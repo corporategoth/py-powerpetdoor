@@ -8,6 +8,6 @@ jobs:
   sync:
     uses: neuromancy/workflows/sync-github-release.yml@main
     secrets:
-      github_token: ${{ secrets.GITHUB_PAT }}
+      github_token: ${{ secrets.GH_PAT }}
     with:
       github_repo: "corporategoth/py-powerpetdoor"
