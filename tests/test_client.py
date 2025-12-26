@@ -443,7 +443,7 @@ class TestListenerSystem:
 
         assert "test_listener" not in client.door_status_listeners
 
-    def test_listener_invoked_on_message(self, mock_client, callback_tracker, make_callback, event_loop):
+    async def test_listener_invoked_on_message(self, mock_client, callback_tracker, make_callback):
         """Listener callback is invoked when relevant message received."""
         client, _, device = mock_client
         callback = make_callback("door_status")
@@ -458,8 +458,8 @@ class TestListenerSystem:
             "msgId": 1
         })
 
-        # Run the client's event loop briefly to process pending tasks
-        event_loop.run_until_complete(asyncio.sleep(0.01))
+        # Allow the event loop to process pending tasks
+        await asyncio.sleep(0.01)
 
         assert "door_status" in callback_tracker["calls"]
 
@@ -500,7 +500,7 @@ class TestKeepalive:
         msg = client._queue.get_nowait()
         assert PING in msg.data
 
-    def test_pong_clears_last_ping(self, mock_client, event_loop):
+    async def test_pong_clears_last_ping(self, mock_client):
         """Successful PONG response clears _last_ping."""
         client, _, device = mock_client
 
@@ -511,8 +511,8 @@ class TestKeepalive:
         # Respond with PONG
         device.respond_to_ping(1, ping_value)
 
-        # Run the client's event loop briefly to process pending tasks
-        event_loop.run_until_complete(asyncio.sleep(0.01))
+        # Allow the event loop to process pending tasks
+        await asyncio.sleep(0.01)
 
         assert client._last_ping is None
 
@@ -588,7 +588,7 @@ class TestOutstandingMessages:
 
         assert msg_id in client._outstanding
 
-    def test_response_resolves_future(self, mock_client, event_loop):
+    async def test_response_resolves_future(self, mock_client):
         """Response with matching msgId resolves the future."""
         client, _, device = mock_client
 
@@ -603,8 +603,8 @@ class TestOutstandingMessages:
             "settings": {"power_state": True}
         })
 
-        # Run the client's event loop briefly to process pending tasks
-        event_loop.run_until_complete(asyncio.sleep(0.01))
+        # Allow the event loop to process pending tasks
+        await asyncio.sleep(0.01)
 
         # Future should be resolved
         assert msg_id not in client._outstanding

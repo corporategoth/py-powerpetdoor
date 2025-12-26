@@ -194,14 +194,6 @@ def mock_transport() -> MockTransport:
 
 
 @pytest.fixture
-def event_loop():
-    """Create an event loop for async tests."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture
 def client_config() -> dict:
     """Default client configuration."""
     return {
@@ -214,19 +206,20 @@ def client_config() -> dict:
 
 
 @pytest.fixture
-async def mock_client(event_loop, mock_transport, client_config) -> tuple[PowerPetDoorClient, MockTransport, MockDeviceProtocol]:
+async def mock_client(mock_transport, client_config) -> tuple[PowerPetDoorClient, MockTransport, MockDeviceProtocol]:
     """Create a PowerPetDoorClient with mocked transport.
 
     Returns:
         Tuple of (client, transport, device_protocol)
     """
+    loop = asyncio.get_running_loop()
     client = PowerPetDoorClient(
         host=client_config["host"],
         port=client_config["port"],
         timeout=client_config["timeout"],
         reconnect=client_config["reconnect"],
         keepalive=client_config["keepalive"],
-        loop=event_loop
+        loop=loop
     )
 
     # Simulate connection established
@@ -261,15 +254,16 @@ async def mock_client(event_loop, mock_transport, client_config) -> tuple[PowerP
 
 
 @pytest.fixture
-def disconnected_client(event_loop, client_config) -> PowerPetDoorClient:
+async def disconnected_client(client_config) -> PowerPetDoorClient:
     """Create a PowerPetDoorClient without a connection."""
+    loop = asyncio.get_running_loop()
     client = PowerPetDoorClient(
         host=client_config["host"],
         port=client_config["port"],
         timeout=client_config["timeout"],
         reconnect=client_config["reconnect"],
         keepalive=client_config["keepalive"],
-        loop=event_loop
+        loop=loop
     )
     return client
 
