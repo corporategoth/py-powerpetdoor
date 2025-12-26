@@ -1,11 +1,32 @@
 # Power Pet Door Python Library
 
-A Python library for communicating with Power Pet Door devices over the network.
+[![Buy Me Coffee][buymecoffee]][donation]
+
+[![Github Release][releases-shield]][releases]
+[![Github Activity][commits-shield]][commits]
+[![License][license-shield]][license]
+
+[![PyPI][pypi-shield]][pypi]
+[![Python Versions][python-shield]][pypi]
+
+A Python library for communicating with [Power Pet Door][powerpetdoor] WiFi-enabled pet doors made by [High Tech Pet][hitecpet].
+
+<p align="center">
+  <a href="https://www.hitecpet.com/collections/power-pet-doors3">
+    <img src="https://www.hitecpet.com/cdn/shop/files/PX-2_with_Logo_2.png?v=1717017660&width=400" alt="Power Pet Door" width="300">
+  </a>
+</p>
+
+## Disclaimer
+
+**This library is NOT authorized, endorsed, or supported by High Tech Pet Products, Inc.**
+
+This is an independent, community-developed project. No contributions, financial or otherwise, have been received from High Tech Pet. If you need official support for your Power Pet Door, please contact [High Tech Pet][hitecpet] directly.
 
 ## Installation
 
 ```bash
-pip install powerpetdoor
+pip install pypowerpetdoor
 ```
 
 ## Usage
@@ -98,6 +119,29 @@ compressed = compress_schedule(schedule_list)
 to_delete, to_add = compute_schedule_diff(current, new)
 ```
 
+## Related Projects
+
+- [ha-powerpetdoor][ha-powerpetdoor] - Home Assistant integration for Power Pet Door
+
 ## License
 
 MIT License - see LICENSE file for details.
+
+<!---->
+
+***
+
+[buymecoffee]: https://cdn.buymeacoffee.com/buttons/default-orange.png
+[donation]: https://buymeacoffee.com/corporategoth
+[commits-shield]: https://img.shields.io/github/commit-activity/y/corporategoth/py-powerpetdoor.svg?style=for-the-badge
+[commits]: https://github.com/corporategoth/py-powerpetdoor/commits/main
+[license]: https://github.com/corporategoth/py-powerpetdoor/blob/main/LICENSE
+[license-shield]: https://img.shields.io/github/license/corporategoth/py-powerpetdoor.svg?style=for-the-badge
+[releases-shield]: https://img.shields.io/github/release/corporategoth/py-powerpetdoor.svg?style=for-the-badge
+[releases]: https://github.com/corporategoth/py-powerpetdoor/releases
+[pypi-shield]: https://img.shields.io/pypi/v/pypowerpetdoor.svg?style=for-the-badge
+[pypi]: https://pypi.org/project/pypowerpetdoor/
+[python-shield]: https://img.shields.io/pypi/pyversions/pypowerpetdoor.svg?style=for-the-badge
+[hitecpet]: https://www.hitecpet.com/
+[powerpetdoor]: https://www.hitecpet.com/collections/power-pet-doors3
+[ha-powerpetdoor]: https://github.com/corporategoth/ha-powerpetdoor
