@@ -11,6 +11,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Only run on GitHub, not Gitea
+    if: ${{ vars.GITEA_ACTIONS != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -34,7 +36,8 @@ jobs:
   publish:
     needs: test
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'published'
+    # Only run on GitHub, not Gitea
+    if: ${{ vars.GITEA_ACTIONS != 'true' && github.event_name == 'release' && github.event.action == 'published' }}
     environment: pypi
     permissions:
       id-token: write

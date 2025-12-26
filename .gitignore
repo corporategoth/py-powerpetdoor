@@ -269,4 +269,4 @@ http-client.private.env.json
 .claude/**/*.local.*
 
 # direnv
-.envrc
+.envrc.idea/

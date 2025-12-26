@@ -1,0 +1,13 @@
+name: Sync Release to GitHub
+
+on:
+  release:
+    types: [published, edited, deleted]
+
+jobs:
+  sync:
+    uses: neuromancy/workflows/sync-github-release.yml@main
+    secrets:
+      github_token: ${{ secrets.GITHUB_PAT }}
+    with:
+      github_repo: "corporategoth/py-powerpetdoor"
