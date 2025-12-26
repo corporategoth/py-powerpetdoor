@@ -270,3 +270,4 @@ http-client.private.env.json
 
 # direnv
 .envrc.idea/
+.envrc
