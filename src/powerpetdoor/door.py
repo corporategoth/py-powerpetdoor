@@ -185,48 +185,100 @@ class ScheduleTime:
 
 @dataclass
 class Schedule:
-    """A door schedule entry."""
+    """A door schedule entry.
+
+    Each schedule entry controls ONE sensor (inside or outside) for specific
+    days and a time window. The `inside` and `outside` fields indicate which
+    sensor this entry applies to.
+
+    Protocol format:
+        - daysOfWeek: list of 7 ints [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+        - inside/outside: bool flags for which sensor
+        - Time fields use prefix (in/out) + StartTime/EndTime
+    """
 
     index: int = 0
     enabled: bool = True
-    days_of_week: int = 0b1111111  # Bitmask, bit 0 = Monday
-
-    inside_start: ScheduleTime = field(default_factory=ScheduleTime)
-    inside_end: ScheduleTime = field(default_factory=ScheduleTime)
-    outside_start: ScheduleTime = field(default_factory=ScheduleTime)
-    outside_end: ScheduleTime = field(default_factory=ScheduleTime)
+    # List of 7 values [Sun, Mon, Tue, Wed, Thu, Fri, Sat] where 1=active
+    days_of_week: list = field(default_factory=lambda: [1, 1, 1, 1, 1, 1, 1])
+    # Which sensor this entry is for
+    inside: bool = False
+    outside: bool = False
+    # Time window (applies to whichever sensor is enabled)
+    start: ScheduleTime = field(default_factory=lambda: ScheduleTime(6, 0))
+    end: ScheduleTime = field(default_factory=lambda: ScheduleTime(22, 0))
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to protocol dict format."""
-        return {
+        result = {
             FIELD_INDEX: self.index,
             FIELD_ENABLED: self.enabled,
-            FIELD_DAYSOFWEEK: self.days_of_week,
-            f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}": self.inside_start.to_dict(),
-            f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}": self.inside_end.to_dict(),
-            f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}": self.outside_start.to_dict(),
-            f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}": self.outside_end.to_dict(),
+            FIELD_DAYSOFWEEK: self.days_of_week.copy() if isinstance(self.days_of_week, list) else self.days_of_week,
+            FIELD_INSIDE: self.inside,
+            FIELD_OUTSIDE: self.outside,
         }
+
+        # Set time fields for the appropriate sensor(s)
+        if self.inside:
+            result[f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = self.start.to_dict()
+            result[f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = self.end.to_dict()
+        else:
+            result[f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {FIELD_HOUR: 0, FIELD_MINUTE: 0}
+            result[f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {FIELD_HOUR: 0, FIELD_MINUTE: 0}
+
+        if self.outside:
+            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = self.start.to_dict()
+            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = self.end.to_dict()
+        else:
+            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {FIELD_HOUR: 0, FIELD_MINUTE: 0}
+            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {FIELD_HOUR: 0, FIELD_MINUTE: 0}
+
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Schedule":
         """Create from protocol dict."""
+        inside = data.get(FIELD_INSIDE, False)
+        outside = data.get(FIELD_OUTSIDE, False)
+
+        # Get time from the appropriate prefix
+        if inside:
+            start = ScheduleTime.from_dict(
+                data.get(f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}", {})
+            )
+            end = ScheduleTime.from_dict(
+                data.get(f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}", {})
+            )
+        elif outside:
+            start = ScheduleTime.from_dict(
+                data.get(f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}", {})
+            )
+            end = ScheduleTime.from_dict(
+                data.get(f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}", {})
+            )
+        else:
+            start = ScheduleTime()
+            end = ScheduleTime()
+
+        # Handle daysOfWeek - could be list or legacy bitmask
+        days = data.get(FIELD_DAYSOFWEEK, [1, 1, 1, 1, 1, 1, 1])
+        if isinstance(days, int):
+            # Convert bitmask to list [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+            days = [(days >> i) & 1 for i in range(7)]
+
+        # Handle enabled field - could be bool or string
+        enabled = data.get(FIELD_ENABLED, True)
+        if isinstance(enabled, str):
+            enabled = enabled == "1"
+
         return cls(
             index=data.get(FIELD_INDEX, 0),
-            enabled=data.get(FIELD_ENABLED, True),
-            days_of_week=data.get(FIELD_DAYSOFWEEK, 0b1111111),
-            inside_start=ScheduleTime.from_dict(
-                data.get(f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}", {})
-            ),
-            inside_end=ScheduleTime.from_dict(
-                data.get(f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}", {})
-            ),
-            outside_start=ScheduleTime.from_dict(
-                data.get(f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}", {})
-            ),
-            outside_end=ScheduleTime.from_dict(
-                data.get(f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}", {})
-            ),
+            enabled=enabled,
+            days_of_week=days,
+            inside=inside,
+            outside=outside,
+            start=start,
+            end=end,
         )
 
 

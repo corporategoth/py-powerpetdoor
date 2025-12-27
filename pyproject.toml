@@ -42,6 +42,10 @@ Homepage = "https://github.com/corporategoth/py-powerpetdoor"
 Repository = "https://github.com/corporategoth/py-powerpetdoor"
 Issues = "https://github.com/corporategoth/py-powerpetdoor/issues"
 
+[project.scripts]
+ppd-simulator = "powerpetdoor.simulator.cli:main"
+ppd-simulator-ctl = "powerpetdoor.simulator.ctl:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

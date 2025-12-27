@@ -26,7 +26,8 @@ Example usage:
 from .state import DoorSimulatorState, Schedule, DoorTimingConfig
 from .protocol import DoorSimulatorProtocol, CommandRegistry
 from .server import DoorSimulator
-from .cli import run_simulator_interactive, main
+from .cli import run_simulator, main
+from .commands import CommandHandler, CommandResult
 from .scripting import (
     Script,
     ScriptRunner,
@@ -48,8 +49,11 @@ __all__ = [
     # Command registry
     "CommandRegistry",
     # CLI
-    "run_simulator_interactive",
+    "run_simulator",
     "main",
+    # Commands
+    "CommandHandler",
+    "CommandResult",
     # Scripting
     "Script",
     "ScriptRunner",

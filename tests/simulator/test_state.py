@@ -63,19 +63,21 @@ class TestSchedule:
         schedule = Schedule(index=0)
         assert schedule.index == 0
         assert schedule.enabled is True
-        assert schedule.days_of_week == 0b1111111  # All days
-        assert schedule.inside_start_hour == 6
-        assert schedule.inside_end_hour == 22
-        assert schedule.outside_start_hour == 6
-        assert schedule.outside_end_hour == 22
+        assert schedule.days_of_week == [1, 1, 1, 1, 1, 1, 1]  # All days
+        assert schedule.inside is False
+        assert schedule.outside is False
+        assert schedule.start_hour == 6
+        assert schedule.end_hour == 22
 
     def test_to_dict(self):
         """Should convert to protocol dict format."""
-        schedule = Schedule(index=1, enabled=True)
+        schedule = Schedule(index=1, enabled=True, inside=True)
         result = schedule.to_dict()
         assert result["index"] == 1
         assert result["enabled"] == "1"
         assert "daysOfWeek" in result
+        assert result["inside"] is True
+        assert result["outside"] is False
         assert "in_start_time" in result
         assert "in_end_time" in result
         assert "out_start_time" in result
@@ -86,56 +88,81 @@ class TestSchedule:
         data = {
             "index": 2,
             "enabled": "1",
-            "daysOfWeek": 0b0011111,  # Mon-Fri
+            "daysOfWeek": [1, 1, 1, 1, 1, 0, 0],  # Sun-Thu (protocol: Sun=0)
+            "inside": True,
+            "outside": False,
             "in_start_time": {"hour": 8, "min": 0},
             "in_end_time": {"hour": 18, "min": 30},
-            "out_start_time": {"hour": 9, "min": 0},
-            "out_end_time": {"hour": 17, "min": 0},
+            "out_start_time": {"hour": 0, "min": 0},
+            "out_end_time": {"hour": 0, "min": 0},
         }
         schedule = Schedule.from_dict(data)
         assert schedule.index == 2
         assert schedule.enabled is True
-        assert schedule.days_of_week == 0b0011111
-        assert schedule.inside_start_hour == 8
-        assert schedule.inside_start_min == 0
-        assert schedule.inside_end_hour == 18
-        assert schedule.inside_end_min == 30
+        assert schedule.days_of_week == [1, 1, 1, 1, 1, 0, 0]
+        assert schedule.inside is True
+        assert schedule.outside is False
+        assert schedule.start_hour == 8
+        assert schedule.start_min == 0
+        assert schedule.end_hour == 18
+        assert schedule.end_min == 30
+
+    def test_from_dict_legacy_bitmask(self):
+        """Should handle legacy bitmask format for days_of_week."""
+        data = {
+            "index": 2,
+            "enabled": "1",
+            "daysOfWeek": 0b0011111,  # Legacy bitmask
+            "inside": True,
+            "outside": False,
+            "in_start_time": {"hour": 8, "min": 0},
+            "in_end_time": {"hour": 18, "min": 30},
+        }
+        schedule = Schedule.from_dict(data)
+        # Bitmask 0b0011111 = 31 converts to list [1, 1, 1, 1, 1, 0, 0]
+        assert schedule.days_of_week == [1, 1, 1, 1, 1, 0, 0]
 
     def test_roundtrip_conversion(self):
         """to_dict and from_dict should be inverses."""
         original = Schedule(
             index=3,
             enabled=False,
-            days_of_week=0b1010101,
-            inside_start_hour=7,
-            inside_start_min=30,
+            days_of_week=[1, 0, 1, 0, 1, 0, 1],
+            inside=True,
+            outside=False,
+            start_hour=7,
+            start_min=30,
         )
         converted = Schedule.from_dict(original.to_dict())
         assert converted.index == original.index
         assert converted.enabled == original.enabled
         assert converted.days_of_week == original.days_of_week
-        assert converted.inside_start_hour == original.inside_start_hour
-        assert converted.inside_start_min == original.inside_start_min
+        assert converted.inside == original.inside
+        assert converted.outside == original.outside
+        assert converted.start_hour == original.start_hour
+        assert converted.start_min == original.start_min
 
     def test_is_day_active_monday(self):
         """Should correctly check if Monday is active."""
-        # Monday = bit 2 (0b0000010)
-        schedule = Schedule(index=0, enabled=True, days_of_week=0b0000010)
-        assert schedule.is_day_active(0) is True  # Monday
+        # Protocol format: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+        # Monday only = [0, 1, 0, 0, 0, 0, 0]
+        schedule = Schedule(index=0, enabled=True, days_of_week=[0, 1, 0, 0, 0, 0, 0])
+        assert schedule.is_day_active(0) is True  # Monday (Python weekday 0)
         assert schedule.is_day_active(1) is False  # Tuesday
         assert schedule.is_day_active(6) is False  # Sunday
 
     def test_is_day_active_weekend(self):
         """Should correctly check weekend days."""
-        # Sat=64 (0b1000000), Sun=1 (0b0000001)
-        schedule = Schedule(index=0, enabled=True, days_of_week=0b1000001)
-        assert schedule.is_day_active(5) is True  # Saturday
-        assert schedule.is_day_active(6) is True  # Sunday
+        # Protocol format: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+        # Sat + Sun = [1, 0, 0, 0, 0, 0, 1]
+        schedule = Schedule(index=0, enabled=True, days_of_week=[1, 0, 0, 0, 0, 0, 1])
+        assert schedule.is_day_active(5) is True  # Saturday (Python weekday 5)
+        assert schedule.is_day_active(6) is True  # Sunday (Python weekday 6)
         assert schedule.is_day_active(0) is False  # Monday
 
     def test_is_day_active_disabled_schedule(self):
         """Disabled schedule should never be active."""
-        schedule = Schedule(index=0, enabled=False, days_of_week=0b1111111)
+        schedule = Schedule(index=0, enabled=False, days_of_week=[1, 1, 1, 1, 1, 1, 1])
         assert schedule.is_day_active(0) is False
         assert schedule.is_day_active(6) is False
 
@@ -144,9 +171,11 @@ class TestSchedule:
         schedule = Schedule(
             index=0,
             enabled=True,
-            days_of_week=0b1111111,
-            inside_start_hour=8,
-            inside_end_hour=20,
+            days_of_week=[1, 1, 1, 1, 1, 1, 1],
+            inside=True,
+            outside=False,
+            start_hour=8,
+            end_hour=20,
         )
         # 10:00 on Monday should be allowed
         assert schedule.is_sensor_allowed("inside", 10, 0, 0) is True
@@ -154,27 +183,35 @@ class TestSchedule:
         assert schedule.is_sensor_allowed("inside", 6, 0, 0) is False
         # 21:00 on Monday should NOT be allowed
         assert schedule.is_sensor_allowed("inside", 21, 0, 0) is False
+        # Outside sensor should NOT be allowed (this entry is for inside only)
+        assert schedule.is_sensor_allowed("outside", 10, 0, 0) is False
 
     def test_is_sensor_allowed_outside_normal_hours(self):
         """Outside sensor should be allowed during scheduled hours."""
         schedule = Schedule(
             index=0,
             enabled=True,
-            days_of_week=0b1111111,
-            outside_start_hour=9,
-            outside_end_hour=17,
+            days_of_week=[1, 1, 1, 1, 1, 1, 1],
+            inside=False,
+            outside=True,
+            start_hour=9,
+            end_hour=17,
         )
         assert schedule.is_sensor_allowed("outside", 12, 0, 0) is True
         assert schedule.is_sensor_allowed("outside", 8, 0, 0) is False
+        # Inside sensor should NOT be allowed (this entry is for outside only)
+        assert schedule.is_sensor_allowed("inside", 12, 0, 0) is False
 
     def test_is_sensor_allowed_crosses_midnight(self):
         """Should handle schedules that cross midnight."""
         schedule = Schedule(
             index=0,
             enabled=True,
-            days_of_week=0b1111111,
-            inside_start_hour=22,
-            inside_end_hour=6,
+            days_of_week=[1, 1, 1, 1, 1, 1, 1],
+            inside=True,
+            outside=False,
+            start_hour=22,
+            end_hour=6,
         )
         # 23:00 should be allowed
         assert schedule.is_sensor_allowed("inside", 23, 0, 0) is True
@@ -239,8 +276,10 @@ class TestDoorSimulatorState:
         state.schedules[0] = Schedule(
             index=0,
             enabled=True,
-            inside_start_hour=22,
-            inside_end_hour=6,
+            inside=True,
+            outside=False,
+            start_hour=22,
+            end_hour=6,
         )
         # Even at 12:00 when schedule says no, auto=False allows it
         assert state.is_sensor_allowed_by_schedule("inside") is True

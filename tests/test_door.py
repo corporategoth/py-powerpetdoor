@@ -204,18 +204,22 @@ class TestSchedule:
         schedule = Schedule()
         assert schedule.index == 0
         assert schedule.enabled is True
-        assert schedule.days_of_week == 0b1111111  # All days
+        assert schedule.days_of_week == [1, 1, 1, 1, 1, 1, 1]  # All days
+        assert schedule.inside is False
+        assert schedule.outside is False
+        assert schedule.start.hour == 6
+        assert schedule.end.hour == 22
 
     def test_to_dict_roundtrip(self):
         """Schedule should survive to_dict/from_dict roundtrip."""
         original = Schedule(
             index=2,
             enabled=True,
-            days_of_week=0b0101010,
-            inside_start=ScheduleTime(hour=6, minute=0),
-            inside_end=ScheduleTime(hour=22, minute=0),
-            outside_start=ScheduleTime(hour=8, minute=0),
-            outside_end=ScheduleTime(hour=20, minute=0),
+            days_of_week=[0, 1, 0, 1, 0, 1, 0],
+            inside=True,
+            outside=False,
+            start=ScheduleTime(hour=6, minute=0),
+            end=ScheduleTime(hour=22, minute=0),
         )
         d = original.to_dict()
         restored = Schedule.from_dict(d)
@@ -223,8 +227,10 @@ class TestSchedule:
         assert restored.index == original.index
         assert restored.enabled == original.enabled
         assert restored.days_of_week == original.days_of_week
-        assert restored.inside_start.hour == original.inside_start.hour
-        assert restored.inside_end.minute == original.inside_end.minute
+        assert restored.inside == original.inside
+        assert restored.outside == original.outside
+        assert restored.start.hour == original.start.hour
+        assert restored.end.minute == original.end.minute
 
 
 # ============================================================================

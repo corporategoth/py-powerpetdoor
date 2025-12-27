@@ -97,13 +97,14 @@ async def client(simulator) -> PowerPetDoorClient:
     # Connect without blocking
     await client.connect()
 
-    # Wait for connection to be established
+    # Wait for connection to be established on both sides
     for _ in range(50):  # 5 seconds max
-        if client.available:
+        if client.available and len(simulator.protocols) > 0:
             break
         await asyncio.sleep(0.1)
 
     assert client.available, "Client failed to connect to simulator"
+    assert len(simulator.protocols) > 0, "Simulator did not register the connection"
 
     yield client
 

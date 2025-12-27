@@ -10,6 +10,8 @@ import logging
 import time
 from typing import Callable, Optional, TYPE_CHECKING
 
+from ..tz_utils import get_posix_tz_string, is_cache_initialized
+
 from ..const import (
     COMMAND,
     PING,
@@ -337,7 +339,15 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     @CommandRegistry.handler(CMD_GET_TIMEZONE)
     async def _handle_get_timezone(self, msg: dict, response: dict) -> None:
-        response[FIELD_TZ] = self.state.timezone
+        # Convert IANA timezone to POSIX format (as real hardware does)
+        iana_tz = self.state.timezone
+        if is_cache_initialized():
+            posix_tz = get_posix_tz_string(iana_tz)
+            if posix_tz:
+                response[FIELD_TZ] = posix_tz
+                return
+        # Fallback to raw value if conversion fails
+        response[FIELD_TZ] = iana_tz
 
     @CommandRegistry.handler(CMD_GET_HOLD_TIME)
     async def _handle_get_hold_time(self, msg: dict, response: dict) -> None:

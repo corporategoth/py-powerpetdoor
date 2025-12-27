@@ -6,301 +6,278 @@ and controlling the door simulator.
 
 import asyncio
 import logging
-import random
 from pathlib import Path
 from typing import Optional
 
-from .state import Schedule
+from .commands import CommandHandler
 from .server import DoorSimulator
+from ..tz_utils import async_init_timezone_cache
 
 logger = logging.getLogger(__name__)
 
+# Default control port offset from simulator port
+CONTROL_PORT_OFFSET = 1
 
-async def run_simulator_interactive(
+
+async def run_simulator(
     host: str = "0.0.0.0",
     port: int = 3000,
-    script_file: Optional[str] = None,
-    script_name: Optional[str] = None,
-    exit_after_script: bool = False,
+    scripts: Optional[list[str]] = None,
+    loop_scripts: bool = False,
+    script_delay: float = 0,
+    oneshot: bool = False,
+    daemon: bool = False,
+    run_for: Optional[float] = None,
+    wait_for_client: bool = False,
+    control_port: Optional[int] = None,
 ):
-    """Run the simulator with interactive keyboard controls.
-
-    Commands:
-        Door Operations:
-            i - Trigger inside sensor (pet going out)
-            o - Trigger outside sensor (pet coming in)
-            c - Close door immediately
-            h - Open and hold (stays open until 'c')
-
-        Physical Buttons (like on the real door):
-            p - Toggle power on/off
-            m - Toggle auto/tiMers (schedule enable)
-            n - Toggle iNside sensor enable
-            u - Toggle oUtside sensor enable
-
-        Simulation Events:
-            x - Simulate obstruction (triggers auto-retract)
-            d - Toggle pet in doorway (keeps door open)
-
-        Settings:
-            s - Toggle outside sensor safety lock
-            l - Toggle command lockout
-            a - Toggle auto-retract
-            t <seconds> - Set hold time
-            b [percent] - Set battery level (random if no value)
-
-        Schedule:
-            1 - Add sample schedule #1 (all days, 6am-10pm)
-            2 - Add sample schedule #2 (weekdays, 7am-6pm)
-            3 - Delete schedule #1
-
-        Scripts:
-            r <name> - Run a built-in script
-            f <path> - Run a script file
-            / - List available built-in scripts
-
-        Info:
-            ? - Show current door state
-            q - Quit
+    """Run the Power Pet Door simulator.
 
     Args:
         host: Address to bind the server
-        port: Port to listen on
-        script_file: Path to a script file to run on startup
-        script_name: Name of a built-in script to run on startup
-        exit_after_script: If True, exit after script completes
+        port: Port to listen on for door protocol
+        scripts: List of scripts to run (file paths or built-in names, auto-detected).
+                 Implies non-interactive mode.
+        loop_scripts: If True, run scripts continuously in a loop
+        script_delay: Delay in seconds between script runs
+        oneshot: If True, exit after scripts complete (even if run_for is set)
+        daemon: If True, run without interactive input and no scripts.
+        run_for: Maximum run time in seconds (oneshot can exit earlier)
+        wait_for_client: If True, delay script start until a client connects
+        control_port: Port for control commands (default: port + 1 in daemon/script mode)
+
+    Returns:
+        Script result (True if all passed, False if any failed, None if no scripts)
     """
     import sys
 
-    from .scripting import Script, ScriptRunner, get_builtin_script, list_builtin_scripts
+    from .scripting import ScriptRunner
 
+    # Initialize timezone cache for IANA to POSIX conversion
+    await async_init_timezone_cache()
+
+    # Start the simulator
     simulator = DoorSimulator(host=host, port=port)
     await simulator.start()
 
     script_runner = ScriptRunner(simulator)
 
-    print(f"Simulator started on port {port}")
-    print("=" * 65)
-    print("Door Operations:")
-    print("  i - Trigger inside sensor     o - Trigger outside sensor")
-    print("  c - Close door                h - Open and hold")
-    print()
-    print("Physical Buttons:")
-    print("  p - Power on/off              m - Auto/tiMers (schedule)")
-    print("  n - iNside sensor enable      u - oUtside sensor enable")
-    print()
-    print("Simulation Events:")
-    print("  x - Simulate obstruction      d - Toggle pet in doorway")
-    print()
-    print("Settings:")
-    print("  s - Safety lock               l - Command lockout")
-    print("  a - Auto-retract              t <sec> - Hold time")
-    print("  b [pct] - Battery level")
-    print()
-    print("Schedule:")
-    print("  1 - Add schedule #1           2 - Add schedule #2")
-    print("  3 - Delete schedule #1")
-    print()
-    print("Scripts:")
-    print("  r <name> - Run built-in       f <path> - Run script file")
-    print("  / - List built-in scripts")
-    print()
-    print("Info:  ? - Show state           q - Quit")
-    print("=" * 65)
-    print()
-
+    # Set up control structures
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     script_result = [None]  # Use list to allow mutation in nested function
+    script_queue: asyncio.Queue[str] = asyncio.Queue()
 
-    # Run startup script if specified
-    if script_file or script_name:
-        async def run_startup_script():
+    # Create command handler
+    cmd_handler = CommandHandler(
+        simulator=simulator,
+        script_runner=script_runner,
+        stop_callback=stop_event.set,
+        script_queue=script_queue,
+    )
+
+    # Determine mode
+    interactive = not scripts and not daemon
+
+    # Print startup info
+    print(f"Simulator started on port {port}")
+    if control_port:
+        print(f"Control port: {control_port}")
+    if interactive:
+        print("=" * 65)
+        print(cmd_handler.get_help())
+        print("=" * 65)
+    print()
+
+    # Start control server if configured
+    control_server = None
+    if control_port:
+        async def handle_control_client(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ):
+            """Handle a control connection."""
+            addr = writer.get_extra_info("peername")
+            logger.info(f"Control connection from {addr}")
             try:
-                if script_file:
-                    script = Script.from_file(Path(script_file))
-                else:
-                    script = get_builtin_script(script_name)
+                while True:
+                    line = await reader.readline()
+                    if not line:
+                        break
+                    cmd = line.decode().strip()
+                    if not cmd:
+                        continue
 
-                print(f"\n>>> Running startup script: {script.name}")
-                success = await script_runner.run(script)
-                script_result[0] = success
+                    result = await cmd_handler.execute(cmd)
+                    if result.success:
+                        writer.write(f"OK: {result.message}\n".encode())
+                    else:
+                        writer.write(f"ERROR: {result.message}\n".encode())
+                    await writer.drain()
 
-                if exit_after_script:
-                    print(f"\n>>> Script {'PASSED' if success else 'FAILED'}")
-                    stop_event.set()
+                    # Check if we should exit
+                    if stop_event.is_set():
+                        break
             except Exception as e:
-                print(f"Error running startup script: {e}")
-                script_result[0] = False
-                if exit_after_script:
+                logger.error(f"Control client error: {e}")
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                logger.info(f"Control connection closed from {addr}")
+
+        control_server = await asyncio.start_server(
+            handle_control_client, host, control_port
+        )
+        logger.info(f"Control server listening on {host}:{control_port}")
+
+    # Process queued scripts in background
+    async def process_script_queue():
+        while not stop_event.is_set():
+            try:
+                try:
+                    script_ref = await asyncio.wait_for(
+                        script_queue.get(), timeout=0.5
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
+                try:
+                    script = cmd_handler.load_script(script_ref)
+                    logger.info(f"Running queued script: {script.name}")
+                    success = await script_runner.run(script)
+                    logger.info(f"Script {'PASSED' if success else 'FAILED'}: {script.name}")
+                except Exception as e:
+                    logger.error(f"Error running queued script: {e}")
+            except asyncio.CancelledError:
+                break
+
+    queue_task = asyncio.create_task(process_script_queue())
+
+    # Run startup scripts if specified
+    if scripts:
+        async def run_startup_scripts():
+            all_success = True
+            run_count = 0
+            try:
+                # Wait for client connection if requested
+                if wait_for_client:
+                    print(">>> Waiting for client connection...")
+                    while not simulator.protocols:
+                        if stop_event.is_set():
+                            return
+                        await asyncio.sleep(0.1)
+                    print(">>> Client connected, starting scripts")
+
+                while True:
+                    # Check for client disconnect if wait_for_client
+                    if wait_for_client and not simulator.protocols:
+                        print(">>> Client disconnected, stopping scripts")
+                        break
+
+                    run_count += 1
+                    if loop_scripts:
+                        print(f"\n>>> Script run #{run_count}")
+
+                    for i, script_ref in enumerate(scripts):
+                        # Check for disconnect before each script
+                        if wait_for_client and not simulator.protocols:
+                            print(">>> Client disconnected, stopping scripts")
+                            break
+
+                        # Add delay between scripts (not before first one)
+                        if i > 0 and script_delay > 0:
+                            print(f">>> Waiting {script_delay}s before next script...")
+                            await asyncio.sleep(script_delay)
+
+                        try:
+                            script = cmd_handler.load_script(script_ref)
+                            print(f"\n>>> Running script: {script.name}")
+                            success = await script_runner.run(script)
+                            if not success:
+                                all_success = False
+                                print(f">>> Script FAILED: {script.name}")
+                            else:
+                                print(f">>> Script PASSED: {script.name}")
+                        except Exception as e:
+                            print(f"Error running script '{script_ref}': {e}")
+                            all_success = False
+                    else:
+                        # Loop completed without break (no disconnect)
+                        if not loop_scripts:
+                            break
+
+                        # Delay before next loop iteration
+                        if script_delay > 0:
+                            print(f">>> Waiting {script_delay}s before next loop...")
+                            await asyncio.sleep(script_delay)
+                        continue
+
+                    # Inner loop was broken (disconnect), exit outer loop too
+                    break
+
+            except asyncio.CancelledError:
+                pass
+            finally:
+                script_result[0] = all_success
+                if oneshot:
+                    print(f"\n>>> All scripts {'PASSED' if all_success else 'FAILED'}")
                     stop_event.set()
 
-        asyncio.create_task(run_startup_script())
+        asyncio.create_task(run_startup_scripts())
 
-    def show_state():
-        s = simulator.state
-        print("\n--- Current State ---")
-        print(f"  Door: {s.door_status}")
-        print(f"  Power: {'ON' if s.power else 'OFF'}")
-        print(f"  Auto (schedule): {'ON' if s.auto else 'OFF'}")
-        print(f"  Inside sensor: {'enabled' if s.inside else 'disabled'}")
-        print(f"  Outside sensor: {'enabled' if s.outside else 'disabled'}")
-        print(f"  Safety lock: {'ON' if s.safety_lock else 'OFF'}")
-        print(f"  Command lockout: {'ON' if s.cmd_lockout else 'OFF'}")
-        print(f"  Auto-retract: {'ON' if s.autoretract else 'OFF'}")
-        print(f"  Hold time: {s.hold_time}s")
-        print(f"  Battery: {s.battery_percent}%")
-        print(f"  Pet in doorway: {'yes' if s.pet_in_doorway else 'no'}")
-        print(f"  Schedules: {list(s.schedules.keys())}")
-        print(f"  Open cycles: {s.total_open_cycles}")
-        print(f"  Auto-retracts: {s.total_auto_retracts}")
-        print("---")
-
-    def list_scripts():
-        print("\n--- Built-in Scripts ---")
-        for name, desc in list_builtin_scripts():
-            print(f"  {name}: {desc}")
-        print("---")
-
-    def handle_input():
+    # Set up interactive input if applicable
+    stdin_available = False
+    if interactive:
         try:
-            line = sys.stdin.readline().strip()
-            if not line:
-                return
+            if sys.stdin and sys.stdin.fileno() >= 0:
+                import os
+                os.fstat(sys.stdin.fileno())
+                stdin_available = True
+        except (OSError, ValueError, AttributeError):
+            pass
 
-            cmd = line.lower()
+        if stdin_available:
+            def handle_input():
+                try:
+                    line = sys.stdin.readline().strip()
+                    if line:
+                        asyncio.create_task(process_interactive_command(line))
+                except Exception as e:
+                    print(f"Error: {e}")
 
-            if cmd == "i":
-                print(">>> Inside sensor triggered (pet going out)")
-                simulator.trigger_sensor("inside")
-            elif cmd == "o":
-                print(">>> Outside sensor triggered (pet coming in)")
-                simulator.trigger_sensor("outside")
-            elif cmd == "c":
-                print(">>> Closing door")
-                asyncio.create_task(simulator.close_door())
-            elif cmd == "h":
-                print(">>> Opening and holding")
-                asyncio.create_task(simulator.open_door(hold=True))
-            elif cmd == "x":
-                print(">>> Simulating obstruction")
-                simulator.simulate_obstruction()
-            elif cmd == "d":
-                simulator.state.pet_in_doorway = not simulator.state.pet_in_doorway
-                state = "present" if simulator.state.pet_in_doorway else "gone"
-                print(f">>> Pet in doorway: {state}")
-            elif cmd == "p":
-                simulator.state.power = not simulator.state.power
-                state = "ON" if simulator.state.power else "OFF"
-                print(f">>> Power: {state}")
-            elif cmd == "m":
-                simulator.state.auto = not simulator.state.auto
-                state = "ON" if simulator.state.auto else "OFF"
-                print(f">>> Auto (schedule): {state}")
-            elif cmd == "n":
-                simulator.state.inside = not simulator.state.inside
-                state = "enabled" if simulator.state.inside else "disabled"
-                print(f">>> Inside sensor: {state}")
-            elif cmd == "u":
-                simulator.state.outside = not simulator.state.outside
-                state = "enabled" if simulator.state.outside else "disabled"
-                print(f">>> Outside sensor: {state}")
-            elif cmd == "l":
-                simulator.state.cmd_lockout = not simulator.state.cmd_lockout
-                state = "ON" if simulator.state.cmd_lockout else "OFF"
-                print(f">>> Command lockout: {state}")
-            elif cmd == "s":
-                simulator.state.safety_lock = not simulator.state.safety_lock
-                state = "ON" if simulator.state.safety_lock else "OFF"
-                print(f">>> Outside sensor safety lock: {state}")
-            elif cmd == "a":
-                simulator.state.autoretract = not simulator.state.autoretract
-                state = "ON" if simulator.state.autoretract else "OFF"
-                print(f">>> Auto-retract: {state}")
-            elif cmd.startswith("t ") or cmd == "t":
-                # Handle "t <seconds>" or just "t" for prompt
-                parts = line.split(maxsplit=1)
-                if len(parts) > 1 and parts[1].isdigit():
-                    seconds = int(parts[1])
-                    simulator.state.hold_time = seconds
-                    print(f">>> Hold time set to {seconds}s")
-                else:
-                    print("Usage: t <seconds> (e.g., t 5)")
-            elif cmd.startswith("b ") or cmd == "b":
-                # Handle "b <percent>" or just "b" for random
-                parts = line.split(maxsplit=1)
-                if len(parts) > 1 and parts[1].isdigit():
-                    pct = max(0, min(100, int(parts[1])))
-                    print(f">>> Battery set to {pct}%")
-                    simulator.set_battery(pct)
-                else:
-                    pct = random.randint(10, 100)
-                    print(f">>> Battery set to {pct}% (random)")
-                    simulator.set_battery(pct)
-            elif cmd == "1":
-                schedule = Schedule(index=1, enabled=True)
-                simulator.add_schedule(schedule)
-                print(">>> Added schedule #1 (all days, 6am-10pm)")
-            elif cmd == "2":
-                schedule = Schedule(
-                    index=2,
-                    enabled=True,
-                    days_of_week=0b0111110,  # Mon-Fri
-                    inside_start_hour=7,
-                    inside_end_hour=18,
-                    outside_start_hour=7,
-                    outside_end_hour=18,
-                )
-                simulator.add_schedule(schedule)
-                print(">>> Added schedule #2 (weekdays, 7am-6pm)")
-            elif cmd == "3":
-                simulator.remove_schedule(1)
-                print(">>> Deleted schedule #1")
-            elif cmd == "/":
-                list_scripts()
-            elif cmd.startswith("r "):
-                # Run built-in script
-                name = line[2:].strip()
+            async def process_interactive_command(line: str):
+                result = await cmd_handler.execute(line)
+                print(f">>> {result.message}")
 
-                async def run_script():
-                    try:
-                        script = get_builtin_script(name)
-                        await script_runner.run(script)
-                    except Exception as e:
-                        print(f"Error: {e}")
-                asyncio.create_task(run_script())
-            elif cmd.startswith("f "):
-                # Run script file
-                script_path = line[2:].strip()
+            loop.add_reader(sys.stdin.fileno(), handle_input)
+        else:
+            logger.warning("stdin not available, running in daemon mode")
 
-                async def run_file():
-                    try:
-                        script = Script.from_file(Path(script_path))
-                        await script_runner.run(script)
-                    except Exception as e:
-                        print(f"Error: {e}")
-                asyncio.create_task(run_file())
-            elif cmd == "?":
-                show_state()
-            elif cmd == "q":
-                print(">>> Shutting down...")
-                stop_event.set()
-            else:
-                print(f"Unknown command: {line}")
-        except Exception as e:
-            print(f"Error: {e}")
+    # Handle run_for timeout
+    if run_for:
+        async def timeout_shutdown():
+            await asyncio.sleep(run_for)
+            logger.info(f"Run time ({run_for}s) elapsed, shutting down")
+            stop_event.set()
 
-    # Only add stdin reader if not running in non-interactive mode
-    if not exit_after_script:
-        loop.add_reader(sys.stdin.fileno(), handle_input)
+        asyncio.create_task(timeout_shutdown())
 
+    # Wait for stop signal
     try:
         await stop_event.wait()
     except asyncio.CancelledError:
         pass
     finally:
-        if not exit_after_script:
+        # Cleanup
+        if interactive and stdin_available:
             loop.remove_reader(sys.stdin.fileno())
+        queue_task.cancel()
+        try:
+            await queue_task
+        except asyncio.CancelledError:
+            pass
+        if control_server:
+            control_server.close()
+            await control_server.wait_closed()
         await simulator.stop()
 
     return script_result[0]
@@ -332,21 +309,57 @@ def main():
     )
     parser.add_argument(
         "--script", "-s",
-        help="Run a built-in script by name (e.g., 'basic_cycle', 'full_test_suite')"
+        action="append",
+        dest="scripts",
+        metavar="SCRIPT",
+        help="Run a script (built-in name or file path, auto-detected). "
+             "Can be specified multiple times to run scripts in sequence. "
+             "Implies non-interactive mode."
     )
     parser.add_argument(
-        "--script-file", "-f",
-        help="Run a script from a YAML file"
-    )
-    parser.add_argument(
-        "--exit-after-script", "-e",
+        "--loop",
         action="store_true",
-        help="Exit after script completes (useful for CI/CD)"
+        help="Run scripts continuously in a loop"
+    )
+    parser.add_argument(
+        "--script-delay",
+        type=float,
+        default=0,
+        metavar="SECONDS",
+        help="Delay between scripts and loop iterations (default: 0)"
+    )
+    parser.add_argument(
+        "--oneshot",
+        action="store_true",
+        help="Exit after scripts complete (useful for CI/CD). Takes precedence over --run-for."
+    )
+    parser.add_argument(
+        "--wait-for-client", "-w",
+        action="store_true",
+        help="Wait for a client to connect before starting scripts. "
+             "Scripts stop if client disconnects."
     )
     parser.add_argument(
         "--list-scripts", "-l",
         action="store_true",
         help="List available built-in scripts and exit"
+    )
+    parser.add_argument(
+        "--daemon", "-D",
+        nargs="?",
+        type=int,
+        const=-1,  # Sentinel: use default (port+1)
+        default=None,
+        metavar="CONTROL_PORT",
+        help="Run in daemon mode (no interactive input, no scripts). "
+             "Optionally specify control port (default: PORT+1). "
+             "Mutually exclusive with --script."
+    )
+    parser.add_argument(
+        "--run-for", "-r",
+        type=float,
+        metavar="SECONDS",
+        help="Maximum run time in seconds (--oneshot can exit earlier)"
     )
 
     args = parser.parse_args()
@@ -364,17 +377,35 @@ def main():
             print(f"  {name}: {desc}")
         return
 
+    # Determine daemon mode and control port
+    daemon = args.daemon is not None
+
+    # Validate mutually exclusive options
+    if args.scripts and daemon:
+        parser.error("--script and --daemon are mutually exclusive")
+
+    if daemon:
+        # -1 means use default (port+1), otherwise use specified port
+        control_port = args.port + 1 if args.daemon == -1 else args.daemon
+    else:
+        control_port = None
+
     try:
-        result = asyncio.run(run_simulator_interactive(
+        result = asyncio.run(run_simulator(
             host=args.host,
             port=args.port,
-            script_name=args.script,
-            script_file=args.script_file,
-            exit_after_script=args.exit_after_script,
+            scripts=args.scripts,
+            loop_scripts=args.loop,
+            script_delay=args.script_delay,
+            oneshot=args.oneshot,
+            daemon=daemon,
+            run_for=args.run_for,
+            wait_for_client=args.wait_for_client,
+            control_port=control_port,
         ))
 
         # Exit with appropriate code for CI/CD
-        if args.exit_after_script and result is not None:
+        if args.oneshot and result is not None:
             sys.exit(0 if result else 1)
 
     except KeyboardInterrupt:

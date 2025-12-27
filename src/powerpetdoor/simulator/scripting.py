@@ -301,19 +301,19 @@ class ScriptRunner:
         elif action == "add_schedule":
             index = int(params.get("index", 1))
             enabled = params.get("enabled", True)
-            # Create a schedule that allows sensors 24/7 (midnight to midnight)
-            # This ensures tests pass regardless of the time of day
+            # Create a schedule that allows BOTH sensors 24/7 (midnight to midnight)
+            # This ensures tests pass regardless of the time of day.
+            # Note: Each schedule entry controls specific sensors via inside/outside flags.
             schedule = Schedule(
                 index=index,
                 enabled=enabled,
-                inside_start_hour=0,
-                inside_start_min=0,
-                inside_end_hour=23,
-                inside_end_min=59,
-                outside_start_hour=0,
-                outside_start_min=0,
-                outside_end_hour=23,
-                outside_end_min=59,
+                days_of_week=[1, 1, 1, 1, 1, 1, 1],  # All days
+                inside=True,   # Allow inside sensor
+                outside=True,  # Allow outside sensor
+                start_hour=0,
+                start_min=0,
+                end_hour=23,
+                end_min=59,
             )
             self.simulator.add_schedule(schedule)
 
