@@ -1,0 +1,27 @@
+name: Sync Wiki to GitHub
+
+on:
+  wiki:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync wiki to GitHub
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GITHUB_REPO: corporategoth/py-powerpetdoor
+          GITEA_WIKI_URL: ${{ github.server_url }}/${{ github.repository }}.wiki.git
+        run: |
+          # Configure git
+          git config --global user.name "Gitea Sync"
+          git config --global user.email "sync@neuromancy.net"
+
+          # Clone Gitea wiki
+          git clone --bare "${GITEA_WIKI_URL}" wiki.git
+          cd wiki.git
+
+          # Push to GitHub wiki
+          git push --mirror "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.wiki.git"
+
+          echo "Wiki synced to GitHub"

@@ -1,0 +1,28 @@
+name: Handle Gitea Release Deletion
+
+on:
+  repository_dispatch:
+    types: [gitea-release-deleted]
+
+jobs:
+  delete-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete release on GitHub
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.client_payload.tag_name }}
+        run: |
+          echo "Deleting release ${RELEASE_TAG}..."
+
+          # Get release ID by tag
+          RELEASE_ID=$(gh api repos/${{ github.repository }}/releases/tags/${RELEASE_TAG} --jq '.id' 2>/dev/null || echo "")
+
+          if [ -z "$RELEASE_ID" ]; then
+            echo "Release not found for tag ${RELEASE_TAG}, nothing to delete"
+            exit 0
+          fi
+
+          # Delete the release
+          gh api -X DELETE repos/${{ github.repository }}/releases/${RELEASE_ID}
+          echo "Successfully deleted release ${RELEASE_TAG}"

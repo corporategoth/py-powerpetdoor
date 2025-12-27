@@ -2,7 +2,7 @@ name: Sync Release to GitHub
 
 on:
   release:
-    types: [published, edited, deleted]
+    types: [published, edited]
 
 jobs:
   sync:
