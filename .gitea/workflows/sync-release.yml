@@ -6,7 +6,7 @@ on:
 
 jobs:
   sync:
-    uses: neuromancy/workflows/.gitea/workflows/sync-github-release.yml@v1.0.0
+    uses: neuromancy/workflows/.gitea/workflows/sync-github-release.yml@v1.0.1
     secrets:
       github_token: ${{ secrets.GH_PAT }}
     with:
