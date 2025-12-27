@@ -5,42 +5,8 @@ on:
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Sync wiki to GitHub
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
-          GITHUB_REPO: corporategoth/py-powerpetdoor
-          GITEA_WIKI_URL: ${{ github.server_url }}/${{ github.repository }}.wiki.git
-        run: |
-          set -e
-
-          GITHUB_WIKI_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.wiki.git"
-
-          # Configure git
-          git config --global user.name "Gitea Sync"
-          git config --global user.email "sync@neuromancy.net"
-
-          # Clone Gitea wiki (non-bare to get default branch)
-          git clone "${GITEA_WIKI_URL}" wiki
-          cd wiki
-
-          # Get local (Gitea) default branch name
-          LOCAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-          echo "Gitea wiki branch: ${LOCAL_BRANCH}"
-
-          # Get remote (GitHub) default branch name
-          REMOTE_BRANCH=$(git ls-remote --symref "${GITHUB_WIKI_URL}" HEAD | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2}')
-          if [ -z "${REMOTE_BRANCH}" ]; then
-            # GitHub wiki doesn't exist yet, use local branch name
-            REMOTE_BRANCH="${LOCAL_BRANCH}"
-            echo "GitHub wiki not initialized, will use: ${REMOTE_BRANCH}"
-          else
-            echo "GitHub wiki branch: ${REMOTE_BRANCH}"
-          fi
-
-          # Add GitHub as remote and push
-          git remote add github "${GITHUB_WIKI_URL}"
-          git push github "${LOCAL_BRANCH}:${REMOTE_BRANCH}" --force
-
-          echo "Wiki synced: ${LOCAL_BRANCH} -> ${REMOTE_BRANCH}"
+    uses: neuromancy/workflows/.gitea/workflows/sync-github-wiki.yml@v1.1.0
+    secrets:
+      github_token: ${{ secrets.GH_PAT }}
+    with:
+      github_repo: "corporategoth/py-powerpetdoor"
