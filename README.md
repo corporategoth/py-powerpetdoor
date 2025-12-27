@@ -29,49 +29,53 @@ This is an independent, community-developed project. No contributions, financial
 pip install pypowerpetdoor
 ```
 
-## Usage
+## Quick Start
+
+The library provides two interfaces:
+
+### PowerPetDoor (Recommended)
+
+A high-level, Pythonic interface with cached state and simple methods:
 
 ```python
 import asyncio
-from powerpetdoor import PowerPetDoorClient, COMMAND, CMD_OPEN, CMD_CLOSE
-
-# Create a client
-client = PowerPetDoorClient(
-    host="192.168.1.100",
-    port=3000,
-    keepalive=30.0,
-    timeout=10.0,
-    reconnect=5.0
-)
-
-# Add a listener for door status updates
-client.add_listener(
-    name="my_app",
-    door_status_update=lambda status: print(f"Door status: {status}")
-)
-
-# Start the client (blocks if running own event loop)
-# For integration with existing event loop, pass it to the constructor
-client.start()
-
-# Send commands
-client.send_message(COMMAND, CMD_OPEN)
-client.send_message(COMMAND, CMD_CLOSE)
-
-# Stop when done
-client.stop()
-```
-
-## Async Usage
-
-For use with an existing asyncio event loop:
-
-```python
-import asyncio
-from powerpetdoor import PowerPetDoorClient, COMMAND, CMD_GET_SETTINGS, CONFIG
+from powerpetdoor import PowerPetDoor
 
 async def main():
-    loop = asyncio.get_event_loop()
+    door = PowerPetDoor("192.168.1.100")
+    await door.connect()
+
+    # Read state via properties
+    print(f"Door status: {door.status.name}")
+    print(f"Battery: {door.battery_percent}%")
+
+    # Control via async methods
+    if door.is_closed:
+        await door.open()
+
+    await door.set_hold_time(15)
+    await door.set_inside_sensor(True)
+
+    # Register callbacks
+    door.on_status_change(lambda s: print(f"Status: {s.name}"))
+
+    await door.disconnect()
+
+asyncio.run(main())
+```
+
+See [docs/door.md](docs/door.md) for complete documentation.
+
+### PowerPetDoorClient (Low-Level)
+
+For advanced use cases requiring direct protocol access:
+
+```python
+import asyncio
+from powerpetdoor import PowerPetDoorClient, CONFIG, CMD_GET_SETTINGS
+
+async def main():
+    loop = asyncio.get_running_loop()
 
     client = PowerPetDoorClient(
         host="192.168.1.100",
@@ -82,17 +86,59 @@ async def main():
         loop=loop
     )
 
-    # Connect
     await client.connect()
 
-    # Send a command and wait for response
     settings = await client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
     print(f"Settings: {settings}")
 
-    # Disconnect
     client.stop()
 
 asyncio.run(main())
+```
+
+See [docs/client.md](docs/client.md) for complete documentation.
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [docs/door.md](docs/door.md) | PowerPetDoor high-level interface |
+| [docs/client.md](docs/client.md) | PowerPetDoorClient low-level interface |
+| [docs/simulator.md](docs/simulator.md) | Door simulator for testing |
+
+## Door Simulator
+
+The library includes a full-featured door simulator for testing without hardware:
+
+```bash
+# Run interactive simulator
+python -m powerpetdoor.simulator
+
+# Run with test script
+python -m powerpetdoor.simulator --script basic_cycle
+
+# Run in CI/CD (exit on completion)
+python -m powerpetdoor.simulator --script full_test_suite --exit-after-script
+```
+
+See [docs/simulator.md](docs/simulator.md) for complete documentation.
+
+## Library Structure
+
+```
+powerpetdoor/
+├── door.py            # PowerPetDoor high-level interface
+├── client.py          # PowerPetDoorClient low-level client
+├── const.py           # Protocol constants and commands
+├── schedule.py        # Schedule utilities
+├── tz_utils.py        # Timezone utilities
+└── simulator/         # Door simulator submodule
+    ├── state.py       # Simulator state dataclasses
+    ├── protocol.py    # Command handler registry
+    ├── server.py      # DoorSimulator server
+    ├── cli.py         # Interactive CLI
+    ├── scripting.py   # YAML script runner
+    └── scripts/       # Built-in test scripts
 ```
 
 ## Schedule Utilities
@@ -117,62 +163,6 @@ compressed = compress_schedule(schedule_list)
 
 # Compute differences between schedules
 to_delete, to_add = compute_schedule_diff(current, new)
-```
-
-## Door Simulator
-
-The library includes a full-featured door simulator for testing clients without real hardware. The simulator speaks the same protocol as the real device and supports all commands.
-
-### Quick Start
-
-```bash
-# Run the interactive simulator
-python -m powerpetdoor.simulator
-
-# Run with a test script
-python -m powerpetdoor.simulator --script basic_cycle
-
-# Run script and exit (for CI/CD)
-python -m powerpetdoor.simulator --script full_test_suite --exit-after-script
-```
-
-### Programmatic Usage
-
-```python
-import asyncio
-from powerpetdoor.simulator import DoorSimulator
-
-async def main():
-    simulator = DoorSimulator(host="0.0.0.0", port=3000)
-    await simulator.start()
-
-    # Trigger events programmatically
-    simulator.trigger_sensor("inside")
-    await asyncio.sleep(5)
-    await simulator.close_door()
-
-    await simulator.stop()
-
-asyncio.run(main())
-```
-
-For complete documentation including scripting syntax and all available commands, see [docs/SIMULATOR.md](docs/SIMULATOR.md).
-
-## Library Structure
-
-```
-powerpetdoor/
-├── client.py          # PowerPetDoorClient - main client class
-├── const.py           # Protocol constants and commands
-├── schedule.py        # Schedule utilities
-├── tz_utils.py        # Timezone utilities
-└── simulator/         # Door simulator submodule
-    ├── state.py       # Simulator state dataclasses
-    ├── protocol.py    # Command handler registry
-    ├── server.py      # DoorSimulator server
-    ├── cli.py         # Interactive CLI
-    ├── scripting.py   # YAML script runner
-    └── scripts/       # Built-in test scripts
 ```
 
 ## Related Projects

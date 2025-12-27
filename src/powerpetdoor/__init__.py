@@ -21,6 +21,14 @@ Example usage:
 """
 
 from .client import PowerPetDoorClient, PrioritizedMessage, find_end, make_bool
+from .door import (
+    PowerPetDoor,
+    DoorStatus,
+    NotificationSettings,
+    BatteryInfo,
+    Schedule,
+    ScheduleTime,
+)
 from .const import (
     # Message types
     COMMAND,
@@ -102,8 +110,15 @@ from .tz_utils import (
     parse_posix_tz_string,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 __all__ = [
+    # Door facade
+    "PowerPetDoor",
+    "DoorStatus",
+    "NotificationSettings",
+    "BatteryInfo",
+    "Schedule",
+    "ScheduleTime",
     # Client
     "PowerPetDoorClient",
     "PrioritizedMessage",
