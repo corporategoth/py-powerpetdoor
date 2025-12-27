@@ -67,7 +67,10 @@ class DoorSimulator:
         loop = asyncio.get_running_loop()
 
         def protocol_factory():
-            protocol = DoorSimulatorProtocol(self.state)
+            protocol = DoorSimulatorProtocol(
+                self.state,
+                broadcast_status=self._broadcast_door_status,
+            )
             self.protocols.append(protocol)
             return protocol
 
@@ -99,9 +102,9 @@ class DoorSimulator:
             sensor: "inside" or "outside"
         """
         if self.protocols:
-            # If clients connected, use protocol's trigger_sensor
-            for protocol in self.protocols:
-                protocol.trigger_sensor(sensor)
+            # If clients connected, use the first protocol's trigger_sensor.
+            # Status updates will be broadcast to all clients via broadcast_status callback.
+            self.protocols[0].trigger_sensor(sensor)
         else:
             # No clients connected - directly simulate the sensor trigger
             self._direct_trigger_sensor(sensor)
@@ -114,6 +117,11 @@ class DoorSimulator:
         # Check if sensor is enabled and power is on
         if not self.state.power:
             logger.info(f"Simulator: Sensor {sensor} ignored (power OFF)")
+            return
+
+        # Check command lockout
+        if self.state.cmd_lockout:
+            logger.info(f"Simulator: Sensor {sensor} ignored (command lockout)")
             return
 
         if sensor == "inside" and not self.state.inside:
@@ -153,8 +161,17 @@ class DoorSimulator:
             self.state.door_status = DOOR_STATE_HOLDING
             self._broadcast_door_status()
 
-            # Hold for configured time
-            await asyncio.sleep(float(self.state.hold_time))
+            # Hold for configured time, checking for pet presence
+            hold_remaining = float(self.state.hold_time)
+            while hold_remaining > 0:
+                # If pet is in doorway, reset hold timer
+                if self.state.pet_in_doorway:
+                    logger.info("Simulator: Pet detected in doorway, resetting hold timer")
+                    hold_remaining = float(self.state.hold_time)
+                    self.state.pet_in_doorway = False
+
+                await asyncio.sleep(0.1)
+                hold_remaining -= 0.1
 
             # Close
             await self._direct_close_door()
@@ -167,25 +184,42 @@ class DoorSimulator:
         self._broadcast_door_status()
         await asyncio.sleep(timing.slowing_time)
 
-        # Check for obstruction
-        if self.state.obstruction_pending and self.state.autoretract:
-            logger.info("Simulator: Obstruction detected! Auto-retracting...")
-            self.state.obstruction_pending = False
-            self.state.total_auto_retracts += 1
-            await self._direct_open_door(hold=False)
+        # Check for obstruction after slowing
+        if await self._check_obstruction_retract():
             return
 
         self.state.door_status = DOOR_STATE_CLOSING_TOP_OPEN
         self._broadcast_door_status()
         await asyncio.sleep(timing.closing_top_time)
 
+        # Check for obstruction after closing top
+        if await self._check_obstruction_retract():
+            return
+
         self.state.door_status = DOOR_STATE_CLOSING_MID_OPEN
         self._broadcast_door_status()
         await asyncio.sleep(timing.closing_mid_time)
 
+        # Check for obstruction after closing mid
+        if await self._check_obstruction_retract():
+            return
+
         self.state.door_status = DOOR_STATE_CLOSED
         self._broadcast_door_status()
         self.state.total_open_cycles += 1
+
+    async def _check_obstruction_retract(self) -> bool:
+        """Check for obstruction and auto-retract if enabled.
+
+        Returns True if door was retracted (caller should return early).
+        """
+        if self.state.obstruction_pending and self.state.autoretract:
+            logger.info("Simulator: Obstruction detected! Auto-retracting...")
+            self.state.obstruction_pending = False
+            self.state.total_auto_retracts += 1
+            await self._direct_open_door(hold=False)
+            return True
+        return False
 
     def _broadcast_door_status(self):
         """Broadcast door status to all connected clients."""
@@ -197,8 +231,22 @@ class DoorSimulator:
 
         If autoretract is enabled, the door will auto-retract (reopen).
         """
-        for protocol in self.protocols:
-            protocol.simulate_obstruction()
+        if self.protocols:
+            # Only need to set obstruction_pending once (shared state)
+            self.protocols[0].simulate_obstruction()
+        else:
+            # Direct simulation without clients
+            if self.state.door_status in (
+                DOOR_STATE_SLOWING,
+                DOOR_STATE_CLOSING_TOP_OPEN,
+                DOOR_STATE_CLOSING_MID_OPEN,
+            ):
+                logger.info("Simulator: Obstruction detected during close")
+                self.state.obstruction_pending = True
+            else:
+                logger.info(
+                    f"Simulator: Obstruction ignored (door status: {self.state.door_status})"
+                )
 
     def set_pet_in_doorway(self, present: bool = True):
         """Simulate pet presence in doorway (keeps door open longer)."""
@@ -215,8 +263,8 @@ class DoorSimulator:
         Works with or without connected clients.
         """
         if self.protocols:
-            for protocol in self.protocols:
-                await protocol._simulate_door_open(hold=hold)
+            # Only need to trigger once - status broadcasts go to all clients
+            await self.protocols[0]._simulate_door_open(hold=hold)
         else:
             await self._direct_open_door(hold=hold)
 
@@ -226,8 +274,8 @@ class DoorSimulator:
         Works with or without connected clients.
         """
         if self.protocols:
-            for protocol in self.protocols:
-                await protocol._simulate_door_close()
+            # Only need to trigger once - status broadcasts go to all clients
+            await self.protocols[0]._simulate_door_close()
         else:
             await self._direct_close_door()
 

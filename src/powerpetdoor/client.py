@@ -496,9 +496,7 @@ class PowerPetDoorClient:
         for callback in self.settings_listeners.values():
             callback(settings)
 
-        keys = self.settings_listeners.keys()
-
-        # Notify sensor listeners if they're not also settings listeners
+        # Notify sensor listeners for fields in settings
         sensor_fields = [
             (FIELD_POWER, self.sensor_listeners[FIELD_POWER]),
             (FIELD_INSIDE, self.sensor_listeners[FIELD_INSIDE]),
@@ -509,11 +507,10 @@ class PowerPetDoorClient:
             (FIELD_AUTORETRACT, self.sensor_listeners[FIELD_AUTORETRACT]),
         ]
         for field, listeners in sensor_fields:
-            if listeners:
+            if listeners and field in settings:
                 val = make_bool(settings[field])
-                for name, callback in listeners.items():
-                    if name not in keys:
-                        callback(val)
+                for callback in listeners.values():
+                    callback(field, val)
 
         # Notify other listeners
         if self.timezone_listeners:

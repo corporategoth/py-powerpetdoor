@@ -147,9 +147,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         self,
         state: DoorSimulatorState,
         on_command: Optional[Callable[[str, dict], None]] = None,
+        broadcast_status: Optional[Callable[[], None]] = None,
     ):
         self.state = state
         self.on_command = on_command
+        self.broadcast_status = broadcast_status
         self.transport: Optional[asyncio.Transport] = None
         self.buffer = ""
         self._door_task: Optional[asyncio.Task] = None
@@ -237,7 +239,9 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             self._send({"CMD": PONG, PONG: msg[PING], FIELD_SUCCESS: "true"})
             return
 
-        cmd = msg.get(COMMAND)
+        # Client sends commands under "config" key for queries, "cmd" for actions
+        from ..const import CONFIG
+        cmd = msg.get(CONFIG) or msg.get(COMMAND)
         if not cmd:
             return
 
@@ -577,7 +581,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
                 pass
 
         self.state.door_status = DOOR_STATE_RISING
-        self._send_door_status()
+        self._broadcast_or_send_status()
 
         async def door_sequence():
             timing = self.state.timing
@@ -587,11 +591,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
             if hold:
                 self.state.door_status = DOOR_STATE_KEEPUP
-                self._send_door_status()
+                self._broadcast_or_send_status()
                 # Hold indefinitely until explicit close
             else:
                 self.state.door_status = DOOR_STATE_HOLDING
-                self._send_door_status()
+                self._broadcast_or_send_status()
 
                 # Hold for the configured time, checking for pet presence
                 self._hold_remaining = float(self.state.hold_time)
@@ -626,7 +630,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         timing = self.state.timing
 
         self.state.door_status = DOOR_STATE_SLOWING
-        self._send_door_status()
+        self._broadcast_or_send_status()
 
         async def close_sequence():
             await asyncio.sleep(timing.slowing_time)
@@ -641,7 +645,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
                 return
 
             self.state.door_status = DOOR_STATE_CLOSING_TOP_OPEN
-            self._send_door_status()
+            self._broadcast_or_send_status()
             await asyncio.sleep(timing.closing_top_time)
 
             # Check again for obstruction
@@ -653,7 +657,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
                 return
 
             self.state.door_status = DOOR_STATE_CLOSING_MID_OPEN
-            self._send_door_status()
+            self._broadcast_or_send_status()
             await asyncio.sleep(timing.closing_mid_time)
 
             # Final obstruction check
@@ -665,18 +669,25 @@ class DoorSimulatorProtocol(asyncio.Protocol):
                 return
 
             self.state.door_status = DOOR_STATE_CLOSED
-            self._send_door_status()
+            self._broadcast_or_send_status()
             self.state.total_open_cycles += 1
 
         self._door_task = asyncio.create_task(close_sequence())
 
     def _send_door_status(self):
-        """Send unsolicited door status update."""
+        """Send unsolicited door status update to this client only."""
         self._send({
             "CMD": DOOR_STATUS,
             FIELD_DOOR_STATUS: self.state.door_status,
             FIELD_SUCCESS: "true",
         })
+
+    def _broadcast_or_send_status(self):
+        """Broadcast door status to all clients, or send to this client only."""
+        if self.broadcast_status:
+            self.broadcast_status()
+        else:
+            self._send_door_status()
 
     def _send_sensor_notification(self, sensor: str, state: str = "on"):
         """Send sensor trigger notification if enabled.
@@ -717,6 +728,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         # Check if sensor is enabled and power is on
         if not self.state.power:
             logger.info(f"Simulator: Sensor {sensor} ignored (power OFF)")
+            return
+
+        # Check command lockout
+        if self.state.cmd_lockout:
+            logger.info(f"Simulator: Sensor {sensor} ignored (command lockout)")
             return
 
         if sensor == "inside" and not self.state.inside:
