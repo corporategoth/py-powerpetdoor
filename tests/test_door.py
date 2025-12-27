@@ -269,7 +269,12 @@ class TestPowerPetDoorStatus:
     async def test_status_after_open(self, door, simulator):
         """Status should update after opening."""
         await door.open()
-        await asyncio.sleep(0.2)
+
+        # Wait for door to open (poll instead of fixed sleep for CI reliability)
+        for _ in range(50):
+            if door.is_open:
+                break
+            await asyncio.sleep(0.1)
 
         assert door.status in (DoorStatus.RISING, DoorStatus.HOLDING, DoorStatus.KEEPUP)
         assert door.is_open is True
@@ -334,7 +339,12 @@ class TestPowerPetDoorControl:
         assert door.is_closed
 
         await door.toggle()
-        await asyncio.sleep(0.2)
+
+        # Wait for door to open (poll instead of fixed sleep for CI reliability)
+        for _ in range(50):
+            if door.is_open:
+                break
+            await asyncio.sleep(0.1)
 
         assert door.is_open
 
