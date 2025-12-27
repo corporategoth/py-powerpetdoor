@@ -1,0 +1,24 @@
+name: "Basic Door Cycle"
+description: "Pet triggers inside sensor, door opens, holds, then closes"
+steps:
+  - action: assert
+    condition: door_status
+    equals: DOOR_CLOSED
+  - action: set
+    name: hold_time
+    value: "2"
+  - action: trigger_sensor
+    sensor: inside
+  - action: wait
+    seconds: 0.5
+  - action: assert
+    condition: door_status
+    equals: DOOR_RISING
+  - action: wait_for
+    condition: door_holding
+    timeout: 5
+  - action: wait_for
+    condition: door_closed
+    timeout: 10
+  - action: log
+    message: "Door cycle completed successfully"

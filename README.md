@@ -119,6 +119,62 @@ compressed = compress_schedule(schedule_list)
 to_delete, to_add = compute_schedule_diff(current, new)
 ```
 
+## Door Simulator
+
+The library includes a full-featured door simulator for testing clients without real hardware. The simulator speaks the same protocol as the real device and supports all commands.
+
+### Quick Start
+
+```bash
+# Run the interactive simulator
+python -m powerpetdoor.simulator
+
+# Run with a test script
+python -m powerpetdoor.simulator --script basic_cycle
+
+# Run script and exit (for CI/CD)
+python -m powerpetdoor.simulator --script full_test_suite --exit-after-script
+```
+
+### Programmatic Usage
+
+```python
+import asyncio
+from powerpetdoor.simulator import DoorSimulator
+
+async def main():
+    simulator = DoorSimulator(host="0.0.0.0", port=3000)
+    await simulator.start()
+
+    # Trigger events programmatically
+    simulator.trigger_sensor("inside")
+    await asyncio.sleep(5)
+    await simulator.close_door()
+
+    await simulator.stop()
+
+asyncio.run(main())
+```
+
+For complete documentation including scripting syntax and all available commands, see [docs/SIMULATOR.md](docs/SIMULATOR.md).
+
+## Library Structure
+
+```
+powerpetdoor/
+├── client.py          # PowerPetDoorClient - main client class
+├── const.py           # Protocol constants and commands
+├── schedule.py        # Schedule utilities
+├── tz_utils.py        # Timezone utilities
+└── simulator/         # Door simulator submodule
+    ├── state.py       # Simulator state dataclasses
+    ├── protocol.py    # Command handler registry
+    ├── server.py      # DoorSimulator server
+    ├── cli.py         # Interactive CLI
+    ├── scripting.py   # YAML script runner
+    └── scripts/       # Built-in test scripts
+```
+
 ## Related Projects
 
 - [ha-powerpetdoor][ha-powerpetdoor] - Home Assistant integration for Power Pet Door

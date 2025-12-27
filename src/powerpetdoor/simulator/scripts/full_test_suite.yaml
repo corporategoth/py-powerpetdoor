@@ -1,0 +1,102 @@
+name: "Full Test Suite"
+description: "Comprehensive test of all simulator features"
+steps:
+  # Test 1: Basic cycle
+  - action: log
+    message: "=== Test 1: Basic Door Cycle ==="
+  - action: set
+    name: hold_time
+    value: "1"
+  - action: trigger_sensor
+    sensor: inside
+  - action: wait
+    seconds: 0.2
+  - action: wait_for
+    condition: door_open
+    timeout: 5
+  - action: wait_for
+    condition: door_closed
+    timeout: 10
+  - action: log
+    message: "Basic cycle: PASSED"
+
+  # Test 2: Outside sensor
+  - action: log
+    message: "=== Test 2: Outside Sensor ==="
+  - action: trigger_sensor
+    sensor: outside
+  - action: wait
+    seconds: 0.2
+  - action: wait_for
+    condition: door_open
+    timeout: 5
+  - action: wait_for
+    condition: door_closed
+    timeout: 10
+  - action: log
+    message: "Outside sensor: PASSED"
+
+  # Test 3: Power off
+  - action: log
+    message: "=== Test 3: Power Off ==="
+  - action: set
+    name: power
+    value: "off"
+  - action: trigger_sensor
+    sensor: inside
+  - action: wait
+    seconds: 0.5
+  - action: assert
+    condition: door_status
+    equals: DOOR_CLOSED
+  - action: set
+    name: power
+    value: "on"
+  - action: log
+    message: "Power off: PASSED"
+
+  # Test 4: Safety lock
+  - action: log
+    message: "=== Test 4: Safety Lock ==="
+  - action: set
+    name: safety_lock
+    value: "on"
+  - action: trigger_sensor
+    sensor: outside
+  - action: wait
+    seconds: 0.5
+  - action: assert
+    condition: door_status
+    equals: DOOR_CLOSED
+  - action: set
+    name: safety_lock
+    value: "off"
+  - action: log
+    message: "Safety lock: PASSED"
+
+  # Test 5: Open and hold
+  - action: log
+    message: "=== Test 5: Open and Hold ==="
+  - action: open
+    hold: true
+  - action: wait
+    seconds: 0.2
+  - action: wait_for
+    condition: door_keepup
+    timeout: 5
+  - action: wait
+    seconds: 1
+  - action: assert
+    condition: door_status
+    equals: DOOR_KEEPUP
+  - action: close
+  - action: wait
+    seconds: 0.2
+  - action: wait_for
+    condition: door_closed
+    timeout: 10
+  - action: log
+    message: "Open and hold: PASSED"
+
+  - action: log
+    message: "=== All tests PASSED ==="

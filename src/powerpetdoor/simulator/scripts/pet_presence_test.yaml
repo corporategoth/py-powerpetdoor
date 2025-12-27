@@ -1,0 +1,27 @@
+name: "Pet Presence Hold Extension"
+description: "Tests that pet in doorway extends hold time"
+steps:
+  - action: set
+    name: hold_time
+    value: "2"
+  - action: trigger_sensor
+    sensor: inside
+  - action: wait_for
+    condition: door_holding
+    timeout: 5
+  - action: wait
+    seconds: 1.5
+  - action: pet_presence
+  - action: log
+    message: "Pet detected - hold timer should reset"
+  - action: wait
+    seconds: 1.5
+  - action: assert
+    condition: door_status
+    equals: DOOR_HOLDING
+  - action: pet_off
+  - action: log
+    message: "Pet left - door should close after hold time"
+  - action: wait_for
+    condition: door_closed
+    timeout: 10

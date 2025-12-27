@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pypowerpetdoor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python library for communicating with Power Pet Door devices"
 readme = "README.md"
 license = {text = "MIT"}
@@ -43,6 +43,9 @@ Issues = "https://github.com/corporategoth/py-powerpetdoor/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"powerpetdoor.simulator" = ["scripts/*.yaml", "scripts/*.yml"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -1,0 +1,48 @@
+name: "Schedule Enforcement Test"
+description: "Tests that sensors respect schedule time windows"
+steps:
+  # First test without any schedules - should always work
+  - action: log
+    message: "=== Test 1: No Schedules (should work) ==="
+  - action: set
+    name: hold_time
+    value: "1"
+  - action: trigger_sensor
+    sensor: inside
+  - action: wait
+    seconds: 0.2
+  - action: wait_for
+    condition: door_open
+    timeout: 5
+  - action: wait_for
+    condition: door_closed
+    timeout: 10
+  - action: log
+    message: "No schedule test: PASSED"
+
+  # Add a schedule that only allows sensors during certain hours
+  # For testing, we create a schedule that should be active NOW
+  - action: log
+    message: "=== Test 2: With Active Schedule (should work) ==="
+  - action: add_schedule
+    index: 1
+  - action: trigger_sensor
+    sensor: inside
+  - action: wait
+    seconds: 0.2
+  - action: wait_for
+    condition: door_open
+    timeout: 5
+  - action: wait_for
+    condition: door_closed
+    timeout: 10
+  - action: log
+    message: "Active schedule test: PASSED"
+
+  # Now disable the schedule - should still work with no active schedules
+  - action: log
+    message: "=== Test 3: Disabled Schedule ==="
+  - action: remove_schedule
+    index: 1
+  - action: log
+    message: "Schedule tests: PASSED"

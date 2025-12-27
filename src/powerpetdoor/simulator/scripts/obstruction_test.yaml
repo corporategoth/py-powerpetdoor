@@ -1,0 +1,28 @@
+name: "Obstruction Auto-Retract Test"
+description: "Tests that door auto-retracts when obstruction detected"
+steps:
+  - action: set
+    name: autoretract
+    value: "on"
+  - action: set
+    name: hold_time
+    value: "1"
+  - action: trigger_sensor
+    sensor: inside
+  - action: wait_for
+    condition: door_holding
+    timeout: 5
+  - action: log
+    message: "Door is holding, waiting for close to start..."
+  - action: wait
+    seconds: 1.5
+  - action: obstruction
+  - action: log
+    message: "Obstruction triggered, door should auto-retract"
+  - action: wait
+    seconds: 1
+  - action: wait_for
+    condition: door_open
+    timeout: 5
+  - action: log
+    message: "Auto-retract successful!"

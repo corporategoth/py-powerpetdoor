@@ -56,6 +56,9 @@ from .const import (
     CMD_SET_SCHEDULE,
     CMD_GET_HW_INFO,
     CMD_GET_DOOR_BATTERY,
+    CMD_HAS_REMOTE_ID,
+    CMD_HAS_REMOTE_KEY,
+    CMD_CHECK_RESET_REASON,
     CMD_GET_NOTIFICATIONS,
     CMD_SET_NOTIFICATIONS,
     CMD_GET_HOLD_TIME,
@@ -97,6 +100,9 @@ from .const import (
     FIELD_LOW_BATTERY_NOTIFICATIONS,
     FIELD_TOTAL_OPEN_CYCLES,
     FIELD_TOTAL_AUTO_RETRACTS,
+    FIELD_HAS_REMOTE_ID,
+    FIELD_HAS_REMOTE_KEY,
+    FIELD_RESET_REASON,
     MINIMUM_TIME_BETWEEN_MSGS,
 )
 
@@ -104,6 +110,39 @@ _LOGGER = logging.getLogger(__name__)
 
 MAX_FAILED_MSG = 2
 MAX_FAILED_PINGS = 3
+
+
+class ResponseHandlerRegistry:
+    """Registry for client response handlers.
+
+    This provides a decorator-based system for mapping command responses
+    to their handler methods, eliminating the need for large if/elif chains.
+    """
+
+    _handlers: dict[str, Callable] = {}
+
+    @classmethod
+    def handler(cls, *cmds: str):
+        """Decorator to register a response handler for one or more commands.
+
+        Args:
+            cmds: One or more command strings this handler processes
+
+        Example:
+            @ResponseHandlerRegistry.handler(CMD_GET_POWER, CMD_POWER_ON, CMD_POWER_OFF)
+            def _handle_power(self, msg, future):
+                ...
+        """
+        def decorator(func):
+            for cmd in cmds:
+                cls._handlers[cmd] = func
+            return func
+        return decorator
+
+    @classmethod
+    def get(cls, cmd: str) -> Callable | None:
+        """Get the handler for a command, or None if not found."""
+        return cls._handlers.get(cmd)
 
 
 @dataclass(order=True)
@@ -260,6 +299,10 @@ class PowerPetDoorClient:
         self.sensor_trigger_voltage_listeners: dict[str, Callable[[int], None]] = {}
         self.sleep_sensor_trigger_voltage_listeners: dict[str, Callable[[int], None]] = {}
 
+        self.remote_id_listeners: dict[str, Callable[[bool], None]] = {}
+        self.remote_key_listeners: dict[str, Callable[[bool], None]] = {}
+        self.reset_reason_listeners: dict[str, Callable[[str], None]] = {}
+
         self.on_connect: dict[str, Callable[[], Awaitable[None]]] = {}
         self.on_disconnect: dict[str, Callable[[], Awaitable[None]]] = {}
         self.on_ping: dict[str, Callable[[int], None]] = {}
@@ -309,6 +352,9 @@ class PowerPetDoorClient:
                      hold_time_update: Callable[[int], None] | None = None,
                      sensor_trigger_voltage_update: Callable[[int], None] | None = None,
                      sleep_sensor_trigger_voltage_update: Callable[[int], None] | None = None,
+                     remote_id_update: Callable[[bool], None] | None = None,
+                     remote_key_update: Callable[[bool], None] | None = None,
+                     reset_reason_update: Callable[[str], None] | None = None,
                      ) -> None:
         """Register callbacks for device state updates.
 
@@ -325,6 +371,9 @@ class PowerPetDoorClient:
             hold_time_update: Called with hold time in seconds
             sensor_trigger_voltage_update: Called with trigger voltage
             sleep_sensor_trigger_voltage_update: Called with sleep trigger voltage
+            remote_id_update: Called with True if device has remote ID
+            remote_key_update: Called with True if device has remote key
+            reset_reason_update: Called with reset reason string
         """
         if door_status_update:
             self.door_status_listeners[name] = door_status_update
@@ -393,6 +442,12 @@ class PowerPetDoorClient:
             self.sensor_trigger_voltage_listeners[name] = sensor_trigger_voltage_update
         if sleep_sensor_trigger_voltage_update:
             self.sleep_sensor_trigger_voltage_listeners[name] = sleep_sensor_trigger_voltage_update
+        if remote_id_update:
+            self.remote_id_listeners[name] = remote_id_update
+        if remote_key_update:
+            self.remote_key_listeners[name] = remote_key_update
+        if reset_reason_update:
+            self.reset_reason_listeners[name] = reset_reason_update
 
     def del_listener(self, name: str) -> None:
         """Remove all listeners registered under a name."""
@@ -418,6 +473,305 @@ class PowerPetDoorClient:
         del self.hold_time_listeners[name]
         del self.sensor_trigger_voltage_listeners[name]
         del self.sleep_sensor_trigger_voltage_listeners[name]
+        del self.remote_id_listeners[name]
+        del self.remote_key_listeners[name]
+        del self.reset_reason_listeners[name]
+
+    # -------------------------------------------------------------------------
+    # Response Handlers - registered via decorator pattern
+    # -------------------------------------------------------------------------
+
+    @ResponseHandlerRegistry.handler(CMD_GET_DOOR_STATUS, DOOR_STATUS)
+    def _handle_door_status(self, msg: dict, future) -> None:
+        """Handle door status responses."""
+        for callback in self.door_status_listeners.values():
+            callback(msg[FIELD_DOOR_STATUS])
+        if future:
+            future.set_result(msg[FIELD_DOOR_STATUS])
+
+    @ResponseHandlerRegistry.handler(CMD_GET_SETTINGS)
+    def _handle_get_settings(self, msg: dict, future) -> None:
+        """Handle settings response - extracts many sub-values."""
+        settings = msg[FIELD_SETTINGS]
+        for callback in self.settings_listeners.values():
+            callback(settings)
+
+        keys = self.settings_listeners.keys()
+
+        # Notify sensor listeners if they're not also settings listeners
+        sensor_fields = [
+            (FIELD_POWER, self.sensor_listeners[FIELD_POWER]),
+            (FIELD_INSIDE, self.sensor_listeners[FIELD_INSIDE]),
+            (FIELD_OUTSIDE, self.sensor_listeners[FIELD_OUTSIDE]),
+            (FIELD_AUTO, self.sensor_listeners[FIELD_AUTO]),
+            (FIELD_OUTSIDE_SENSOR_SAFETY_LOCK, self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK]),
+            (FIELD_CMD_LOCKOUT, self.sensor_listeners[FIELD_CMD_LOCKOUT]),
+            (FIELD_AUTORETRACT, self.sensor_listeners[FIELD_AUTORETRACT]),
+        ]
+        for field, listeners in sensor_fields:
+            if listeners:
+                val = make_bool(settings[field])
+                for name, callback in listeners.items():
+                    if name not in keys:
+                        callback(val)
+
+        # Notify other listeners
+        if self.timezone_listeners:
+            for callback in self.timezone_listeners.values():
+                callback(settings[FIELD_TZ])
+        if self.hold_time_listeners:
+            for callback in self.hold_time_listeners.values():
+                callback(settings[FIELD_HOLD_OPEN_TIME])
+        if self.sensor_trigger_voltage_listeners:
+            for callback in self.sensor_trigger_voltage_listeners.values():
+                callback(settings[FIELD_SENSOR_TRIGGER_VOLTAGE])
+        if self.sleep_sensor_trigger_voltage_listeners:
+            for callback in self.sleep_sensor_trigger_voltage_listeners.values():
+                callback(settings[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE])
+
+        if future:
+            future.set_result(settings)
+
+    @ResponseHandlerRegistry.handler(CMD_GET_NOTIFICATIONS, CMD_SET_NOTIFICATIONS)
+    def _handle_notifications(self, msg: dict, future) -> None:
+        """Handle notifications response."""
+        notifications = msg[FIELD_NOTIFICATIONS]
+        notification_fields = [
+            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
+            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
+            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
+            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
+            FIELD_LOW_BATTERY_NOTIFICATIONS,
+        ]
+        for field in notification_fields:
+            if self.notifications_listeners[field]:
+                val = make_bool(notifications[field])
+                for callback in self.notifications_listeners[field].values():
+                    callback(val)
+        if future:
+            future.set_result(notifications)
+
+    @ResponseHandlerRegistry.handler(CMD_GET_DOOR_OPEN_STATS)
+    def _handle_door_open_stats(self, msg: dict, future) -> None:
+        """Handle door open stats response."""
+        if self.stats_listeners[FIELD_TOTAL_OPEN_CYCLES]:
+            for callback in self.stats_listeners[FIELD_TOTAL_OPEN_CYCLES].values():
+                callback(msg[FIELD_TOTAL_OPEN_CYCLES])
+        if self.stats_listeners[FIELD_TOTAL_AUTO_RETRACTS]:
+            for callback in self.stats_listeners[FIELD_TOTAL_AUTO_RETRACTS].values():
+                callback(msg[FIELD_TOTAL_AUTO_RETRACTS])
+        if future:
+            future.set_result({
+                FIELD_TOTAL_OPEN_CYCLES: msg[FIELD_TOTAL_OPEN_CYCLES],
+                FIELD_TOTAL_AUTO_RETRACTS: msg[FIELD_TOTAL_AUTO_RETRACTS],
+            })
+
+    @ResponseHandlerRegistry.handler(
+        CMD_GET_SENSORS, CMD_ENABLE_INSIDE, CMD_DISABLE_INSIDE,
+        CMD_ENABLE_OUTSIDE, CMD_DISABLE_OUTSIDE
+    )
+    def _handle_sensors(self, msg: dict, future) -> None:
+        """Handle sensor enable/disable responses."""
+        fr = {}
+        if FIELD_INSIDE in msg:
+            val = make_bool(msg[FIELD_INSIDE])
+            fr[FIELD_INSIDE] = val
+            if self.sensor_listeners[FIELD_INSIDE]:
+                for callback in self.sensor_listeners[FIELD_INSIDE].values():
+                    callback(val)
+        if FIELD_OUTSIDE in msg:
+            val = make_bool(msg[FIELD_OUTSIDE])
+            fr[FIELD_OUTSIDE] = val
+            if self.sensor_listeners[FIELD_OUTSIDE]:
+                for callback in self.sensor_listeners[FIELD_OUTSIDE].values():
+                    callback(val)
+        if future:
+            future.set_result(fr)
+
+    @ResponseHandlerRegistry.handler(CMD_GET_POWER, CMD_POWER_ON, CMD_POWER_OFF)
+    def _handle_power(self, msg: dict, future) -> None:
+        """Handle power state responses."""
+        if FIELD_POWER in msg:
+            val = make_bool(msg[FIELD_POWER])
+            if self.sensor_listeners[FIELD_POWER]:
+                for callback in self.sensor_listeners[FIELD_POWER].values():
+                    callback(val)
+            if future:
+                future.set_result(val)
+
+    @ResponseHandlerRegistry.handler(CMD_GET_AUTO, CMD_ENABLE_AUTO, CMD_DISABLE_AUTO)
+    def _handle_auto(self, msg: dict, future) -> None:
+        """Handle timers/auto enabled responses."""
+        if FIELD_AUTO in msg:
+            val = make_bool(msg[FIELD_AUTO])
+            if self.sensor_listeners[FIELD_AUTO]:
+                for callback in self.sensor_listeners[FIELD_AUTO].values():
+                    callback(val)
+            if future:
+                future.set_result(val)
+
+    @ResponseHandlerRegistry.handler(
+        CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
+        CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
+        CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK
+    )
+    def _handle_safety_lock(self, msg: dict, future) -> None:
+        """Handle outside sensor safety lock responses."""
+        if FIELD_SETTINGS in msg and FIELD_OUTSIDE_SENSOR_SAFETY_LOCK in msg[FIELD_SETTINGS]:
+            val = make_bool(msg[FIELD_SETTINGS][FIELD_OUTSIDE_SENSOR_SAFETY_LOCK])
+            if self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK]:
+                for callback in self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK].values():
+                    callback(val)
+            if future:
+                future.set_result(val)
+
+    @ResponseHandlerRegistry.handler(
+        CMD_GET_CMD_LOCKOUT, CMD_ENABLE_CMD_LOCKOUT, CMD_DISABLE_CMD_LOCKOUT
+    )
+    def _handle_cmd_lockout(self, msg: dict, future) -> None:
+        """Handle command lockout responses."""
+        if FIELD_SETTINGS in msg and FIELD_CMD_LOCKOUT in msg[FIELD_SETTINGS]:
+            val = make_bool(msg[FIELD_SETTINGS][FIELD_CMD_LOCKOUT])
+            if self.sensor_listeners[FIELD_CMD_LOCKOUT]:
+                for callback in self.sensor_listeners[FIELD_CMD_LOCKOUT].values():
+                    callback(val)
+            if future:
+                future.set_result(val)
+
+    @ResponseHandlerRegistry.handler(
+        CMD_GET_AUTORETRACT, CMD_ENABLE_AUTORETRACT, CMD_DISABLE_AUTORETRACT
+    )
+    def _handle_autoretract(self, msg: dict, future) -> None:
+        """Handle autoretract responses."""
+        if FIELD_SETTINGS in msg and FIELD_AUTORETRACT in msg[FIELD_SETTINGS]:
+            val = make_bool(msg[FIELD_SETTINGS][FIELD_AUTORETRACT])
+            if self.sensor_listeners[FIELD_AUTORETRACT]:
+                for callback in self.sensor_listeners[FIELD_AUTORETRACT].values():
+                    callback(val)
+            if future:
+                future.set_result(val)
+
+    @ResponseHandlerRegistry.handler(CMD_GET_HW_INFO)
+    def _handle_hw_info(self, msg: dict, future) -> None:
+        """Handle hardware info response."""
+        if FIELD_FWINFO in msg:
+            for callback in self.hw_info_listeners.values():
+                callback(msg[FIELD_FWINFO])
+            if future:
+                future.set_result(msg[FIELD_FWINFO])
+
+    @ResponseHandlerRegistry.handler(CMD_GET_DOOR_BATTERY)
+    def _handle_battery(self, msg: dict, future) -> None:
+        """Handle battery status response."""
+        data = {
+            FIELD_BATTERY_PERCENT: msg[FIELD_BATTERY_PERCENT],
+            FIELD_BATTERY_PRESENT: make_bool(msg[FIELD_BATTERY_PRESENT]),
+            FIELD_AC_PRESENT: make_bool(msg[FIELD_AC_PRESENT]),
+        }
+        for callback in self.battery_listeners.values():
+            callback(data)
+        if future:
+            future.set_result(data)
+
+    @ResponseHandlerRegistry.handler(CMD_GET_TIMEZONE, CMD_SET_TIMEZONE)
+    def _handle_timezone(self, msg: dict, future) -> None:
+        """Handle timezone responses."""
+        if FIELD_TZ in msg:
+            val = msg[FIELD_TZ]
+            for callback in self.timezone_listeners.values():
+                callback(val)
+            if future:
+                future.set_result(val)
+
+    @ResponseHandlerRegistry.handler(CMD_GET_HOLD_TIME, CMD_SET_HOLD_TIME)
+    def _handle_hold_time(self, msg: dict, future) -> None:
+        """Handle hold time responses."""
+        if FIELD_HOLD_TIME in msg:
+            val = msg[FIELD_HOLD_TIME]
+            for callback in self.hold_time_listeners.values():
+                callback(val)
+            if future:
+                future.set_result(val)
+
+    @ResponseHandlerRegistry.handler(CMD_GET_SENSOR_TRIGGER_VOLTAGE, CMD_SET_SENSOR_TRIGGER_VOLTAGE)
+    def _handle_sensor_trigger_voltage(self, msg: dict, future) -> None:
+        """Handle sensor trigger voltage responses."""
+        if FIELD_SENSOR_TRIGGER_VOLTAGE in msg:
+            val = msg[FIELD_SENSOR_TRIGGER_VOLTAGE]
+            for callback in self.sensor_trigger_voltage_listeners.values():
+                callback(val)
+            if future:
+                future.set_result(val)
+
+    @ResponseHandlerRegistry.handler(
+        CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE, CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE
+    )
+    def _handle_sleep_sensor_trigger_voltage(self, msg: dict, future) -> None:
+        """Handle sleep sensor trigger voltage responses."""
+        if FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE in msg:
+            val = msg[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE]
+            for callback in self.sleep_sensor_trigger_voltage_listeners.values():
+                callback(val)
+            if future:
+                future.set_result(val)
+
+    @ResponseHandlerRegistry.handler(CMD_GET_SCHEDULE_LIST)
+    def _handle_schedule_list(self, msg: dict, future) -> None:
+        """Handle schedule list response."""
+        if future:
+            future.set_result(msg[FIELD_SCHEDULES])
+
+    @ResponseHandlerRegistry.handler(CMD_DELETE_SCHEDULE)
+    def _handle_delete_schedule(self, msg: dict, future) -> None:
+        """Handle delete schedule response."""
+        if future:
+            future.set_result(msg[FIELD_INDEX])
+
+    @ResponseHandlerRegistry.handler(CMD_GET_SCHEDULE, CMD_SET_SCHEDULE)
+    def _handle_schedule(self, msg: dict, future) -> None:
+        """Handle get/set schedule response."""
+        if future:
+            future.set_result(msg[FIELD_SCHEDULE])
+
+    @ResponseHandlerRegistry.handler(CMD_HAS_REMOTE_ID)
+    def _handle_remote_id(self, msg: dict, future) -> None:
+        """Handle HAS_REMOTE_ID response."""
+        if FIELD_HAS_REMOTE_ID in msg:
+            val = make_bool(msg[FIELD_HAS_REMOTE_ID])
+            for callback in self.remote_id_listeners.values():
+                callback(val)
+            if future:
+                future.set_result(val)
+
+    @ResponseHandlerRegistry.handler(CMD_HAS_REMOTE_KEY)
+    def _handle_remote_key(self, msg: dict, future) -> None:
+        """Handle HAS_REMOTE_KEY response."""
+        if FIELD_HAS_REMOTE_KEY in msg:
+            val = make_bool(msg[FIELD_HAS_REMOTE_KEY])
+            for callback in self.remote_key_listeners.values():
+                callback(val)
+            if future:
+                future.set_result(val)
+
+    @ResponseHandlerRegistry.handler(CMD_CHECK_RESET_REASON)
+    def _handle_reset_reason(self, msg: dict, future) -> None:
+        """Handle CHECK_RESET_REASON response."""
+        if FIELD_RESET_REASON in msg:
+            val = msg[FIELD_RESET_REASON]
+            for callback in self.reset_reason_listeners.values():
+                callback(val)
+            if future:
+                future.set_result(val)
+
+    @ResponseHandlerRegistry.handler(PONG)
+    def _handle_pong(self, msg: dict, future) -> None:
+        """Handle PONG keepalive response."""
+        if msg[PONG] == self._last_ping:
+            diff = round(time.time() * 1000) - int(self._last_ping)
+            for callback in self.on_ping.values():
+                callback(diff)
+            self._failed_pings = 0
+            self._last_ping = None
 
     def start(self) -> None:
         """Start the client and initiate connection.
@@ -656,6 +1010,10 @@ class PowerPetDoorClient:
                 end = find_end(self._buffer)
 
     async def process_message(self, msg) -> None:
+        """Process an incoming message from the device.
+
+        Uses the ResponseHandlerRegistry to dispatch to the appropriate handler.
+        """
         future = None
         if "msgID" in msg:
             self.replyMsgId = msg["msgID"]
@@ -672,252 +1030,17 @@ class PowerPetDoorClient:
                 await self.dequeue_data()
 
         if msg[FIELD_SUCCESS] == "true":
-            if msg["CMD"] in (CMD_GET_DOOR_STATUS, DOOR_STATUS):
-                for callback in self.door_status_listeners.values():
-                    callback(msg[FIELD_DOOR_STATUS])
-                if future:
-                    future.set_result(msg[FIELD_DOOR_STATUS])
+            # Look up handler in registry
+            handler = ResponseHandlerRegistry.get(msg["CMD"])
+            if handler:
+                handler(self, msg, future)
 
-            elif msg["CMD"] == CMD_GET_SETTINGS:
-                for callback in self.settings_listeners.values():
-                    callback(msg[FIELD_SETTINGS])
-                keys = self.settings_listeners.keys()
-                if self.sensor_listeners[FIELD_POWER]:
-                    val = make_bool(msg[FIELD_SETTINGS][FIELD_POWER])
-                    for name, callback in self.sensor_listeners[FIELD_POWER].items():
-                        if name not in keys:
-                            callback(val)
-                if self.sensor_listeners[FIELD_INSIDE]:
-                    val = make_bool(msg[FIELD_SETTINGS][FIELD_INSIDE])
-                    for name, callback in self.sensor_listeners[FIELD_INSIDE].items():
-                        if name not in keys:
-                            callback(val)
-                if self.sensor_listeners[FIELD_OUTSIDE]:
-                    val = make_bool(msg[FIELD_SETTINGS][FIELD_OUTSIDE])
-                    for name, callback in self.sensor_listeners[FIELD_OUTSIDE].items():
-                        if name not in keys:
-                            callback(val)
-                if self.sensor_listeners[FIELD_AUTO]:
-                    val = make_bool(msg[FIELD_SETTINGS][FIELD_AUTO])
-                    for name, callback in self.sensor_listeners[FIELD_AUTO].items():
-                        if name not in keys:
-                            callback(val)
-                if self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK]:
-                    val = make_bool(msg[FIELD_SETTINGS][FIELD_OUTSIDE_SENSOR_SAFETY_LOCK])
-                    for name, callback in self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK].items():
-                        if name not in keys:
-                            callback(val)
-                if self.sensor_listeners[FIELD_CMD_LOCKOUT]:
-                    val = make_bool(msg[FIELD_SETTINGS][FIELD_CMD_LOCKOUT])
-                    for name, callback in self.sensor_listeners[FIELD_CMD_LOCKOUT].items():
-                        if name not in keys:
-                            callback(val)
-                if self.sensor_listeners[FIELD_AUTORETRACT]:
-                    val = make_bool(msg[FIELD_SETTINGS][FIELD_AUTORETRACT])
-                    for name, callback in self.sensor_listeners[FIELD_AUTORETRACT].items():
-                        if name not in keys:
-                            callback(val)
-                if self.timezone_listeners:
-                    val: str = msg[FIELD_SETTINGS][FIELD_TZ]
-                    for callback in self.timezone_listeners.values():
-                        callback(val)
-                if self.hold_time_listeners:
-                    val: int = msg[FIELD_SETTINGS][FIELD_HOLD_OPEN_TIME]
-                    for callback in self.hold_time_listeners.values():
-                        callback(val)
-                if self.sensor_trigger_voltage_listeners:
-                    val: int = msg[FIELD_SETTINGS][FIELD_SENSOR_TRIGGER_VOLTAGE]
-                    for callback in self.sensor_trigger_voltage_listeners.values():
-                        callback(val)
-                if self.sleep_sensor_trigger_voltage_listeners:
-                    val: int = msg[FIELD_SETTINGS][FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE]
-                    for callback in self.sleep_sensor_trigger_voltage_listeners.values():
-                        callback(val)
-
-                if future:
-                    future.set_result(msg[FIELD_SETTINGS])
-
-            elif msg["CMD"] in (CMD_GET_NOTIFICATIONS, CMD_SET_NOTIFICATIONS):
-                if self.notifications_listeners[FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS]:
-                    val = make_bool(msg[FIELD_NOTIFICATIONS][FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS])
-                    for callback in self.notifications_listeners[FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS].values():
-                        callback(val)
-                if self.notifications_listeners[FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS]:
-                    val = make_bool(msg[FIELD_NOTIFICATIONS][FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS])
-                    for callback in self.notifications_listeners[FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS].values():
-                        callback(val)
-                if self.notifications_listeners[FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS]:
-                    val = make_bool(msg[FIELD_NOTIFICATIONS][FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS])
-                    for callback in self.notifications_listeners[FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS].values():
-                        callback(val)
-                if self.notifications_listeners[FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS]:
-                    val = make_bool(msg[FIELD_NOTIFICATIONS][FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS])
-                    for callback in self.notifications_listeners[FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS].values():
-                        callback(val)
-                if self.notifications_listeners[FIELD_LOW_BATTERY_NOTIFICATIONS]:
-                    val = make_bool(msg[FIELD_NOTIFICATIONS][FIELD_LOW_BATTERY_NOTIFICATIONS])
-                    for callback in self.notifications_listeners[FIELD_LOW_BATTERY_NOTIFICATIONS].values():
-                        callback(val)
-                if future:
-                    future.set_result(msg[FIELD_NOTIFICATIONS])
-
-            elif msg["CMD"] == CMD_GET_DOOR_OPEN_STATS:
-                if self.stats_listeners[FIELD_TOTAL_OPEN_CYCLES]:
-                    val = msg[FIELD_TOTAL_OPEN_CYCLES]
-                    for callback in self.stats_listeners[FIELD_TOTAL_OPEN_CYCLES].values():
-                        callback(val)
-                if self.stats_listeners[FIELD_TOTAL_AUTO_RETRACTS]:
-                    val = msg[FIELD_TOTAL_AUTO_RETRACTS]
-                    for callback in self.stats_listeners[FIELD_TOTAL_AUTO_RETRACTS].values():
-                        callback(val)
-                if future:
-                    data = {
-                        FIELD_TOTAL_OPEN_CYCLES: msg[FIELD_TOTAL_OPEN_CYCLES],
-                        FIELD_TOTAL_AUTO_RETRACTS: msg[FIELD_TOTAL_AUTO_RETRACTS],
-                    }
-                    future.set_result(data)
-
-            elif msg["CMD"] in (CMD_GET_SENSORS, CMD_ENABLE_INSIDE, CMD_DISABLE_INSIDE, CMD_ENABLE_OUTSIDE, CMD_DISABLE_OUTSIDE):
-                fr = {}
-                if FIELD_INSIDE in msg:
-                    val: bool = make_bool(msg[FIELD_INSIDE])
-                    fr[FIELD_INSIDE] = val
-                    if self.sensor_listeners[FIELD_INSIDE]:
-                        for callback in self.sensor_listeners[FIELD_INSIDE].values():
-                            callback(val)
-                if FIELD_OUTSIDE in msg:
-                    val: bool = make_bool(msg[FIELD_OUTSIDE])
-                    fr[FIELD_OUTSIDE] = val
-                    if self.sensor_listeners[FIELD_OUTSIDE]:
-                        for callback in self.sensor_listeners[FIELD_OUTSIDE].values():
-                            callback(val)
-                if future:
-                    future.set_result(fr)
-
-            elif msg["CMD"] in (CMD_GET_POWER, CMD_POWER_ON, CMD_POWER_OFF):
-                if FIELD_POWER in msg:
-                    val: bool = make_bool(msg[FIELD_POWER])
-                    if self.sensor_listeners[FIELD_POWER]:
-                        for callback in self.sensor_listeners[FIELD_POWER].values():
-                            callback(val)
-                    if future:
-                        future.set_result(val)
-
-            elif msg["CMD"] in (CMD_GET_AUTO, CMD_ENABLE_AUTO, CMD_DISABLE_AUTO):
-                if FIELD_AUTO in msg:
-                    val: bool = make_bool(msg[FIELD_AUTO])
-                    if self.sensor_listeners[FIELD_AUTO]:
-                        for callback in self.sensor_listeners[FIELD_AUTO].values():
-                           callback(val)
-                    if future:
-                        future.set_result(val)
-
-            elif msg["CMD"] in (CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK, CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK, CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK):
-                if FIELD_SETTINGS in msg:
-                    if FIELD_OUTSIDE_SENSOR_SAFETY_LOCK in msg[FIELD_SETTINGS]:
-                        val: bool = make_bool(msg[FIELD_SETTINGS][FIELD_OUTSIDE_SENSOR_SAFETY_LOCK])
-                        if self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK]:
-                            for callback in self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK].values():
-                               callback(val)
-                        if future:
-                            future.set_result(val)
-
-            elif msg["CMD"] in (CMD_GET_CMD_LOCKOUT, CMD_ENABLE_CMD_LOCKOUT, CMD_DISABLE_CMD_LOCKOUT):
-                if FIELD_SETTINGS in msg:
-                    if FIELD_CMD_LOCKOUT in msg[FIELD_SETTINGS]:
-                        val: bool = make_bool(msg[FIELD_SETTINGS][FIELD_CMD_LOCKOUT])
-                        if self.sensor_listeners[FIELD_CMD_LOCKOUT]:
-                            for callback in self.sensor_listeners[FIELD_CMD_LOCKOUT].values():
-                               callback(val)
-                        if future:
-                            future.set_result(val)
-
-            elif msg["CMD"] in (CMD_GET_AUTORETRACT, CMD_ENABLE_AUTORETRACT, CMD_DISABLE_AUTORETRACT):
-                if FIELD_SETTINGS in msg:
-                    if FIELD_AUTORETRACT in msg[FIELD_SETTINGS]:
-                        val: bool = make_bool(msg[FIELD_SETTINGS][FIELD_AUTORETRACT])
-                        if self.sensor_listeners[FIELD_AUTORETRACT]:
-                            for callback in self.sensor_listeners[FIELD_AUTORETRACT].values():
-                               callback(val)
-                        if future:
-                            future.set_result(val)
-
-            elif msg["CMD"] == CMD_GET_HW_INFO:
-                if FIELD_FWINFO in msg:
-                    for callback in self.hw_info_listeners.values():
-                        callback(msg[FIELD_FWINFO])
-                    if future:
-                        future.set_result(msg[FIELD_FWINFO])
-
-            elif msg["CMD"] == CMD_GET_DOOR_BATTERY:
-                data = {
-                    FIELD_BATTERY_PERCENT: msg[FIELD_BATTERY_PERCENT],
-                    FIELD_BATTERY_PRESENT: make_bool(msg[FIELD_BATTERY_PRESENT]),
-                    FIELD_AC_PRESENT: make_bool(msg[FIELD_AC_PRESENT]),
-                }
-                for callback in self.battery_listeners.values():
-                    callback(data)
-                if future:
-                    future.set_result(data)
-
-            elif msg["CMD"] in (CMD_GET_TIMEZONE, CMD_SET_TIMEZONE):
-                if FIELD_TZ in msg:
-                    val: str = msg[FIELD_TZ]
-                    for callback in self.timezone_listeners.values():
-                        callback(val)
-                    if future:
-                        future.set_result(val)
-
-            elif msg["CMD"] in (CMD_GET_HOLD_TIME, CMD_SET_HOLD_TIME):
-                if FIELD_HOLD_TIME in msg:
-                    val: int = msg[FIELD_HOLD_TIME]
-                    for callback in self.hold_time_listeners.values():
-                        callback(val)
-                    if future:
-                        future.set_result(val)
-
-            elif msg["CMD"] in (CMD_GET_SENSOR_TRIGGER_VOLTAGE, CMD_SET_SENSOR_TRIGGER_VOLTAGE):
-                if FIELD_SENSOR_TRIGGER_VOLTAGE in msg:
-                    val: int = msg[FIELD_SENSOR_TRIGGER_VOLTAGE]
-                    for callback in self.sensor_trigger_voltage_listeners.values():
-                        callback(val)
-                    if future:
-                        future.set_result(val)
-
-            elif msg["CMD"] in (CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE, CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE):
-                if FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE in msg:
-                    val: int = msg[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE]
-                    for callback in self.sleep_sensor_trigger_voltage_listeners.values():
-                        callback(val)
-                    if future:
-                        future.set_result(val)
-
-            elif msg["CMD"] == CMD_GET_SCHEDULE_LIST:
-                if future:
-                    future.set_result(msg[FIELD_SCHEDULES])
-
-            elif msg["CMD"] == CMD_DELETE_SCHEDULE:
-                if future:
-                    future.set_result(msg[FIELD_INDEX])
-
-            elif msg["CMD"] in (CMD_GET_SCHEDULE, CMD_SET_SCHEDULE):
-                if future:
-                    future.set_result(msg[FIELD_SCHEDULE])
-
-            elif msg["CMD"] == PONG:
-                if msg[PONG] == self._last_ping:
-                    diff = round(time.time() * 1000) - int(self._last_ping)
-                    for callback in self.on_ping.values():
-                        callback(diff)
-                    self._failed_pings = 0
-                    self._last_ping = None
-
+            # Cancel unfulfilled futures
             if future and not future.done():
                 future.cancel()
-
         else:
             if future:
-                future.set_exception("Command Failed")
+                future.set_exception(Exception("Command Failed"))
             _LOGGER.warning("Error reported: {}".format(json.dumps(msg)))
 
     def send_message(self, type: str, arg: str, notify: bool = False, **kwargs) -> None:

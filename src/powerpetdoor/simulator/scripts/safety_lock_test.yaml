@@ -1,0 +1,28 @@
+name: "Outside Sensor Safety Lock Test"
+description: "Tests that outside sensor is blocked when safety lock enabled"
+steps:
+  - action: set
+    name: safety_lock
+    value: "on"
+  - action: trigger_sensor
+    sensor: outside
+  - action: wait
+    seconds: 0.5
+  - action: assert
+    condition: door_status
+    equals: DOOR_CLOSED
+  - action: log
+    message: "Outside sensor blocked by safety lock - correct!"
+  - action: trigger_sensor
+    sensor: inside
+  - action: wait_for
+    condition: door_open
+    timeout: 5
+  - action: log
+    message: "Inside sensor still works with safety lock - correct!"
+  - action: wait_for
+    condition: door_closed
+    timeout: 15
+  - action: set
+    name: safety_lock
+    value: "off"

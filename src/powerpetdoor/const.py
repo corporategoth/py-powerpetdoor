@@ -125,6 +125,19 @@ CMD_GET_SCHEDULE = "GET_SCHEDULE"
 CMD_SET_SCHEDULE = "SET_SCHEDULE"
 CMD_DELETE_SCHEDULE = "DELETE_SCHEDULE"
 
+# Notification event types (sent by device when events occur)
+NOTIFY_SENSOR_INDOOR = "SENSOR_INDOOR"
+NOTIFY_SENSOR_OUTDOOR = "SENSOR_OUTDOOR"
+NOTIFY_LOW_BATTERY = "LOW_BATTERY"
+
+# Field for notification events
+FIELD_SENSOR_STATE = "sensorState"  # "on" or "off"
+
+# Response field names for remote/reset commands
+FIELD_HAS_REMOTE_ID = "hasRemoteId"
+FIELD_HAS_REMOTE_KEY = "hasRemoteKey"
+FIELD_RESET_REASON = "resetReason"
+
 # Message priorities (lower = higher priority)
 PRIORITY_CRITICAL = 0  # Keepalive (PING/PONG)
 PRIORITY_HIGH = 1      # Door commands (OPEN, CLOSE)

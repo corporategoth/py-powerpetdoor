@@ -1,0 +1,287 @@
+"""Power Pet Door simulator server.
+
+This module contains the main DoorSimulator class that provides a TCP server
+for simulating a Power Pet Door device.
+"""
+
+import asyncio
+import logging
+from typing import Optional
+
+from ..const import (
+    DOOR_STATE_CLOSED,
+    DOOR_STATE_RISING,
+    DOOR_STATE_HOLDING,
+    DOOR_STATE_KEEPUP,
+    DOOR_STATE_SLOWING,
+    DOOR_STATE_CLOSING_TOP_OPEN,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    CMD_GET_DOOR_BATTERY,
+    NOTIFY_LOW_BATTERY,
+    FIELD_BATTERY_PERCENT,
+    FIELD_BATTERY_PRESENT,
+    FIELD_AC_PRESENT,
+    FIELD_SUCCESS,
+)
+
+from .state import DoorSimulatorState, Schedule
+from .protocol import DoorSimulatorProtocol
+
+logger = logging.getLogger(__name__)
+
+
+class DoorSimulator:
+    """Power Pet Door simulator server.
+
+    This class simulates a Power Pet Door device. It listens on a TCP
+    port and responds to commands from PowerPetDoorClient.
+
+    Example:
+        simulator = DoorSimulator(port=3000)
+        await simulator.start()
+
+        # Simulate a pet triggering the inside sensor
+        simulator.trigger_sensor("inside")
+
+        # Or control programmatically
+        await simulator.open_door()
+        await simulator.close_door()
+
+        await simulator.stop()
+    """
+
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 3000,
+        state: Optional[DoorSimulatorState] = None,
+    ):
+        self.host = host
+        self.port = port
+        self.state = state or DoorSimulatorState()
+        self.server: Optional[asyncio.Server] = None
+        self.protocols: list[DoorSimulatorProtocol] = []
+
+    async def start(self):
+        """Start the simulator server."""
+        loop = asyncio.get_running_loop()
+
+        def protocol_factory():
+            protocol = DoorSimulatorProtocol(self.state)
+            self.protocols.append(protocol)
+            return protocol
+
+        self.server = await loop.create_server(
+            protocol_factory,
+            self.host,
+            self.port,
+        )
+
+        logger.info(f"Door simulator listening on {self.host}:{self.port}")
+
+    async def stop(self):
+        """Stop the simulator server."""
+        if self.server:
+            self.server.close()
+            await self.server.wait_closed()
+            logger.info("Door simulator stopped")
+
+    # =========================================================================
+    # Spontaneous Events (simulate from door side)
+    # =========================================================================
+
+    def trigger_sensor(self, sensor: str):
+        """Simulate a sensor trigger (pet walking through).
+
+        Works both with and without connected clients.
+
+        Args:
+            sensor: "inside" or "outside"
+        """
+        if self.protocols:
+            # If clients connected, use protocol's trigger_sensor
+            for protocol in self.protocols:
+                protocol.trigger_sensor(sensor)
+        else:
+            # No clients connected - directly simulate the sensor trigger
+            self._direct_trigger_sensor(sensor)
+
+    def _direct_trigger_sensor(self, sensor: str):
+        """Directly trigger a sensor without requiring a connected client.
+
+        This is used when running scripts without a client connection.
+        """
+        # Check if sensor is enabled and power is on
+        if not self.state.power:
+            logger.info(f"Simulator: Sensor {sensor} ignored (power OFF)")
+            return
+
+        if sensor == "inside" and not self.state.inside:
+            logger.info("Simulator: Inside sensor ignored (disabled)")
+            return
+
+        if sensor == "outside":
+            if not self.state.outside:
+                logger.info("Simulator: Outside sensor ignored (disabled)")
+                return
+            if self.state.safety_lock:
+                logger.info("Simulator: Outside sensor ignored (safety lock)")
+                return
+
+        # Check schedule enforcement
+        if not self.state.is_sensor_allowed_by_schedule(sensor):
+            logger.info(f"Simulator: {sensor.capitalize()} sensor ignored (outside schedule)")
+            return
+
+        # Door is closed, trigger open
+        logger.info(f"Simulator: {sensor.capitalize()} sensor triggered, opening door")
+        asyncio.create_task(self._direct_open_door(hold=False))
+
+    async def _direct_open_door(self, hold: bool = False):
+        """Open door directly without a client connection."""
+        timing = self.state.timing
+
+        self.state.door_status = DOOR_STATE_RISING
+        self._broadcast_door_status()
+
+        await asyncio.sleep(timing.rise_time)
+
+        if hold:
+            self.state.door_status = DOOR_STATE_KEEPUP
+            self._broadcast_door_status()
+        else:
+            self.state.door_status = DOOR_STATE_HOLDING
+            self._broadcast_door_status()
+
+            # Hold for configured time
+            await asyncio.sleep(float(self.state.hold_time))
+
+            # Close
+            await self._direct_close_door()
+
+    async def _direct_close_door(self):
+        """Close door directly without a client connection."""
+        timing = self.state.timing
+
+        self.state.door_status = DOOR_STATE_SLOWING
+        self._broadcast_door_status()
+        await asyncio.sleep(timing.slowing_time)
+
+        # Check for obstruction
+        if self.state.obstruction_pending and self.state.autoretract:
+            logger.info("Simulator: Obstruction detected! Auto-retracting...")
+            self.state.obstruction_pending = False
+            self.state.total_auto_retracts += 1
+            await self._direct_open_door(hold=False)
+            return
+
+        self.state.door_status = DOOR_STATE_CLOSING_TOP_OPEN
+        self._broadcast_door_status()
+        await asyncio.sleep(timing.closing_top_time)
+
+        self.state.door_status = DOOR_STATE_CLOSING_MID_OPEN
+        self._broadcast_door_status()
+        await asyncio.sleep(timing.closing_mid_time)
+
+        self.state.door_status = DOOR_STATE_CLOSED
+        self._broadcast_door_status()
+        self.state.total_open_cycles += 1
+
+    def _broadcast_door_status(self):
+        """Broadcast door status to all connected clients."""
+        for protocol in self.protocols:
+            protocol._send_door_status()
+
+    def simulate_obstruction(self):
+        """Simulate obstruction detection during door close.
+
+        If autoretract is enabled, the door will auto-retract (reopen).
+        """
+        for protocol in self.protocols:
+            protocol.simulate_obstruction()
+
+    def set_pet_in_doorway(self, present: bool = True):
+        """Simulate pet presence in doorway (keeps door open longer)."""
+        self.state.pet_in_doorway = present
+        logger.info(f"Simulator: Pet {'in' if present else 'left'} doorway")
+
+    # =========================================================================
+    # Door Control
+    # =========================================================================
+
+    async def open_door(self, hold: bool = False):
+        """Open the door (as if triggered by sensor or schedule).
+
+        Works with or without connected clients.
+        """
+        if self.protocols:
+            for protocol in self.protocols:
+                await protocol._simulate_door_open(hold=hold)
+        else:
+            await self._direct_open_door(hold=hold)
+
+    async def close_door(self):
+        """Close the door.
+
+        Works with or without connected clients.
+        """
+        if self.protocols:
+            for protocol in self.protocols:
+                await protocol._simulate_door_close()
+        else:
+            await self._direct_close_door()
+
+    # =========================================================================
+    # State Management
+    # =========================================================================
+
+    def set_battery(self, percent: int):
+        """Set battery percentage and notify connected clients.
+
+        Sends a low battery notification if battery drops below 20%
+        and low battery notifications are enabled.
+        """
+        old_percent = self.state.battery_percent
+        self.state.battery_percent = max(0, min(100, percent))
+
+        # Send battery status update
+        for protocol in self.protocols:
+            protocol._send({
+                "CMD": CMD_GET_DOOR_BATTERY,
+                FIELD_BATTERY_PERCENT: self.state.battery_percent,
+                FIELD_BATTERY_PRESENT: "1" if self.state.battery_present else "0",
+                FIELD_AC_PRESENT: "1" if self.state.ac_present else "0",
+                FIELD_SUCCESS: "true",
+            })
+
+        # Send low battery notification if crossing threshold
+        LOW_BATTERY_THRESHOLD = 20
+        if old_percent > LOW_BATTERY_THRESHOLD and percent <= LOW_BATTERY_THRESHOLD:
+            if self.state.low_battery:
+                for protocol in self.protocols:
+                    protocol._send({
+                        "CMD": NOTIFY_LOW_BATTERY,
+                        FIELD_BATTERY_PERCENT: self.state.battery_percent,
+                        FIELD_SUCCESS: "true",
+                    })
+                logger.info(f"Simulator: Low battery notification sent ({percent}%)")
+
+    def set_power(self, enabled: bool):
+        """Set power state."""
+        self.state.power = enabled
+        logger.info(f"Simulator: Power {'ON' if enabled else 'OFF'}")
+
+    # =========================================================================
+    # Schedule Management
+    # =========================================================================
+
+    def add_schedule(self, schedule: Schedule):
+        """Add or update a schedule."""
+        self.state.schedules[schedule.index] = schedule
+        logger.info(f"Simulator: Added schedule {schedule.index}")
+
+    def remove_schedule(self, index: int):
+        """Remove a schedule by index."""
+        if index in self.state.schedules:
+            del self.state.schedules[index]
+            logger.info(f"Simulator: Removed schedule {index}")

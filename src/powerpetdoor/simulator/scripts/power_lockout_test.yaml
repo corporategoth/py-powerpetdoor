@@ -1,0 +1,37 @@
+name: "Power and Lockout Test"
+description: "Tests that commands are blocked when power off or lockout enabled"
+steps:
+  - action: log
+    message: "Testing power off behavior..."
+  - action: set
+    name: power
+    value: "off"
+  - action: trigger_sensor
+    sensor: inside
+  - action: wait
+    seconds: 0.5
+  - action: assert
+    condition: door_status
+    equals: DOOR_CLOSED
+  - action: log
+    message: "Door stayed closed with power off - correct!"
+  - action: set
+    name: power
+    value: "on"
+  - action: log
+    message: "Testing command lockout..."
+  - action: set
+    name: cmd_lockout
+    value: "on"
+  - action: trigger_sensor
+    sensor: inside
+  - action: wait
+    seconds: 0.5
+  - action: assert
+    condition: door_status
+    equals: DOOR_CLOSED
+  - action: log
+    message: "Door stayed closed with lockout - correct!"
+  - action: set
+    name: cmd_lockout
+    value: "off"
