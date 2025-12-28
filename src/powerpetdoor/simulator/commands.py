@@ -173,17 +173,47 @@ class CommandHandler:
     # Door Operations
     # -------------------------------------------------------------------------
 
-    @command("inside", ["i"], "Trigger inside sensor (pet going out)", category="door")
+    @command("inside", ["i"], "Activate inside sensor detection", "[duration]", category="door")
     def inside(self, arg: Optional[str] = None) -> CommandResult:
-        """Trigger the inside sensor."""
-        self.simulator.trigger_sensor("inside")
-        return CommandResult(True, "Inside sensor triggered (pet going out)")
+        """Activate inside sensor detection.
 
-    @command("outside", ["o"], "Trigger outside sensor (pet coming in)", category="door")
+        Args:
+            duration: How long sensor stays active (default 0.5s).
+                     0 = toggle mode (on indefinitely if off, off if on)
+        """
+        duration = 0.5  # default
+        if arg is not None:
+            try:
+                duration = float(arg)
+            except ValueError:
+                return CommandResult(False, "Usage: inside [duration]")
+        self.simulator.activate_sensor("inside", duration)
+        if duration == 0:
+            state = "activated" if self.simulator.state.inside_sensor_active else "deactivated"
+            return CommandResult(True, f"Inside sensor {state} (toggle)")
+        else:
+            return CommandResult(True, f"Inside sensor activated for {duration}s")
+
+    @command("outside", ["o"], "Activate outside sensor detection", "[duration]", category="door")
     def outside(self, arg: Optional[str] = None) -> CommandResult:
-        """Trigger the outside sensor."""
-        self.simulator.trigger_sensor("outside")
-        return CommandResult(True, "Outside sensor triggered (pet coming in)")
+        """Activate outside sensor detection.
+
+        Args:
+            duration: How long sensor stays active (default 0.5s).
+                     0 = toggle mode (on indefinitely if off, off if on)
+        """
+        duration = 0.5  # default
+        if arg is not None:
+            try:
+                duration = float(arg)
+            except ValueError:
+                return CommandResult(False, "Usage: outside [duration]")
+        self.simulator.activate_sensor("outside", duration)
+        if duration == 0:
+            state = "activated" if self.simulator.state.outside_sensor_active else "deactivated"
+            return CommandResult(True, f"Outside sensor {state} (toggle)")
+        else:
+            return CommandResult(True, f"Outside sensor activated for {duration}s")
 
     @command("close", ["c"], "Close the door", category="door")
     def close(self, arg: Optional[str] = None) -> CommandResult:
@@ -217,13 +247,6 @@ class CommandHandler:
         """Simulate an obstruction."""
         self.simulator.simulate_obstruction()
         return CommandResult(True, "Simulating obstruction")
-
-    @command("pet", ["d"], "Toggle pet in doorway", category="simulation")
-    def pet(self, arg: Optional[str] = None) -> CommandResult:
-        """Toggle pet presence in doorway."""
-        self.simulator.state.pet_in_doorway = not self.simulator.state.pet_in_doorway
-        state = "present" if self.simulator.state.pet_in_doorway else "gone"
-        return CommandResult(True, f"Pet in doorway: {state}")
 
     # -------------------------------------------------------------------------
     # Physical Button Toggles
@@ -323,11 +346,11 @@ class CommandHandler:
         self.simulator.set_battery(pct)
         return CommandResult(True, f"Battery set to {pct}%")
 
-    @command("ac", [], "Toggle or set AC power connection", "[connect|disconnect]", category="settings")
+    @command("ac", [], "Toggle or set AC power connection", "[c|d|connect|disconnect]", category="settings")
     def ac(self, arg: Optional[str] = None) -> CommandResult:
         """Toggle or set AC power connection."""
         if arg:
-            present = arg.lower() in ("connect", "on", "true", "1", "yes")
+            present = arg.lower() in ("c", "connect", "on", "true", "1", "yes")
         else:
             present = not self.simulator.state.ac_present
         self.simulator.set_ac_present(present)
@@ -735,7 +758,7 @@ class CommandHandler:
     # Info
     # -------------------------------------------------------------------------
 
-    @command("status", ["?", "state"], "Show current simulator state", category="info")
+    @command("status", ["state", "info", "v"], "Show current simulator state", category="info")
     def status(self, arg: Optional[str] = None) -> CommandResult:
         """Show current simulator state."""
         s = self.simulator.state
@@ -755,7 +778,8 @@ class CommandHandler:
             "ac_present": s.ac_present,
             "charge_rate": bc.charge_rate,
             "discharge_rate": bc.discharge_rate,
-            "pet_in_doorway": s.pet_in_doorway,
+            "inside_sensor_active": s.inside_sensor_active,
+            "outside_sensor_active": s.outside_sensor_active,
             "schedules": list(s.schedules.keys()),
             "open_cycles": s.total_open_cycles,
             "auto_retracts": s.total_auto_retracts,
@@ -769,9 +793,9 @@ class CommandHandler:
         battery_status = f"{s.battery_percent}%"
         if not s.battery_present:
             battery_status += " (no battery)"
-        elif s.ac_present and bc.charge_rate > 0:
+        elif s.ac_present and bc.charge_rate > 0 and s.battery_percent < 100:
             battery_status += f" (charging {bc.charge_rate}%/min)"
-        elif not s.ac_present and bc.discharge_rate > 0:
+        elif not s.ac_present and bc.discharge_rate > 0 and s.battery_percent > 0:
             battery_status += f" (discharging {bc.discharge_rate}%/min)"
 
         # Build notifications string
@@ -788,6 +812,14 @@ class CommandHandler:
             notify_on.append("low_bat")
         notify_str = ", ".join(notify_on) if notify_on else "none"
 
+        # Build sensor detection status
+        sensor_active = []
+        if s.inside_sensor_active:
+            sensor_active.append("inside")
+        if s.outside_sensor_active:
+            sensor_active.append("outside")
+        sensor_str = ", ".join(sensor_active) if sensor_active else "none"
+
         lines = [
             "Current State:",
             f"  Door: {s.door_status}",
@@ -802,14 +834,14 @@ class CommandHandler:
             f"  Battery: {battery_status}",
             f"  AC: {'connected' if s.ac_present else 'disconnected'}",
             f"  Notifications: {notify_str}",
-            f"  Pet in doorway: {'yes' if s.pet_in_doorway else 'no'}",
+            f"  Sensor active: {sensor_str}",
             f"  Schedules: {list(s.schedules.keys())}",
             f"  Open cycles: {s.total_open_cycles}",
             f"  Auto-retracts: {s.total_auto_retracts}",
         ]
         return CommandResult(True, "\n".join(lines), data)
 
-    @command("help", ["?help"], "Show available commands", category="info")
+    @command("help", ["?"], "Show available commands", category="info")
     def help(self, arg: Optional[str] = None) -> CommandResult:
         """Show help for all commands."""
         return CommandResult(True, self.get_help())

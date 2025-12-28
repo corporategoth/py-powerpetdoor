@@ -22,6 +22,11 @@ from ..const import (
     PING,
     PONG,
     DOOR_STATUS,
+    FIELD_MSG_ID,
+    FIELD_MSG_ID_RESPONSE,
+    FIELD_DIRECTION,
+    FIELD_CMD,
+    DOOR_TO_PHONE,
     DOOR_STATE_CLOSED,
     DOOR_STATE_RISING,
     DOOR_STATE_HOLDING,
@@ -88,6 +93,8 @@ from ..const import (
     FIELD_HOLD_TIME,
     FIELD_DOOR_STATUS,
     FIELD_SUCCESS,
+    SUCCESS_TRUE,
+    SUCCESS_FALSE,
     FIELD_FWINFO,
     FIELD_BATTERY_PERCENT,
     FIELD_BATTERY_PRESENT,
@@ -239,11 +246,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     async def _handle_message(self, msg: dict):
         """Handle an incoming message."""
-        msg_id = msg.get("msgId")
+        msg_id = msg.get(FIELD_MSG_ID)
 
         # Handle PING
         if PING in msg:
-            self._send({"CMD": PONG, PONG: msg[PING], FIELD_SUCCESS: "true"})
+            self._send({FIELD_CMD: PONG, PONG: msg[PING], FIELD_SUCCESS: SUCCESS_TRUE, FIELD_DIRECTION: DOOR_TO_PHONE})
             return
 
         # Client sends commands under "config" key for queries, "cmd" for actions
@@ -255,14 +262,14 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         if self.on_command:
             self.on_command(cmd, msg)
 
-        response = {"CMD": cmd, FIELD_SUCCESS: "true"}
+        response = {FIELD_CMD: cmd, FIELD_SUCCESS: SUCCESS_TRUE, FIELD_DIRECTION: DOOR_TO_PHONE}
         if msg_id:
-            response["msgID"] = msg_id
+            response[FIELD_MSG_ID_RESPONSE] = msg_id
 
         # Check if command is allowed
         allowed, reason = self._check_command_allowed(cmd)
         if not allowed:
-            response[FIELD_SUCCESS] = "false"
+            response[FIELD_SUCCESS] = SUCCESS_FALSE
             response["reason"] = reason
             self._send(response)
             return
@@ -380,7 +387,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         if index is not None and index in self.state.schedules:
             response[FIELD_SCHEDULE] = self.state.schedules[index].to_dict()
         else:
-            response[FIELD_SUCCESS] = "false"
+            response[FIELD_SUCCESS] = SUCCESS_FALSE
             response["reason"] = "Schedule not found"
 
     @CommandRegistry.handler(CMD_SET_SCHEDULE)
@@ -392,7 +399,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             response[FIELD_SCHEDULE] = schedule.to_dict()
             logger.info(f"Simulator: Schedule {schedule.index} saved")
         else:
-            response[FIELD_SUCCESS] = "false"
+            response[FIELD_SUCCESS] = SUCCESS_FALSE
 
     @CommandRegistry.handler(CMD_DELETE_SCHEDULE)
     async def _handle_delete_schedule(self, msg: dict, response: dict) -> None:
@@ -401,7 +408,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             del self.state.schedules[index]
             logger.info(f"Simulator: Schedule {index} deleted")
         else:
-            response[FIELD_SUCCESS] = "false"
+            response[FIELD_SUCCESS] = SUCCESS_FALSE
             response["reason"] = "Schedule not found"
 
     @CommandRegistry.handler(CMD_SET_SCHEDULE_LIST)
@@ -617,14 +624,13 @@ class DoorSimulatorProtocol(asyncio.Protocol):
                 self.state.door_status = DOOR_STATE_HOLDING
                 self._broadcast_or_send_status()
 
-                # Hold for the configured time, checking for pet presence
+                # Hold for the configured time, checking for sensor blocking close
                 self._hold_remaining = float(self.state.hold_time)
-                while self._hold_remaining > 0:
-                    # If pet is in doorway, reset hold timer
-                    if self.state.pet_in_doorway:
-                        logger.info("Simulator: Pet detected in doorway, resetting hold timer")
+                while self._hold_remaining > 0 or self.state.is_sensor_blocking_close():
+                    # If sensor is blocking close, reset hold timer
+                    if self.state.is_sensor_blocking_close():
+                        logger.debug("Simulator: Sensor blocking close, resetting hold timer")
                         self._hold_remaining = float(self.state.hold_time)
-                        self.state.pet_in_doorway = False
 
                     await asyncio.sleep(0.1)
                     self._hold_remaining -= 0.1
@@ -646,7 +652,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         await self._do_close_sequence()
 
     async def _do_close_sequence(self):
-        """Execute the door closing sequence with obstruction detection."""
+        """Execute the door closing sequence with sensor detection."""
         timing = self.state.timing
 
         self.state.door_status = DOOR_STATE_CLOSING_TOP_OPEN
@@ -655,10 +661,12 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         async def close_sequence():
             await asyncio.sleep(timing.closing_top_time)
 
-            # Check for obstruction during close
-            if self.state.obstruction_pending and self.state.autoretract:
-                logger.info("Simulator: Obstruction detected! Auto-retracting...")
-                self.state.obstruction_pending = False
+            # Check for sensor blocking close
+            if self.state.is_sensor_blocking_close() and self.state.autoretract:
+                logger.info("Simulator: Sensor blocking close! Auto-retracting...")
+                # Clear the active sensors
+                self.state.inside_sensor_active = False
+                self.state.outside_sensor_active = False
                 self.state.total_auto_retracts += 1
                 # Door auto-retracts (opens again)
                 await self._simulate_door_open(hold=False)
@@ -668,10 +676,12 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             self._broadcast_or_send_status()
             await asyncio.sleep(timing.closing_mid_time)
 
-            # Final obstruction check
-            if self.state.obstruction_pending and self.state.autoretract:
-                logger.info("Simulator: Obstruction detected! Auto-retracting...")
-                self.state.obstruction_pending = False
+            # Final sensor check
+            if self.state.is_sensor_blocking_close() and self.state.autoretract:
+                logger.info("Simulator: Sensor blocking close! Auto-retracting...")
+                # Clear the active sensors
+                self.state.inside_sensor_active = False
+                self.state.outside_sensor_active = False
                 self.state.total_auto_retracts += 1
                 await self._simulate_door_open(hold=False)
                 return
@@ -685,9 +695,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     def _send_door_status(self):
         """Send unsolicited door status update to this client only."""
         self._send({
-            "CMD": DOOR_STATUS,
+            FIELD_CMD: DOOR_STATUS,
             FIELD_DOOR_STATUS: self.state.door_status,
-            FIELD_SUCCESS: "true",
+            FIELD_SUCCESS: SUCCESS_TRUE,
+            FIELD_DIRECTION: DOOR_TO_PHONE,
         })
 
     def _broadcast_or_send_status(self):
@@ -719,9 +730,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             notify_type = NOTIFY_SENSOR_OUTDOOR
 
         self._send({
-            "CMD": notify_type,
+            FIELD_CMD: notify_type,
             FIELD_SENSOR_STATE: state,
-            FIELD_SUCCESS: "true",
+            FIELD_SUCCESS: SUCCESS_TRUE,
+            FIELD_DIRECTION: DOOR_TO_PHONE,
         })
         logger.debug(f"Simulator: Sent {sensor} sensor {state} notification")
 
@@ -769,15 +781,19 @@ class DoorSimulatorProtocol(asyncio.Protocol):
                 self._send_sensor_notification(sensor, "on")
             return
 
-        # If door is closing, this is treated as pet presence - door should reopen
+        # If door is closing, activate the sensor to trigger auto-retract
         if self.state.door_status in (
             DOOR_STATE_CLOSING_TOP_OPEN,
             DOOR_STATE_CLOSING_MID_OPEN,
         ):
-            logger.info(f"Simulator: {sensor.capitalize()} sensor during close, setting pet presence")
-            self.state.pet_in_doorway = True
-            # Also set obstruction to trigger auto-retract
-            self.state.obstruction_pending = True
+            logger.info(f"Simulator: {sensor.capitalize()} sensor during close, activating sensor")
+            # Activate the appropriate sensor (mutually exclusive)
+            if sensor == "inside":
+                self.state.inside_sensor_active = True
+                self.state.outside_sensor_active = False
+            else:
+                self.state.outside_sensor_active = True
+                self.state.inside_sensor_active = False
             self._last_sensor_trigger = now
             self._send_sensor_notification(sensor, "on")
             return
@@ -789,12 +805,27 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         asyncio.create_task(self._simulate_door_open(hold=False))
 
     def simulate_obstruction(self):
-        """Simulate an obstruction during door close (will trigger auto-retract if enabled)."""
-        if self.state.door_status in (
+        """Simulate obstruction detection (inside sensor active indefinitely).
+
+        Works in any door state:
+        - Closed/opening: Will prevent closing once door reaches HOLDING
+        - Holding: Prevents closing
+        - Closing: Triggers auto-retract if enabled
+        """
+        # Set inside sensor active (obstruction = something in the doorway)
+        self.state.inside_sensor_active = True
+        self.state.outside_sensor_active = False
+
+        if self.state.door_status == DOOR_STATE_CLOSED:
+            logger.info("Simulator: Obstruction set (will block close when door opens)")
+        elif self.state.door_status in (DOOR_STATE_RISING, DOOR_STATE_SLOWING):
+            logger.info("Simulator: Obstruction set (will block close when door reaches top)")
+        elif self.state.door_status in (DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP):
+            logger.info("Simulator: Obstruction set (blocking close)")
+        elif self.state.door_status in (
             DOOR_STATE_CLOSING_TOP_OPEN,
             DOOR_STATE_CLOSING_MID_OPEN,
         ):
-            logger.info("Simulator: Obstruction set - will trigger on next close check")
-            self.state.obstruction_pending = True
+            logger.info("Simulator: Obstruction during close (will trigger retract)")
         else:
-            logger.info("Simulator: Cannot set obstruction - door not closing")
+            logger.info(f"Simulator: Obstruction set (door status: {self.state.door_status})")

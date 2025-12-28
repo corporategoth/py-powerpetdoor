@@ -54,14 +54,11 @@ from .const import (
     CMD_GET_DOOR_BATTERY,
     CMD_GET_DOOR_OPEN_STATS,
     CMD_GET_DOOR_STATUS,
-    CMD_GET_HOLD_TIME,
     CMD_GET_HW_INFO,
     CMD_GET_NOTIFICATIONS,
     CMD_GET_SCHEDULE,
     CMD_GET_SCHEDULE_LIST,
-    CMD_GET_SENSORS,
     CMD_GET_SETTINGS,
-    CMD_GET_TIMEZONE,
     CMD_OPEN,
     CMD_OPEN_AND_HOLD,
     CMD_POWER_OFF,
@@ -89,7 +86,6 @@ from .const import (
     FIELD_DAYSOFWEEK,
     FIELD_ENABLED,
     FIELD_END_TIME_SUFFIX,
-    FIELD_HOLD_TIME,
     FIELD_HOUR,
     FIELD_INDEX,
     FIELD_INSIDE,
@@ -101,7 +97,6 @@ from .const import (
     FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
     FIELD_POWER,
     FIELD_SCHEDULE,
-    FIELD_SCHEDULES,
     FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
     FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
     FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
@@ -109,7 +104,9 @@ from .const import (
     FIELD_START_TIME_SUFFIX,
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
-    FIELD_TZ,
+    FIELD_FW_MAJOR,
+    FIELD_FW_MINOR,
+    FIELD_FW_PATCH,
 )
 
 logger = logging.getLogger(__name__)
@@ -377,6 +374,16 @@ class PowerPetDoor:
         """The door's TCP port."""
         return self._port
 
+    @property
+    def default_timeout(self) -> float:
+        """Default timeout for commands, based on client retry configuration.
+
+        This is the client's effective_timeout (cfg_timeout * MAX_FAILED_MSG),
+        which represents the maximum time the client will attempt to get a
+        response before dropping the message.
+        """
+        return self._client.effective_timeout
+
     async def connect(self) -> None:
         """Connect to the door and fetch initial state."""
         # Register callbacks to keep cache updated
@@ -518,12 +525,19 @@ class PowerPetDoor:
         """Whether the inside sensor is enabled."""
         return self._inside_sensor
 
-    async def set_inside_sensor(self, enabled: bool) -> None:
-        """Enable or disable the inside sensor."""
+    async def set_inside_sensor(
+        self, enabled: bool, *, timeout: Optional[float] = None
+    ) -> None:
+        """Enable or disable the inside sensor.
+
+        Args:
+            enabled: Whether to enable the sensor.
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         cmd = CMD_ENABLE_INSIDE if enabled else CMD_DISABLE_INSIDE
         await asyncio.wait_for(
             self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
 
     @property
@@ -531,12 +545,19 @@ class PowerPetDoor:
         """Whether the outside sensor is enabled."""
         return self._outside_sensor
 
-    async def set_outside_sensor(self, enabled: bool) -> None:
-        """Enable or disable the outside sensor."""
+    async def set_outside_sensor(
+        self, enabled: bool, *, timeout: Optional[float] = None
+    ) -> None:
+        """Enable or disable the outside sensor.
+
+        Args:
+            enabled: Whether to enable the sensor.
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         cmd = CMD_ENABLE_OUTSIDE if enabled else CMD_DISABLE_OUTSIDE
         await asyncio.wait_for(
             self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
 
     # =========================================================================
@@ -548,12 +569,19 @@ class PowerPetDoor:
         """Whether the door is powered on."""
         return self._power
 
-    async def set_power(self, enabled: bool) -> None:
-        """Turn door power on or off."""
+    async def set_power(
+        self, enabled: bool, *, timeout: Optional[float] = None
+    ) -> None:
+        """Turn door power on or off.
+
+        Args:
+            enabled: Whether to enable power.
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         cmd = CMD_POWER_ON if enabled else CMD_POWER_OFF
         await asyncio.wait_for(
             self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
 
     # =========================================================================
@@ -565,12 +593,19 @@ class PowerPetDoor:
         """Whether automatic scheduling is enabled."""
         return self._auto
 
-    async def set_auto(self, enabled: bool) -> None:
-        """Enable or disable automatic scheduling."""
+    async def set_auto(
+        self, enabled: bool, *, timeout: Optional[float] = None
+    ) -> None:
+        """Enable or disable automatic scheduling.
+
+        Args:
+            enabled: Whether to enable auto mode.
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         cmd = CMD_ENABLE_AUTO if enabled else CMD_DISABLE_AUTO
         await asyncio.wait_for(
             self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
 
     # =========================================================================
@@ -582,8 +617,15 @@ class PowerPetDoor:
         """Whether outside sensor safety lock is enabled."""
         return self._safety_lock
 
-    async def set_safety_lock(self, enabled: bool) -> None:
-        """Enable or disable outside sensor safety lock."""
+    async def set_safety_lock(
+        self, enabled: bool, *, timeout: Optional[float] = None
+    ) -> None:
+        """Enable or disable outside sensor safety lock.
+
+        Args:
+            enabled: Whether to enable safety lock.
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         cmd = (
             CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK
             if enabled
@@ -591,7 +633,7 @@ class PowerPetDoor:
         )
         await asyncio.wait_for(
             self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
 
     @property
@@ -599,12 +641,19 @@ class PowerPetDoor:
         """Whether auto-retract on obstruction is enabled."""
         return self._autoretract
 
-    async def set_autoretract(self, enabled: bool) -> None:
-        """Enable or disable auto-retract on obstruction."""
+    async def set_autoretract(
+        self, enabled: bool, *, timeout: Optional[float] = None
+    ) -> None:
+        """Enable or disable auto-retract on obstruction.
+
+        Args:
+            enabled: Whether to enable auto-retract.
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         cmd = CMD_ENABLE_AUTORETRACT if enabled else CMD_DISABLE_AUTORETRACT
         await asyncio.wait_for(
             self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
 
     @property
@@ -615,17 +664,23 @@ class PowerPetDoor:
         """
         return self._pet_proximity_keep_open
 
-    async def set_pet_proximity_keep_open(self, enabled: bool) -> None:
+    async def set_pet_proximity_keep_open(
+        self, enabled: bool, *, timeout: Optional[float] = None
+    ) -> None:
         """Enable or disable keeping door open when pet is in proximity.
 
         Note: This uses inverted logic - enabling this feature disables
         command lockout in the protocol.
+
+        Args:
+            enabled: Whether to enable pet proximity keep-open.
+            timeout: Seconds to wait for response. Defaults to default_timeout.
         """
         # Inverted: enable keep-open = disable cmd_lockout
         cmd = CMD_DISABLE_CMD_LOCKOUT if enabled else CMD_ENABLE_CMD_LOCKOUT
         await asyncio.wait_for(
             self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
 
     # =========================================================================
@@ -637,15 +692,22 @@ class PowerPetDoor:
         """Time in seconds the door stays open after sensor trigger."""
         return self._hold_time
 
-    async def set_hold_time(self, seconds: float) -> None:
-        """Set the hold-open time in seconds."""
+    async def set_hold_time(
+        self, seconds: float, *, timeout: Optional[float] = None
+    ) -> None:
+        """Set the hold-open time in seconds.
+
+        Args:
+            seconds: Hold time in seconds.
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         # Protocol uses centiseconds
         centiseconds = int(seconds * 100)
         await asyncio.wait_for(
             self._client.send_message(
                 CONFIG, CMD_SET_HOLD_TIME, notify=True, holdTime=centiseconds
             ),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
 
     @property
@@ -653,15 +715,18 @@ class PowerPetDoor:
         """The door's timezone (POSIX format)."""
         return self._timezone
 
-    async def set_timezone(self, tz: str) -> None:
+    async def set_timezone(
+        self, tz: str, *, timeout: Optional[float] = None
+    ) -> None:
         """Set the door's timezone.
 
         Args:
             tz: Timezone in POSIX format (e.g., 'EST5EDT,M3.2.0,M11.1.0').
+            timeout: Seconds to wait for response. Defaults to default_timeout.
         """
         await asyncio.wait_for(
             self._client.send_message(CONFIG, CMD_SET_TIMEZONE, notify=True, tz=tz),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
 
     # =========================================================================
@@ -697,9 +762,9 @@ class PowerPetDoor:
         """Firmware version string."""
         if not self._hw_info:
             return ""
-        major = self._hw_info.get("fw_maj", 0)
-        minor = self._hw_info.get("fw_min", 0)
-        patch = self._hw_info.get("fw_pat", 0)
+        major = self._hw_info.get(FIELD_FW_MAJOR, 0)
+        minor = self._hw_info.get(FIELD_FW_MINOR, 0)
+        patch = self._hw_info.get(FIELD_FW_PATCH, 0)
         return f"{major}.{minor}.{patch}"
 
     @property
@@ -738,10 +803,19 @@ class PowerPetDoor:
         outside_on: Optional[bool] = None,
         outside_off: Optional[bool] = None,
         low_battery: Optional[bool] = None,
+        timeout: Optional[float] = None,
     ) -> None:
         """Update notification settings.
 
         Only specified settings are changed; others remain unchanged.
+
+        Args:
+            inside_on: Notify when inside sensor triggers.
+            inside_off: Notify when inside sensor deactivates.
+            outside_on: Notify when outside sensor triggers.
+            outside_off: Notify when outside sensor deactivates.
+            low_battery: Notify on low battery.
+            timeout: Seconds to wait for response. Defaults to default_timeout.
         """
         settings = {
             FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: (
@@ -770,7 +844,7 @@ class PowerPetDoor:
         }
         await asyncio.wait_for(
             self._client.send_message(CONFIG, CMD_SET_NOTIFICATIONS, notify=True, **settings),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
 
     # =========================================================================
@@ -782,35 +856,62 @@ class PowerPetDoor:
         """Current list of schedules."""
         return self._schedules.copy()
 
-    async def get_schedule(self, index: int) -> Schedule:
-        """Fetch a specific schedule by index."""
+    async def get_schedule(
+        self, index: int, *, timeout: Optional[float] = None
+    ) -> Schedule:
+        """Fetch a specific schedule by index.
+
+        Args:
+            index: Schedule index (0-based).
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         result = await asyncio.wait_for(
             self._client.send_message(CONFIG, CMD_GET_SCHEDULE, notify=True, index=index),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
         return Schedule.from_dict(result)
 
-    async def set_schedule(self, schedule: Schedule) -> None:
-        """Create or update a schedule."""
+    async def set_schedule(
+        self, schedule: Schedule, *, timeout: Optional[float] = None
+    ) -> None:
+        """Create or update a schedule.
+
+        Args:
+            schedule: The schedule to set.
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         await asyncio.wait_for(
             self._client.send_message(
                 CONFIG, CMD_SET_SCHEDULE, notify=True, **{FIELD_SCHEDULE: schedule.to_dict()}
             ),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
 
-    async def delete_schedule(self, index: int) -> None:
-        """Delete a schedule by index."""
+    async def delete_schedule(
+        self, index: int, *, timeout: Optional[float] = None
+    ) -> None:
+        """Delete a schedule by index.
+
+        Args:
+            index: Schedule index to delete.
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         await asyncio.wait_for(
             self._client.send_message(CONFIG, CMD_DELETE_SCHEDULE, notify=True, index=index),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
 
-    async def refresh_schedules(self) -> list[Schedule]:
-        """Refresh and return the schedule list."""
+    async def refresh_schedules(
+        self, *, timeout: Optional[float] = None
+    ) -> list[Schedule]:
+        """Refresh and return the schedule list.
+
+        Args:
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         result = await asyncio.wait_for(
             self._client.send_message(CONFIG, CMD_GET_SCHEDULE_LIST, notify=True),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
         self._schedules = [Schedule.from_dict(s) for s in (result or [])]
         return self._schedules.copy()
@@ -839,70 +940,93 @@ class PowerPetDoor:
     # Refresh
     # =========================================================================
 
-    async def refresh(self) -> None:
-        """Refresh all cached state from the door."""
+    async def refresh(self, *, timeout: Optional[float] = None) -> None:
+        """Refresh all cached state from the door.
+
+        Args:
+            timeout: Seconds to wait for each response. Defaults to default_timeout.
+        """
         await asyncio.gather(
-            self.refresh_status(),
-            self.refresh_settings(),
-            self.refresh_battery(),
-            self.refresh_stats(),
-            self.refresh_hardware_info(),
+            self.refresh_status(timeout=timeout),
+            self.refresh_settings(timeout=timeout),
+            self.refresh_battery(timeout=timeout),
+            self.refresh_stats(timeout=timeout),
+            self.refresh_hardware_info(timeout=timeout),
             return_exceptions=True,
         )
 
-    async def refresh_status(self) -> DoorStatus:
-        """Refresh and return the door status."""
+    async def refresh_status(
+        self, *, timeout: Optional[float] = None
+    ) -> DoorStatus:
+        """Refresh and return the door status.
+
+        Args:
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         result = await asyncio.wait_for(
             self._client.send_message(CONFIG, CMD_GET_DOOR_STATUS, notify=True),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
         self._status = DoorStatus.from_string(result)
         return self._status
 
-    async def refresh_settings(self) -> None:
-        """Refresh all settings from the door."""
-        # Settings update callback will update individual fields
-        await asyncio.wait_for(
-            self._client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True),
-            timeout=10.0,
-        )
-        # Also refresh hold time and timezone
+    async def refresh_settings(self, *, timeout: Optional[float] = None) -> None:
+        """Refresh all settings from the door.
+
+        Args:
+            timeout: Seconds to wait for each response. Defaults to default_timeout.
+        """
+        effective_timeout = timeout if timeout is not None else self.default_timeout
+        # GET_SETTINGS includes hold time, timezone, and sensor voltages
+        # Notifications are separate
         await asyncio.gather(
             asyncio.wait_for(
-                self._client.send_message(CONFIG, CMD_GET_HOLD_TIME, notify=True),
-                timeout=10.0,
-            ),
-            asyncio.wait_for(
-                self._client.send_message(CONFIG, CMD_GET_TIMEZONE, notify=True),
-                timeout=10.0,
+                self._client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True),
+                timeout=effective_timeout,
             ),
             asyncio.wait_for(
                 self._client.send_message(CONFIG, CMD_GET_NOTIFICATIONS, notify=True),
-                timeout=10.0,
+                timeout=effective_timeout,
             ),
             return_exceptions=True,
         )
 
-    async def refresh_battery(self) -> BatteryInfo:
-        """Refresh and return battery info."""
+    async def refresh_battery(
+        self, *, timeout: Optional[float] = None
+    ) -> BatteryInfo:
+        """Refresh and return battery info.
+
+        Args:
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         await asyncio.wait_for(
             self._client.send_message(CONFIG, CMD_GET_DOOR_BATTERY, notify=True),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
         return self._battery
 
-    async def refresh_stats(self) -> None:
-        """Refresh door statistics."""
+    async def refresh_stats(self, *, timeout: Optional[float] = None) -> None:
+        """Refresh door statistics.
+
+        Args:
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         await asyncio.wait_for(
             self._client.send_message(CONFIG, CMD_GET_DOOR_OPEN_STATS, notify=True),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
 
-    async def refresh_hardware_info(self) -> dict[str, Any]:
-        """Refresh and return hardware info."""
+    async def refresh_hardware_info(
+        self, *, timeout: Optional[float] = None
+    ) -> dict[str, Any]:
+        """Refresh and return hardware info.
+
+        Args:
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
         result = await asyncio.wait_for(
             self._client.send_message(CONFIG, CMD_GET_HW_INFO, notify=True),
-            timeout=10.0,
+            timeout=timeout if timeout is not None else self.default_timeout,
         )
         if result:
             self._hw_info = result

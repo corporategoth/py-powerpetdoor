@@ -42,10 +42,10 @@ class TestPetPresenceTest:
 
     @pytest.mark.asyncio
     async def test_pet_flag_cleared_after_test(self, runner, simulator):
-        """Pet in doorway should be cleared after script completes."""
+        """Pet sensor should be cleared after script completes."""
         script = get_builtin_script("pet_presence_test")
         await runner.run(script, verbose=False)
-        assert simulator.state.pet_in_doorway is False
+        assert simulator.state.inside_sensor_active is False
 
 
 @requires_yaml

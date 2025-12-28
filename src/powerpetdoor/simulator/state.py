@@ -298,11 +298,36 @@ class DoorSimulatorState:
     # Timing configuration
     timing: DoorTimingConfig = field(default_factory=DoorTimingConfig)
 
-    # Obstruction simulation state
-    obstruction_pending: bool = False
+    # Sensor detection simulation state (for obstruction/pet simulation)
+    # These represent the physical sensor detecting something (e.g., pet in doorway)
+    inside_sensor_active: bool = False
+    outside_sensor_active: bool = False
 
-    # Pet presence simulation (keeps door open)
-    pet_in_doorway: bool = False
+    @property
+    def sensor_active(self) -> bool:
+        """Check if any sensor is currently detecting something."""
+        return self.inside_sensor_active or self.outside_sensor_active
+
+    def is_sensor_blocking_close(self) -> bool:
+        """Check if an active sensor should prevent closing.
+
+        Returns True if a sensor is:
+        - Active (detecting something)
+        - Enabled (the sensor setting is on)
+        - For outside sensor: not safety-locked
+        - cmd_lockout is disabled (when enabled, sensors don't block close)
+        """
+        # When cmd_lockout is enabled, sensor detection doesn't prevent closing
+        # (cmd_lockout=True means pet_proximity_keep_open=False)
+        if self.cmd_lockout:
+            return False
+        # Inside sensor blocks if: active AND sensor enabled
+        if self.inside_sensor_active and self.inside:
+            return True
+        # Outside sensor blocks if: active AND sensor enabled AND NOT safety-locked
+        if self.outside_sensor_active and self.outside and not self.safety_lock:
+            return True
+        return False
 
     def get_settings(self) -> dict:
         """Get full settings dict."""

@@ -36,6 +36,13 @@ from .const import (
     PING,
     PONG,
     DOOR_STATUS,
+    # Message envelope
+    FIELD_MSG_ID,
+    FIELD_MSG_ID_RESPONSE,
+    FIELD_DIRECTION,
+    FIELD_CMD,
+    PHONE_TO_DOOR,
+    DOOR_TO_PHONE,
     # Commands
     CMD_OPEN,
     CMD_OPEN_AND_HOLD,
@@ -138,6 +145,13 @@ __all__ = [
     "PING",
     "PONG",
     "DOOR_STATUS",
+    # Constants - Message envelope
+    "FIELD_MSG_ID",
+    "FIELD_MSG_ID_RESPONSE",
+    "FIELD_DIRECTION",
+    "FIELD_CMD",
+    "PHONE_TO_DOOR",
+    "DOOR_TO_PHONE",
     # Constants - Commands
     "CMD_OPEN",
     "CMD_OPEN_AND_HOLD",

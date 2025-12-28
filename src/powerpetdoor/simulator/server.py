@@ -27,6 +27,7 @@ from ..const import (
     FIELD_BATTERY_PRESENT,
     FIELD_AC_PRESENT,
     FIELD_SUCCESS,
+    SUCCESS_TRUE,
 )
 
 from .state import DoorSimulatorState, Schedule, BatteryConfig
@@ -175,7 +176,7 @@ class DoorSimulator:
                 FIELD_BATTERY_PERCENT: self.state.battery_percent,
                 FIELD_BATTERY_PRESENT: "1" if self.state.battery_present else "0",
                 FIELD_AC_PRESENT: "1" if self.state.ac_present else "0",
-                FIELD_SUCCESS: "true",
+                FIELD_SUCCESS: SUCCESS_TRUE,
             })
 
     def _send_low_battery_notification(self):
@@ -185,7 +186,7 @@ class DoorSimulator:
                 protocol._send({
                     "CMD": NOTIFY_LOW_BATTERY,
                     FIELD_BATTERY_PERCENT: self.state.battery_percent,
-                    FIELD_SUCCESS: "true",
+                    FIELD_SUCCESS: SUCCESS_TRUE,
                 })
             logger.info(f"Simulator: Low battery notification ({self.state.battery_percent}%)")
 
@@ -266,14 +267,13 @@ class DoorSimulator:
             self.state.door_status = DOOR_STATE_HOLDING
             self._broadcast_door_status()
 
-            # Hold for configured time, checking for pet presence
+            # Hold for configured time, checking for sensor blocking close
             hold_remaining = float(self.state.hold_time)
-            while hold_remaining > 0:
-                # If pet is in doorway, reset hold timer
-                if self.state.pet_in_doorway:
-                    logger.info("Simulator: Pet detected in doorway, resetting hold timer")
+            while hold_remaining > 0 or self.state.is_sensor_blocking_close():
+                # If sensor is blocking close, reset hold timer
+                if self.state.is_sensor_blocking_close():
+                    logger.debug("Simulator: Sensor blocking close, resetting hold timer")
                     hold_remaining = float(self.state.hold_time)
-                    self.state.pet_in_doorway = False
 
                 await asyncio.sleep(0.1)
                 hold_remaining -= 0.1
@@ -289,30 +289,32 @@ class DoorSimulator:
         self._broadcast_door_status()
         await asyncio.sleep(timing.closing_top_time)
 
-        # Check for obstruction after closing top
-        if await self._check_obstruction_retract():
+        # Check for sensor blocking close after closing top
+        if await self._check_sensor_retract():
             return
 
         self.state.door_status = DOOR_STATE_CLOSING_MID_OPEN
         self._broadcast_door_status()
         await asyncio.sleep(timing.closing_mid_time)
 
-        # Check for obstruction after closing mid
-        if await self._check_obstruction_retract():
+        # Check for sensor blocking close after closing mid
+        if await self._check_sensor_retract():
             return
 
         self.state.door_status = DOOR_STATE_CLOSED
         self._broadcast_door_status()
         self.state.total_open_cycles += 1
 
-    async def _check_obstruction_retract(self) -> bool:
-        """Check for obstruction and auto-retract if enabled.
+    async def _check_sensor_retract(self) -> bool:
+        """Check for sensor blocking close and auto-retract if enabled.
 
         Returns True if door was retracted (caller should return early).
         """
-        if self.state.obstruction_pending and self.state.autoretract:
-            logger.info("Simulator: Obstruction detected! Auto-retracting...")
-            self.state.obstruction_pending = False
+        if self.state.is_sensor_blocking_close() and self.state.autoretract:
+            logger.info("Simulator: Sensor blocking close! Auto-retracting...")
+            # Clear the active sensors
+            self.state.inside_sensor_active = False
+            self.state.outside_sensor_active = False
             self.state.total_auto_retracts += 1
             await self._direct_open_door(hold=False)
             return True
@@ -324,29 +326,109 @@ class DoorSimulator:
             protocol._send_door_status()
 
     def simulate_obstruction(self):
-        """Simulate obstruction detection during door close.
+        """Simulate obstruction detection (inside sensor active indefinitely).
 
-        If autoretract is enabled, the door will auto-retract (reopen).
+        Works in any door state:
+        - Closed/opening: Will prevent closing once door reaches HOLDING
+        - Holding: Prevents closing
+        - Closing: Triggers auto-retract if enabled
         """
         if self.protocols:
-            # Only need to set obstruction_pending once (shared state)
+            # Use protocol method for proper handling
             self.protocols[0].simulate_obstruction()
         else:
-            # Direct simulation without clients
-            if self.state.door_status in (
+            # Direct simulation without clients - set inside sensor active
+            self.state.inside_sensor_active = True
+            if self.state.door_status == DOOR_STATE_CLOSED:
+                logger.info("Simulator: Obstruction set (will block close when door opens)")
+            elif self.state.door_status in (DOOR_STATE_RISING, DOOR_STATE_SLOWING):
+                logger.info("Simulator: Obstruction set (will block close when door reaches top)")
+            elif self.state.door_status in (DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP):
+                logger.info("Simulator: Obstruction set (blocking close)")
+            elif self.state.door_status in (
                 DOOR_STATE_CLOSING_TOP_OPEN,
                 DOOR_STATE_CLOSING_MID_OPEN,
             ):
-                logger.info("Simulator: Obstruction detected during close")
-                self.state.obstruction_pending = True
+                logger.info("Simulator: Obstruction during close (will trigger retract)")
             else:
+                logger.info(f"Simulator: Obstruction set (door status: {self.state.door_status})")
+
+    def activate_sensor(self, sensor: str, duration: float = 0.5):
+        """Activate sensor detection with optional duration.
+
+        Args:
+            sensor: "inside" or "outside"
+            duration: How long sensor stays active in seconds.
+                     0 = toggle mode (on indefinitely if off, off if on)
+                     >0 = active for that duration then auto-deactivates
+
+        This is mutually exclusive - activating one sensor clears the other.
+        If door is closed, triggers a door cycle (respecting sensor enable and safety).
+        """
+        # Mutually exclusive - clear the other sensor
+        if sensor == "inside":
+            self.state.outside_sensor_active = False
+            if duration == 0:
+                # Toggle mode
+                self.state.inside_sensor_active = not self.state.inside_sensor_active
                 logger.info(
-                    f"Simulator: Obstruction ignored (door status: {self.state.door_status})"
+                    f"Simulator: Inside sensor {'activated' if self.state.inside_sensor_active else 'deactivated'} (toggle)"
                 )
+            else:
+                self.state.inside_sensor_active = True
+                logger.info(f"Simulator: Inside sensor activated for {duration}s")
+                # Schedule deactivation
+                asyncio.create_task(self._deactivate_sensor_after("inside", duration))
+        elif sensor == "outside":
+            self.state.inside_sensor_active = False
+            if duration == 0:
+                # Toggle mode
+                self.state.outside_sensor_active = not self.state.outside_sensor_active
+                logger.info(
+                    f"Simulator: Outside sensor {'activated' if self.state.outside_sensor_active else 'deactivated'} (toggle)"
+                )
+            else:
+                self.state.outside_sensor_active = True
+                logger.info(f"Simulator: Outside sensor activated for {duration}s")
+                # Schedule deactivation
+                asyncio.create_task(self._deactivate_sensor_after("outside", duration))
+
+        # If door is closed and sensor should trigger, open the door
+        if self.state.door_status == DOOR_STATE_CLOSED:
+            should_trigger = False
+            if sensor == "inside" and self.state.inside_sensor_active:
+                # Inside sensor: check if enabled and power on
+                if self.state.power and self.state.inside:
+                    should_trigger = True
+            elif sensor == "outside" and self.state.outside_sensor_active:
+                # Outside sensor: check if enabled, power on, and not safety locked
+                if self.state.power and self.state.outside and not self.state.safety_lock:
+                    should_trigger = True
+
+            if should_trigger:
+                logger.info(f"Simulator: {sensor.capitalize()} sensor triggering door cycle")
+                asyncio.create_task(self._direct_open_door(hold=False))
+
+    async def _deactivate_sensor_after(self, sensor: str, duration: float):
+        """Deactivate sensor after specified duration."""
+        await asyncio.sleep(duration)
+        if sensor == "inside" and self.state.inside_sensor_active:
+            self.state.inside_sensor_active = False
+            logger.info("Simulator: Inside sensor deactivated (duration expired)")
+        elif sensor == "outside" and self.state.outside_sensor_active:
+            self.state.outside_sensor_active = False
+            logger.info("Simulator: Outside sensor deactivated (duration expired)")
 
     def set_pet_in_doorway(self, present: bool = True):
-        """Simulate pet presence in doorway (keeps door open longer)."""
-        self.state.pet_in_doorway = present
+        """Simulate pet presence in doorway (keeps door open longer).
+
+        This is an alias for activate_sensor("inside", 0) for backwards compatibility.
+        """
+        if present:
+            self.state.inside_sensor_active = True
+            self.state.outside_sensor_active = False
+        else:
+            self.state.inside_sensor_active = False
         logger.info(f"Simulator: Pet {'in' if present else 'left'} doorway")
 
     # =========================================================================

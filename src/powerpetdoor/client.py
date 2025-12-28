@@ -23,6 +23,11 @@ from .const import (
     CONFIG,
     PING,
     PONG,
+    FIELD_MSG_ID,
+    FIELD_MSG_ID_RESPONSE,
+    FIELD_DIRECTION,
+    FIELD_CMD,
+    PHONE_TO_DOOR,
     PRIORITY_CRITICAL,
     PRIORITY_LOW,
     COMMAND_PRIORITIES,
@@ -70,6 +75,7 @@ from .const import (
     CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     FIELD_SUCCESS,
+    SUCCESS_TRUE,
     FIELD_DOOR_STATUS,
     FIELD_SETTINGS,
     FIELD_NOTIFICATIONS,
@@ -108,6 +114,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+#: Maximum retry attempts before dropping a message
 MAX_FAILED_MSG = 2
 MAX_FAILED_PINGS = 3
 
@@ -1012,12 +1019,12 @@ class PowerPetDoorClient:
         Uses the ResponseHandlerRegistry to dispatch to the appropriate handler.
         """
         future = None
-        if "msgID" in msg:
-            self.replyMsgId = msg["msgID"]
+        if FIELD_MSG_ID_RESPONSE in msg:
+            self.replyMsgId = msg[FIELD_MSG_ID_RESPONSE]
             if self.replyMsgId in self._outstanding and not self._outstanding[self.replyMsgId].cancelled():
                 future = self._outstanding[self.replyMsgId]
 
-        if msg["CMD"] == self._last_command:
+        if msg[FIELD_CMD] == self._last_command:
             if self._check_receipt:
                 self._check_receipt.cancel()
                 self._check_receipt = None
@@ -1026,9 +1033,9 @@ class PowerPetDoorClient:
                 self._can_dequeue = False
                 await self.dequeue_data()
 
-        if msg[FIELD_SUCCESS] == "true":
+        if msg[FIELD_SUCCESS] == SUCCESS_TRUE:
             # Look up handler in registry
-            handler = ResponseHandlerRegistry.get(msg["CMD"])
+            handler = ResponseHandlerRegistry.get(msg[FIELD_CMD])
             if handler:
                 handler(self, msg, future)
 
@@ -1069,7 +1076,7 @@ class PowerPetDoorClient:
             priority = COMMAND_PRIORITIES.get(arg, PRIORITY_LOW)
 
         self.msgId += 1
-        self.enqueue_data({ type: arg, "msgId": msgId, "dir": "p2d", **kwargs }, priority=priority)
+        self.enqueue_data({ type: arg, FIELD_MSG_ID: msgId, FIELD_DIRECTION: PHONE_TO_DOOR, **kwargs }, priority=priority)
         return rv
 
     @property
@@ -1086,3 +1093,12 @@ class PowerPetDoorClient:
     def port(self) -> int:
         """The configured port number."""
         return self.cfg_port
+
+    @property
+    def effective_timeout(self) -> float:
+        """Maximum time to wait for a command response including retries.
+
+        This is cfg_timeout * MAX_FAILED_MSG, representing the total time
+        the client will try before dropping an unacknowledged message.
+        """
+        return self.cfg_timeout * MAX_FAILED_MSG

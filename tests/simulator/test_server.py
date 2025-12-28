@@ -176,12 +176,12 @@ class TestDoorSimulator:
         assert 3 not in simulator.state.schedules
 
     def test_set_pet_in_doorway(self, simulator):
-        """set_pet_in_doorway should update state."""
+        """set_pet_in_doorway should update inside_sensor_active state."""
         simulator.set_pet_in_doorway(True)
-        assert simulator.state.pet_in_doorway is True
+        assert simulator.state.inside_sensor_active is True
 
         simulator.set_pet_in_doorway(False)
-        assert simulator.state.pet_in_doorway is False
+        assert simulator.state.inside_sensor_active is False
 
 
 # ============================================================================
@@ -211,18 +211,22 @@ class TestDoorOperationSequences:
         assert DOOR_STATE_RISING in states_seen or DOOR_STATE_HOLDING in states_seen
 
     @pytest.mark.asyncio
-    async def test_obstruction_detection(self, simulator):
-        """Obstruction flag should be settable and affect state."""
+    async def test_sensor_active_state(self, simulator):
+        """Sensor active flags should be settable and affect is_sensor_blocking_close."""
         # Verify initial state
-        assert simulator.state.obstruction_pending is False
+        assert simulator.state.inside_sensor_active is False
+        assert simulator.state.outside_sensor_active is False
+        assert simulator.state.is_sensor_blocking_close() is False
 
-        # Set obstruction
-        simulator.state.obstruction_pending = True
-        assert simulator.state.obstruction_pending is True
+        # Set inside sensor active (with sensor enabled)
+        simulator.state.inside_sensor_active = True
+        assert simulator.state.inside_sensor_active is True
+        assert simulator.state.is_sensor_blocking_close() is True
 
         # Clear it
-        simulator.state.obstruction_pending = False
-        assert simulator.state.obstruction_pending is False
+        simulator.state.inside_sensor_active = False
+        assert simulator.state.inside_sensor_active is False
+        assert simulator.state.is_sensor_blocking_close() is False
 
     @pytest.mark.asyncio
     async def test_open_and_hold_keeps_door_open(self, simulator):

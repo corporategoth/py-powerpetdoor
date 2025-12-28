@@ -70,10 +70,11 @@ def interactive_mode(host: str, port: int):
     print("Type 'help' for commands, 'exit' to quit")
     print()
 
+    prompt = f"{host}:{port}> "
     try:
         while True:
             try:
-                line = input("sim> ").strip()
+                line = input(prompt).strip()
             except EOFError:
                 break
 
@@ -132,7 +133,7 @@ Commands:
         "--interactive", "-i",
         action="store_true",
         help="Run in interactive mode"
-    )
+    w)
     parser.add_argument(
         "--timeout", "-t",
         type=float,

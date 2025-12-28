@@ -19,6 +19,20 @@ PING = "PING"
 PONG = "PONG"
 DOOR_STATUS = "DOOR_STATUS"
 
+# Message envelope fields
+FIELD_MSG_ID = "msgId"
+FIELD_MSG_ID_RESPONSE = "msgID"  # Response uses different casing
+FIELD_DIRECTION = "dir"
+FIELD_CMD = "CMD"  # Command echo in responses
+
+# Direction values (p2d = phone to door, d2p = door to phone)
+PHONE_TO_DOOR = "p2d"
+DOOR_TO_PHONE = "d2p"
+
+# Success field values (strings, not booleans)
+SUCCESS_TRUE = "true"
+SUCCESS_FALSE = "false"
+
 # Field names in protocol messages
 FIELD_POWER = "power_state"
 FIELD_INSIDE = "inside"

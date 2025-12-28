@@ -6,7 +6,7 @@ steps:
     value: "on"
   - action: set
     name: hold_time
-    value: "1"
+    value: "2"
   - action: trigger_sensor
     sensor: inside
   - action: wait_for
@@ -15,7 +15,7 @@ steps:
   - action: log
     message: "Door is holding, waiting for close to start..."
   - action: wait
-    seconds: 1.5
+    seconds: 2.2
   - action: obstruction
   - action: log
     message: "Obstruction triggered, door should auto-retract"

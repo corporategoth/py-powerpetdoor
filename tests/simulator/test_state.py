@@ -349,3 +349,151 @@ class TestDoorSimulatorState:
         state = DoorSimulatorState(auto=True)
         assert state.is_sensor_allowed_by_schedule("inside") is True
         assert state.is_sensor_allowed_by_schedule("outside") is True
+
+
+# ============================================================================
+# Sensor Detection Model Tests
+# ============================================================================
+
+class TestSensorDetectionModel:
+    """Tests for the sensor detection model (inside_sensor_active, outside_sensor_active)."""
+
+    def test_sensor_active_defaults(self):
+        """Sensor active flags should default to False."""
+        state = DoorSimulatorState()
+        assert state.inside_sensor_active is False
+        assert state.outside_sensor_active is False
+
+    def test_sensor_active_property_none_active(self):
+        """sensor_active property should be False when no sensors active."""
+        state = DoorSimulatorState()
+        assert state.sensor_active is False
+
+    def test_sensor_active_property_inside_active(self):
+        """sensor_active property should be True when inside sensor active."""
+        state = DoorSimulatorState(inside_sensor_active=True)
+        assert state.sensor_active is True
+
+    def test_sensor_active_property_outside_active(self):
+        """sensor_active property should be True when outside sensor active."""
+        state = DoorSimulatorState(outside_sensor_active=True)
+        assert state.sensor_active is True
+
+    def test_sensor_active_property_both_active(self):
+        """sensor_active property should be True when both sensors active."""
+        state = DoorSimulatorState(inside_sensor_active=True, outside_sensor_active=True)
+        assert state.sensor_active is True
+
+
+class TestIsSensorBlockingClose:
+    """Tests for is_sensor_blocking_close() method."""
+
+    def test_no_sensors_active(self):
+        """Should not block close when no sensors are active."""
+        state = DoorSimulatorState()
+        assert state.is_sensor_blocking_close() is False
+
+    def test_inside_sensor_active_and_enabled(self):
+        """Inside sensor should block close when active AND enabled."""
+        state = DoorSimulatorState(inside_sensor_active=True, inside=True)
+        assert state.is_sensor_blocking_close() is True
+
+    def test_inside_sensor_active_but_disabled(self):
+        """Inside sensor should NOT block close when active but disabled."""
+        state = DoorSimulatorState(inside_sensor_active=True, inside=False)
+        assert state.is_sensor_blocking_close() is False
+
+    def test_outside_sensor_active_and_enabled(self):
+        """Outside sensor should block close when active, enabled, and NOT safety-locked."""
+        state = DoorSimulatorState(
+            outside_sensor_active=True,
+            outside=True,
+            safety_lock=False
+        )
+        assert state.is_sensor_blocking_close() is True
+
+    def test_outside_sensor_active_but_disabled(self):
+        """Outside sensor should NOT block close when active but disabled."""
+        state = DoorSimulatorState(
+            outside_sensor_active=True,
+            outside=False,
+            safety_lock=False
+        )
+        assert state.is_sensor_blocking_close() is False
+
+    def test_outside_sensor_active_but_safety_locked(self):
+        """Outside sensor should NOT block close when safety-locked."""
+        state = DoorSimulatorState(
+            outside_sensor_active=True,
+            outside=True,
+            safety_lock=True
+        )
+        assert state.is_sensor_blocking_close() is False
+
+    def test_inside_blocks_even_with_safety_lock(self):
+        """Inside sensor should block close even when safety_lock is on."""
+        state = DoorSimulatorState(
+            inside_sensor_active=True,
+            inside=True,
+            safety_lock=True  # Safety lock only affects outside sensor
+        )
+        assert state.is_sensor_blocking_close() is True
+
+    def test_both_sensors_active_one_disabled(self):
+        """Should block if at least one active sensor is enabled."""
+        # Inside active and enabled, outside active but disabled
+        state = DoorSimulatorState(
+            inside_sensor_active=True,
+            inside=True,
+            outside_sensor_active=True,
+            outside=False
+        )
+        assert state.is_sensor_blocking_close() is True
+
+        # Inside active but disabled, outside active and enabled
+        state = DoorSimulatorState(
+            inside_sensor_active=True,
+            inside=False,
+            outside_sensor_active=True,
+            outside=True,
+            safety_lock=False
+        )
+        assert state.is_sensor_blocking_close() is True
+
+    def test_both_sensors_active_both_disabled(self):
+        """Should NOT block if both active sensors are disabled."""
+        state = DoorSimulatorState(
+            inside_sensor_active=True,
+            inside=False,
+            outside_sensor_active=True,
+            outside=False
+        )
+        assert state.is_sensor_blocking_close() is False
+
+    def test_cmd_lockout_prevents_inside_blocking(self):
+        """When cmd_lockout is enabled, inside sensor should NOT block close."""
+        state = DoorSimulatorState(
+            inside_sensor_active=True,
+            inside=True,
+            cmd_lockout=True
+        )
+        assert state.is_sensor_blocking_close() is False
+
+    def test_cmd_lockout_prevents_outside_blocking(self):
+        """When cmd_lockout is enabled, outside sensor should NOT block close."""
+        state = DoorSimulatorState(
+            outside_sensor_active=True,
+            outside=True,
+            safety_lock=False,
+            cmd_lockout=True
+        )
+        assert state.is_sensor_blocking_close() is False
+
+    def test_cmd_lockout_disabled_allows_blocking(self):
+        """When cmd_lockout is disabled, sensors should block as normal."""
+        state = DoorSimulatorState(
+            inside_sensor_active=True,
+            inside=True,
+            cmd_lockout=False
+        )
+        assert state.is_sensor_blocking_close() is True

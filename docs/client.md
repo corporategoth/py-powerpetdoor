@@ -406,3 +406,14 @@ Messages are automatically prioritized:
 | Low (3) | Configuration changes |
 
 This ensures keepalives and urgent door commands are processed before routine queries.
+
+## Default Timing
+
+The client uses these default timing values:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Min message interval | 200ms | Delay between messages to avoid overwhelming device |
+| Keepalive interval | 30s | PING/PONG frequency |
+| Response timeout | 10s | Max wait for command response |
+| Reconnect delay | 5s | Wait before reconnecting after disconnect |

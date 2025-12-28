@@ -11,6 +11,7 @@ and controlling the door simulator.
 
 import asyncio
 import logging
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +20,93 @@ from .server import DoorSimulator
 from ..tz_utils import async_init_timezone_cache
 
 logger = logging.getLogger(__name__)
+
+
+class InteractivePrompt:
+    """Manages interactive prompt with proper output handling.
+
+    When enabled, this class handles displaying a prompt and ensuring
+    that async output (like log messages) properly clears the line
+    before printing and restores the prompt afterward.
+    """
+
+    def __init__(self, prompt: str = "$ "):
+        self.prompt = prompt
+        self._enabled = False
+        self._handler: Optional[logging.Handler] = None
+        self._saved_handlers: list[logging.Handler] = []
+
+    def enable(self):
+        """Enable the prompt and install the logging handler."""
+        if self._enabled:
+            return
+        self._enabled = True
+
+        # Remove existing handlers and save them for later restoration
+        root_logger = logging.getLogger()
+        self._saved_handlers = list(root_logger.handlers)
+        for handler in self._saved_handlers:
+            root_logger.removeHandler(handler)
+
+        # Install a custom handler that clears line before output
+        self._handler = _PromptLoggingHandler(self)
+        self._handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        )
+        root_logger.addHandler(self._handler)
+        self.show()
+
+    def disable(self):
+        """Disable the prompt and remove the logging handler."""
+        if not self._enabled:
+            return
+        self._enabled = False
+
+        root_logger = logging.getLogger()
+        if self._handler:
+            root_logger.removeHandler(self._handler)
+            self._handler = None
+
+        # Restore saved handlers
+        for handler in self._saved_handlers:
+            root_logger.addHandler(handler)
+        self._saved_handlers = []
+
+    def show(self):
+        """Display the prompt."""
+        if self._enabled:
+            sys.stdout.write(self.prompt)
+            sys.stdout.flush()
+
+    def clear_line(self):
+        """Clear the current line (prompt and any partial input)."""
+        if self._enabled:
+            # Move to start of line and clear to end
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+
+    def output(self, text: str):
+        """Print text, handling prompt correctly."""
+        self.clear_line()
+        print(text)
+        self.show()
+
+
+class _PromptLoggingHandler(logging.Handler):
+    """Logging handler that respects the interactive prompt."""
+
+    def __init__(self, prompt: InteractivePrompt):
+        super().__init__()
+        self._prompt = prompt
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self._prompt.clear_line()
+            print(msg)
+            self._prompt.show()
+        except Exception:
+            self.handleError(record)
 
 # Default control port offset from simulator port
 CONTROL_PORT_OFFSET = 1
@@ -231,6 +319,7 @@ async def run_simulator(
 
     # Set up interactive input if applicable
     stdin_available = False
+    prompt: Optional[InteractivePrompt] = None
     if interactive:
         try:
             if sys.stdin and sys.stdin.fileno() >= 0:
@@ -241,18 +330,32 @@ async def run_simulator(
             pass
 
         if stdin_available:
+            # Create prompt with host:port format
+            prompt = InteractivePrompt(f"{host}:{port}> ")
+
             def handle_input():
                 try:
                     line = sys.stdin.readline().strip()
                     if line:
                         asyncio.create_task(process_interactive_command(line))
+                    else:
+                        # Empty line (just Enter), re-show prompt
+                        prompt.show()
                 except Exception as e:
-                    print(f"Error: {e}")
+                    prompt.output(f"Error: {e}")
 
             async def process_interactive_command(line: str):
                 result = await cmd_handler.execute(line)
-                print(f">>> {result.message}")
+                # Don't show prompt again after shutdown command
+                if stop_event.is_set():
+                    prompt.clear_line()
+                    print(f">>> {result.message}")
+                    # Remove stdin reader immediately to avoid blocking shutdown
+                    loop.remove_reader(sys.stdin.fileno())
+                else:
+                    prompt.output(f">>> {result.message}")
 
+            prompt.enable()
             loop.add_reader(sys.stdin.fileno(), handle_input)
         else:
             logger.warning("stdin not available, running in daemon mode")
@@ -273,8 +376,13 @@ async def run_simulator(
         pass
     finally:
         # Cleanup
+        if prompt:
+            prompt.disable()
         if interactive and stdin_available:
-            loop.remove_reader(sys.stdin.fileno())
+            try:
+                loop.remove_reader(sys.stdin.fileno())
+            except Exception:
+                pass  # Already removed
         queue_task.cancel()
         try:
             await queue_task

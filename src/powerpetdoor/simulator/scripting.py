@@ -27,8 +27,10 @@ steps:
 
 Available actions:
   - trigger_sensor: Trigger inside or outside sensor
-  - obstruction: Simulate obstruction during close
-  - pet_presence: Set pet in doorway (extends hold time)
+  - inside: Activate inside sensor with optional duration (default 0.5s)
+  - outside: Activate outside sensor with optional duration (default 0.5s)
+  - obstruction: Simulate obstruction (sets inside sensor active indefinitely)
+  - pet_presence: Set pet in doorway (inside sensor active indefinitely)
   - open: Open door (optionally with hold)
   - close: Close door
   - wait: Wait for specified seconds
@@ -264,10 +266,23 @@ class ScriptRunner:
             self.simulator.simulate_obstruction()
 
         elif action == "pet_presence" or action == "pet_on":
-            self.simulator.set_pet_in_doorway(True)
+            # Pet presence = inside sensor active indefinitely (toggle on)
+            if not state.inside_sensor_active:
+                self.simulator.activate_sensor("inside", 0)
 
         elif action == "pet_off":
-            self.simulator.set_pet_in_doorway(False)
+            # Clear inside sensor
+            state.inside_sensor_active = False
+
+        elif action == "inside":
+            # Activate inside sensor with optional duration
+            duration = float(params.get("duration", 0.5))
+            self.simulator.activate_sensor("inside", duration)
+
+        elif action == "outside":
+            # Activate outside sensor with optional duration
+            duration = float(params.get("duration", 0.5))
+            self.simulator.activate_sensor("outside", duration)
 
         elif action == "open":
             hold = params.get("hold", False)
