@@ -103,6 +103,7 @@ await door.open()           # Open door (auto-closes after hold time)
 await door.open_and_hold()  # Open and keep open until manually closed
 await door.close()          # Close the door
 await door.toggle()         # Open if closed, close if open
+await door.cycle()          # Full door cycle (same as open, auto-closes after hold time)
 ```
 
 ## Door Status
@@ -316,14 +317,15 @@ schedule = await door.get_schedule(0)
 # Create/update a schedule
 from powerpetdoor import Schedule, ScheduleTime
 
+# days_of_week is a list: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
 schedule = Schedule(
     index=0,
     enabled=True,
-    days_of_week=0b1111111,  # All days (bit 0 = Monday)
-    inside_start=ScheduleTime(hour=6, minute=0),
-    inside_end=ScheduleTime(hour=22, minute=0),
-    outside_start=ScheduleTime(hour=8, minute=0),
-    outside_end=ScheduleTime(hour=20, minute=0),
+    days_of_week=[1, 1, 1, 1, 1, 1, 1],  # All days
+    inside=True,       # This schedule controls inside sensor
+    outside=False,
+    start=ScheduleTime(hour=6, minute=0),
+    end=ScheduleTime(hour=22, minute=0),
 )
 await door.set_schedule(schedule)
 
@@ -414,29 +416,24 @@ class ScheduleTime:
 
 @dataclass
 class Schedule:
-    index: int = 0                    # Schedule slot (0-based)
-    enabled: bool = True              # Whether schedule is active
-    days_of_week: int = 0b1111111     # Bitmask (bit 0 = Monday)
-    inside_start: ScheduleTime        # Inside sensor start time
-    inside_end: ScheduleTime          # Inside sensor end time
-    outside_start: ScheduleTime       # Outside sensor start time
-    outside_end: ScheduleTime         # Outside sensor end time
+    index: int = 0                              # Schedule slot (0-based)
+    enabled: bool = True                        # Whether schedule is active
+    days_of_week: list = [1,1,1,1,1,1,1]        # [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+    inside: bool = False                        # Controls inside sensor
+    outside: bool = False                       # Controls outside sensor
+    start: ScheduleTime                         # Start time for sensor
+    end: ScheduleTime                           # End time for sensor
 ```
 
-### Days of Week Bitmask
+### Days of Week List
+
+Each schedule entry controls ONE sensor (inside or outside) for specific days and a time window.
 
 ```python
-# Bit positions for days_of_week
-MONDAY    = 0b0000001  # bit 0
-TUESDAY   = 0b0000010  # bit 1
-WEDNESDAY = 0b0000100  # bit 2
-THURSDAY  = 0b0001000  # bit 3
-FRIDAY    = 0b0010000  # bit 4
-SATURDAY  = 0b0100000  # bit 5
-SUNDAY    = 0b1000000  # bit 6
+# days_of_week is a list: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+# 1 = active, 0 = inactive
 
-# Examples
-WEEKDAYS = 0b0011111   # Monday-Friday
-WEEKENDS = 0b1100000   # Saturday-Sunday
-ALL_DAYS = 0b1111111   # Every day
+ALL_DAYS  = [1, 1, 1, 1, 1, 1, 1]  # Every day
+WEEKDAYS  = [0, 1, 1, 1, 1, 1, 0]  # Monday-Friday
+WEEKENDS  = [1, 0, 0, 0, 0, 0, 1]  # Saturday-Sunday
 ```

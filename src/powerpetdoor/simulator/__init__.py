@@ -23,7 +23,7 @@ Example usage:
     await simulator.start()
 """
 
-from .state import DoorSimulatorState, Schedule, DoorTimingConfig
+from .state import DoorSimulatorState, Schedule, DoorTimingConfig, BatteryConfig
 from .protocol import DoorSimulatorProtocol, CommandRegistry
 from .server import DoorSimulator
 from .cli import run_simulator, main
@@ -46,6 +46,7 @@ __all__ = [
     # State helpers
     "Schedule",
     "DoorTimingConfig",
+    "BatteryConfig",
     # Command registry
     "CommandRegistry",
     # CLI

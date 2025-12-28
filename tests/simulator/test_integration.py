@@ -365,13 +365,17 @@ class TestMultiClient:
             # Send OPEN from client 1
             await cap1.send({CONFIG: CMD_OPEN, "msgId": 1})
 
-            # Wait for status updates on both
+            # Wait for BOTH the command response AND a status update on client 1
+            # The command response and status update may arrive in any order
             await cap1.receive_until(
-                lambda m: m.get(FIELD_DOOR_STATUS) == DOOR_STATE_RISING
-                or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_HOLDING
-                or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_KEEPUP,
+                lambda m: (
+                    cap1.find_message(CMD_OPEN) is not None
+                    and len(cap1.find_status_updates()) > 0
+                ),
                 timeout=2.0
             )
+
+            # Wait for status update on client 2
             await cap2.receive_until(
                 lambda m: m.get(FIELD_DOOR_STATUS) == DOOR_STATE_RISING
                 or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_HOLDING

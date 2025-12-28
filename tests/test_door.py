@@ -373,6 +373,21 @@ class TestPowerPetDoorControl:
 
         assert door.is_closed
 
+    @pytest.mark.asyncio
+    async def test_cycle_opens_door(self, door, simulator):
+        """cycle() should open the door (and it auto-closes after hold_time)."""
+        assert door.is_closed
+
+        await door.cycle()
+
+        # Wait for door to open
+        for _ in range(50):
+            if door.is_open:
+                break
+            await asyncio.sleep(0.1)
+
+        assert door.is_open
+
 
 # ============================================================================
 # Sensor Tests

@@ -24,10 +24,13 @@ from ..const import (
     FIELD_SUCCESS,
 )
 
-from .state import DoorSimulatorState, Schedule
+from .state import DoorSimulatorState, Schedule, BatteryConfig
 from .protocol import DoorSimulatorProtocol
 
 logger = logging.getLogger(__name__)
+
+# Low battery threshold for notifications
+LOW_BATTERY_THRESHOLD = 20
 
 
 class DoorSimulator:
@@ -61,6 +64,8 @@ class DoorSimulator:
         self.state = state or DoorSimulatorState()
         self.server: Optional[asyncio.Server] = None
         self.protocols: list[DoorSimulatorProtocol] = []
+        self._battery_task: Optional[asyncio.Task] = None
+        self._running = False
 
     async def start(self):
         """Start the simulator server."""
@@ -80,14 +85,104 @@ class DoorSimulator:
             self.port,
         )
 
+        self._running = True
+        self._battery_task = asyncio.create_task(self._battery_simulation_loop())
+
         logger.info(f"Door simulator listening on {self.host}:{self.port}")
 
     async def stop(self):
         """Stop the simulator server."""
+        self._running = False
+
+        if self._battery_task:
+            self._battery_task.cancel()
+            try:
+                await self._battery_task
+            except asyncio.CancelledError:
+                pass
+            self._battery_task = None
+
         if self.server:
             self.server.close()
             await self.server.wait_closed()
             logger.info("Door simulator stopped")
+
+    # =========================================================================
+    # Battery Simulation
+    # =========================================================================
+
+    async def _battery_simulation_loop(self):
+        """Background task that simulates battery charge/discharge over time."""
+        while self._running:
+            try:
+                config = self.state.battery_config
+                await asyncio.sleep(config.update_interval)
+
+                if not self._running:
+                    break
+
+                # Only simulate if battery is present
+                if not self.state.battery_present:
+                    continue
+
+                old_percent = self.state.battery_percent
+
+                if self.state.ac_present and config.charge_rate > 0:
+                    # Charging: increase battery level
+                    # Rate is per minute, interval is in seconds
+                    delta = config.charge_rate * (config.update_interval / 60.0)
+                    new_percent = min(100, self.state.battery_percent + delta)
+                    if new_percent != self.state.battery_percent:
+                        self.state.battery_percent = int(new_percent)
+                        logger.debug(
+                            f"Battery charging: {old_percent}% -> {self.state.battery_percent}%"
+                        )
+                        self._broadcast_battery_status()
+
+                elif not self.state.ac_present and config.discharge_rate > 0:
+                    # Discharging: decrease battery level
+                    delta = config.discharge_rate * (config.update_interval / 60.0)
+                    new_percent = max(0, self.state.battery_percent - delta)
+                    if int(new_percent) != self.state.battery_percent:
+                        self.state.battery_percent = int(new_percent)
+                        logger.debug(
+                            f"Battery discharging: {old_percent}% -> {self.state.battery_percent}%"
+                        )
+                        self._broadcast_battery_status()
+
+                        # Check for low battery notification
+                        if (
+                            old_percent > LOW_BATTERY_THRESHOLD
+                            and self.state.battery_percent <= LOW_BATTERY_THRESHOLD
+                        ):
+                            self._send_low_battery_notification()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in battery simulation: {e}")
+
+    def _broadcast_battery_status(self):
+        """Broadcast battery status to all connected clients."""
+        for protocol in self.protocols:
+            protocol._send({
+                "CMD": CMD_GET_DOOR_BATTERY,
+                FIELD_BATTERY_PERCENT: self.state.battery_percent,
+                FIELD_BATTERY_PRESENT: "1" if self.state.battery_present else "0",
+                FIELD_AC_PRESENT: "1" if self.state.ac_present else "0",
+                FIELD_SUCCESS: "true",
+            })
+
+    def _send_low_battery_notification(self):
+        """Send low battery notification to connected clients."""
+        if self.state.low_battery:
+            for protocol in self.protocols:
+                protocol._send({
+                    "CMD": NOTIFY_LOW_BATTERY,
+                    FIELD_BATTERY_PERCENT: self.state.battery_percent,
+                    FIELD_SUCCESS: "true",
+                })
+            logger.info(f"Simulator: Low battery notification ({self.state.battery_percent}%)")
 
     # =========================================================================
     # Spontaneous Events (simulate from door side)
@@ -292,27 +387,55 @@ class DoorSimulator:
         old_percent = self.state.battery_percent
         self.state.battery_percent = max(0, min(100, percent))
 
-        # Send battery status update
-        for protocol in self.protocols:
-            protocol._send({
-                "CMD": CMD_GET_DOOR_BATTERY,
-                FIELD_BATTERY_PERCENT: self.state.battery_percent,
-                FIELD_BATTERY_PRESENT: "1" if self.state.battery_present else "0",
-                FIELD_AC_PRESENT: "1" if self.state.ac_present else "0",
-                FIELD_SUCCESS: "true",
-            })
+        self._broadcast_battery_status()
 
         # Send low battery notification if crossing threshold
-        LOW_BATTERY_THRESHOLD = 20
         if old_percent > LOW_BATTERY_THRESHOLD and percent <= LOW_BATTERY_THRESHOLD:
-            if self.state.low_battery:
-                for protocol in self.protocols:
-                    protocol._send({
-                        "CMD": NOTIFY_LOW_BATTERY,
-                        FIELD_BATTERY_PERCENT: self.state.battery_percent,
-                        FIELD_SUCCESS: "true",
-                    })
-                logger.info(f"Simulator: Low battery notification sent ({percent}%)")
+            self._send_low_battery_notification()
+
+    def set_ac_present(self, present: bool):
+        """Set AC power connection state and notify clients.
+
+        Args:
+            present: True if AC is connected, False if disconnected.
+        """
+        if self.state.ac_present == present:
+            return
+
+        self.state.ac_present = present
+        logger.info(f"Simulator: AC {'connected' if present else 'disconnected'}")
+        self._broadcast_battery_status()
+
+    def set_battery_present(self, present: bool):
+        """Set battery presence state and notify clients.
+
+        Args:
+            present: True if battery is installed, False if removed.
+        """
+        if self.state.battery_present == present:
+            return
+
+        self.state.battery_present = present
+        logger.info(f"Simulator: Battery {'installed' if present else 'removed'}")
+        self._broadcast_battery_status()
+
+    def set_charge_rate(self, rate: float):
+        """Set battery charge rate (percent per minute).
+
+        Args:
+            rate: Charge rate in percent per minute. Set to 0 to disable charging.
+        """
+        self.state.battery_config.charge_rate = max(0.0, rate)
+        logger.info(f"Simulator: Charge rate set to {rate}%/min")
+
+    def set_discharge_rate(self, rate: float):
+        """Set battery discharge rate (percent per minute).
+
+        Args:
+            rate: Discharge rate in percent per minute. Set to 0 to disable discharging.
+        """
+        self.state.battery_config.discharge_rate = max(0.0, rate)
+        logger.info(f"Simulator: Discharge rate set to {rate}%/min")
 
     def set_power(self, enabled: bool):
         """Set power state."""

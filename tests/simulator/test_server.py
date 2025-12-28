@@ -15,6 +15,7 @@ from powerpetdoor.simulator import (
     DoorSimulatorState,
     Schedule,
     DoorTimingConfig,
+    BatteryConfig,
 )
 from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
@@ -235,3 +236,159 @@ class TestDoorOperationSequences:
         # Wait more time - should still be KEEPUP
         await asyncio.sleep(0.3)
         assert simulator.state.door_status == DOOR_STATE_KEEPUP
+
+
+# ============================================================================
+# Battery Simulation Tests
+# ============================================================================
+
+class TestBatterySimulation:
+    """Tests for battery simulation methods."""
+
+    @pytest.fixture
+    async def simulator_with_battery(self, timing_config):
+        """Create a simulator with fast battery updates for testing."""
+        battery_config = BatteryConfig(
+            charge_rate=600.0,  # 600%/min = 10%/sec (fast for testing)
+            discharge_rate=600.0,  # 600%/min = 10%/sec
+            update_interval=0.1,  # Update every 100ms
+        )
+        state = DoorSimulatorState(
+            timing=timing_config,
+            hold_time=1,
+            battery_config=battery_config,
+            battery_percent=50,
+        )
+        sim = DoorSimulator(port=0, state=state)
+        await sim.start()
+        yield sim
+        await sim.stop()
+
+    def test_set_ac_present(self, simulator):
+        """set_ac_present should update AC state."""
+        assert simulator.state.ac_present is True
+        simulator.set_ac_present(False)
+        assert simulator.state.ac_present is False
+        simulator.set_ac_present(True)
+        assert simulator.state.ac_present is True
+
+    def test_set_battery_present(self, simulator):
+        """set_battery_present should update battery presence."""
+        assert simulator.state.battery_present is True
+        simulator.set_battery_present(False)
+        assert simulator.state.battery_present is False
+        simulator.set_battery_present(True)
+        assert simulator.state.battery_present is True
+
+    def test_set_charge_rate(self, simulator):
+        """set_charge_rate should update charge rate."""
+        simulator.set_charge_rate(5.0)
+        assert simulator.state.battery_config.charge_rate == 5.0
+        simulator.set_charge_rate(0.0)
+        assert simulator.state.battery_config.charge_rate == 0.0
+
+    def test_set_discharge_rate(self, simulator):
+        """set_discharge_rate should update discharge rate."""
+        simulator.set_discharge_rate(0.5)
+        assert simulator.state.battery_config.discharge_rate == 0.5
+        simulator.set_discharge_rate(0.0)
+        assert simulator.state.battery_config.discharge_rate == 0.0
+
+    def test_set_charge_rate_negative_clamps_to_zero(self, simulator):
+        """set_charge_rate should clamp negative values to zero."""
+        simulator.set_charge_rate(-5.0)
+        assert simulator.state.battery_config.charge_rate == 0.0
+
+    def test_set_discharge_rate_negative_clamps_to_zero(self, simulator):
+        """set_discharge_rate should clamp negative values to zero."""
+        simulator.set_discharge_rate(-5.0)
+        assert simulator.state.battery_config.discharge_rate == 0.0
+
+    @pytest.mark.asyncio
+    async def test_battery_charges_when_ac_present(self, simulator_with_battery):
+        """Battery should charge when AC is present."""
+        sim = simulator_with_battery
+        sim.set_ac_present(True)
+        initial = sim.state.battery_percent
+
+        # Wait for a few update cycles
+        await asyncio.sleep(0.3)
+
+        # Battery should have increased
+        assert sim.state.battery_percent > initial
+
+    @pytest.mark.asyncio
+    async def test_battery_discharges_when_ac_absent(self, simulator_with_battery):
+        """Battery should discharge when AC is absent."""
+        sim = simulator_with_battery
+        sim.set_ac_present(False)
+        initial = sim.state.battery_percent
+
+        # Wait for a few update cycles
+        await asyncio.sleep(0.3)
+
+        # Battery should have decreased
+        assert sim.state.battery_percent < initial
+
+    @pytest.mark.asyncio
+    async def test_battery_no_change_when_absent(self, simulator_with_battery):
+        """Battery should not change when battery is absent."""
+        sim = simulator_with_battery
+        sim.set_battery_present(False)
+        initial = sim.state.battery_percent
+        sim.set_ac_present(False)
+
+        await asyncio.sleep(0.3)
+
+        # Battery should not have changed
+        assert sim.state.battery_percent == initial
+
+    @pytest.mark.asyncio
+    async def test_battery_caps_at_100(self, simulator_with_battery):
+        """Battery should not exceed 100%."""
+        sim = simulator_with_battery
+        sim.set_battery(99)
+        sim.set_ac_present(True)
+
+        await asyncio.sleep(0.5)
+
+        # Battery should be capped at 100
+        assert sim.state.battery_percent <= 100
+
+    @pytest.mark.asyncio
+    async def test_battery_floors_at_0(self, simulator_with_battery):
+        """Battery should not go below 0%."""
+        sim = simulator_with_battery
+        sim.set_battery(1)
+        sim.set_ac_present(False)
+
+        await asyncio.sleep(0.5)
+
+        # Battery should be floored at 0
+        assert sim.state.battery_percent >= 0
+
+    @pytest.mark.asyncio
+    async def test_zero_charge_rate_no_change(self, simulator_with_battery):
+        """Battery should not change with zero charge rate."""
+        sim = simulator_with_battery
+        sim.set_charge_rate(0.0)
+        sim.set_ac_present(True)
+        initial = sim.state.battery_percent
+
+        await asyncio.sleep(0.3)
+
+        # Battery should not have changed
+        assert sim.state.battery_percent == initial
+
+    @pytest.mark.asyncio
+    async def test_zero_discharge_rate_no_change(self, simulator_with_battery):
+        """Battery should not change with zero discharge rate."""
+        sim = simulator_with_battery
+        sim.set_discharge_rate(0.0)
+        sim.set_ac_present(False)
+        initial = sim.state.battery_percent
+
+        await asyncio.sleep(0.3)
+
+        # Battery should not have changed
+        assert sim.state.battery_percent == initial

@@ -192,6 +192,17 @@ class CommandHandler:
         asyncio.create_task(self.simulator.open_door(hold=True))
         return CommandResult(True, "Opening and holding")
 
+    @command("cycle", ["y"], "Full door cycle (like pressing door button)", category="door")
+    def cycle(self, arg: Optional[str] = None) -> CommandResult:
+        """Run a full door cycle - open, hold, close.
+
+        This simulates pressing the physical button on the door,
+        which opens the door, holds for hold_time, then closes.
+        Unlike sensor triggers, this bypasses sensor enable checks.
+        """
+        asyncio.create_task(self.simulator.open_door(hold=False))
+        return CommandResult(True, "Starting door cycle")
+
     # -------------------------------------------------------------------------
     # Simulation Events
     # -------------------------------------------------------------------------
@@ -306,6 +317,131 @@ class CommandHandler:
             pct = random.randint(10, 100)
         self.simulator.set_battery(pct)
         return CommandResult(True, f"Battery set to {pct}%")
+
+    @command("ac", [], "Toggle or set AC power connection", "[connect|disconnect]", category="settings")
+    def ac(self, arg: Optional[str] = None) -> CommandResult:
+        """Toggle or set AC power connection."""
+        if arg:
+            present = arg.lower() in ("connect", "on", "true", "1", "yes")
+        else:
+            present = not self.simulator.state.ac_present
+        self.simulator.set_ac_present(present)
+        state = "connected" if present else "disconnected"
+        return CommandResult(True, f"AC: {state}")
+
+    @command("battery_present", [], "Toggle or set battery presence", "[on|off]", category="settings")
+    def battery_present(self, arg: Optional[str] = None) -> CommandResult:
+        """Toggle or set battery presence."""
+        if arg:
+            present = arg.lower() in ("on", "true", "1", "yes", "installed")
+        else:
+            present = not self.simulator.state.battery_present
+        self.simulator.set_battery_present(present)
+        state = "installed" if present else "removed"
+        return CommandResult(True, f"Battery: {state}")
+
+    @command("charge_rate", [], "Set battery charge rate (%/min, 0=disable)", "<rate>", category="settings")
+    def charge_rate(self, arg: Optional[str] = None) -> CommandResult:
+        """Set battery charge rate in percent per minute."""
+        if arg:
+            try:
+                rate = float(arg)
+                self.simulator.set_charge_rate(rate)
+                if rate == 0:
+                    return CommandResult(True, "Charging disabled")
+                return CommandResult(True, f"Charge rate: {rate}%/min")
+            except ValueError:
+                return CommandResult(False, "Usage: charge_rate <rate>")
+        else:
+            rate = self.simulator.state.battery_config.charge_rate
+            return CommandResult(True, f"Charge rate: {rate}%/min")
+
+    @command("discharge_rate", [], "Set battery discharge rate (%/min, 0=disable)", "<rate>", category="settings")
+    def discharge_rate(self, arg: Optional[str] = None) -> CommandResult:
+        """Set battery discharge rate in percent per minute."""
+        if arg:
+            try:
+                rate = float(arg)
+                self.simulator.set_discharge_rate(rate)
+                if rate == 0:
+                    return CommandResult(True, "Discharging disabled")
+                return CommandResult(True, f"Discharge rate: {rate}%/min")
+            except ValueError:
+                return CommandResult(False, "Usage: discharge_rate <rate>")
+        else:
+            rate = self.simulator.state.battery_config.discharge_rate
+            return CommandResult(True, f"Discharge rate: {rate}%/min")
+
+    # -------------------------------------------------------------------------
+    # Notifications
+    # -------------------------------------------------------------------------
+
+    # Notification name mappings
+    _NOTIFY_NAMES = {
+        "inside_on": "sensor_on_indoor",
+        "inside_off": "sensor_off_indoor",
+        "outside_on": "sensor_on_outdoor",
+        "outside_off": "sensor_off_outdoor",
+        "low_battery": "low_battery",
+    }
+
+    @command("notify", [], "Manage notification settings", "[name] [on|off]", category="settings")
+    def notify(self, arg: Optional[str] = None) -> CommandResult:
+        """Show or toggle notification settings.
+
+        Available notifications:
+            inside_on    - Notify when inside sensor triggers
+            inside_off   - Notify when inside sensor stops
+            outside_on   - Notify when outside sensor triggers
+            outside_off  - Notify when outside sensor stops
+            low_battery  - Notify on low battery
+
+        Examples:
+            notify                     - Show all notification settings
+            notify inside_on           - Toggle inside_on notification
+            notify inside_on on        - Enable inside_on notification
+            notify low_battery off     - Disable low_battery notification
+        """
+        s = self.simulator.state
+
+        if not arg:
+            # Show all notification settings
+            lines = ["Notifications:"]
+            lines.append(f"  inside_on:   {'ON' if s.sensor_on_indoor else 'OFF'}")
+            lines.append(f"  inside_off:  {'ON' if s.sensor_off_indoor else 'OFF'}")
+            lines.append(f"  outside_on:  {'ON' if s.sensor_on_outdoor else 'OFF'}")
+            lines.append(f"  outside_off: {'ON' if s.sensor_off_outdoor else 'OFF'}")
+            lines.append(f"  low_battery: {'ON' if s.low_battery else 'OFF'}")
+            return CommandResult(True, "\n".join(lines))
+
+        parts = arg.split()
+        name = parts[0].lower()
+        value = parts[1].lower() if len(parts) > 1 else None
+
+        if name not in self._NOTIFY_NAMES:
+            return CommandResult(
+                False,
+                f"Unknown notification: {name}\n"
+                "Available: inside_on, inside_off, outside_on, outside_off, low_battery"
+            )
+
+        attr = self._NOTIFY_NAMES[name]
+
+        if value is None:
+            # Toggle
+            current = getattr(s, attr)
+            setattr(s, attr, not current)
+            new_state = "ON" if not current else "OFF"
+        elif value in ("on", "true", "1", "yes"):
+            setattr(s, attr, True)
+            new_state = "ON"
+        elif value in ("off", "false", "0", "no"):
+            setattr(s, attr, False)
+            new_state = "OFF"
+        else:
+            return CommandResult(False, f"Invalid value: {value}. Use on/off")
+
+        return CommandResult(True, f"Notification {name}: {new_state}")
 
     # -------------------------------------------------------------------------
     # Schedules
@@ -572,7 +708,7 @@ class CommandHandler:
             lines.append(f"  {name}: {desc}")
         return CommandResult(True, "\n".join(lines), {"scripts": scripts})
 
-    @command("run", ["r", "f", "file"], "Run a script", "<script>", category="scripts")
+    @command("run", ["r", "file"], "Run a script", "<script>", category="scripts")
     async def run(self, arg: Optional[str] = None) -> CommandResult:
         """Run a script (built-in name or file path)."""
         if not arg:
@@ -598,6 +734,7 @@ class CommandHandler:
     def status(self, arg: Optional[str] = None) -> CommandResult:
         """Show current simulator state."""
         s = self.simulator.state
+        bc = s.battery_config
         data = {
             "door": s.door_status,
             "power": s.power,
@@ -608,12 +745,44 @@ class CommandHandler:
             "cmd_lockout": s.cmd_lockout,
             "autoretract": s.autoretract,
             "hold_time": s.hold_time,
-            "battery": s.battery_percent,
+            "battery_percent": s.battery_percent,
+            "battery_present": s.battery_present,
+            "ac_present": s.ac_present,
+            "charge_rate": bc.charge_rate,
+            "discharge_rate": bc.discharge_rate,
             "pet_in_doorway": s.pet_in_doorway,
             "schedules": list(s.schedules.keys()),
             "open_cycles": s.total_open_cycles,
             "auto_retracts": s.total_auto_retracts,
+            "notify_inside_on": s.sensor_on_indoor,
+            "notify_inside_off": s.sensor_off_indoor,
+            "notify_outside_on": s.sensor_on_outdoor,
+            "notify_outside_off": s.sensor_off_outdoor,
+            "notify_low_battery": s.low_battery,
         }
+        # Build battery status string
+        battery_status = f"{s.battery_percent}%"
+        if not s.battery_present:
+            battery_status += " (no battery)"
+        elif s.ac_present and bc.charge_rate > 0:
+            battery_status += f" (charging {bc.charge_rate}%/min)"
+        elif not s.ac_present and bc.discharge_rate > 0:
+            battery_status += f" (discharging {bc.discharge_rate}%/min)"
+
+        # Build notifications string
+        notify_on = []
+        if s.sensor_on_indoor:
+            notify_on.append("in_on")
+        if s.sensor_off_indoor:
+            notify_on.append("in_off")
+        if s.sensor_on_outdoor:
+            notify_on.append("out_on")
+        if s.sensor_off_outdoor:
+            notify_on.append("out_off")
+        if s.low_battery:
+            notify_on.append("low_bat")
+        notify_str = ", ".join(notify_on) if notify_on else "none"
+
         lines = [
             "Current State:",
             f"  Door: {s.door_status}",
@@ -625,7 +794,9 @@ class CommandHandler:
             f"  Command lockout: {'ON' if s.cmd_lockout else 'OFF'}",
             f"  Auto-retract: {'ON' if s.autoretract else 'OFF'}",
             f"  Hold time: {s.hold_time}s",
-            f"  Battery: {s.battery_percent}%",
+            f"  Battery: {battery_status}",
+            f"  AC: {'connected' if s.ac_present else 'disconnected'}",
+            f"  Notifications: {notify_str}",
             f"  Pet in doorway: {'yes' if s.pet_in_doorway else 'no'}",
             f"  Schedules: {list(s.schedules.keys())}",
             f"  Open cycles: {s.total_open_cycles}",

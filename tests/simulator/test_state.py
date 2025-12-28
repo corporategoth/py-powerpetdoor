@@ -12,6 +12,7 @@ from powerpetdoor.simulator import (
     DoorSimulatorState,
     Schedule,
     DoorTimingConfig,
+    BatteryConfig,
 )
 from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
@@ -49,6 +50,38 @@ class TestDoorTimingConfig:
         assert config.rise_time == 2.0
         assert config.default_hold_time == 15
         assert config.slowing_time == 0.5
+
+
+# ============================================================================
+# BatteryConfig Tests
+# ============================================================================
+
+class TestBatteryConfig:
+    """Tests for BatteryConfig dataclass."""
+
+    def test_default_values(self):
+        """Default battery config should have reasonable defaults."""
+        config = BatteryConfig()
+        assert config.charge_rate == 1.0  # 1% per minute
+        assert config.discharge_rate == 0.1  # 0.1% per minute
+        assert config.update_interval == 60.0  # 60 seconds
+
+    def test_custom_values(self):
+        """Should accept custom battery config values."""
+        config = BatteryConfig(
+            charge_rate=5.0,
+            discharge_rate=0.5,
+            update_interval=30.0,
+        )
+        assert config.charge_rate == 5.0
+        assert config.discharge_rate == 0.5
+        assert config.update_interval == 30.0
+
+    def test_zero_rates(self):
+        """Should accept zero rates to disable automatic changes."""
+        config = BatteryConfig(charge_rate=0.0, discharge_rate=0.0)
+        assert config.charge_rate == 0.0
+        assert config.discharge_rate == 0.0
 
 
 # ============================================================================
@@ -238,6 +271,33 @@ class TestDoorSimulatorState:
         assert state.auto is True
         assert state.battery_percent == 85
         assert state.hold_time == 10
+        # Counters should default to 0
+        assert state.total_open_cycles == 0
+        assert state.total_auto_retracts == 0
+
+    def test_battery_config_default(self):
+        """State should have default battery config."""
+        state = DoorSimulatorState()
+        assert state.battery_config is not None
+        assert state.battery_config.charge_rate == 1.0
+        assert state.battery_config.discharge_rate == 0.1
+
+    def test_battery_config_custom(self):
+        """State should accept custom battery config."""
+        config = BatteryConfig(charge_rate=2.0, discharge_rate=0.5)
+        state = DoorSimulatorState(battery_config=config)
+        assert state.battery_config.charge_rate == 2.0
+        assert state.battery_config.discharge_rate == 0.5
+
+    def test_battery_presence(self):
+        """State should track battery and AC presence."""
+        state = DoorSimulatorState()
+        assert state.battery_present is True  # Default
+        assert state.ac_present is True  # Default
+
+        state = DoorSimulatorState(battery_present=False, ac_present=False)
+        assert state.battery_present is False
+        assert state.ac_present is False
 
     def test_get_settings(self):
         """get_settings should return protocol format."""

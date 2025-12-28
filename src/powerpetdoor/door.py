@@ -501,6 +501,14 @@ class PowerPetDoor:
             await self.close()
         # If closing, do nothing
 
+    async def cycle(self) -> None:
+        """Perform a full door cycle (open, hold for hold_time, close).
+
+        This simulates a pet triggering the sensor - the door opens,
+        holds for the configured hold time, then automatically closes.
+        """
+        await self.open()
+
     # =========================================================================
     # Sensors
     # =========================================================================

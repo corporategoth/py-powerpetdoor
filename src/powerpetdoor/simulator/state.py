@@ -61,6 +61,25 @@ class DoorTimingConfig:
 
 
 @dataclass
+class BatteryConfig:
+    """Configuration for battery charge/discharge simulation.
+
+    Rates are in percent per minute. Set to 0 to disable automatic changes.
+    """
+
+    # Charge rate when AC is present (percent per minute)
+    # Default: 1% per minute = ~100 minutes to full charge
+    charge_rate: float = 1.0
+
+    # Discharge rate when AC is absent (percent per minute)
+    # Default: 0.1% per minute = ~1000 minutes (~16 hours) to empty
+    discharge_rate: float = 0.1
+
+    # How often to update battery level (seconds)
+    update_interval: float = 60.0
+
+
+@dataclass
 class Schedule:
     """A door schedule entry.
 
@@ -238,15 +257,18 @@ class DoorSimulatorState:
     battery_present: bool = True
     ac_present: bool = True
 
+    # Battery simulation configuration
+    battery_config: BatteryConfig = field(default_factory=BatteryConfig)
+
     # Settings
     timezone: str = "America/New_York"
     hold_time: int = 10
     sensor_trigger_voltage: int = 100
     sleep_sensor_trigger_voltage: int = 50
 
-    # Stats
-    total_open_cycles: int = 1234
-    total_auto_retracts: int = 56
+    # Stats (default to 0 for fresh simulator)
+    total_open_cycles: int = 0
+    total_auto_retracts: int = 0
 
     # Firmware
     fw_major: int = 1

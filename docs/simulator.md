@@ -102,6 +102,7 @@ When running without `--exit-after-script`, the simulator provides an interactiv
 |-----|--------|
 | `i` | Trigger inside sensor (pet going out) |
 | `o` | Trigger outside sensor (pet coming in) |
+| `y` | Cycle door (open, hold, close) |
 | `c` | Close door immediately |
 | `h` | Open and hold (stays open until 'c') |
 
@@ -131,7 +132,26 @@ These simulate the physical buttons on the door unit:
 | `l` | Toggle command lockout |
 | `a` | Toggle auto-retract |
 | `t <sec>` | Set hold time (e.g., `t 5`) |
+
+### Battery Simulation
+
+| Command | Action |
+|---------|--------|
 | `b [pct]` | Set battery level (random if no value) |
+| `ac [connect\|disconnect]` | Toggle or set AC power connection |
+| `battery_present [on\|off]` | Toggle or set battery presence |
+| `charge_rate <rate>` | Set charge rate (%/min, 0 to disable) |
+| `discharge_rate <rate>` | Set discharge rate (%/min, 0 to disable) |
+
+### Notifications
+
+| Command | Action |
+|---------|--------|
+| `notify` | Show all notification settings |
+| `notify <name>` | Toggle a notification setting |
+| `notify <name> on\|off` | Set a notification setting |
+
+Available notification names: `inside_on`, `inside_off`, `outside_on`, `outside_off`, `low_battery`
 
 ### Schedules
 
@@ -146,14 +166,14 @@ These simulate the physical buttons on the door unit:
 | Command | Action |
 |---------|--------|
 | `r <name>` | Run a built-in script by name |
-| `f <path>` | Run a script from a file |
+| `file <path>` | Run a script from a file |
 | `/` | List available built-in scripts |
 
 ### Info
 
 | Key | Action |
 |-----|--------|
-| `?` | Show current door state |
+| `?` or `status` | Show current door state (including battery and notifications) |
 | `q` | Quit simulator |
 
 ## Programmatic Usage
@@ -203,6 +223,12 @@ async def demo_events(simulator):
 
     # Battery simulation
     simulator.set_battery(75)             # Set to 75%
+    simulator.set_ac_present(True)        # AC power connected
+    simulator.set_ac_present(False)       # AC power disconnected
+    simulator.set_battery_present(True)   # Battery installed
+    simulator.set_battery_present(False)  # Battery removed
+    simulator.set_charge_rate(1.0)        # 1%/min charge rate
+    simulator.set_discharge_rate(0.1)     # 0.1%/min discharge rate
 ```
 
 ### Modifying State
@@ -232,14 +258,15 @@ from powerpetdoor.simulator import Schedule
 
 async def manage_schedules(simulator):
     # Create a schedule (weekdays 7am-6pm)
+    # days_of_week is a list: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
     schedule = Schedule(
         index=1,
         enabled=True,
-        days_of_week=0b0111110,   # Mon-Fri (bit 0 = Sunday)
-        inside_start_hour=7,
-        inside_end_hour=18,
-        outside_start_hour=7,
-        outside_end_hour=18,
+        days_of_week=[0, 1, 1, 1, 1, 1, 0],  # Mon-Fri
+        inside=True,       # This schedule controls inside sensor
+        outside=False,
+        start_hour=7,
+        end_hour=18,
     )
 
     # Add and remove schedules
