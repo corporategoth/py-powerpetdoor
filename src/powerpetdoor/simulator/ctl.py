@@ -379,7 +379,7 @@ async def interactive_mode_async(
                         await response_queue.put((True, msg))
                         # Update client count from status responses
                         if "Clients:" in decoded:
-                            if "none" in decoded or "Clients: 0" in decoded:
+                            if "Clients: none" in decoded or "Clients: 0" in decoded:
                                 has_clients[0] = False
                             else:
                                 has_clients[0] = True
@@ -433,7 +433,9 @@ async def interactive_mode_async(
     try:
         success, response = await send_command_async("status")
         if success and "Clients:" in response:
-            if "none" in response or "Clients: 0" in response:
+            # Check specifically for "Clients: none" or "Clients: 0"
+            # (not just "none" anywhere, which would match "Notifications: none")
+            if "Clients: none" in response or "Clients: 0" in response:
                 has_clients[0] = False
             else:
                 has_clients[0] = True
