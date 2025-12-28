@@ -20,6 +20,7 @@ from powerpetdoor.simulator import (
     DoorSimulator,
     DoorSimulatorState,
     DoorTimingConfig,
+    Schedule,
 )
 from powerpetdoor.const import (
     CONFIG,
@@ -590,3 +591,86 @@ class TestErrorHandling:
 
         # Door should still be closed
         assert simulator.state.door_status == DOOR_STATE_CLOSED
+
+
+# ============================================================================
+# Schedule Callback Tests
+# ============================================================================
+
+class TestScheduleCallbacks:
+    """Test schedule callback system with simulator."""
+
+    @pytest.mark.asyncio
+    async def test_schedule_update_callback(self, client, simulator, tracker):
+        """Schedule add should trigger schedule_update callback."""
+        callback = tracker.make_callback("schedule")
+        client.add_listener("test", schedule_update=callback)
+
+        # Add a schedule via simulator
+        schedule = Schedule(
+            index=0,
+            enabled=True,
+            inside=True,
+            outside=False,
+            start_hour=6,
+            start_min=0,
+            end_hour=22,
+            end_min=0,
+        )
+        simulator.add_schedule(schedule)
+
+        # Wait for callback
+        await tracker.wait_for("schedule", timeout=2.0)
+
+        calls = tracker.get_calls("schedule")
+        assert len(calls) > 0
+        # Callback receives schedule dict (values are strings from protocol)
+        schedule_data = calls[0][0]
+        assert schedule_data["index"] == 0
+        assert schedule_data["enabled"] == "1"
+
+    @pytest.mark.asyncio
+    async def test_schedule_delete_callback(self, client, simulator, tracker):
+        """Schedule delete should trigger schedule_delete callback."""
+        # First add a schedule
+        schedule = Schedule(index=0, enabled=True, inside=True, outside=False)
+        simulator.state.schedules[0] = schedule
+
+        callback = tracker.make_callback("schedule_delete")
+        client.add_listener("test", schedule_delete=callback)
+
+        # Delete the schedule via simulator
+        simulator.remove_schedule(0)
+
+        # Wait for callback
+        await tracker.wait_for("schedule_delete", timeout=2.0)
+
+        calls = tracker.get_calls("schedule_delete")
+        assert len(calls) > 0
+        # Callback receives schedule index
+        deleted_index = calls[0][0]
+        assert deleted_index == 0
+
+    @pytest.mark.asyncio
+    async def test_schedule_modify_triggers_update(self, client, simulator, tracker):
+        """Modifying a schedule should trigger schedule_update callback."""
+        # First add a schedule directly to state (no broadcast)
+        schedule = Schedule(index=0, enabled=True, inside=True, outside=False)
+        simulator.state.schedules[0] = schedule
+
+        callback = tracker.make_callback("schedule")
+        client.add_listener("test", schedule_update=callback)
+
+        # Modify the schedule - this should broadcast
+        schedule.enabled = False
+        simulator.broadcast_schedule(schedule)
+
+        # Wait for callback
+        await tracker.wait_for("schedule", timeout=2.0)
+
+        calls = tracker.get_calls("schedule")
+        assert len(calls) > 0
+        # Callback receives schedule dict (values are strings from protocol)
+        schedule_data = calls[0][0]
+        assert schedule_data["index"] == 0
+        assert schedule_data["enabled"] == "0"

@@ -73,8 +73,10 @@ class LocalCommandHandler(InfoCommandsMixin, ControlCommandsMixin):
 
         A command is local if:
         - It's marked as local_only in the registry (exit, clear, history)
-        - It's help/? (ctl generates its own help to include local commands)
-        - It contains a help request (e.g., "sched help", "sched add ?")
+        - It's the top-level help/? command (ctl generates its own help)
+
+        Note: Subcommand help (e.g., "schedule add help") is sent to the daemon,
+        which has all the command handlers and can generate accurate help.
         """
         parts = line.split()
         if not parts:
@@ -82,14 +84,9 @@ class LocalCommandHandler(InfoCommandsMixin, ControlCommandsMixin):
 
         cmd = parts[0].lower()
 
-        # Help is always handled locally to show ctl-specific help
+        # Top-level help is handled locally to show ctl-specific help
         if cmd in ("help", "?"):
             return True
-
-        # Check if any part is a help request (subcommand help)
-        for part in parts[1:]:
-            if part.lower() in ("help", "?"):
-                return True
 
         registry = get_command_registry()
 

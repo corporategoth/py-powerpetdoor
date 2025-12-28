@@ -362,9 +362,9 @@ class DoorSimulatorState:
             FIELD_LOW_BATTERY_NOTIFICATIONS: "1" if self.low_battery else "0",
         }
 
-    def get_schedule_list(self) -> list:
-        """Get list of all schedules."""
-        return [sched.to_dict() for sched in self.schedules.values()]
+    def get_schedule_list(self) -> list[int]:
+        """Get list of schedule indices (matches real device behavior)."""
+        return list(self.schedules.keys())
 
     def is_sensor_allowed_by_schedule(self, sensor: str) -> bool:
         """Check if a sensor trigger is allowed based on schedules.

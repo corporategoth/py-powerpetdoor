@@ -196,6 +196,7 @@ class ScheduleCommandsMixin:
         if err:
             return err
         sched.enabled = True
+        self.simulator.broadcast_schedule(sched)
         return CommandResult(True, f"Schedule #{index} enabled")
 
     @subcommand(
@@ -218,6 +219,7 @@ class ScheduleCommandsMixin:
         if err:
             return err
         sched.enabled = False
+        self.simulator.broadcast_schedule(sched)
         return CommandResult(True, f"Schedule #{index} disabled")
 
     @subcommand(
@@ -245,6 +247,7 @@ class ScheduleCommandsMixin:
         if err:
             return err
         sched.days_of_week = days
+        self.simulator.broadcast_schedule(sched)
         return CommandResult(True, f"Schedule #{index} days: {self._format_days(days)}")
 
     @subcommand(
@@ -278,6 +281,7 @@ class ScheduleCommandsMixin:
         sched.start_min = start_m
         sched.end_hour = end_h
         sched.end_min = end_m
+        self.simulator.broadcast_schedule(sched)
         return CommandResult(
             True,
             f"Schedule #{index} time: "

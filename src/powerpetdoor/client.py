@@ -309,6 +309,8 @@ class PowerPetDoorClient:
         self.remote_id_listeners: dict[str, Callable[[bool], None]] = {}
         self.remote_key_listeners: dict[str, Callable[[bool], None]] = {}
         self.reset_reason_listeners: dict[str, Callable[[str], None]] = {}
+        self.schedule_update_listeners: dict[str, Callable[[dict], None]] = {}
+        self.schedule_delete_listeners: dict[str, Callable[[int], None]] = {}
 
         self.on_connect: dict[str, Callable[[], Awaitable[None]]] = {}
         self.on_disconnect: dict[str, Callable[[], Awaitable[None]]] = {}
@@ -362,6 +364,8 @@ class PowerPetDoorClient:
                      remote_id_update: Callable[[bool], None] | None = None,
                      remote_key_update: Callable[[bool], None] | None = None,
                      reset_reason_update: Callable[[str], None] | None = None,
+                     schedule_update: Callable[[dict], None] | None = None,
+                     schedule_delete: Callable[[int], None] | None = None,
                      ) -> None:
         """Register callbacks for device state updates.
 
@@ -381,6 +385,8 @@ class PowerPetDoorClient:
             remote_id_update: Called with True if device has remote ID
             remote_key_update: Called with True if device has remote key
             reset_reason_update: Called with reset reason string
+            schedule_update: Called with schedule dict when schedule is added/updated
+            schedule_delete: Called with schedule index when schedule is deleted
         """
         if door_status_update:
             self.door_status_listeners[name] = door_status_update
@@ -455,6 +461,10 @@ class PowerPetDoorClient:
             self.remote_key_listeners[name] = remote_key_update
         if reset_reason_update:
             self.reset_reason_listeners[name] = reset_reason_update
+        if schedule_update:
+            self.schedule_update_listeners[name] = schedule_update
+        if schedule_delete:
+            self.schedule_delete_listeners[name] = schedule_delete
 
     def del_listener(self, name: str) -> None:
         """Remove all listeners registered under a name."""
@@ -483,6 +493,8 @@ class PowerPetDoorClient:
         del self.remote_id_listeners[name]
         del self.remote_key_listeners[name]
         del self.reset_reason_listeners[name]
+        del self.schedule_update_listeners[name]
+        del self.schedule_delete_listeners[name]
 
     # -------------------------------------------------------------------------
     # Response Handlers - registered via decorator pattern
@@ -728,14 +740,22 @@ class PowerPetDoorClient:
     @ResponseHandlerRegistry.handler(CMD_DELETE_SCHEDULE)
     def _handle_delete_schedule(self, msg: dict, future) -> None:
         """Handle delete schedule response."""
-        if future:
-            future.set_result(msg[FIELD_INDEX])
+        if FIELD_INDEX in msg:
+            index = msg[FIELD_INDEX]
+            for callback in self.schedule_delete_listeners.values():
+                callback(index)
+            if future:
+                future.set_result(index)
 
     @ResponseHandlerRegistry.handler(CMD_GET_SCHEDULE, CMD_SET_SCHEDULE)
     def _handle_schedule(self, msg: dict, future) -> None:
         """Handle get/set schedule response."""
-        if future:
-            future.set_result(msg[FIELD_SCHEDULE])
+        if FIELD_SCHEDULE in msg:
+            schedule = msg[FIELD_SCHEDULE]
+            for callback in self.schedule_update_listeners.values():
+                callback(schedule)
+            if future:
+                future.set_result(schedule)
 
     @ResponseHandlerRegistry.handler(CMD_HAS_REMOTE_ID)
     def _handle_remote_id(self, msg: dict, future) -> None:

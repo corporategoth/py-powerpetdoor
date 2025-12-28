@@ -43,6 +43,8 @@ from ..const import (
     CMD_GET_HW_INFO,
     CMD_GET_NOTIFICATIONS,
     CMD_GET_SCHEDULE_LIST,
+    CMD_SET_SCHEDULE,
+    CMD_DELETE_SCHEDULE,
     CMD_GET_SETTINGS,
     NOTIFY_LOW_BATTERY,
     DOOR_TO_PHONE,
@@ -60,7 +62,9 @@ from ..const import (
     FIELD_NOTIFICATIONS,
     FIELD_OUTSIDE,
     FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
+    FIELD_INDEX,
     FIELD_POWER,
+    FIELD_SCHEDULE,
     FIELD_SCHEDULES,
     FIELD_SETTINGS,
     FIELD_SUCCESS,
@@ -406,6 +410,26 @@ class DoorSimulator:
             protocol._send({
                 "CMD": CMD_GET_SCHEDULE_LIST,
                 FIELD_SCHEDULES: self.state.get_schedule_list(),
+                FIELD_SUCCESS: SUCCESS_TRUE,
+                FIELD_DIRECTION: DOOR_TO_PHONE,
+            })
+
+    def broadcast_schedule(self, schedule: Schedule):
+        """Broadcast a single schedule add/update to all connected clients."""
+        for protocol in self.protocols:
+            protocol._send({
+                "CMD": CMD_SET_SCHEDULE,
+                FIELD_SCHEDULE: schedule.to_dict(),
+                FIELD_SUCCESS: SUCCESS_TRUE,
+                FIELD_DIRECTION: DOOR_TO_PHONE,
+            })
+
+    def broadcast_schedule_delete(self, index: int):
+        """Broadcast a schedule deletion to all connected clients."""
+        for protocol in self.protocols:
+            protocol._send({
+                "CMD": CMD_DELETE_SCHEDULE,
+                FIELD_INDEX: index,
                 FIELD_SUCCESS: SUCCESS_TRUE,
                 FIELD_DIRECTION: DOOR_TO_PHONE,
             })
@@ -846,9 +870,11 @@ class DoorSimulator:
         """Add or update a schedule."""
         self.state.schedules[schedule.index] = schedule
         logger.info(f"Simulator: Added schedule {schedule.index}")
+        self.broadcast_schedule(schedule)
 
     def remove_schedule(self, index: int):
         """Remove a schedule by index."""
         if index in self.state.schedules:
             del self.state.schedules[index]
             logger.info(f"Simulator: Removed schedule {index}")
+            self.broadcast_schedule_delete(index)

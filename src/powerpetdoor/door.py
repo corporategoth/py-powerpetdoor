@@ -355,6 +355,7 @@ class PowerPetDoor:
         self._settings_callbacks: list[Callable[[dict[str, Any]], None]] = []
         self._connect_callbacks: list[Callable[[], None]] = []
         self._disconnect_callbacks: list[Callable[[], None]] = []
+        self._schedule_callbacks: list[Callable[[list["Schedule"]], None]] = []
 
     # =========================================================================
     # Connection
@@ -426,6 +427,8 @@ class PowerPetDoor:
                 FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: self._on_notify_outside_off,
                 FIELD_LOW_BATTERY_NOTIFICATIONS: self._on_notify_low_battery,
             },
+            schedule_update=self._on_schedule_update,
+            schedule_delete=self._on_schedule_delete,
         )
 
         self._client.add_handlers(
@@ -918,14 +921,43 @@ class PowerPetDoor:
     ) -> list[Schedule]:
         """Refresh and return the schedule list.
 
+        This performs a two-step fetch matching the real device behavior:
+        1. Get list of schedule indices
+        2. Fetch each schedule individually
+
         Args:
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
-        result = await asyncio.wait_for(
+        effective_timeout = timeout if timeout is not None else self.default_timeout
+
+        # Step 1: Get schedule indices
+        indices = await asyncio.wait_for(
             self._client.send_message(CONFIG, CMD_GET_SCHEDULE_LIST, notify=True),
-            timeout=timeout if timeout is not None else self.default_timeout,
+            timeout=effective_timeout,
         )
-        self._schedules = [Schedule.from_dict(s) for s in (result or [])]
+
+        if not indices:
+            self._schedules = []
+            return []
+
+        # Step 2: Fetch each schedule individually
+        schedules = []
+        for idx in indices:
+            try:
+                result = await asyncio.wait_for(
+                    self._client.send_message(
+                        CONFIG, CMD_GET_SCHEDULE, notify=True, **{FIELD_INDEX: idx}
+                    ),
+                    timeout=effective_timeout,
+                )
+                if result:
+                    schedules.append(Schedule.from_dict(result))
+            except asyncio.TimeoutError:
+                logger.warning("Timeout fetching schedule %d", idx)
+            except Exception:
+                logger.exception("Error fetching schedule %d", idx)
+
+        self._schedules = schedules
         return self._schedules.copy()
 
     # =========================================================================
@@ -947,6 +979,14 @@ class PowerPetDoor:
     def on_disconnect(self, callback: Callable[[], None]) -> None:
         """Register a callback for when the door disconnects."""
         self._disconnect_callbacks.append(callback)
+
+    def on_schedule_change(self, callback: Callable[[list["Schedule"]], None]) -> None:
+        """Register a callback for schedule changes.
+
+        The callback receives the updated list of schedules whenever
+        a schedule is added, updated, or deleted.
+        """
+        self._schedule_callbacks.append(callback)
 
     # =========================================================================
     # Refresh
@@ -1183,3 +1223,32 @@ class PowerPetDoor:
             latency_ms: Round-trip latency in milliseconds.
         """
         self._latency = latency_ms / 1000.0
+
+    def _on_schedule_update(self, schedule_data: dict[str, Any]) -> None:
+        """Handle schedule add/update from client."""
+        schedule = Schedule.from_dict(schedule_data)
+        # Update or add the schedule in our cache
+        for i, s in enumerate(self._schedules):
+            if s.index == schedule.index:
+                self._schedules[i] = schedule
+                break
+        else:
+            self._schedules.append(schedule)
+        # Sort by index for consistent ordering
+        self._schedules.sort(key=lambda s: s.index)
+        # Notify callbacks
+        self._notify_schedule_change()
+
+    def _on_schedule_delete(self, index: int) -> None:
+        """Handle schedule delete from client."""
+        self._schedules = [s for s in self._schedules if s.index != index]
+        self._notify_schedule_change()
+
+    def _notify_schedule_change(self) -> None:
+        """Notify all schedule callbacks with the current schedule list."""
+        schedules_copy = self._schedules.copy()
+        for callback in self._schedule_callbacks:
+            try:
+                callback(schedules_copy)
+            except Exception:
+                logger.exception("Error in schedule callback")

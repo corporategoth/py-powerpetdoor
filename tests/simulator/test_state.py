@@ -321,14 +321,14 @@ class TestDoorSimulatorState:
         assert notifications["lowBatteryNotificationsEnabled"] == "1"
 
     def test_get_schedule_list(self):
-        """get_schedule_list should return list of schedule dicts."""
+        """get_schedule_list should return list of schedule indices."""
         state = DoorSimulatorState()
         state.schedules[0] = Schedule(index=0)
         state.schedules[1] = Schedule(index=1)
         result = state.get_schedule_list()
         assert len(result) == 2
-        assert result[0]["index"] == 0
-        assert result[1]["index"] == 1
+        assert result[0] == 0
+        assert result[1] == 1
 
     def test_is_sensor_allowed_by_schedule_no_auto(self):
         """Should allow all sensors when auto/timers disabled."""
