@@ -1,3 +1,8 @@
+# Copyright (c) 2025 Preston Elder
+#
+# This software is released under the MIT License.
+# https://opensource.org/licenses/MIT
+
 """Scripting system for Power Pet Door simulator.
 
 This module provides a YAML-based scripting system for automating

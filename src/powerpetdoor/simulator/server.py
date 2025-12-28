@@ -1,3 +1,8 @@
+# Copyright (c) 2025 Preston Elder
+#
+# This software is released under the MIT License.
+# https://opensource.org/licenses/MIT
+
 """Power Pet Door simulator server.
 
 This module contains the main DoorSimulator class that provides a TCP server

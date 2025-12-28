@@ -1,3 +1,8 @@
+# Copyright (c) 2025 Preston Elder
+#
+# This software is released under the MIT License.
+# https://opensource.org/licenses/MIT
+
 """Power Pet Door simulator submodule.
 
 This module provides a simulated Power Pet Door that speaks the same

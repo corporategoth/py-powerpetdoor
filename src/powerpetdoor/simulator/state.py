@@ -1,3 +1,8 @@
+# Copyright (c) 2025 Preston Elder
+#
+# This software is released under the MIT License.
+# https://opensource.org/licenses/MIT
+
 """State dataclasses for Power Pet Door simulator.
 
 This module contains all the state-related dataclasses used by the simulator.

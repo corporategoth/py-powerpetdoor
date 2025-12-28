@@ -1,3 +1,8 @@
+# Copyright (c) 2025 Preston Elder
+#
+# This software is released under the MIT License.
+# https://opensource.org/licenses/MIT
+
 """CLI for Power Pet Door simulator.
 
 This module provides the interactive command-line interface for running
