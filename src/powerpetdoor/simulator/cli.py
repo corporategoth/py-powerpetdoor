@@ -12,238 +12,26 @@ and controlling the door simulator.
 import asyncio
 import logging
 import sys
-from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from .commands import CommandHandler, _command_registry
+from .commands import CommandHandler
 from .server import DoorSimulator
 from ..tz_utils import async_init_timezone_cache
+
+# Import shared prompt_toolkit components
+from .prompt_common import (
+    PROMPT_TOOLKIT_AVAILABLE,
+    CLI_HISTORY_FILE as HISTORY_FILE,
+    InteractiveSession,
+)
+
+if PROMPT_TOOLKIT_AVAILABLE:
+    from prompt_toolkit.patch_stdout import patch_stdout
 
 if TYPE_CHECKING:
     from .scripting import ScriptRunner
 
 logger = logging.getLogger(__name__)
-
-# Try to import prompt_toolkit for enhanced interactive features
-try:
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-    from prompt_toolkit.completion import Completer, Completion
-    from prompt_toolkit.formatted_text import FormattedText
-    from prompt_toolkit.history import FileHistory, InMemoryHistory
-    from prompt_toolkit.lexers import Lexer
-    from prompt_toolkit.patch_stdout import patch_stdout
-    from prompt_toolkit.styles import Style
-    PROMPT_TOOLKIT_AVAILABLE = True
-except ImportError:
-    PROMPT_TOOLKIT_AVAILABLE = False
-
-# History file path
-HISTORY_FILE = Path.home() / ".powerpetdoor_simulator_history"
-
-# Style for syntax highlighting
-SIMULATOR_STYLE = Style.from_dict({
-    # Commands
-    "command": "#00aa00 bold",  # Green for commands
-    "alias": "#00aa00",  # Green (not bold) for aliases
-    # Arguments
-    "subcommand": "#0088ff",  # Blue for subcommands
-    "option": "#ff8800",  # Orange for on/off options
-    "number": "#aa00aa",  # Purple for numbers
-    # Prompt - connected (white) vs disconnected (gray)
-    "prompt.connected": "#ffffff bold",
-    "prompt.disconnected": "#888888",
-}) if PROMPT_TOOLKIT_AVAILABLE else None
-
-# Command categories for syntax highlighting
-_COMMANDS = set()
-_ALIASES = set()
-_SUBCOMMANDS = {"list", "add", "del", "delete", "rm", "remove", "on", "off",
-                "enable", "disable", "days", "time", "clear"}
-_OPTIONS = {"on", "off", "connect", "disconnect", "c", "d"}
-
-
-def _init_command_sets():
-    """Initialize command sets for syntax highlighting."""
-    global _COMMANDS, _ALIASES
-    for info in _command_registry.values():
-        _COMMANDS.add(info.name)
-        for alias in info.aliases:
-            _ALIASES.add(alias)
-
-
-# Only define prompt_toolkit classes when available
-if PROMPT_TOOLKIT_AVAILABLE:
-    class SimulatorLexer(Lexer):
-        """Syntax highlighter for simulator commands."""
-
-        def lex_document(self, document):
-            """Return a lexer function for the document."""
-            # Initialize command sets if needed
-            if not _COMMANDS:
-                _init_command_sets()
-
-            def get_line_tokens(line_number):
-                line = document.lines[line_number]
-                tokens = []
-                words = line.split()
-                pos = 0
-
-                for i, word in enumerate(words):
-                    # Find start position of this word
-                    start = line.find(word, pos)
-                    # Add any whitespace before
-                    if start > pos:
-                        tokens.append(("", line[pos:start]))
-
-                    # Determine token style
-                    if i == 0:
-                        # First word is command
-                        if word.lower() in _COMMANDS:
-                            tokens.append(("class:command", word))
-                        elif word.lower() in _ALIASES:
-                            tokens.append(("class:alias", word))
-                        else:
-                            tokens.append(("", word))
-                    elif i == 1:
-                        # Second word might be subcommand or option
-                        if word.lower() in _SUBCOMMANDS:
-                            tokens.append(("class:subcommand", word))
-                        elif word.lower() in _OPTIONS:
-                            tokens.append(("class:option", word))
-                        elif word.replace(".", "").replace("-", "").isdigit():
-                            tokens.append(("class:number", word))
-                        else:
-                            tokens.append(("", word))
-                    else:
-                        # Other words
-                        if word.replace(".", "").replace("-", "").replace(":", "").isdigit():
-                            tokens.append(("class:number", word))
-                        elif word.lower() in _OPTIONS:
-                            tokens.append(("class:option", word))
-                        else:
-                            tokens.append(("", word))
-
-                    pos = start + len(word)
-
-                # Add trailing whitespace
-                if pos < len(line):
-                    tokens.append(("", line[pos:]))
-
-                return tokens
-
-            return get_line_tokens
-
-    class SimulatorCompleter(Completer):
-        """Tab completion for simulator commands using prompt_toolkit."""
-
-        def __init__(self, cmd_handler: CommandHandler):
-            self.cmd_handler = cmd_handler
-
-        def _get_commands(self) -> list[tuple[str, str]]:
-            """Get all unique command names with descriptions."""
-            seen = set()
-            commands = []
-            for info in _command_registry.values():
-                if info.name not in seen:
-                    seen.add(info.name)
-                    commands.append((info.name, info.description))
-                    for alias in info.aliases:
-                        if alias not in seen:
-                            seen.add(alias)
-                            commands.append((alias, f"Alias for {info.name}"))
-            return sorted(commands, key=lambda x: x[0])
-
-        def _get_subcommands(self, cmd: str) -> list[tuple[str, str]]:
-            """Get subcommands for a command with descriptions."""
-            if cmd in ("schedule", "sched"):
-                return [
-                    ("list", "Show all schedules"),
-                    ("add", "Add a new schedule"),
-                    ("del", "Delete a schedule"),
-                    ("on", "Enable a schedule"),
-                    ("off", "Disable a schedule"),
-                    ("days", "Set schedule days"),
-                    ("time", "Set schedule time window"),
-                ]
-            elif cmd in ("notify",):
-                return [
-                    ("inside_on", "Inside sensor activated notification"),
-                    ("inside_off", "Inside sensor deactivated notification"),
-                    ("outside_on", "Outside sensor activated notification"),
-                    ("outside_off", "Outside sensor deactivated notification"),
-                    ("low_battery", "Low battery notification"),
-                ]
-            elif cmd in ("run", "r", "file"):
-                try:
-                    from .scripting import list_builtin_scripts
-                    return [(name, desc) for name, desc in list_builtin_scripts()]
-                except Exception:
-                    return []
-            elif cmd in ("history", "hist"):
-                return [
-                    ("clear", "Clear command history"),
-                ]
-            return []
-
-        def _get_toggle_options(self, cmd: str) -> list[tuple[str, str]]:
-            """Get toggle options for on/off commands."""
-            toggle_cmds = {
-                "power", "p", "auto", "m", "inside_enable", "n",
-                "outside_enable", "u", "safety", "s", "lockout", "l",
-                "autoretract", "a", "battery_present", "bp"
-            }
-            if cmd in toggle_cmds:
-                return [("on", "Enable"), ("off", "Disable")]
-            elif cmd in ("ac",):
-                return [("connect", "Connect AC power"), ("disconnect", "Disconnect AC power")]
-            return []
-
-        def get_completions(self, document, complete_event):
-            """Generate completions for the current input."""
-            text = document.text_before_cursor
-            words = text.split()
-
-            # Determine what we're completing
-            if not text or text.endswith(" "):
-                # Starting a new word
-                word_before = ""
-                completing_first = len(words) == 0
-            else:
-                # Completing current word
-                word_before = words[-1] if words else ""
-                completing_first = len(words) == 1
-
-            if completing_first or not words:
-                # Complete command names
-                for cmd, desc in self._get_commands():
-                    if cmd.startswith(word_before):
-                        yield Completion(
-                            cmd,
-                            start_position=-len(word_before),
-                            display_meta=desc,
-                        )
-            else:
-                # Complete subcommands or options
-                cmd = words[0].lower()
-                subcommands = self._get_subcommands(cmd)
-                if subcommands:
-                    for sub, desc in subcommands:
-                        if sub.startswith(word_before):
-                            yield Completion(
-                                sub,
-                                start_position=-len(word_before),
-                                display_meta=desc,
-                            )
-                else:
-                    options = self._get_toggle_options(cmd)
-                    for opt, desc in options:
-                        if opt.startswith(word_before):
-                            yield Completion(
-                                opt,
-                                start_position=-len(word_before),
-                                display_meta=desc,
-                            )
 
 
 class InteractivePrompt:
@@ -348,6 +136,7 @@ async def run_simulator(
     wait_for_client: bool = False,
     control_port: Optional[int] = None,
     history_file: Optional[str] = None,
+    firmware: Optional[tuple[int, int, int]] = None,
 ):
     """Run the Power Pet Door simulator.
 
@@ -363,6 +152,7 @@ async def run_simulator(
         run_for: Maximum run time in seconds (oneshot can exit earlier)
         wait_for_client: If True, delay script start until a client connects
         control_port: Port for control commands (default: port + 1 in daemon/script mode)
+        firmware: Firmware version as (major, minor, patch) tuple
 
     Returns:
         Script result (True if all passed, False if any failed, None if no scripts)
@@ -370,12 +160,22 @@ async def run_simulator(
     import sys
 
     from .scripting import ScriptRunner
+    from .state import DoorSimulatorState
 
     # Initialize timezone cache for IANA to POSIX conversion
     await async_init_timezone_cache()
 
+    # Create state with optional firmware version
+    state = None
+    if firmware:
+        state = DoorSimulatorState(
+            fw_major=firmware[0],
+            fw_minor=firmware[1],
+            fw_patch=firmware[2],
+        )
+
     # Start the simulator
-    simulator = DoorSimulator(host=host, port=port)
+    simulator = DoorSimulator(host=host, port=port, state=state)
     await simulator.start()
 
     script_runner = ScriptRunner(simulator)
@@ -397,6 +197,12 @@ async def run_simulator(
     # Determine mode
     interactive = not scripts and not daemon
 
+    # Set interactive and CLI mode before printing help so interactive-only commands appear
+    # and exit/q/quit are shown as aliases for shutdown
+    if interactive:
+        cmd_handler.set_interactive_mode(True)
+        cmd_handler.set_cli_mode(True)
+
     # Print startup info
     print(f"Simulator started on port {port}")
     if control_port:
@@ -409,13 +215,38 @@ async def run_simulator(
 
     # Start control server if configured
     control_server = None
+    control_clients: set[asyncio.StreamWriter] = set()
+    control_log_handler: logging.Handler | None = None
+
     if control_port:
+
+        class ControlClientLogHandler(logging.Handler):
+            """Logging handler that broadcasts to control clients."""
+
+            def emit(self, record):
+                try:
+                    msg = self.format(record)
+                    # Send log messages with LOG: prefix
+                    data = f"LOG: {msg}\n".encode()
+                    # Broadcast to all connected control clients
+                    for writer in list(control_clients):
+                        try:
+                            writer.write(data)
+                            # Don't await drain here - it would block
+                            # The message will be sent eventually
+                        except Exception:
+                            # Client disconnected, will be cleaned up later
+                            pass
+                except Exception:
+                    self.handleError(record)
+
         async def handle_control_client(
             reader: asyncio.StreamReader, writer: asyncio.StreamWriter
         ):
             """Handle a control connection."""
             addr = writer.get_extra_info("peername")
             logger.info(f"Control connection from {addr}")
+            control_clients.add(writer)
             try:
                 while True:
                     line = await reader.readline()
@@ -426,10 +257,12 @@ async def run_simulator(
                         continue
 
                     result = await cmd_handler.execute(cmd)
+                    # Escape newlines for protocol (ctl will unescape)
+                    escaped_msg = result.message.replace('\\', '\\\\').replace('\n', '\\n')
                     if result.success:
-                        writer.write(f"OK: {result.message}\n".encode())
+                        writer.write(f"OK: {escaped_msg}\n".encode())
                     else:
-                        writer.write(f"ERROR: {result.message}\n".encode())
+                        writer.write(f"ERROR: {escaped_msg}\n".encode())
                     await writer.drain()
 
                     # Check if we should exit
@@ -438,6 +271,7 @@ async def run_simulator(
             except Exception as e:
                 logger.error(f"Control client error: {e}")
             finally:
+                control_clients.discard(writer)
                 writer.close()
                 await writer.wait_closed()
                 logger.info(f"Control connection closed from {addr}")
@@ -446,6 +280,13 @@ async def run_simulator(
             handle_control_client, host, control_port
         )
         logger.info(f"Control server listening on {host}:{control_port}")
+
+        # Install log handler to broadcast to control clients
+        control_log_handler = ControlClientLogHandler()
+        control_log_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        )
+        logging.getLogger().addHandler(control_log_handler)
 
     # Process queued scripts in background
     async def process_script_queue():
@@ -558,112 +399,41 @@ async def run_simulator(
             pass
 
         if stdin_available:
-            prompt_text = f"{host}:{port}> "
-
             if PROMPT_TOOLKIT_AVAILABLE:
-                # Dynamic prompt that changes color based on connection status
-                def get_prompt():
-                    if simulator.protocols:
-                        return FormattedText([("class:prompt.connected", prompt_text)])
-                    else:
-                        return FormattedText([("class:prompt.disconnected", prompt_text)])
-                # Use prompt_toolkit for enhanced interactive features
-                # Determine history: None disables, otherwise use file path
+                # Use InteractiveSession.create for standard prompt setup
                 history_path = history_file if history_file else str(HISTORY_FILE)
-                if history_path.lower() == "none":
-                    history = InMemoryHistory()
-                else:
-                    history = FileHistory(history_path)
-                session = PromptSession(
-                    history=history,
-                    completer=SimulatorCompleter(cmd_handler),
-                    complete_while_typing=False,
-                    lexer=SimulatorLexer(),
-                    style=SIMULATOR_STYLE,
-                    auto_suggest=AutoSuggestFromHistory(),
-                    enable_history_search=True,  # Ctrl+R for reverse search
+                interactive = InteractiveSession.create(
+                    host=host,
+                    port=port,
+                    history_file=history_path,
+                    is_connected=lambda: bool(simulator.protocols),
                 )
 
-                # Register history command handler
-                cmd_handler.set_history(history)
-
-                def remove_last_history_entry():
-                    """Remove the last (most recent) entry from history (file and memory)."""
-                    try:
-                        # Remove from in-memory history
-                        # Note: _loaded_strings is stored newest-first, so pop(0) removes the most recent
-                        if hasattr(history, '_loaded_strings') and history._loaded_strings:
-                            history._loaded_strings.pop(0)
-                        # Rewrite the history file without the last entry
-                        if hasattr(history, 'filename'):
-                            import datetime
-                            entries = list(history.get_strings())
-                            with open(history.filename, 'w') as f:
-                                for entry in entries:
-                                    # FileHistory format: timestamp comment, then +line for each line
-                                    f.write(f'\n# {datetime.datetime.now()}\n')
-                                    for line in entry.split('\n'):
-                                        f.write(f'+{line}\n')
-                    except Exception:
-                        pass  # Ignore errors in history cleanup
-
-                def replace_last_history_entry(new_command: str):
-                    """Replace the last (most recent) history entry with a different command."""
-                    try:
-                        # Replace in-memory history
-                        # Note: _loaded_strings is stored newest-first, so [0] is the most recent
-                        if hasattr(history, '_loaded_strings') and history._loaded_strings:
-                            history._loaded_strings[0] = new_command
-                        # Append the new command to file (it will be at end, old entry is orphaned but harmless)
-                        # Actually, rewrite the file to keep it clean
-                        if hasattr(history, 'filename'):
-                            import datetime
-                            entries = list(history.get_strings())
-                            with open(history.filename, 'w') as f:
-                                for entry in entries:
-                                    f.write(f'\n# {datetime.datetime.now()}\n')
-                                    for line in entry.split('\n'):
-                                        f.write(f'+{line}\n')
-                    except Exception as e:
-                        logging.error(f"replace_last_history_entry error: {e}")
+                # Register history with command handler (for history command)
+                if interactive.history:
+                    cmd_handler.set_history(interactive.history)
 
                 async def interactive_input_loop():
                     """Async input loop using prompt_toolkit."""
                     try:
-                        while not stop_event.is_set():
-                            try:
-                                line = await session.prompt_async(get_prompt)
-                                line = line.strip()
-                                if not line:
-                                    continue
-                                result = await cmd_handler.execute(line)
-                                # Handle history for ! commands
-                                if line.startswith("!") and " -> " in result.message:
-                                    # Extract resolved command from "!1 -> status\n..."
-                                    first_line = result.message.split("\n", 1)[0]
-                                    if " -> " in first_line:
-                                        resolved_cmd = first_line.split(" -> ", 1)[1]
-                                        if result.success:
-                                            # Replace !1 with the resolved command
-                                            replace_last_history_entry(resolved_cmd)
-                                        else:
-                                            # Failed - remove entirely
-                                            remove_last_history_entry()
-                                elif not result.success:
-                                    # Remove failed commands from history
-                                    remove_last_history_entry()
+                        async for input_line in interactive.input_loop(
+                            stop_check=stop_event.is_set
+                        ):
+                            if input_line.was_history_recall:
+                                print(f">>> {input_line.original} -> {input_line.resolved}")
+
+                            result = await cmd_handler.execute(input_line.resolved)
+                            interactive.handle_result(input_line, result.success)
+
+                            if result.message:
                                 print(f">>> {result.message}")
-                                if stop_event.is_set():
-                                    break
-                            except EOFError:
-                                # Ctrl+D
-                                stop_event.set()
+                            if stop_event.is_set():
                                 break
-                            except KeyboardInterrupt:
-                                # Ctrl+C - just show new prompt
-                                continue
                     except asyncio.CancelledError:
                         pass
+                    finally:
+                        # Signal stop on EOF
+                        stop_event.set()
 
                 # Enter patch_stdout context for the rest of the run
                 # This ensures all log output is handled properly with the prompt
@@ -684,6 +454,7 @@ async def run_simulator(
                 input_task = asyncio.create_task(interactive_input_loop())
             else:
                 # Fallback to basic input with InteractivePrompt
+                prompt_text = f"{host}:{port}> "
                 prompt = InteractivePrompt(prompt_text)
                 reader_removed = [False]  # Use list to allow mutation in nested function
 
@@ -706,15 +477,18 @@ async def run_simulator(
                     # Don't show prompt again after shutdown command
                     if stop_event.is_set():
                         prompt.clear_line()
-                        print(f">>> {result.message}")
+                        if result.message:
+                            print(f">>> {result.message}")
                         # Remove stdin reader immediately to avoid blocking shutdown
                         reader_removed[0] = True
                         try:
                             loop.remove_reader(sys.stdin.fileno())
                         except Exception:
                             pass
-                    else:
+                    elif result.message:
                         prompt.output(f">>> {result.message}")
+                    else:
+                        prompt.show()
 
                 prompt.enable()
                 loop.add_reader(sys.stdin.fileno(), handle_input)
@@ -760,6 +534,8 @@ async def run_simulator(
         if control_server:
             control_server.close()
             await control_server.wait_closed()
+        if control_log_handler:
+            logging.getLogger().removeHandler(control_log_handler)
         await simulator.stop()
 
     return script_result[0]
@@ -851,6 +627,11 @@ def main():
             default=str(HISTORY_FILE),
             help=f"History file path, or 'none' to disable (default: {HISTORY_FILE})"
         )
+    parser.add_argument(
+        "--firmware", "-f",
+        metavar="VERSION",
+        help="Firmware version to report (e.g., '1.2.3', default: 1.2.3)"
+    )
 
     args = parser.parse_args()
 
@@ -884,6 +665,17 @@ def main():
     else:
         control_port = None
 
+    # Parse firmware version if provided
+    firmware = None
+    if args.firmware:
+        try:
+            parts = args.firmware.split(".")
+            if len(parts) != 3:
+                parser.error("Firmware version must be in format major.minor.patch (e.g., '1.2.3')")
+            firmware = (int(parts[0]), int(parts[1]), int(parts[2]))
+        except ValueError:
+            parser.error("Firmware version must contain only numbers (e.g., '1.2.3')")
+
     try:
         result = asyncio.run(run_simulator(
             host=args.host,
@@ -897,6 +689,7 @@ def main():
             wait_for_client=args.wait_for_client,
             control_port=control_port,
             history_file=args.history,
+            firmware=firmware,
         ))
 
         # Exit with appropriate code for CI/CD

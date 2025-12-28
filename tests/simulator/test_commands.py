@@ -147,14 +147,14 @@ class TestNotifyCommand:
         """notify with unknown name should fail."""
         result = await command_handler.execute("notify unknown_notify")
         assert result.success is False
-        assert "Unknown notification" in result.message
+        assert "Unknown notify subcommand" in result.message
 
     @pytest.mark.asyncio
     async def test_notify_invalid_value(self, command_handler):
         """notify with invalid value should fail."""
         result = await command_handler.execute("notify inside_on maybe")
         assert result.success is False
-        assert "Invalid value" in result.message
+        assert "not valid" in result.message
 
 
 # ============================================================================
@@ -351,10 +351,10 @@ class TestBroadcastCommand:
 
     @pytest.mark.asyncio
     async def test_broadcast_no_arg_shows_types(self, command_handler):
-        """broadcast with no arg should show available types."""
+        """broadcast with no arg should show available subcommands."""
         result = await command_handler.execute("broadcast")
         assert result.success
-        assert "Broadcast types:" in result.message
+        assert "broadcast subcommands:" in result.message
         assert "status" in result.message
         assert "settings" in result.message
         assert "battery" in result.message
@@ -365,7 +365,7 @@ class TestBroadcastCommand:
         """'bc' alias should work for broadcast command."""
         result = await command_handler.execute("bc")
         assert result.success
-        assert "Broadcast types:" in result.message
+        assert "broadcast subcommands:" in result.message
 
     @pytest.mark.asyncio
     async def test_broadcast_no_clients_error(self, command_handler):
@@ -379,7 +379,7 @@ class TestBroadcastCommand:
         """broadcast with invalid type should fail."""
         result = await command_handler.execute("broadcast invalid")
         assert not result.success
-        assert "Unknown broadcast type" in result.message
+        assert "Unknown broadcast subcommand" in result.message
 
     @pytest.mark.asyncio
     async def test_broadcast_status_with_client(self, command_handler):
@@ -468,3 +468,113 @@ class TestStatusClientCount:
             assert result.data["connected_clients"] == 2
         finally:
             command_handler.simulator.protocols.clear()
+
+
+# ============================================================================
+# Interactive-Only Command Tests
+# ============================================================================
+
+class TestInteractiveOnlyCommands:
+    """Tests for interactive-only commands."""
+
+    @pytest.mark.asyncio
+    async def test_clear_rejected_when_not_interactive(self, command_handler):
+        """clear command should be rejected when not in interactive mode."""
+        # By default, _interactive_mode is False
+        assert command_handler._interactive_mode is False
+
+        result = await command_handler.execute("clear")
+        assert result.success is False
+        assert "Unknown command" in result.message
+
+    @pytest.mark.asyncio
+    async def test_clear_works_in_interactive_mode(self, command_handler):
+        """clear command should work in interactive mode."""
+        command_handler.set_interactive_mode(True)
+
+        result = await command_handler.execute("clear")
+        assert result.success is True
+        assert result.message == ""  # Clear returns empty message
+
+    @pytest.mark.asyncio
+    async def test_clear_alias_cls_rejected_when_not_interactive(self, command_handler):
+        """cls alias should also be rejected when not in interactive mode."""
+        result = await command_handler.execute("cls")
+        assert result.success is False
+        assert "Unknown command" in result.message
+
+    @pytest.mark.asyncio
+    async def test_history_rejected_when_not_interactive(self, command_handler):
+        """history command should be rejected when not in interactive mode."""
+        # Even if history is available, it should be rejected in non-interactive mode
+        result = await command_handler.execute("history")
+        assert result.success is False
+        assert "Unknown command" in result.message
+
+    @pytest.mark.asyncio
+    async def test_history_alias_rejected_when_not_interactive(self, command_handler):
+        """hist alias should be rejected when not in interactive mode."""
+        result = await command_handler.execute("hist")
+        assert result.success is False
+        assert "Unknown command" in result.message
+
+    @pytest.mark.asyncio
+    async def test_help_works_when_not_interactive(self, command_handler):
+        """help command should work even when not in interactive mode."""
+        result = await command_handler.execute("help")
+        assert result.success is True
+        assert "Commands:" in result.message
+
+    @pytest.mark.asyncio
+    async def test_help_hides_interactive_commands_when_not_interactive(self, command_handler):
+        """help should not show interactive-only commands when not in interactive mode."""
+        result = await command_handler.execute("help")
+        assert result.success is True
+        assert "clear" not in result.message
+        assert "history" not in result.message
+
+    @pytest.mark.asyncio
+    async def test_help_shows_interactive_commands_in_interactive_mode(self, command_handler):
+        """help should show interactive-only commands in interactive mode."""
+        command_handler.set_interactive_mode(True)
+
+        result = await command_handler.execute("help")
+        assert result.success is True
+        assert "clear" in result.message
+
+    @pytest.mark.asyncio
+    async def test_set_interactive_mode(self, command_handler):
+        """set_interactive_mode should update the mode."""
+        assert command_handler._interactive_mode is False
+
+        command_handler.set_interactive_mode(True)
+        assert command_handler._interactive_mode is True
+
+        command_handler.set_interactive_mode(False)
+        assert command_handler._interactive_mode is False
+
+
+# ============================================================================
+# Empty Message Result Tests
+# ============================================================================
+
+class TestEmptyMessageResults:
+    """Tests for commands that return empty messages."""
+
+    @pytest.mark.asyncio
+    async def test_clear_returns_empty_message(self, command_handler):
+        """clear command should return an empty message."""
+        command_handler.set_interactive_mode(True)
+
+        result = await command_handler.execute("clear")
+        assert result.success is True
+        assert result.message == ""
+
+    @pytest.mark.asyncio
+    async def test_empty_message_is_falsy(self, command_handler):
+        """Empty message should be falsy for conditional checks."""
+        command_handler.set_interactive_mode(True)
+
+        result = await command_handler.execute("clear")
+        # This is how cli.py checks whether to print
+        assert not result.message  # Empty string is falsy

@@ -219,10 +219,13 @@ class TestDoorOperationMessages:
         await capture.send({CONFIG: CMD_OPEN, "msgId": 1})
 
         # Wait for door to start rising
-        messages = await capture.receive_until(
+        await capture.receive_until(
             lambda m: m.get(FIELD_DOOR_STATUS) in (DOOR_STATE_RISING, DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP),
             timeout=2.0
         )
+
+        # Receive any remaining messages (command response might arrive after status)
+        await capture.receive_all(timeout=0.2)
 
         # Should have received open response
         open_response = capture.find_message(CMD_OPEN)
