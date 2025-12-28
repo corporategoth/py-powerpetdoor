@@ -389,6 +389,99 @@ class TestClientCallbacks:
         assert len(calls) > 0
 
     @pytest.mark.asyncio
+    async def test_sensor_callback_receives_field_and_value(self, client, simulator, tracker):
+        """Sensor callback should receive both field_name and value arguments."""
+        callback = tracker.make_callback("sensor")
+        client.add_listener("test", sensor_update={FIELD_INSIDE: callback})
+
+        # Change sensor state
+        client.send_message(COMMAND, CMD_DISABLE_INSIDE)
+
+        await tracker.wait_for("sensor", timeout=2.0)
+
+        calls = tracker.get_calls("sensor")
+        assert len(calls) > 0
+        # Verify callback received (field_name, value) tuple
+        field_name, value = calls[0]
+        assert field_name == FIELD_INSIDE
+        assert value is False
+
+    @pytest.mark.asyncio
+    async def test_wildcard_sensor_listener(self, client, simulator, tracker):
+        """Wildcard '*' sensor listener should receive callbacks for all sensor fields."""
+        callback = tracker.make_callback("sensor")
+        client.add_listener("test", sensor_update={"*": callback})
+
+        # Change inside sensor state
+        client.send_message(COMMAND, CMD_DISABLE_INSIDE)
+
+        await tracker.wait_for("sensor", timeout=2.0)
+
+        calls = tracker.get_calls("sensor")
+        assert len(calls) > 0
+        # Verify callback received (field_name, value) tuple
+        field_name, value = calls[0]
+        assert field_name == FIELD_INSIDE
+        assert value is False
+
+    @pytest.mark.asyncio
+    async def test_wildcard_sensor_listener_power(self, client, simulator, tracker):
+        """Wildcard sensor listener should receive power state changes."""
+        callback = tracker.make_callback("sensor")
+        client.add_listener("test", sensor_update={"*": callback})
+
+        # Change power state
+        client.send_message(COMMAND, CMD_POWER_OFF)
+
+        await tracker.wait_for("sensor", timeout=2.0)
+
+        calls = tracker.get_calls("sensor")
+        assert len(calls) > 0
+        # Verify callback received (field_name, value) tuple
+        field_name, value = calls[0]
+        assert field_name == FIELD_POWER
+        assert value is False
+
+    @pytest.mark.asyncio
+    async def test_simulator_broadcast_triggers_wildcard_listener(self, client, simulator, tracker):
+        """Simulator-initiated broadcasts should trigger wildcard sensor listeners.
+
+        This tests the scenario where state changes are made from the simulator
+        side (e.g., via CLI commands) rather than client-initiated commands.
+        """
+        callback = tracker.make_callback("sensor")
+        client.add_listener("test", sensor_update={"*": callback})
+
+        # Change power state from simulator side (broadcast)
+        simulator.broadcast_power(False)
+
+        await tracker.wait_for("sensor", timeout=2.0)
+
+        calls = tracker.get_calls("sensor")
+        assert len(calls) > 0
+        # Verify callback received (field_name, value) tuple
+        field_name, value = calls[0]
+        assert field_name == FIELD_POWER
+        assert value is False
+
+    @pytest.mark.asyncio
+    async def test_simulator_broadcast_inside_sensor(self, client, simulator, tracker):
+        """Simulator broadcast for inside sensor should trigger listener."""
+        callback = tracker.make_callback("sensor")
+        client.add_listener("test", sensor_update={"*": callback})
+
+        # Broadcast inside sensor change from simulator
+        simulator.broadcast_inside_sensor(False)
+
+        await tracker.wait_for("sensor", timeout=2.0)
+
+        calls = tracker.get_calls("sensor")
+        assert len(calls) > 0
+        field_name, value = calls[0]
+        assert field_name == FIELD_INSIDE
+        assert value is False
+
+    @pytest.mark.asyncio
     async def test_multiple_listeners(self, client, simulator, tracker):
         """Multiple listeners should all receive callbacks."""
         callback1 = tracker.make_callback("listener1")

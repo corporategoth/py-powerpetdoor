@@ -582,13 +582,13 @@ class PowerPetDoorClient:
             fr[FIELD_INSIDE] = val
             if self.sensor_listeners[FIELD_INSIDE]:
                 for callback in self.sensor_listeners[FIELD_INSIDE].values():
-                    callback(val)
+                    callback(FIELD_INSIDE, val)
         if FIELD_OUTSIDE in msg:
             val = make_bool(msg[FIELD_OUTSIDE])
             fr[FIELD_OUTSIDE] = val
             if self.sensor_listeners[FIELD_OUTSIDE]:
                 for callback in self.sensor_listeners[FIELD_OUTSIDE].values():
-                    callback(val)
+                    callback(FIELD_OUTSIDE, val)
         if future:
             future.set_result(fr)
 
@@ -599,7 +599,7 @@ class PowerPetDoorClient:
             val = make_bool(msg[FIELD_POWER])
             if self.sensor_listeners[FIELD_POWER]:
                 for callback in self.sensor_listeners[FIELD_POWER].values():
-                    callback(val)
+                    callback(FIELD_POWER, val)
             if future:
                 future.set_result(val)
 
@@ -610,7 +610,7 @@ class PowerPetDoorClient:
             val = make_bool(msg[FIELD_AUTO])
             if self.sensor_listeners[FIELD_AUTO]:
                 for callback in self.sensor_listeners[FIELD_AUTO].values():
-                    callback(val)
+                    callback(FIELD_AUTO, val)
             if future:
                 future.set_result(val)
 
@@ -625,7 +625,7 @@ class PowerPetDoorClient:
             val = make_bool(msg[FIELD_SETTINGS][FIELD_OUTSIDE_SENSOR_SAFETY_LOCK])
             if self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK]:
                 for callback in self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK].values():
-                    callback(val)
+                    callback(FIELD_OUTSIDE_SENSOR_SAFETY_LOCK, val)
             if future:
                 future.set_result(val)
 
@@ -638,7 +638,7 @@ class PowerPetDoorClient:
             val = make_bool(msg[FIELD_SETTINGS][FIELD_CMD_LOCKOUT])
             if self.sensor_listeners[FIELD_CMD_LOCKOUT]:
                 for callback in self.sensor_listeners[FIELD_CMD_LOCKOUT].values():
-                    callback(val)
+                    callback(FIELD_CMD_LOCKOUT, val)
             if future:
                 future.set_result(val)
 
@@ -651,7 +651,7 @@ class PowerPetDoorClient:
             val = make_bool(msg[FIELD_SETTINGS][FIELD_AUTORETRACT])
             if self.sensor_listeners[FIELD_AUTORETRACT]:
                 for callback in self.sensor_listeners[FIELD_AUTORETRACT].values():
-                    callback(val)
+                    callback(FIELD_AUTORETRACT, val)
             if future:
                 future.set_result(val)
 
