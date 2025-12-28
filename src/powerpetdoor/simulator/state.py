@@ -54,7 +54,7 @@ class DoorTimingConfig:
     rise_time: float = 1.5
 
     # Default hold time before auto-close (can be overridden by state.hold_time)
-    default_hold_time: int = 10
+    default_hold_time: int = 2
 
     # Time for each phase of closing
     slowing_time: float = 0.3
@@ -258,7 +258,7 @@ class DoorSimulatorState:
     cmd_lockout: bool = False
 
     # Battery
-    battery_percent: int = 85
+    battery_percent: int = 100
     battery_present: bool = True
     ac_present: bool = True
 
@@ -267,7 +267,7 @@ class DoorSimulatorState:
 
     # Settings
     timezone: str = "America/New_York"
-    hold_time: int = 10
+    hold_time: int = 2
     sensor_trigger_voltage: int = 100
     sleep_sensor_trigger_voltage: int = 50
 

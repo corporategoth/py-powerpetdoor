@@ -254,6 +254,11 @@ class DoorSimulator:
 
         await asyncio.sleep(timing.rise_time)
 
+        # Door slows as it approaches the top (still opening)
+        self.state.door_status = DOOR_STATE_SLOWING
+        self._broadcast_door_status()
+        await asyncio.sleep(timing.slowing_time)
+
         if hold:
             self.state.door_status = DOOR_STATE_KEEPUP
             self._broadcast_door_status()
@@ -279,14 +284,6 @@ class DoorSimulator:
     async def _direct_close_door(self):
         """Close door directly without a client connection."""
         timing = self.state.timing
-
-        self.state.door_status = DOOR_STATE_SLOWING
-        self._broadcast_door_status()
-        await asyncio.sleep(timing.slowing_time)
-
-        # Check for obstruction after slowing
-        if await self._check_obstruction_retract():
-            return
 
         self.state.door_status = DOOR_STATE_CLOSING_TOP_OPEN
         self._broadcast_door_status()
@@ -337,7 +334,6 @@ class DoorSimulator:
         else:
             # Direct simulation without clients
             if self.state.door_status in (
-                DOOR_STATE_SLOWING,
                 DOOR_STATE_CLOSING_TOP_OPEN,
                 DOOR_STATE_CLOSING_MID_OPEN,
             ):

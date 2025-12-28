@@ -559,8 +559,8 @@ class TestPowerPetDoorBattery:
     @pytest.mark.asyncio
     async def test_battery_initial(self, door):
         """Battery info should have values from simulator."""
-        # Simulator defaults to 85% battery
-        assert door.battery_percent == 85
+        # Simulator defaults to 100% battery
+        assert door.battery_percent == 100
         assert door.battery_present is True
         assert door.ac_present is True
 

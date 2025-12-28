@@ -604,6 +604,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             # Door rises
             await asyncio.sleep(timing.rise_time)
 
+            # Door slows as it approaches the top (still opening)
+            self.state.door_status = DOOR_STATE_SLOWING
+            self._broadcast_or_send_status()
+            await asyncio.sleep(timing.slowing_time)
+
             if hold:
                 self.state.door_status = DOOR_STATE_KEEPUP
                 self._broadcast_or_send_status()
@@ -644,11 +649,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         """Execute the door closing sequence with obstruction detection."""
         timing = self.state.timing
 
-        self.state.door_status = DOOR_STATE_SLOWING
+        self.state.door_status = DOOR_STATE_CLOSING_TOP_OPEN
         self._broadcast_or_send_status()
 
         async def close_sequence():
-            await asyncio.sleep(timing.slowing_time)
+            await asyncio.sleep(timing.closing_top_time)
 
             # Check for obstruction during close
             if self.state.obstruction_pending and self.state.autoretract:
@@ -656,18 +661,6 @@ class DoorSimulatorProtocol(asyncio.Protocol):
                 self.state.obstruction_pending = False
                 self.state.total_auto_retracts += 1
                 # Door auto-retracts (opens again)
-                await self._simulate_door_open(hold=False)
-                return
-
-            self.state.door_status = DOOR_STATE_CLOSING_TOP_OPEN
-            self._broadcast_or_send_status()
-            await asyncio.sleep(timing.closing_top_time)
-
-            # Check again for obstruction
-            if self.state.obstruction_pending and self.state.autoretract:
-                logger.info("Simulator: Obstruction detected! Auto-retracting...")
-                self.state.obstruction_pending = False
-                self.state.total_auto_retracts += 1
                 await self._simulate_door_open(hold=False)
                 return
 
@@ -778,7 +771,6 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
         # If door is closing, this is treated as pet presence - door should reopen
         if self.state.door_status in (
-            DOOR_STATE_SLOWING,
             DOOR_STATE_CLOSING_TOP_OPEN,
             DOOR_STATE_CLOSING_MID_OPEN,
         ):
@@ -799,7 +791,6 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     def simulate_obstruction(self):
         """Simulate an obstruction during door close (will trigger auto-retract if enabled)."""
         if self.state.door_status in (
-            DOOR_STATE_SLOWING,
             DOOR_STATE_CLOSING_TOP_OPEN,
             DOOR_STATE_CLOSING_MID_OPEN,
         ):

@@ -34,7 +34,7 @@ class TestDoorTimingConfig:
         """Default timing values should be reasonable."""
         config = DoorTimingConfig()
         assert config.rise_time == 1.5
-        assert config.default_hold_time == 10
+        assert config.default_hold_time == 2
         assert config.slowing_time == 0.3
         assert config.closing_top_time == 0.4
         assert config.closing_mid_time == 0.4
@@ -269,8 +269,8 @@ class TestDoorSimulatorState:
         assert state.inside is True
         assert state.outside is True
         assert state.auto is True
-        assert state.battery_percent == 85
-        assert state.hold_time == 10
+        assert state.battery_percent == 100
+        assert state.hold_time == 2
         # Counters should default to 0
         assert state.total_open_cycles == 0
         assert state.total_auto_retracts == 0
