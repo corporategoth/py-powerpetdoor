@@ -340,7 +340,7 @@ class PowerPetDoor:
         self._safety_lock: bool = False
         self._autoretract: bool = True
         self._pet_proximity_keep_open: bool = False
-        self._hold_time: float = 10.0
+        self._hold_time: float = 2.0
         self._timezone: str = ""
         self._battery = BatteryInfo()
         self._hw_info: dict[str, Any] = {}
@@ -348,6 +348,7 @@ class PowerPetDoor:
         self._total_auto_retracts: int = 0
         self._notifications = NotificationSettings()
         self._schedules: list[Schedule] = []
+        self._latency: Optional[float] = None
 
         # User callbacks
         self._status_callbacks: list[Callable[[DoorStatus], None]] = []
@@ -383,6 +384,16 @@ class PowerPetDoor:
         response before dropping the message.
         """
         return self._client.effective_timeout
+
+    @property
+    def latency(self) -> Optional[float]:
+        """Network latency to the door in seconds.
+
+        This is determined from the round-trip time of ping/pong messages.
+        Returns None if no ping has been received yet (e.g., before connection
+        or if keepalive is disabled).
+        """
+        return self._latency
 
     async def connect(self) -> None:
         """Connect to the door and fetch initial state."""
@@ -421,6 +432,7 @@ class PowerPetDoor:
             "_door_facade",
             on_connect=self._on_connect,
             on_disconnect=self._on_disconnect,
+            on_ping=self._on_ping,
         )
 
         await self._client.connect()
@@ -1157,8 +1169,17 @@ class PowerPetDoor:
 
     async def _on_disconnect(self) -> None:
         """Handle connection lost."""
+        self._latency = None  # Reset latency since we're no longer connected
         for callback in self._disconnect_callbacks:
             try:
                 callback()
             except Exception:
                 logger.exception("Error in disconnect callback")
+
+    def _on_ping(self, latency_ms: int) -> None:
+        """Handle ping response with latency measurement.
+
+        Args:
+            latency_ms: Round-trip latency in milliseconds.
+        """
+        self._latency = latency_ms / 1000.0

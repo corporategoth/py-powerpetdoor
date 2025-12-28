@@ -396,3 +396,75 @@ class TestBatterySimulation:
 
         # Battery should not have changed
         assert sim.state.battery_percent == initial
+
+
+# ============================================================================
+# Client Connection Management Tests
+# ============================================================================
+
+class TestClientConnectionManagement:
+    """Tests for client connect/disconnect and protocols list management."""
+
+    @pytest.mark.asyncio
+    async def test_protocols_list_starts_empty(self, simulator):
+        """protocols list should be empty when no clients connected."""
+        assert len(simulator.protocols) == 0
+
+    @pytest.mark.asyncio
+    async def test_client_connect_adds_to_protocols(self, simulator):
+        """Connecting a client should add to protocols list."""
+        port = simulator.server.sockets[0].getsockname()[1]
+
+        # Connect a client
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        await asyncio.sleep(0.05)  # Give time for connection to be processed
+
+        assert len(simulator.protocols) == 1
+
+        writer.close()
+        await writer.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_client_disconnect_removes_from_protocols(self, simulator):
+        """Disconnecting a client should remove from protocols list."""
+        port = simulator.server.sockets[0].getsockname()[1]
+
+        # Connect a client
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        await asyncio.sleep(0.05)
+
+        assert len(simulator.protocols) == 1
+
+        # Disconnect
+        writer.close()
+        await writer.wait_closed()
+        await asyncio.sleep(0.05)  # Give time for disconnect to be processed
+
+        assert len(simulator.protocols) == 0
+
+    @pytest.mark.asyncio
+    async def test_multiple_clients_tracked(self, simulator):
+        """Multiple clients should all be tracked in protocols list."""
+        port = simulator.server.sockets[0].getsockname()[1]
+
+        # Connect multiple clients
+        clients = []
+        for _ in range(3):
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            clients.append((reader, writer))
+            await asyncio.sleep(0.02)
+
+        assert len(simulator.protocols) == 3
+
+        # Disconnect one
+        _, writer = clients.pop()
+        writer.close()
+        await writer.wait_closed()
+        await asyncio.sleep(0.05)
+
+        assert len(simulator.protocols) == 2
+
+        # Cleanup remaining
+        for _, writer in clients:
+            writer.close()
+            await writer.wait_closed()

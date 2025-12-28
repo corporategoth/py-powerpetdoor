@@ -22,11 +22,22 @@ from ..const import (
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_CLOSING_MID_OPEN,
     CMD_GET_DOOR_BATTERY,
+    CMD_GET_DOOR_OPEN_STATS,
+    CMD_GET_HW_INFO,
+    CMD_GET_NOTIFICATIONS,
+    CMD_GET_SCHEDULE_LIST,
+    CMD_GET_SETTINGS,
     NOTIFY_LOW_BATTERY,
     FIELD_BATTERY_PERCENT,
     FIELD_BATTERY_PRESENT,
     FIELD_AC_PRESENT,
+    FIELD_FWINFO,
+    FIELD_NOTIFICATIONS,
+    FIELD_SCHEDULES,
+    FIELD_SETTINGS,
     FIELD_SUCCESS,
+    FIELD_TOTAL_AUTO_RETRACTS,
+    FIELD_TOTAL_OPEN_CYCLES,
     SUCCESS_TRUE,
 )
 
@@ -77,10 +88,15 @@ class DoorSimulator:
         """Start the simulator server."""
         loop = asyncio.get_running_loop()
 
+        def handle_disconnect(protocol):
+            if protocol in self.protocols:
+                self.protocols.remove(protocol)
+
         def protocol_factory():
             protocol = DoorSimulatorProtocol(
                 self.state,
                 broadcast_status=self._broadcast_door_status,
+                on_disconnect=handle_disconnect,
             )
             self.protocols.append(protocol)
             return protocol
@@ -107,6 +123,18 @@ class DoorSimulator:
             except asyncio.CancelledError:
                 pass
             self._battery_task = None
+
+        # Close all client connections and cancel their tasks
+        for protocol in self.protocols:
+            if protocol._door_task:
+                protocol._door_task.cancel()
+                try:
+                    await protocol._door_task
+                except asyncio.CancelledError:
+                    pass
+            if protocol.transport:
+                protocol.transport.close()
+        self.protocols.clear()
 
         if self.server:
             self.server.close()
@@ -170,10 +198,12 @@ class DoorSimulator:
 
     def _broadcast_battery_status(self):
         """Broadcast battery status to all connected clients."""
+        # Report 0% if battery is not present
+        percent = self.state.battery_percent if self.state.battery_present else 0
         for protocol in self.protocols:
             protocol._send({
                 "CMD": CMD_GET_DOOR_BATTERY,
-                FIELD_BATTERY_PERCENT: self.state.battery_percent,
+                FIELD_BATTERY_PERCENT: percent,
                 FIELD_BATTERY_PRESENT: "1" if self.state.battery_present else "0",
                 FIELD_AC_PRESENT: "1" if self.state.ac_present else "0",
                 FIELD_SUCCESS: SUCCESS_TRUE,
@@ -189,6 +219,66 @@ class DoorSimulator:
                     FIELD_SUCCESS: SUCCESS_TRUE,
                 })
             logger.info(f"Simulator: Low battery notification ({self.state.battery_percent}%)")
+
+    def broadcast_settings(self):
+        """Broadcast settings to all connected clients."""
+        for protocol in self.protocols:
+            protocol._send({
+                "CMD": CMD_GET_SETTINGS,
+                FIELD_SETTINGS: self.state.get_settings(),
+                FIELD_SUCCESS: SUCCESS_TRUE,
+            })
+
+    def broadcast_hardware_info(self):
+        """Broadcast hardware/firmware info to all connected clients."""
+        for protocol in self.protocols:
+            protocol._send({
+                "CMD": CMD_GET_HW_INFO,
+                FIELD_FWINFO: {
+                    "fw_maj": self.state.fw_major,
+                    "fw_min": self.state.fw_minor,
+                    "fw_pat": self.state.fw_patch,
+                },
+                FIELD_SUCCESS: SUCCESS_TRUE,
+            })
+
+    def broadcast_stats(self):
+        """Broadcast door open statistics to all connected clients."""
+        for protocol in self.protocols:
+            protocol._send({
+                "CMD": CMD_GET_DOOR_OPEN_STATS,
+                FIELD_TOTAL_OPEN_CYCLES: self.state.total_open_cycles,
+                FIELD_TOTAL_AUTO_RETRACTS: self.state.total_auto_retracts,
+                FIELD_SUCCESS: SUCCESS_TRUE,
+            })
+
+    def broadcast_schedules(self):
+        """Broadcast schedule list to all connected clients."""
+        for protocol in self.protocols:
+            protocol._send({
+                "CMD": CMD_GET_SCHEDULE_LIST,
+                FIELD_SCHEDULES: self.state.get_schedule_list(),
+                FIELD_SUCCESS: SUCCESS_TRUE,
+            })
+
+    def broadcast_notifications(self):
+        """Broadcast notification settings to all connected clients."""
+        for protocol in self.protocols:
+            protocol._send({
+                "CMD": CMD_GET_NOTIFICATIONS,
+                FIELD_NOTIFICATIONS: self.state.get_notifications(),
+                FIELD_SUCCESS: SUCCESS_TRUE,
+            })
+
+    def broadcast_all(self):
+        """Broadcast all state information to all connected clients."""
+        self._broadcast_door_status()
+        self.broadcast_settings()
+        self._broadcast_battery_status()
+        self.broadcast_hardware_info()
+        self.broadcast_stats()
+        self.broadcast_schedules()
+        self.broadcast_notifications()
 
     # =========================================================================
     # Spontaneous Events (simulate from door side)
@@ -247,17 +337,50 @@ class DoorSimulator:
         asyncio.create_task(self._direct_open_door(hold=False))
 
     async def _direct_open_door(self, hold: bool = False):
-        """Open door directly without a client connection."""
+        """Open door directly without a client connection.
+
+        State-aware behavior:
+        - If already open (HOLDING/KEEPUP): do nothing
+        - If already opening (RISING/SLOWING): do nothing
+        - If closing: reverse to equivalent opening state and continue
+        - If closed: start full opening sequence
+        """
+        current_status = self.state.door_status
         timing = self.state.timing
 
-        self.state.door_status = DOOR_STATE_RISING
+        # Already open - do nothing
+        if current_status in (DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP):
+            logger.debug("Simulator: Open command ignored (already open)")
+            return
+
+        # Already opening - do nothing
+        if current_status in (DOOR_STATE_RISING, DOOR_STATE_SLOWING):
+            logger.debug("Simulator: Open command ignored (already opening)")
+            return
+
+        # Determine starting state based on current position
+        if current_status == DOOR_STATE_CLOSING_TOP_OPEN:
+            start_state = DOOR_STATE_SLOWING
+            skip_rising = True
+            logger.info("Simulator: Reversing close at top, continuing to open")
+        elif current_status == DOOR_STATE_CLOSING_MID_OPEN:
+            start_state = DOOR_STATE_RISING
+            skip_rising = False
+            logger.info("Simulator: Reversing close at mid, continuing to open")
+        else:
+            start_state = DOOR_STATE_RISING
+            skip_rising = False
+
+        self.state.door_status = start_state
         self._broadcast_door_status()
 
-        await asyncio.sleep(timing.rise_time)
+        if not skip_rising:
+            await asyncio.sleep(timing.rise_time)
 
-        # Door slows as it approaches the top (still opening)
-        self.state.door_status = DOOR_STATE_SLOWING
-        self._broadcast_door_status()
+            # Door slows as it approaches the top (still opening)
+            self.state.door_status = DOOR_STATE_SLOWING
+            self._broadcast_door_status()
+
         await asyncio.sleep(timing.slowing_time)
 
         if hold:
@@ -281,20 +404,60 @@ class DoorSimulator:
             # Close
             await self._direct_close_door()
 
-    async def _direct_close_door(self):
-        """Close door directly without a client connection."""
+    async def _direct_close_door(
+        self,
+        start_state: str = DOOR_STATE_CLOSING_TOP_OPEN,
+        skip_top: bool = False,
+    ):
+        """Close door directly without a client connection.
+
+        State-aware behavior:
+        - If already closed: do nothing
+        - If already closing: do nothing
+        - If opening: reverse to equivalent closing state and continue
+        - If open (HOLDING/KEEPUP): start full closing sequence
+
+        Args:
+            start_state: The initial closing state (for internal use during reversal).
+            skip_top: If True, skip the CLOSING_TOP_OPEN phase (for internal use).
+        """
+        current_status = self.state.door_status
         timing = self.state.timing
 
-        self.state.door_status = DOOR_STATE_CLOSING_TOP_OPEN
-        self._broadcast_door_status()
-        await asyncio.sleep(timing.closing_top_time)
-
-        # Check for sensor blocking close after closing top
-        if await self._check_sensor_retract():
+        # Already closed - do nothing
+        if current_status == DOOR_STATE_CLOSED:
+            logger.debug("Simulator: Close command ignored (already closed)")
             return
 
-        self.state.door_status = DOOR_STATE_CLOSING_MID_OPEN
+        # Already closing - do nothing
+        if current_status in (DOOR_STATE_CLOSING_TOP_OPEN, DOOR_STATE_CLOSING_MID_OPEN):
+            logger.debug("Simulator: Close command ignored (already closing)")
+            return
+
+        # Determine starting state based on current position (only if not already set)
+        if start_state == DOOR_STATE_CLOSING_TOP_OPEN and not skip_top:
+            if current_status == DOOR_STATE_RISING:
+                start_state = DOOR_STATE_CLOSING_MID_OPEN
+                skip_top = True
+                logger.info("Simulator: Reversing open at rising, closing from mid")
+            elif current_status == DOOR_STATE_SLOWING:
+                start_state = DOOR_STATE_CLOSING_TOP_OPEN
+                skip_top = False
+                logger.info("Simulator: Reversing open at slowing, closing from top")
+
+        self.state.door_status = start_state
         self._broadcast_door_status()
+
+        if not skip_top:
+            await asyncio.sleep(timing.closing_top_time)
+
+            # Check for sensor blocking close after closing top
+            if await self._check_sensor_retract():
+                return
+
+            self.state.door_status = DOOR_STATE_CLOSING_MID_OPEN
+            self._broadcast_door_status()
+
         await asyncio.sleep(timing.closing_mid_time)
 
         # Check for sensor blocking close after closing mid

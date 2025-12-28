@@ -120,6 +120,7 @@ class CommandHandler:
         self.script_runner = script_runner
         self.stop_callback = stop_callback
         self.script_queue = script_queue
+        self._history = None  # Set by cli.py when using prompt_toolkit
 
         # Import here to avoid circular imports
         from .scripting import Script, get_builtin_script, list_builtin_scripts
@@ -137,6 +138,29 @@ class CommandHandler:
         else:
             return self._get_builtin_script(script_ref)
 
+    def set_history(self, history):
+        """Set the history object for the history command.
+
+        Args:
+            history: A prompt_toolkit FileHistory or InMemoryHistory object
+        """
+        self._history = history
+
+    def _is_history_available(self) -> bool:
+        """Check if history features are available.
+
+        Returns True if prompt_toolkit is installed, regardless of whether
+        set_history() has been called yet.
+        """
+        if self._history is not None:
+            return True
+        # Check if prompt_toolkit is available
+        try:
+            import prompt_toolkit
+            return True
+        except ImportError:
+            return False
+
     async def execute(self, command_str: str) -> CommandResult:
         """Execute a command string and return the result.
 
@@ -149,12 +173,27 @@ class CommandHandler:
         if not command_str:
             return CommandResult(False, "Empty command")
 
+        # Handle history recall commands (!!, !n, !-n) - only when history is available
+        history_prefix = ""
+        if self._history is not None and command_str.startswith("!"):
+            recall_result = self._resolve_history_recall(command_str)
+            if recall_result is not None:
+                if isinstance(recall_result, CommandResult):
+                    return recall_result
+                # recall_result is the resolved command string
+                history_prefix = f"{command_str} -> {recall_result}\n"
+                command_str = recall_result
+
         parts = command_str.split(maxsplit=1)
         cmd = parts[0].lower()
         arg = parts[1] if len(parts) > 1 else None
 
         # Look up command in registry
         if cmd not in _command_registry:
+            return CommandResult(False, f"Unknown command: {cmd}. Type 'help' for commands.")
+
+        # Hide history command when prompt_toolkit is not available
+        if cmd in ("history", "hist") and not self._is_history_available():
             return CommandResult(False, f"Unknown command: {cmd}. Type 'help' for commands.")
 
         info = _command_registry[cmd]
@@ -165,9 +204,76 @@ class CommandHandler:
             result = handler(arg)
             if asyncio.iscoroutine(result):
                 result = await result
+            # Prepend history recall info if applicable
+            if history_prefix:
+                result = CommandResult(
+                    result.success,
+                    history_prefix + result.message,
+                    result.data
+                )
             return result
         except Exception as e:
             return CommandResult(False, f"Error: {e}")
+
+    def _resolve_history_recall(self, command_str: str):
+        """Resolve history recall commands like !!, !n, !-n.
+
+        Args:
+            command_str: The command starting with !
+
+        Returns:
+            - The resolved command string to execute
+            - CommandResult if there's an error
+            - None if this isn't a history recall pattern
+
+        Note: Caller must ensure self._history is not None before calling.
+        """
+        # Load history entries
+        # get_strings() returns oldest first, which is what we want for indexing
+        try:
+            entries = list(self._history.get_strings())
+        except Exception as e:
+            return CommandResult(False, f"Error loading history: {e}")
+
+        # The current command (e.g., "!!") was already added to history by prompt_toolkit
+        # before we get here, so exclude it from lookups
+        if entries and entries[-1] == command_str:
+            entries = entries[:-1]
+
+        if not entries:
+            return CommandResult(False, "No history")
+
+        rest = command_str[1:]  # Remove leading !
+
+        # !! - repeat last command
+        if rest == "!":
+            cmd = entries[-1]
+            return cmd
+
+        # !-n - run nth-to-last command
+        if rest.startswith("-"):
+            try:
+                n = int(rest[1:])
+                if n <= 0:
+                    return CommandResult(False, "!-n requires a positive number")
+                if n > len(entries):
+                    return CommandResult(False, f"Only {len(entries)} commands in history")
+                cmd = entries[-n]
+                return cmd
+            except ValueError:
+                return None  # Not a history recall pattern
+
+        # !n - run command at absolute history position n (1-indexed)
+        try:
+            n = int(rest)
+            if n <= 0:
+                return CommandResult(False, "!n requires a positive number")
+            if n > len(entries):
+                return CommandResult(False, f"Only {len(entries)} commands in history")
+            cmd = entries[n - 1]
+            return cmd
+        except ValueError:
+            return None  # Not a history recall pattern
 
     # -------------------------------------------------------------------------
     # Door Operations
@@ -357,7 +463,7 @@ class CommandHandler:
         state = "connected" if present else "disconnected"
         return CommandResult(True, f"AC: {state}")
 
-    @command("battery_present", [], "Toggle or set battery presence", "[on|off]", category="settings")
+    @command("battery_present", ["bp"], "Toggle or set battery presence", "[on|off]", category="settings")
     def battery_present(self, arg: Optional[str] = None) -> CommandResult:
         """Toggle or set battery presence."""
         if arg:
@@ -368,7 +474,7 @@ class CommandHandler:
         state = "installed" if present else "removed"
         return CommandResult(True, f"Battery: {state}")
 
-    @command("charge_rate", [], "Set battery charge rate (%/min, 0=disable)", "<rate>", category="settings")
+    @command("charge_rate", ["cr"], "Set battery charge rate (%/min, 0=disable)", "<rate>", category="settings")
     def charge_rate(self, arg: Optional[str] = None) -> CommandResult:
         """Set battery charge rate in percent per minute."""
         if arg:
@@ -384,7 +490,7 @@ class CommandHandler:
             rate = self.simulator.state.battery_config.charge_rate
             return CommandResult(True, f"Charge rate: {rate}%/min")
 
-    @command("discharge_rate", [], "Set battery discharge rate (%/min, 0=disable)", "<rate>", category="settings")
+    @command("discharge_rate", ["dcr"], "Set battery discharge rate (%/min, 0=disable)", "<rate>", category="settings")
     def discharge_rate(self, arg: Optional[str] = None) -> CommandResult:
         """Set battery discharge rate in percent per minute."""
         if arg:
@@ -559,10 +665,11 @@ class CommandHandler:
         """Show or manage schedules.
 
         Each schedule entry controls ONE sensor (inside or outside) for specific
-        days and a time window.
+        days and a time window. When no schedules exist, an implicit schedule
+        allows both sensors on all days from 00:00-23:59.
 
         Subcommands:
-            schedule                              - Show all schedules
+            schedule [list]                       - Show all schedules
             schedule add <sensor> <time> [days]   - Add schedule (sensor: inside/outside)
             schedule del <index>                  - Delete schedule by index
             schedule on/off <index>               - Enable/disable schedule
@@ -578,20 +685,16 @@ class CommandHandler:
             schedule time 0 9:00-17:00
         """
         if not arg:
-            # Show all schedules
-            schedules = self.simulator.state.schedules
-            if not schedules:
-                return CommandResult(True, "No schedules configured")
-            lines = ["Schedules:"]
-            for idx in sorted(schedules.keys()):
-                lines.append(self._format_schedule(schedules[idx]))
-            return CommandResult(True, "\n".join(lines))
+            return self._schedule_list()
 
         parts = arg.split()
         subcmd = parts[0].lower()
         subargs = parts[1:]
 
-        if subcmd == "add":
+        if subcmd == "list":
+            return self._schedule_list()
+
+        elif subcmd == "add":
             return self._schedule_add(subargs)
 
         elif subcmd in ("del", "delete", "rm", "remove"):
@@ -658,12 +761,29 @@ class CommandHandler:
 
         else:
             return CommandResult(False,
-                "Usage: schedule [add|del|on|off|days|time] <args>\n"
+                "Usage: schedule [list|add|del|on|off|days|time] <args>\n"
+                "  list                       - Show all schedules\n"
                 "  add <sensor> <time> [days] - Add schedule\n"
                 "  del <index>                - Delete schedule\n"
                 "  on/off <index>             - Enable/disable\n"
                 "  days <index> <days>        - Set days\n"
                 "  time <index> <start>-<end> - Set time window")
+
+    def _schedule_list(self) -> CommandResult:
+        """List all schedules, showing implicit schedule if none configured."""
+        schedules = self.simulator.state.schedules
+        if not schedules:
+            # Show implicit schedule when none configured
+            auto_status = "ON" if self.simulator.state.auto else "OFF"
+            return CommandResult(True,
+                f"Schedules (auto mode {auto_status}):\n"
+                "  (implicit): both sensors, all days, 00:00-23:59")
+
+        auto_status = "ON" if self.simulator.state.auto else "OFF"
+        lines = [f"Schedules (auto mode {auto_status}):"]
+        for idx in sorted(schedules.keys()):
+            lines.append(self._format_schedule(schedules[idx]))
+        return CommandResult(True, "\n".join(lines))
 
     def _schedule_add(self, args: list) -> CommandResult:
         """Add a new schedule entry."""
@@ -763,7 +883,9 @@ class CommandHandler:
         """Show current simulator state."""
         s = self.simulator.state
         bc = s.battery_config
+        num_clients = len(self.simulator.protocols)
         data = {
+            "connected_clients": num_clients,
             "door": s.door_status,
             "power": s.power,
             "auto": s.auto,
@@ -820,8 +942,17 @@ class CommandHandler:
             sensor_active.append("outside")
         sensor_str = ", ".join(sensor_active) if sensor_active else "none"
 
+        # Build clients status
+        if num_clients == 0:
+            clients_str = "none"
+        elif num_clients == 1:
+            clients_str = "1 client"
+        else:
+            clients_str = f"{num_clients} clients"
+
         lines = [
             "Current State:",
+            f"  Clients: {clients_str}",
             f"  Door: {s.door_status}",
             f"  Power: {'ON' if s.power else 'OFF'}",
             f"  Auto (schedule): {'ON' if s.auto else 'OFF'}",
@@ -846,6 +977,144 @@ class CommandHandler:
         """Show help for all commands."""
         return CommandResult(True, self.get_help())
 
+    @command("broadcast", ["bc"], "Broadcast data to connected clients", "[type]", category="info")
+    def broadcast(self, arg: Optional[str] = None) -> CommandResult:
+        """Broadcast data to all connected clients.
+
+        This simulates the door spontaneously sending updates to clients,
+        which is useful for testing client refresh handling.
+
+        Types:
+            status      - Door status (open/closed/etc)
+            settings    - All settings (power, sensors, etc)
+            battery     - Battery level and AC status
+            hwinfo      - Hardware/firmware version
+            stats       - Door open cycles and auto-retracts
+            schedules   - Schedule list
+            notifications - Notification settings
+            all         - Broadcast everything
+
+        Examples:
+            broadcast           - Show available types
+            broadcast status    - Broadcast door status
+            broadcast all       - Broadcast everything
+        """
+        valid_types = ["status", "settings", "battery", "hwinfo", "stats", "schedules", "notifications", "all"]
+
+        if not arg:
+            # Show available types
+            lines = ["Broadcast types:"]
+            lines.append("  status        - Door status (open/closed/etc)")
+            lines.append("  settings      - All settings (power, sensors, etc)")
+            lines.append("  battery       - Battery level and AC status")
+            lines.append("  hwinfo        - Hardware/firmware version")
+            lines.append("  stats         - Door open cycles and auto-retracts")
+            lines.append("  schedules     - Schedule list")
+            lines.append("  notifications - Notification settings")
+            lines.append("  all           - Broadcast everything")
+            return CommandResult(True, "\n".join(lines))
+
+        broadcast_type = arg.lower().strip()
+
+        if broadcast_type not in valid_types:
+            return CommandResult(False, f"Unknown broadcast type: {broadcast_type}\n"
+                f"Valid types: {', '.join(valid_types)}")
+
+        # Check if there are connected clients
+        if not self.simulator.protocols:
+            return CommandResult(False, "No clients connected")
+
+        if broadcast_type == "status":
+            self.simulator._broadcast_door_status()
+            return CommandResult(True, f"Broadcast status: {self.simulator.state.door_status}")
+        elif broadcast_type == "settings":
+            self.simulator.broadcast_settings()
+            return CommandResult(True, "Broadcast settings")
+        elif broadcast_type == "battery":
+            self.simulator._broadcast_battery_status()
+            pct = self.simulator.state.battery_percent
+            ac = "AC" if self.simulator.state.ac_present else "no AC"
+            return CommandResult(True, f"Broadcast battery: {pct}% ({ac})")
+        elif broadcast_type == "hwinfo":
+            self.simulator.broadcast_hardware_info()
+            s = self.simulator.state
+            return CommandResult(True, f"Broadcast hwinfo: {s.fw_major}.{s.fw_minor}.{s.fw_patch}")
+        elif broadcast_type == "stats":
+            self.simulator.broadcast_stats()
+            s = self.simulator.state
+            return CommandResult(True, f"Broadcast stats: {s.total_open_cycles} cycles, {s.total_auto_retracts} retracts")
+        elif broadcast_type == "schedules":
+            self.simulator.broadcast_schedules()
+            count = len(self.simulator.state.schedules)
+            return CommandResult(True, f"Broadcast schedules: {count} schedule(s)")
+        elif broadcast_type == "notifications":
+            self.simulator.broadcast_notifications()
+            return CommandResult(True, "Broadcast notifications")
+        elif broadcast_type == "all":
+            self.simulator.broadcast_all()
+            return CommandResult(True, "Broadcast all data")
+
+        return CommandResult(False, "Unknown error")
+
+    @command("history", ["hist"], "Show or manage command history", "[clear|N]", category="info")
+    def history(self, arg: Optional[str] = None) -> CommandResult:
+        """Show or manage command history.
+
+        Subcommands:
+            history         - Show last 20 commands
+            history N       - Show last N commands
+            history clear   - Clear command history
+
+        Note: Requires prompt_toolkit (install with pip install pypowerpetdoor[interactive])
+        """
+        if self._history is None:
+            return CommandResult(False,
+                "History not available. Install prompt_toolkit for history support:\n"
+                "  pip install pypowerpetdoor[interactive]")
+
+        if arg and arg.lower() == "clear":
+            # Clear history (both in-memory and file)
+            try:
+                # Clear in-memory history
+                if hasattr(self._history, '_loaded_strings'):
+                    self._history._loaded_strings.clear()
+                # Truncate the file if using FileHistory
+                if hasattr(self._history, 'filename'):
+                    with open(self._history.filename, 'w'):
+                        pass
+                return CommandResult(True, "History cleared")
+            except Exception as e:
+                return CommandResult(False, f"Error clearing history: {e}")
+
+        # Determine how many entries to show
+        limit = 20
+        if arg:
+            try:
+                limit = int(arg)
+                if limit <= 0:
+                    return CommandResult(False, "Number must be positive")
+            except ValueError:
+                return CommandResult(False, f"Invalid argument: {arg}. Use 'clear' or a number.")
+
+        # Get history entries
+        try:
+            # get_strings() returns oldest first, which is what we want for indexing
+            entries = list(self._history.get_strings())
+            if not entries:
+                return CommandResult(True, "No history")
+
+            # Show last N entries with absolute history IDs
+            total = len(entries)
+            start_idx = max(0, total - limit)
+            shown_entries = entries[start_idx:]
+            lines = [f"History ({len(shown_entries)} of {total} commands):"]
+            for i, entry in enumerate(shown_entries):
+                history_id = start_idx + i + 1  # 1-indexed absolute position
+                lines.append(f"  {history_id:5d}  {entry}")
+            return CommandResult(True, "\n".join(lines))
+        except Exception as e:
+            return CommandResult(False, f"Error reading history: {e}")
+
     # -------------------------------------------------------------------------
     # Control
     # -------------------------------------------------------------------------
@@ -868,6 +1137,9 @@ class CommandHandler:
 
         for info in _command_registry.values():
             if info.name in seen:
+                continue
+            # Hide history command when prompt_toolkit is not available
+            if info.name == "history" and not self._is_history_available():
                 continue
             seen.add(info.name)
 

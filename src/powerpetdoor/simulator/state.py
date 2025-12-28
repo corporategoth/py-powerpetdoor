@@ -286,9 +286,9 @@ class DoorSimulatorState:
     reset_reason: str = "POWER_ON"  # Could be: POWER_ON, WATCHDOG, SOFT_RESET, etc.
 
     # Notifications
-    sensor_on_indoor: bool = True
+    sensor_on_indoor: bool = False
     sensor_off_indoor: bool = False
-    sensor_on_outdoor: bool = True
+    sensor_on_outdoor: bool = False
     sensor_off_outdoor: bool = False
     low_battery: bool = True
 

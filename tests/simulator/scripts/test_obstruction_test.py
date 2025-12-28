@@ -98,8 +98,12 @@ class TestObstructionTestMessages:
 
     @pytest.mark.asyncio
     async def test_door_retracts_on_obstruction(self, runner, simulator, message_capture):
-        """After obstruction, door should retract (show rising state again)."""
-        from powerpetdoor.const import DOOR_STATE_RISING
+        """After obstruction, door should retract (go back to open states)."""
+        from powerpetdoor.const import (
+            DOOR_STATE_CLOSING_TOP_OPEN,
+            DOOR_STATE_SLOWING,
+            DOOR_STATE_HOLDING,
+        )
 
         script = get_builtin_script("obstruction_test")
         await runner.run(script, verbose=False)
@@ -108,8 +112,22 @@ class TestObstructionTestMessages:
         await asyncio.sleep(0.1)
 
         statuses = message_capture.get_status_sequence()
-        rising_count = sum(1 for s in statuses if s == DOOR_STATE_RISING)
-        # Should see rising at least twice: initial open + retract after obstruction
-        assert rising_count >= 2, (
-            f"Expected at least 2 rising states (open + retract), got {rising_count}: {statuses}"
+
+        # With state-aware behavior, when retracting from CLOSING_TOP_OPEN (66%),
+        # the door reverses to SLOWING (same 66% position) rather than restarting
+        # from RISING (33%). This is the correct physical behavior.
+        # We should see:
+        # 1. Initial open: RISING -> SLOWING -> HOLDING
+        # 2. Start closing: CLOSING_TOP_OPEN
+        # 3. Obstruction retract: SLOWING -> HOLDING (reverses from same position)
+        slowing_count = sum(1 for s in statuses if s == DOOR_STATE_SLOWING)
+        holding_count = sum(1 for s in statuses if s == DOOR_STATE_HOLDING)
+
+        # Should see slowing at least twice: initial open + retract after obstruction
+        assert slowing_count >= 2, (
+            f"Expected at least 2 slowing states (open + retract), got {slowing_count}: {statuses}"
+        )
+        # Should see holding at least twice as well
+        assert holding_count >= 2, (
+            f"Expected at least 2 holding states, got {holding_count}: {statuses}"
         )

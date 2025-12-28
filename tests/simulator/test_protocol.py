@@ -334,3 +334,47 @@ class TestDoorSimulatorProtocol:
         protocol.data_received(b'PING":"test"}')
         await asyncio.sleep(0.05)
         assert mock_transport.write.call_count > 0
+
+
+# ============================================================================
+# Connection Lifecycle Tests
+# ============================================================================
+
+class TestConnectionLifecycle:
+    """Tests for connection and disconnection handling."""
+
+    def test_on_disconnect_callback_called(self, state, mock_transport):
+        """on_disconnect callback should be called when connection lost."""
+        disconnect_callback = MagicMock()
+        proto = DoorSimulatorProtocol(
+            state,
+            on_disconnect=disconnect_callback,
+        )
+        proto.connection_made(mock_transport)
+
+        # Simulate disconnect
+        proto.connection_lost(None)
+
+        disconnect_callback.assert_called_once_with(proto)
+
+    def test_on_disconnect_with_exception(self, state, mock_transport):
+        """on_disconnect should be called even when disconnect has exception."""
+        disconnect_callback = MagicMock()
+        proto = DoorSimulatorProtocol(
+            state,
+            on_disconnect=disconnect_callback,
+        )
+        proto.connection_made(mock_transport)
+
+        # Simulate disconnect with exception
+        proto.connection_lost(Exception("Connection reset"))
+
+        disconnect_callback.assert_called_once_with(proto)
+
+    def test_no_callback_when_none(self, state, mock_transport):
+        """Should not error when on_disconnect is None."""
+        proto = DoorSimulatorProtocol(state)
+        proto.connection_made(mock_transport)
+
+        # Should not raise
+        proto.connection_lost(None)

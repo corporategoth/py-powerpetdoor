@@ -162,10 +162,12 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         state: DoorSimulatorState,
         on_command: Optional[Callable[[str, dict], None]] = None,
         broadcast_status: Optional[Callable[[], None]] = None,
+        on_disconnect: Optional[Callable[["DoorSimulatorProtocol"], None]] = None,
     ):
         self.state = state
         self.on_command = on_command
         self.broadcast_status = broadcast_status
+        self.on_disconnect = on_disconnect
         self.transport: Optional[asyncio.Transport] = None
         self.buffer = ""
         self._door_task: Optional[asyncio.Task] = None
@@ -181,6 +183,8 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         logger.info("Simulator: Client disconnected")
         if self._door_task:
             self._door_task.cancel()
+        if self.on_disconnect:
+            self.on_disconnect(self)
 
     def data_received(self, data: bytes):
         try:
@@ -336,7 +340,9 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     @CommandRegistry.handler(CMD_GET_DOOR_BATTERY)
     async def _handle_get_battery(self, msg: dict, response: dict) -> None:
-        response[FIELD_BATTERY_PERCENT] = self.state.battery_percent
+        # Report 0% if battery is not present
+        percent = self.state.battery_percent if self.state.battery_present else 0
+        response[FIELD_BATTERY_PERCENT] = percent
         response[FIELD_BATTERY_PRESENT] = "1" if self.state.battery_present else "0"
         response[FIELD_AC_PRESENT] = "1" if self.state.ac_present else "0"
 
@@ -593,7 +599,26 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     # ==========================================================================
 
     async def _simulate_door_open(self, hold: bool = False):
-        """Simulate door opening sequence with realistic timing."""
+        """Simulate door opening sequence with realistic timing.
+
+        State-aware behavior:
+        - If already open (HOLDING/KEEPUP): do nothing
+        - If already opening (RISING/SLOWING): continue (do nothing)
+        - If closing: reverse to equivalent opening state and continue
+        - If closed: start full opening sequence
+        """
+        current_status = self.state.door_status
+
+        # Already open - do nothing
+        if current_status in (DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP):
+            logger.debug("Simulator: Open command ignored (already open)")
+            return
+
+        # Already opening - do nothing (let current sequence continue)
+        if current_status in (DOOR_STATE_RISING, DOOR_STATE_SLOWING):
+            logger.debug("Simulator: Open command ignored (already opening)")
+            return
+
         # Cancel any existing door movement
         if self._door_task:
             self._door_task.cancel()
@@ -602,18 +627,36 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             except asyncio.CancelledError:
                 pass
 
-        self.state.door_status = DOOR_STATE_RISING
+        # Determine starting state based on current position
+        # CLOSING_TOP_OPEN (66%) -> SLOWING (66%)
+        # CLOSING_MID_OPEN (33%) -> RISING (33%)
+        # CLOSED -> RISING
+        if current_status == DOOR_STATE_CLOSING_TOP_OPEN:
+            start_state = DOOR_STATE_SLOWING
+            skip_rising = True
+            logger.info("Simulator: Reversing close at top, continuing to open")
+        elif current_status == DOOR_STATE_CLOSING_MID_OPEN:
+            start_state = DOOR_STATE_RISING
+            skip_rising = False
+            logger.info("Simulator: Reversing close at mid, continuing to open")
+        else:
+            start_state = DOOR_STATE_RISING
+            skip_rising = False
+
+        self.state.door_status = start_state
         self._broadcast_or_send_status()
 
         async def door_sequence():
             timing = self.state.timing
 
-            # Door rises
-            await asyncio.sleep(timing.rise_time)
+            if not skip_rising:
+                # Door rises
+                await asyncio.sleep(timing.rise_time)
 
-            # Door slows as it approaches the top (still opening)
-            self.state.door_status = DOOR_STATE_SLOWING
-            self._broadcast_or_send_status()
+                # Door slows as it approaches the top (still opening)
+                self.state.door_status = DOOR_STATE_SLOWING
+                self._broadcast_or_send_status()
+
             await asyncio.sleep(timing.slowing_time)
 
             if hold:
@@ -641,7 +684,29 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         self._door_task = asyncio.create_task(door_sequence())
 
     async def _simulate_door_close(self):
-        """Initiate door closing sequence."""
+        """Initiate door closing sequence.
+
+        State-aware behavior:
+        - If already closed: do nothing
+        - If already closing: continue (do nothing)
+        - If opening: reverse to equivalent closing state and continue
+        - If open (HOLDING/KEEPUP): start full closing sequence
+
+        Respects autoretract, pet detection, and command lockout settings.
+        """
+        current_status = self.state.door_status
+
+        # Already closed - do nothing
+        if current_status == DOOR_STATE_CLOSED:
+            logger.debug("Simulator: Close command ignored (already closed)")
+            return
+
+        # Already closing - do nothing (let current sequence continue)
+        if current_status in (DOOR_STATE_CLOSING_TOP_OPEN, DOOR_STATE_CLOSING_MID_OPEN):
+            logger.debug("Simulator: Close command ignored (already closing)")
+            return
+
+        # Cancel any existing door movement
         if self._door_task:
             self._door_task.cancel()
             try:
@@ -649,31 +714,59 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             except asyncio.CancelledError:
                 pass
 
-        await self._do_close_sequence()
+        # Determine starting state based on current position
+        # SLOWING (66%) -> CLOSING_TOP_OPEN (66%)
+        # RISING (33%) -> CLOSING_MID_OPEN (33%)
+        # HOLDING/KEEPUP -> CLOSING_TOP_OPEN
+        if current_status == DOOR_STATE_RISING:
+            start_state = DOOR_STATE_CLOSING_MID_OPEN
+            skip_top = True
+            logger.info("Simulator: Reversing open at rising, closing from mid")
+        elif current_status == DOOR_STATE_SLOWING:
+            start_state = DOOR_STATE_CLOSING_TOP_OPEN
+            skip_top = False
+            logger.info("Simulator: Reversing open at slowing, closing from top")
+        else:
+            # HOLDING or KEEPUP - start full close sequence
+            start_state = DOOR_STATE_CLOSING_TOP_OPEN
+            skip_top = False
 
-    async def _do_close_sequence(self):
-        """Execute the door closing sequence with sensor detection."""
+        await self._do_close_sequence(start_state=start_state, skip_top=skip_top)
+
+    async def _do_close_sequence(
+        self,
+        start_state: str = DOOR_STATE_CLOSING_TOP_OPEN,
+        skip_top: bool = False,
+    ):
+        """Execute the door closing sequence with sensor detection.
+
+        Args:
+            start_state: The initial closing state to set.
+            skip_top: If True, skip the CLOSING_TOP_OPEN phase (start from mid).
+        """
         timing = self.state.timing
 
-        self.state.door_status = DOOR_STATE_CLOSING_TOP_OPEN
+        self.state.door_status = start_state
         self._broadcast_or_send_status()
 
         async def close_sequence():
-            await asyncio.sleep(timing.closing_top_time)
+            if not skip_top:
+                await asyncio.sleep(timing.closing_top_time)
 
-            # Check for sensor blocking close
-            if self.state.is_sensor_blocking_close() and self.state.autoretract:
-                logger.info("Simulator: Sensor blocking close! Auto-retracting...")
-                # Clear the active sensors
-                self.state.inside_sensor_active = False
-                self.state.outside_sensor_active = False
-                self.state.total_auto_retracts += 1
-                # Door auto-retracts (opens again)
-                await self._simulate_door_open(hold=False)
-                return
+                # Check for sensor blocking close
+                if self.state.is_sensor_blocking_close() and self.state.autoretract:
+                    logger.info("Simulator: Sensor blocking close! Auto-retracting...")
+                    # Clear the active sensors
+                    self.state.inside_sensor_active = False
+                    self.state.outside_sensor_active = False
+                    self.state.total_auto_retracts += 1
+                    # Door auto-retracts (opens again)
+                    await self._simulate_door_open(hold=False)
+                    return
 
-            self.state.door_status = DOOR_STATE_CLOSING_MID_OPEN
-            self._broadcast_or_send_status()
+                self.state.door_status = DOOR_STATE_CLOSING_MID_OPEN
+                self._broadcast_or_send_status()
+
             await asyncio.sleep(timing.closing_mid_time)
 
             # Final sensor check

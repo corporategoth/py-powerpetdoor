@@ -340,3 +340,131 @@ class TestAliases:
         result = await command_handler.execute("r nonexistent")
         # Command was recognized (even if script doesn't exist)
         assert "Error" in result.message or result.success is False
+
+
+# ============================================================================
+# Broadcast Command Tests
+# ============================================================================
+
+class TestBroadcastCommand:
+    """Tests for the broadcast command."""
+
+    @pytest.mark.asyncio
+    async def test_broadcast_no_arg_shows_types(self, command_handler):
+        """broadcast with no arg should show available types."""
+        result = await command_handler.execute("broadcast")
+        assert result.success
+        assert "Broadcast types:" in result.message
+        assert "status" in result.message
+        assert "settings" in result.message
+        assert "battery" in result.message
+        assert "all" in result.message
+
+    @pytest.mark.asyncio
+    async def test_broadcast_alias_bc(self, command_handler):
+        """'bc' alias should work for broadcast command."""
+        result = await command_handler.execute("bc")
+        assert result.success
+        assert "Broadcast types:" in result.message
+
+    @pytest.mark.asyncio
+    async def test_broadcast_no_clients_error(self, command_handler):
+        """broadcast should fail when no clients connected."""
+        result = await command_handler.execute("broadcast status")
+        assert not result.success
+        assert "No clients connected" in result.message
+
+    @pytest.mark.asyncio
+    async def test_broadcast_invalid_type(self, command_handler):
+        """broadcast with invalid type should fail."""
+        result = await command_handler.execute("broadcast invalid")
+        assert not result.success
+        assert "Unknown broadcast type" in result.message
+
+    @pytest.mark.asyncio
+    async def test_broadcast_status_with_client(self, command_handler):
+        """broadcast status should work when client connected."""
+        # Add a mock protocol to simulate a connected client
+        mock_protocol = MagicMock()
+        mock_protocol._door_task = None  # Prevent cleanup issues
+        command_handler.simulator.protocols.append(mock_protocol)
+
+        try:
+            result = await command_handler.execute("broadcast status")
+            assert result.success
+            assert "Broadcast status:" in result.message
+        finally:
+            command_handler.simulator.protocols.clear()
+
+    @pytest.mark.asyncio
+    async def test_broadcast_all_with_client(self, command_handler):
+        """broadcast all should work when client connected."""
+        mock_protocol = MagicMock()
+        mock_protocol._door_task = None  # Prevent cleanup issues
+        command_handler.simulator.protocols.append(mock_protocol)
+
+        try:
+            result = await command_handler.execute("broadcast all")
+            assert result.success
+            assert "Broadcast all data" in result.message
+        finally:
+            command_handler.simulator.protocols.clear()
+
+
+# ============================================================================
+# Status Command Client Count Tests
+# ============================================================================
+
+class TestStatusClientCount:
+    """Tests for client count in status command."""
+
+    @pytest.mark.asyncio
+    async def test_status_shows_no_clients(self, command_handler):
+        """status should show 'Clients: none' when no clients connected."""
+        result = await command_handler.execute("status")
+        assert result.success
+        assert "Clients: none" in result.message
+
+    @pytest.mark.asyncio
+    async def test_status_shows_one_client(self, command_handler):
+        """status should show '1 client' when one client connected."""
+        mock_protocol = MagicMock()
+        mock_protocol._door_task = None
+        command_handler.simulator.protocols.append(mock_protocol)
+
+        try:
+            result = await command_handler.execute("status")
+            assert result.success
+            assert "Clients: 1 client" in result.message
+        finally:
+            command_handler.simulator.protocols.clear()
+
+    @pytest.mark.asyncio
+    async def test_status_shows_multiple_clients(self, command_handler):
+        """status should show 'N clients' when multiple clients connected."""
+        for _ in range(3):
+            mock = MagicMock()
+            mock._door_task = None
+            command_handler.simulator.protocols.append(mock)
+
+        try:
+            result = await command_handler.execute("status")
+            assert result.success
+            assert "Clients: 3 clients" in result.message
+        finally:
+            command_handler.simulator.protocols.clear()
+
+    @pytest.mark.asyncio
+    async def test_status_data_includes_client_count(self, command_handler):
+        """status result.data should include connected_clients."""
+        for _ in range(2):
+            mock = MagicMock()
+            mock._door_task = None
+            command_handler.simulator.protocols.append(mock)
+
+        try:
+            result = await command_handler.execute("status")
+            assert result.data is not None
+            assert result.data["connected_clients"] == 2
+        finally:
+            command_handler.simulator.protocols.clear()
