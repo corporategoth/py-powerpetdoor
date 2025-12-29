@@ -38,6 +38,9 @@ class ArgSpec:
         description: Help text describing this argument
         min_value: Minimum value for numeric types
         max_value: Maximum value for numeric types
+        completer: Optional callable for tab completion. Can have signature:
+                  - completer() -> list[tuple[str, str]] - returns all completions
+                  - completer(prefix: str) -> list[tuple[str, str]] - prefix-aware (for paths)
     """
 
     name: str
@@ -48,6 +51,7 @@ class ArgSpec:
     description: str = ""
     min_value: Optional[float] = None  # For int/float types
     max_value: Optional[float] = None  # For int/float types
+    completer: Optional[Callable[..., list[tuple[str, str]]]] = None
 
     def generate_usage(self) -> str:
         """Generate usage string for this argument."""

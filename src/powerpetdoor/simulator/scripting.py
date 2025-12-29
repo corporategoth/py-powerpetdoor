@@ -545,3 +545,97 @@ def list_builtin_scripts() -> list[tuple[str, str]]:
             logger.warning(f"Failed to load script {name}: {e}")
             result.append((name, f"(Error loading: {e})"))
     return result
+
+
+def script_completer(prefix: str = "") -> list[tuple[str, str]]:
+    """Return list of (script_name, description) for tab completion.
+
+    This function is designed to be used as an ArgSpec completer.
+    Returns both builtin scripts and YAML files based on the prefix path.
+
+    Args:
+        prefix: The partial path/name being completed (e.g., "", "basic", "./scr")
+
+    Gracefully handles missing PyYAML by returning just script names.
+    """
+    result = []
+
+    # Determine the directory to search based on prefix
+    # We preserve the original prefix format (e.g., "./" stays as "./")
+    if prefix:
+        prefix_path = Path(prefix)
+        if prefix.endswith("/") or prefix.endswith("\\"):
+            # User typed a directory path ending with /
+            search_dir = prefix_path
+            dir_prefix = prefix  # e.g., "./" or "src/"
+            name_prefix = ""
+        elif "/" in prefix or "\\" in prefix:
+            # User is typing a path like "./scripts/bas" or "./da"
+            search_dir = prefix_path.parent
+            # Get the directory prefix as a string (preserves "./")
+            last_sep = max(prefix.rfind("/"), prefix.rfind("\\"))
+            dir_prefix = prefix[: last_sep + 1]  # e.g., "./" from "./da"
+            name_prefix = prefix[last_sep + 1 :]  # e.g., "da" from "./da"
+        else:
+            # Just a name prefix like "bas"
+            search_dir = None
+            dir_prefix = ""
+            name_prefix = prefix
+    else:
+        search_dir = None
+        dir_prefix = ""
+        name_prefix = ""
+
+    # If searching in a specific directory, list files there
+    if search_dir is not None:
+        # Resolve relative to cwd
+        if not search_dir.is_absolute():
+            search_dir = Path.cwd() / search_dir
+
+        if search_dir.is_dir():
+            # List YAML files in that directory
+            for pattern in ("*.yaml", "*.yml"):
+                for path in search_dir.glob(pattern):
+                    if path.is_file():
+                        # Use dir_prefix to preserve original format (e.g., "./")
+                        completion = dir_prefix + path.name
+                        result.append((completion, "(file)"))
+
+            # Also list subdirectories for further navigation
+            for subdir in search_dir.iterdir():
+                if subdir.is_dir() and not subdir.name.startswith("."):
+                    completion = dir_prefix + subdir.name + "/"
+                    result.append((completion, "(directory)"))
+    else:
+        # No specific directory - show builtin scripts and cwd files
+
+        # Add builtin scripts
+        script_files = _get_script_files()
+        if script_files:
+            if YAML_AVAILABLE:
+                for name, path in sorted(script_files.items()):
+                    try:
+                        script = Script.from_file(path)
+                        result.append((name, script.description or "(builtin)"))
+                    except Exception:
+                        result.append((name, "(builtin)"))
+            else:
+                for name in sorted(script_files.keys()):
+                    result.append((name, "(builtin)"))
+
+        # Add YAML files from current directory
+        cwd = Path.cwd()
+        for pattern in ("*.yaml", "*.yml"):
+            for path in cwd.glob(pattern):
+                if path.is_file():
+                    result.append((path.name, "(local file)"))
+
+        # Add subdirectories that might contain scripts
+        for subdir in cwd.iterdir():
+            if subdir.is_dir() and not subdir.name.startswith("."):
+                # Check if it has any yaml files
+                has_yaml = any(subdir.glob("*.yaml")) or any(subdir.glob("*.yml"))
+                if has_yaml:
+                    result.append((subdir.name + "/", "(directory)"))
+
+    return result

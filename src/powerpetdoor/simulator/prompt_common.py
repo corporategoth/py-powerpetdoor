@@ -320,8 +320,13 @@ if PROMPT_TOOLKIT_AVAILABLE:
                             result.append((alias, f"Alias for {sub_info.name}"))
             return sorted(result, key=lambda x: x[0])
 
-        def _get_arg_options_for_info(self, info) -> list[tuple[str, str]]:
-            """Get argument options for a CommandInfo."""
+        def _get_arg_options_for_info(self, info, prefix: str = "") -> list[tuple[str, str]]:
+            """Get argument options for a CommandInfo.
+
+            Args:
+                info: The CommandInfo to get options for
+                prefix: The current partial text being completed (for path-aware completers)
+            """
             if not info or not info.args:
                 return []
 
@@ -334,6 +339,18 @@ if PROMPT_TOOLKIT_AVAILABLE:
             # Also check for choices on string args (like history's "clear")
             elif arg.choices:
                 return [(c.lower(), c) for c in arg.choices]
+            # Check for dynamic completer
+            elif arg.completer:
+                try:
+                    # Try calling with prefix first (for path-aware completers)
+                    import inspect
+                    sig = inspect.signature(arg.completer)
+                    if len(sig.parameters) > 0:
+                        return arg.completer(prefix)
+                    else:
+                        return arg.completer()
+                except Exception:
+                    return []
             return []
 
         def _get_help_completions(self, info) -> list[tuple[str, str]]:
@@ -344,14 +361,6 @@ if PROMPT_TOOLKIT_AVAILABLE:
             if info.subcommands or info.args:
                 return [("help", "Show help for this command")]
             return []
-
-        def _get_script_completions(self) -> list[tuple[str, str]]:
-            """Get builtin script names for run/file command."""
-            try:
-                from .scripting import list_builtin_scripts
-                return [(name, desc) for name, desc in list_builtin_scripts()]
-            except Exception:
-                return []
 
         def get_completions(self, document, complete_event):
             """Generate completions for the current input."""
@@ -381,17 +390,6 @@ if PROMPT_TOOLKIT_AVAILABLE:
                 # Traverse to current position in command hierarchy
                 info, depth = self._traverse_to_current_info(completed_words)
 
-                # Special case for run/file command
-                if completed_words[0].lower() in ("run", "r", "file"):
-                    for name, desc in self._get_script_completions():
-                        if name.startswith(word_before.lower()):
-                            yield Completion(
-                                name,
-                                start_position=-len(word_before),
-                                display_meta=desc,
-                            )
-                    return
-
                 if info:
                     # Collect all possible completions
                     all_completions = []
@@ -400,14 +398,15 @@ if PROMPT_TOOLKIT_AVAILABLE:
                     all_completions.extend(self._get_subcommands_for_info(info))
 
                     # Add argument options (on/off, choices, etc.)
-                    all_completions.extend(self._get_arg_options_for_info(info))
+                    # Pass word_before as prefix for path-aware completers
+                    all_completions.extend(self._get_arg_options_for_info(info, word_before))
 
                     # Add help pseudo-subcommand
                     all_completions.extend(self._get_help_completions(info))
 
-                    # Yield matching completions
+                    # Yield matching completions (case-insensitive)
                     for name, desc in all_completions:
-                        if name.startswith(word_before.lower()):
+                        if name.lower().startswith(word_before.lower()):
                             yield Completion(
                                 name,
                                 start_position=-len(word_before),

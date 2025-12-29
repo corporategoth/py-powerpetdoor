@@ -16,6 +16,8 @@ import socket
 import sys
 from typing import Optional
 
+from ..tz_utils import async_init_timezone_cache
+
 # Import shared prompt_toolkit components
 from .prompt_common import (
     PROMPT_TOOLKIT_AVAILABLE,
@@ -305,6 +307,9 @@ async def interactive_mode_async(
     host: str, port: int, door_port: int, timeout: float, history_file: Optional[str]
 ):
     """Run in interactive mode using asyncio with log streaming."""
+    # Initialize timezone cache for completion
+    await async_init_timezone_cache()
+
     # Check connection first
     connected, error = check_connection(host, port, timeout)
     if not connected:

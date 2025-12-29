@@ -9,6 +9,16 @@ import random
 from typing import TYPE_CHECKING, Optional
 
 from .base import ArgSpec, CommandResult, SubcommandInfo, command, subcommand
+from ...tz_utils import get_available_timezones
+
+
+def _timezone_completer() -> list[tuple[str, str]]:
+    """Return list of (timezone_name, description) for tab completion."""
+    timezones = get_available_timezones()
+    if not timezones:
+        return []
+    # Return timezone names with empty descriptions (too many for descriptions)
+    return [(tz, "") for tz in timezones]
 
 if TYPE_CHECKING:
     from ..server import DoorSimulator
@@ -316,6 +326,7 @@ class SettingsCommandsMixin:
                 "str",
                 required=False,
                 description="Timezone (e.g., 'America/New_York' or 'EST5EDT,M3.2.0,M11.1.0')",
+                completer=_timezone_completer,
             )
         ],
     )

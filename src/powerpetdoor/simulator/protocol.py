@@ -376,7 +376,8 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     @CommandRegistry.handler(CMD_GET_HOLD_TIME)
     async def _handle_get_hold_time(self, msg: dict, response: dict) -> None:
-        response[FIELD_HOLD_TIME] = self.state.hold_time
+        # Convert seconds to centiseconds for protocol
+        response[FIELD_HOLD_TIME] = int(self.state.hold_time * 100)
 
     @CommandRegistry.handler(CMD_GET_SENSOR_TRIGGER_VOLTAGE)
     async def _handle_get_sensor_voltage(self, msg: dict, response: dict) -> None:
@@ -569,9 +570,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     @CommandRegistry.handler(CMD_SET_HOLD_TIME)
     async def _handle_set_hold_time(self, msg: dict, response: dict) -> None:
         if FIELD_HOLD_TIME in msg:
-            self.state.hold_time = msg[FIELD_HOLD_TIME]
+            # Convert centiseconds to seconds for internal storage
+            self.state.hold_time = msg[FIELD_HOLD_TIME] / 100.0
             logger.info(f"Simulator: Hold time set to {self.state.hold_time}s")
-        response[FIELD_HOLD_TIME] = self.state.hold_time
+        # Convert seconds to centiseconds for protocol response
+        response[FIELD_HOLD_TIME] = int(self.state.hold_time * 100)
 
     @CommandRegistry.handler(CMD_SET_NOTIFICATIONS)
     async def _handle_set_notifications(self, msg: dict, response: dict) -> None:

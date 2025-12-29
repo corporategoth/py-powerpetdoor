@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 from .base import ArgSpec, CommandResult, command
+from ..scripting import script_completer
 
 if TYPE_CHECKING:
     from ..scripting import Script, ScriptRunner
@@ -51,6 +52,7 @@ class ScriptsCommandsMixin:
                 "script",
                 "string",
                 description="Script name or file path",
+                completer=script_completer,
             )
         ],
     )

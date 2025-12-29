@@ -306,10 +306,12 @@ class DoorSimulator:
 
     def broadcast_hold_time(self):
         """Broadcast hold time setting change to all connected clients."""
+        # Convert seconds to centiseconds for protocol
+        hold_time_cs = int(self.state.hold_time * 100)
         for protocol in self.protocols:
             protocol._send({
                 FIELD_CMD: CMD_SET_HOLD_TIME,
-                FIELD_HOLD_TIME: self.state.hold_time,
+                FIELD_HOLD_TIME: hold_time_cs,
                 FIELD_SUCCESS: SUCCESS_TRUE,
                 FIELD_DIRECTION: DOOR_TO_PHONE,
             })
