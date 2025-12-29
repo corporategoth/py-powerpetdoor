@@ -315,6 +315,7 @@ class InfoCommandsMixin:
                 "arg",
                 "string",
                 required=False,
+                choices=["clear"],
                 description="'clear' to clear history, or N to show last N commands",
             )
         ],

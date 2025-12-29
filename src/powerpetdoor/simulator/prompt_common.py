@@ -16,6 +16,11 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 from .commands.base import get_command_registry, get_canonical_command
 from .commands.history import History
 
+# Import CommandHandler to ensure all command modules are loaded and their
+# @command/@subcommand decorators populate the registry. This is needed for
+# ctl.py which otherwise only imports a subset of command mixins.
+from .commands.handler import CommandHandler  # noqa: F401
+
 # Try to import prompt_toolkit for enhanced interactive features
 try:
     from prompt_toolkit.completion import Completer, Completion
@@ -68,11 +73,11 @@ def _collect_subcommands_and_options(subcommands: dict) -> None:
         _SUBCOMMANDS.add(info.name)
         for alias in info.aliases:
             _SUBCOMMANDS.add(alias)
-        # Collect choices from args
+        # Collect choices from args (any arg type with choices, not just "choice" type)
         for arg in info.args:
             if arg.arg_type == "bool_toggle":
                 _OPTIONS.update(["on", "off"])
-            elif arg.arg_type == "choice" and arg.choices:
+            elif arg.choices:
                 _OPTIONS.update(c.lower() for c in arg.choices)
         # Recurse into nested subcommands
         if info.subcommands:
@@ -88,11 +93,11 @@ def init_command_sets():
         _COMMANDS.add(info.name)
         for alias in info.aliases:
             _ALIASES.add(alias)
-        # Collect options from command args
+        # Collect options from command args (any arg type with choices)
         for arg in info.args:
             if arg.arg_type == "bool_toggle":
                 _OPTIONS.update(["on", "off"])
-            elif arg.arg_type == "choice" and arg.choices:
+            elif arg.choices:
                 _OPTIONS.update(c.lower() for c in arg.choices)
         # Collect subcommands recursively
         if info.subcommands:
@@ -117,6 +122,76 @@ if PROMPT_TOOLKIT_AVAILABLE:
     class SimulatorLexer(Lexer):
         """Syntax highlighter for simulator commands."""
 
+        def _get_current_command_info(self, words: list[str]):
+            """Traverse command hierarchy and return current command info.
+
+            Returns:
+                Tuple of (info, depth) where:
+                - info: The CommandInfo at the current position, or None
+                - depth: How many words were consumed as commands/subcommands
+            """
+            if not words:
+                return None, 0
+
+            registry = get_command_registry()
+            cmd = words[0].lower()
+            if cmd not in registry:
+                return None, 0
+
+            info = registry[cmd]
+            depth = 1
+
+            # Traverse subcommand hierarchy
+            for i in range(1, len(words)):
+                word = words[i].lower()
+                # Check for "help" pseudo-subcommand (valid if command has subcommands or args)
+                if word in ("help", "?") and (info.subcommands or info.args):
+                    depth = i + 1
+                    break  # help is terminal, don't traverse further
+                if info.subcommands and word in info.subcommands:
+                    # Count this as part of the command path for highlighting
+                    # (even if subcommand has no handler, it's still a valid subcommand)
+                    info = info.subcommands[word]
+                    depth = i + 1
+                else:
+                    break
+
+            return info, depth
+
+        def _get_valid_subcommands_at_depth(self, words: list[str], depth: int) -> set[str]:
+            """Get valid subcommand names at a specific depth in the command hierarchy."""
+            if depth == 0:
+                return set()
+
+            registry = get_command_registry()
+            cmd = words[0].lower()
+            if cmd not in registry:
+                return set()
+
+            info = registry[cmd]
+
+            # Traverse to the right depth
+            for i in range(1, depth):
+                if i >= len(words):
+                    break
+                word = words[i].lower()
+                if info.subcommands and word in info.subcommands:
+                    info = info.subcommands[word]
+                else:
+                    break
+
+            # Return subcommand names at this level
+            result = set()
+            if info.subcommands:
+                for sub_info in info.subcommands.values():
+                    result.add(sub_info.name)
+                    result.update(sub_info.aliases)
+            # Add help/? as pseudo-subcommands if command has subcommands or args
+            if info.subcommands or info.args:
+                result.add("help")
+                result.add("?")
+            return result
+
         def lex_document(self, document):
             """Return a lexer function for the document."""
             # Initialize command sets if needed
@@ -127,6 +202,9 @@ if PROMPT_TOOLKIT_AVAILABLE:
                 tokens = []
                 words = line.split()
                 pos = 0
+
+                # Get command context
+                info, cmd_depth = self._get_current_command_info(words)
 
                 for i, word in enumerate(words):
                     # Find start position of this word
@@ -144,18 +222,15 @@ if PROMPT_TOOLKIT_AVAILABLE:
                             tokens.append(("class:alias", word))
                         else:
                             tokens.append(("", word))
-                    elif i == 1:
-                        # Second word might be subcommand or option
-                        if word.lower() in _SUBCOMMANDS:
+                    elif i < cmd_depth:
+                        # This word is part of the command/subcommand path
+                        valid_subs = self._get_valid_subcommands_at_depth(words, i)
+                        if word.lower() in valid_subs:
                             tokens.append(("class:subcommand", word))
-                        elif word.lower() in _OPTIONS:
-                            tokens.append(("class:option", word))
-                        elif word.replace(".", "").replace("-", "").isdigit():
-                            tokens.append(("class:number", word))
                         else:
                             tokens.append(("", word))
                     else:
-                        # Other words
+                        # Arguments after command path
                         if (
                             word.replace(".", "")
                             .replace("-", "")
@@ -195,24 +270,40 @@ if PROMPT_TOOLKIT_AVAILABLE:
                             commands.append((alias, f"Alias for {info.name}"))
             return sorted(commands, key=lambda x: x[0])
 
-        def _get_subcommands(self, cmd: str) -> list[tuple[str, str]]:
-            """Get subcommands for a command with descriptions from the registry."""
-            # Special case for run/file command - add builtin scripts
-            if cmd in ("run", "r", "file"):
-                try:
-                    from .scripting import list_builtin_scripts
+        def _traverse_to_current_info(self, words: list[str]):
+            """Traverse command hierarchy based on words already typed.
 
-                    return [(name, desc) for name, desc in list_builtin_scripts()]
-                except Exception:
-                    return []
+            Returns:
+                Tuple of (info, depth) where:
+                - info: The CommandInfo at the current position, or None
+                - depth: How many words were consumed as commands/subcommands
+            """
+            if not words:
+                return None, 0
 
-            # Look up command in registry
             registry = get_command_registry()
+            cmd = words[0].lower()
             if cmd not in registry:
-                return []
+                return None, 0
 
             info = registry[cmd]
-            if not info.subcommands:
+            depth = 1
+
+            # Traverse subcommand hierarchy
+            for i in range(1, len(words)):
+                word = words[i].lower()
+                if info.subcommands and word in info.subcommands:
+                    # Traverse into the subcommand
+                    info = info.subcommands[word]
+                    depth = i + 1
+                else:
+                    break
+
+            return info, depth
+
+        def _get_subcommands_for_info(self, info) -> list[tuple[str, str]]:
+            """Get subcommands for a CommandInfo with descriptions."""
+            if not info or not info.subcommands:
                 return []
 
             # Collect unique subcommands (avoid duplicates from aliases)
@@ -221,7 +312,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
             for sub_info in info.subcommands.values():
                 if sub_info.name not in seen:
                     seen.add(sub_info.name)
-                    result.append((sub_info.name, sub_info.description))
+                    result.append((sub_info.name, sub_info.description or ""))
                     # Also add aliases
                     for alias in sub_info.aliases:
                         if alias not in seen:
@@ -229,14 +320,9 @@ if PROMPT_TOOLKIT_AVAILABLE:
                             result.append((alias, f"Alias for {sub_info.name}"))
             return sorted(result, key=lambda x: x[0])
 
-        def _get_toggle_options(self, cmd: str) -> list[tuple[str, str]]:
-            """Get toggle options for commands from the registry."""
-            registry = get_command_registry()
-            if cmd not in registry:
-                return []
-
-            info = registry[cmd]
-            if not info.args:
+        def _get_arg_options_for_info(self, info) -> list[tuple[str, str]]:
+            """Get argument options for a CommandInfo."""
+            if not info or not info.args:
                 return []
 
             # Check the first arg's type
@@ -245,7 +331,27 @@ if PROMPT_TOOLKIT_AVAILABLE:
                 return [("on", "Enable"), ("off", "Disable")]
             elif arg.arg_type == "choice" and arg.choices:
                 return [(c.lower(), c) for c in arg.choices]
+            # Also check for choices on string args (like history's "clear")
+            elif arg.choices:
+                return [(c.lower(), c) for c in arg.choices]
             return []
+
+        def _get_help_completions(self, info) -> list[tuple[str, str]]:
+            """Get help pseudo-subcommands if command has subcommands or args."""
+            if not info:
+                return []
+            # Offer help if command has subcommands or args that could use explanation
+            if info.subcommands or info.args:
+                return [("help", "Show help for this command")]
+            return []
+
+        def _get_script_completions(self) -> list[tuple[str, str]]:
+            """Get builtin script names for run/file command."""
+            try:
+                from .scripting import list_builtin_scripts
+                return [(name, desc) for name, desc in list_builtin_scripts()]
+            except Exception:
+                return []
 
         def get_completions(self, document, complete_event):
             """Generate completions for the current input."""
@@ -256,39 +362,54 @@ if PROMPT_TOOLKIT_AVAILABLE:
             if not text or text.endswith(" "):
                 # Starting a new word
                 word_before = ""
-                completing_first = len(words) == 0
+                completed_words = words
             else:
                 # Completing current word
                 word_before = words[-1] if words else ""
-                completing_first = len(words) == 1
+                completed_words = words[:-1] if words else []
 
-            if completing_first or not words:
+            if not completed_words:
                 # Complete command names
                 for cmd, desc in self._get_commands():
-                    if cmd.startswith(word_before):
+                    if cmd.startswith(word_before.lower()):
                         yield Completion(
                             cmd,
                             start_position=-len(word_before),
                             display_meta=desc,
                         )
             else:
-                # Complete subcommands or options
-                cmd = words[0].lower()
-                subcommands = self._get_subcommands(cmd)
-                if subcommands:
-                    for sub, desc in subcommands:
-                        if sub.startswith(word_before):
+                # Traverse to current position in command hierarchy
+                info, depth = self._traverse_to_current_info(completed_words)
+
+                # Special case for run/file command
+                if completed_words[0].lower() in ("run", "r", "file"):
+                    for name, desc in self._get_script_completions():
+                        if name.startswith(word_before.lower()):
                             yield Completion(
-                                sub,
+                                name,
                                 start_position=-len(word_before),
                                 display_meta=desc,
                             )
-                else:
-                    options = self._get_toggle_options(cmd)
-                    for opt, desc in options:
-                        if opt.startswith(word_before):
+                    return
+
+                if info:
+                    # Collect all possible completions
+                    all_completions = []
+
+                    # Add subcommands
+                    all_completions.extend(self._get_subcommands_for_info(info))
+
+                    # Add argument options (on/off, choices, etc.)
+                    all_completions.extend(self._get_arg_options_for_info(info))
+
+                    # Add help pseudo-subcommand
+                    all_completions.extend(self._get_help_completions(info))
+
+                    # Yield matching completions
+                    for name, desc in all_completions:
+                        if name.startswith(word_before.lower()):
                             yield Completion(
-                                opt,
+                                name,
                                 start_position=-len(word_before),
                                 display_meta=desc,
                             )

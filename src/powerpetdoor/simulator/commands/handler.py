@@ -380,3 +380,67 @@ class CommandHandler(
                 parsed.append(spec.default)
 
         return parsed, None
+
+
+def register_all_subcommands():
+    """Register all subcommands from CommandHandler class at module load time.
+
+    This function scans CommandHandler and its mixin base classes for methods
+    decorated with @subcommand and registers them in the command registry.
+    This allows subcommand completion and highlighting to work without needing
+    to instantiate a CommandHandler (e.g., in ctl.py).
+    """
+    _command_registry = get_command_registry()
+
+    # Scan all methods in CommandHandler class hierarchy
+    for cls in CommandHandler.__mro__:
+        for name in vars(cls):
+            if name.startswith("_"):
+                continue
+            func = getattr(cls, name, None)
+            if func is None or not callable(func):
+                continue
+
+            # Check for subcommand decorator metadata
+            if hasattr(func, "_subcommand_info") and hasattr(func, "_parent_path"):
+                sub_info: SubcommandInfo = func._subcommand_info
+                parent_path: list[str] = func._parent_path
+
+                # Find the root command
+                if not parent_path or parent_path[0] not in _command_registry:
+                    continue
+
+                # Navigate to the parent through the path
+                parent_info = _command_registry[parent_path[0]]
+                for part in parent_path[1:]:
+                    if part not in parent_info.subcommands:
+                        parent_info = None
+                        break
+                    parent_info = parent_info.subcommands[part]
+
+                if parent_info is None:
+                    continue
+
+                # Skip if already registered
+                if sub_info.name in parent_info.subcommands:
+                    continue
+
+                # Create a new SubcommandInfo with the handler
+                new_sub_info = SubcommandInfo(
+                    name=sub_info.name,
+                    aliases=sub_info.aliases,
+                    description=sub_info.description,
+                    usage=sub_info.usage,
+                    handler=func,
+                    args=sub_info.args,
+                    subcommands=sub_info.subcommands,
+                )
+
+                # Register under name and aliases
+                parent_info.subcommands[sub_info.name] = new_sub_info
+                for alias in sub_info.aliases:
+                    parent_info.subcommands[alias] = new_sub_info
+
+
+# Register subcommands at module load time for prompt completion/highlighting
+register_all_subcommands()
