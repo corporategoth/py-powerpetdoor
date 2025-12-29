@@ -349,7 +349,7 @@ class DoorSimulatorState:
             FIELD_CMD_LOCKOUT: "1" if self.cmd_lockout else "0",
             FIELD_AUTORETRACT: "1" if self.autoretract else "0",
             FIELD_TZ: tz_value,
-            FIELD_HOLD_OPEN_TIME: self.hold_time,
+            FIELD_HOLD_OPEN_TIME: int(self.hold_time * 100),  # Convert to centiseconds
             FIELD_SENSOR_TRIGGER_VOLTAGE: self.sensor_trigger_voltage,
             FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE: self.sleep_sensor_trigger_voltage,
         }
