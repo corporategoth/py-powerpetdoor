@@ -156,6 +156,25 @@ class ScheduleCommandsMixin:
 
     @subcommand(
         "schedule",
+        "clear",
+        [],
+        "Delete all schedules",
+    )
+    def schedule_clear(self) -> CommandResult:
+        """Delete all schedules."""
+        schedules = self.simulator.state.schedules
+        if not schedules:
+            return CommandResult(True, "No schedules to clear")
+
+        count = len(schedules)
+        # Remove all schedules
+        for idx in list(schedules.keys()):
+            self.simulator.remove_schedule(idx)
+
+        return CommandResult(True, f"Cleared {count} schedule(s)")
+
+    @subcommand(
+        "schedule",
         "delete",
         ["del", "rm", "remove"],
         "Delete a schedule",
