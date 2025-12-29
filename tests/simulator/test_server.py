@@ -468,3 +468,92 @@ class TestClientConnectionManagement:
         for _, writer in clients:
             writer.close()
             await writer.wait_closed()
+
+
+# ============================================================================
+# Broadcast Tests
+# ============================================================================
+
+class TestBroadcastFunctions:
+    """Tests for broadcast functions that send updates to connected clients."""
+
+    @pytest.mark.asyncio
+    async def test_broadcast_hold_time_sends_centiseconds(self, simulator):
+        """broadcast_hold_time should send hold time in centiseconds."""
+        port = simulator.server.sockets[0].getsockname()[1]
+
+        # Connect a client
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        await asyncio.sleep(0.05)
+
+        # Set hold time to 5 seconds
+        simulator.state.hold_time = 5.0
+
+        # Trigger broadcast
+        simulator.broadcast_hold_time()
+
+        # Read the broadcast message
+        try:
+            data = await asyncio.wait_for(reader.read(1024), timeout=1.0)
+            import json
+            msg = json.loads(data.decode("ascii"))
+
+            # Should contain hold time in centiseconds (500)
+            assert msg.get("holdTime") == 500
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_broadcast_settings_sends_to_all_clients(self, simulator):
+        """broadcast_settings should send settings to all connected clients."""
+        port = simulator.server.sockets[0].getsockname()[1]
+
+        # Connect two clients
+        clients = []
+        for _ in range(2):
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            clients.append((reader, writer))
+            await asyncio.sleep(0.02)
+
+        # Trigger broadcast
+        simulator.broadcast_settings()
+
+        # Both clients should receive the broadcast
+        import json
+        for reader, writer in clients:
+            try:
+                data = await asyncio.wait_for(reader.read(1024), timeout=1.0)
+                msg = json.loads(data.decode("ascii"))
+                assert "settings" in msg
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_broadcast_settings_hold_time_in_centiseconds(self, simulator):
+        """broadcast_settings should include hold time in centiseconds."""
+        port = simulator.server.sockets[0].getsockname()[1]
+
+        # Connect a client
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        await asyncio.sleep(0.05)
+
+        # Set hold time to 3.5 seconds
+        simulator.state.hold_time = 3.5
+
+        # Trigger broadcast
+        simulator.broadcast_settings()
+
+        # Read the broadcast message
+        import json
+        try:
+            data = await asyncio.wait_for(reader.read(1024), timeout=1.0)
+            msg = json.loads(data.decode("ascii"))
+
+            # Settings should contain hold time in centiseconds (350)
+            settings = msg.get("settings", {})
+            assert settings.get("holdOpenTime") == 350
+        finally:
+            writer.close()
+            await writer.wait_closed()

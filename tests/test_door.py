@@ -544,8 +544,8 @@ class TestPowerPetDoorConfig:
         """set_hold_time should update hold time."""
         await door.set_hold_time(20.0)
 
-        # Verify via simulator (protocol converts to centiseconds)
-        assert simulator.state.hold_time == 2000
+        # door.set_hold_time sends seconds, simulator stores seconds
+        assert simulator.state.hold_time == 20.0
 
 
 # ============================================================================

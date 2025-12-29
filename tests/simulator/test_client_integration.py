@@ -225,11 +225,12 @@ class TestQueryCommands:
 
     @pytest.mark.asyncio
     async def test_get_hold_time(self, client, simulator):
-        """GET_HOLD_TIME should return hold time."""
+        """GET_HOLD_TIME should return hold time in centiseconds."""
         future = client.send_message(CONFIG, CMD_GET_HOLD_TIME, notify=True)
         result = await asyncio.wait_for(future, timeout=2.0)
 
-        assert result == simulator.state.hold_time
+        # Protocol returns centiseconds, state stores seconds
+        assert result == int(simulator.state.hold_time * 100)
 
     @pytest.mark.asyncio
     async def test_get_battery(self, client, simulator):
@@ -343,14 +344,15 @@ class TestControlCommands:
 
     @pytest.mark.asyncio
     async def test_set_hold_time(self, client, simulator):
-        """SET_HOLD_TIME should update hold time."""
+        """SET_HOLD_TIME should update hold time (centiseconds in protocol)."""
         future = client.send_message(
-            CONFIG, CMD_SET_HOLD_TIME, notify=True, holdTime=15
+            CONFIG, CMD_SET_HOLD_TIME, notify=True, holdTime=1500  # 15 seconds
         )
         result = await asyncio.wait_for(future, timeout=2.0)
 
-        assert result == 15
-        assert simulator.state.hold_time == 15
+        # Protocol uses centiseconds, state stores seconds
+        assert result == 1500
+        assert simulator.state.hold_time == 15.0
 
 
 # ============================================================================

@@ -29,6 +29,7 @@ from powerpetdoor.const import (
     CMD_GET_POWER,
     CMD_GET_HW_INFO,
     CMD_GET_DOOR_BATTERY,
+    CMD_GET_HOLD_TIME,
     CMD_OPEN,
     CMD_CLOSE,
     CMD_POWER_ON,
@@ -38,6 +39,7 @@ from powerpetdoor.const import (
     CMD_SET_HOLD_TIME,
     FIELD_DOOR_STATUS,
     FIELD_HOLD_TIME,
+    FIELD_HOLD_OPEN_TIME,
     FIELD_SETTINGS,
     FIELD_BATTERY_PERCENT,
     FIELD_INDEX,
@@ -232,15 +234,16 @@ class TestDoorSimulatorProtocol:
 
     @pytest.mark.asyncio
     async def test_set_hold_time(self, protocol, mock_transport, state):
-        """Should handle SET_HOLD_TIME command."""
+        """Should handle SET_HOLD_TIME command (centiseconds)."""
         msg = json.dumps({
             CONFIG: CMD_SET_HOLD_TIME,
-            FIELD_HOLD_TIME: 30,
+            FIELD_HOLD_TIME: 3000,  # 30 seconds in centiseconds
             "msgId": 1
         }).encode("ascii")
         protocol.data_received(msg)
         await asyncio.sleep(0.05)
-        assert state.hold_time == 30
+        # State stores seconds, protocol uses centiseconds
+        assert state.hold_time == 30.0
 
     @pytest.mark.asyncio
     async def test_door_command_blocked_when_power_off(self, protocol, mock_transport, state):
@@ -378,3 +381,146 @@ class TestConnectionLifecycle:
 
         # Should not raise
         proto.connection_lost(None)
+
+
+# ============================================================================
+# Protocol Value Conversion Tests
+# ============================================================================
+
+class TestHoldTimeCentiseconds:
+    """Tests for hold time centiseconds <-> seconds conversion.
+
+    The protocol uses centiseconds (1/100th of a second) for hold time,
+    but the internal state stores seconds for easier manipulation.
+    These tests verify the conversion is correct in all code paths.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_hold_time_returns_centiseconds(self, protocol, mock_transport, state):
+        """GET_HOLD_TIME should return hold time in centiseconds."""
+        # Set state to 5 seconds
+        state.hold_time = 5.0
+
+        msg = json.dumps({CONFIG: CMD_GET_HOLD_TIME, "msgId": 1}).encode("ascii")
+        protocol.data_received(msg)
+        await asyncio.sleep(0.05)
+
+        response = json.loads(mock_transport.write.call_args[0][0].decode("ascii"))
+        # Should return 500 centiseconds
+        assert response[FIELD_HOLD_TIME] == 500
+
+    @pytest.mark.asyncio
+    async def test_set_hold_time_converts_to_seconds(self, protocol, mock_transport, state):
+        """SET_HOLD_TIME should convert centiseconds to seconds in state."""
+        # Send 1500 centiseconds (15 seconds)
+        msg = json.dumps({
+            CONFIG: CMD_SET_HOLD_TIME,
+            FIELD_HOLD_TIME: 1500,
+            "msgId": 1
+        }).encode("ascii")
+        protocol.data_received(msg)
+        await asyncio.sleep(0.05)
+
+        # State should store 15.0 seconds
+        assert state.hold_time == 15.0
+
+    @pytest.mark.asyncio
+    async def test_set_hold_time_response_is_centiseconds(self, protocol, mock_transport, state):
+        """SET_HOLD_TIME response should echo back centiseconds."""
+        msg = json.dumps({
+            CONFIG: CMD_SET_HOLD_TIME,
+            FIELD_HOLD_TIME: 2500,
+            "msgId": 1
+        }).encode("ascii")
+        protocol.data_received(msg)
+        await asyncio.sleep(0.05)
+
+        response = json.loads(mock_transport.write.call_args[0][0].decode("ascii"))
+        # Response should contain centiseconds
+        assert response[FIELD_HOLD_TIME] == 2500
+
+    @pytest.mark.asyncio
+    async def test_get_settings_hold_time_is_centiseconds(self, protocol, mock_transport, state):
+        """GET_SETTINGS should return hold time in centiseconds."""
+        # Set state to 7.5 seconds
+        state.hold_time = 7.5
+
+        msg = json.dumps({CONFIG: CMD_GET_SETTINGS, "msgId": 1}).encode("ascii")
+        protocol.data_received(msg)
+        await asyncio.sleep(0.05)
+
+        response = json.loads(mock_transport.write.call_args[0][0].decode("ascii"))
+        settings = response[FIELD_SETTINGS]
+        # Should return 750 centiseconds
+        assert settings[FIELD_HOLD_OPEN_TIME] == 750
+
+    @pytest.mark.asyncio
+    async def test_hold_time_round_trip(self, protocol, mock_transport, state):
+        """Setting then getting hold time should preserve the value."""
+        # Set to 4200 centiseconds (42 seconds)
+        msg = json.dumps({
+            CONFIG: CMD_SET_HOLD_TIME,
+            FIELD_HOLD_TIME: 4200,
+            "msgId": 1
+        }).encode("ascii")
+        protocol.data_received(msg)
+        await asyncio.sleep(0.05)
+
+        # Now get it back
+        msg = json.dumps({CONFIG: CMD_GET_HOLD_TIME, "msgId": 2}).encode("ascii")
+        protocol.data_received(msg)
+        await asyncio.sleep(0.05)
+
+        response = json.loads(mock_transport.write.call_args[0][0].decode("ascii"))
+        assert response[FIELD_HOLD_TIME] == 4200
+
+    @pytest.mark.asyncio
+    async def test_hold_time_fractional_seconds(self, protocol, mock_transport, state):
+        """Should handle fractional second values correctly."""
+        # 50 centiseconds = 0.5 seconds
+        msg = json.dumps({
+            CONFIG: CMD_SET_HOLD_TIME,
+            FIELD_HOLD_TIME: 50,
+            "msgId": 1
+        }).encode("ascii")
+        protocol.data_received(msg)
+        await asyncio.sleep(0.05)
+
+        assert state.hold_time == 0.5
+
+        # Verify it comes back correctly
+        msg = json.dumps({CONFIG: CMD_GET_HOLD_TIME, "msgId": 2}).encode("ascii")
+        protocol.data_received(msg)
+        await asyncio.sleep(0.05)
+
+        response = json.loads(mock_transport.write.call_args[0][0].decode("ascii"))
+        assert response[FIELD_HOLD_TIME] == 50
+
+    @pytest.mark.asyncio
+    async def test_default_hold_time(self, state):
+        """Default hold time should be 1 second."""
+        # The fixture creates state with hold_time=1
+        assert state.hold_time == 1.0
+
+    @pytest.mark.asyncio
+    async def test_hold_time_in_settings_matches_dedicated_command(
+        self, protocol, mock_transport, state
+    ):
+        """Hold time from GET_SETTINGS should match GET_HOLD_TIME."""
+        state.hold_time = 12.34  # 1234 centiseconds
+
+        # Get via dedicated command
+        msg = json.dumps({CONFIG: CMD_GET_HOLD_TIME, "msgId": 1}).encode("ascii")
+        protocol.data_received(msg)
+        await asyncio.sleep(0.05)
+        hold_time_response = json.loads(mock_transport.write.call_args[0][0].decode("ascii"))
+
+        # Get via settings
+        msg = json.dumps({CONFIG: CMD_GET_SETTINGS, "msgId": 2}).encode("ascii")
+        protocol.data_received(msg)
+        await asyncio.sleep(0.05)
+        settings_response = json.loads(mock_transport.write.call_args[0][0].decode("ascii"))
+
+        # Both should return 1234 centiseconds
+        assert hold_time_response[FIELD_HOLD_TIME] == 1234
+        assert settings_response[FIELD_SETTINGS][FIELD_HOLD_OPEN_TIME] == 1234
