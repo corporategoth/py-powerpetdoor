@@ -71,6 +71,11 @@ from ..const import (
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
     FIELD_TZ,
+    FIELD_HW_VERSION,
+    FIELD_HW_REVISION,
+    FIELD_FW_MAJOR,
+    FIELD_FW_MINOR,
+    FIELD_FW_PATCH,
     SUCCESS_TRUE,
 )
 
@@ -385,9 +390,11 @@ class DoorSimulator:
             protocol._send({
                 "CMD": CMD_GET_HW_INFO,
                 FIELD_FWINFO: {
-                    "fw_maj": self.state.fw_major,
-                    "fw_min": self.state.fw_minor,
-                    "fw_pat": self.state.fw_patch,
+                    FIELD_FW_MAJOR: self.state.fw_major,
+                    FIELD_FW_MINOR: self.state.fw_minor,
+                    FIELD_FW_PATCH: self.state.fw_patch,
+                    FIELD_HW_VERSION: self.state.hw_ver,
+                    FIELD_HW_REVISION: self.state.hw_rev,
                 },
                 FIELD_SUCCESS: SUCCESS_TRUE,
                 FIELD_DIRECTION: DOOR_TO_PHONE,

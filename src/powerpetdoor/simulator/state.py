@@ -275,10 +275,12 @@ class DoorSimulatorState:
     total_open_cycles: int = 0
     total_auto_retracts: int = 0
 
-    # Firmware
+    # Firmware/Hardware info
     fw_major: int = 1
     fw_minor: int = 2
     fw_patch: int = 3
+    hw_ver: str = "1"  # Hardware version
+    hw_rev: str = "1"  # Hardware revision
 
     # Remote/reset info
     has_remote_id: bool = True

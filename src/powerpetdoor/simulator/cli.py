@@ -137,6 +137,7 @@ async def run_simulator(
     control_port: Optional[int] = None,
     history_file: Optional[str] = None,
     firmware: Optional[tuple[int, int, int]] = None,
+    hardware: Optional[tuple[str, str]] = None,
 ):
     """Run the Power Pet Door simulator.
 
@@ -153,6 +154,7 @@ async def run_simulator(
         wait_for_client: If True, delay script start until a client connects
         control_port: Port for control commands (default: port + 1 in daemon/script mode)
         firmware: Firmware version as (major, minor, patch) tuple
+        hardware: Hardware version as (ver, rev) tuple
 
     Returns:
         Script result (True if all passed, False if any failed, None if no scripts)
@@ -165,14 +167,18 @@ async def run_simulator(
     # Initialize timezone cache for IANA to POSIX conversion
     await async_init_timezone_cache()
 
-    # Create state with optional firmware version
+    # Create state with optional firmware/hardware version
     state = None
-    if firmware:
-        state = DoorSimulatorState(
-            fw_major=firmware[0],
-            fw_minor=firmware[1],
-            fw_patch=firmware[2],
-        )
+    if firmware or hardware:
+        kwargs = {}
+        if firmware:
+            kwargs["fw_major"] = firmware[0]
+            kwargs["fw_minor"] = firmware[1]
+            kwargs["fw_patch"] = firmware[2]
+        if hardware:
+            kwargs["hw_ver"] = hardware[0]
+            kwargs["hw_rev"] = hardware[1]
+        state = DoorSimulatorState(**kwargs)
 
     # Start the simulator
     simulator = DoorSimulator(host=host, port=port, state=state)
@@ -632,6 +638,11 @@ def main():
         metavar="VERSION",
         help="Firmware version to report (e.g., '1.2.3', default: 1.2.3)"
     )
+    parser.add_argument(
+        "--hardware",
+        metavar="VERSION",
+        help="Hardware version to report (e.g., '1.1' for 'ver 1 rev 1', default: 1.1)"
+    )
 
     args = parser.parse_args()
 
@@ -676,6 +687,14 @@ def main():
         except ValueError:
             parser.error("Firmware version must contain only numbers (e.g., '1.2.3')")
 
+    # Parse hardware version if provided
+    hardware = None
+    if args.hardware:
+        parts = args.hardware.split(".")
+        if len(parts) != 2:
+            parser.error("Hardware version must be in format ver.rev (e.g., '1.1')")
+        hardware = (parts[0], parts[1])
+
     try:
         result = asyncio.run(run_simulator(
             host=args.host,
@@ -690,6 +709,7 @@ def main():
             control_port=control_port,
             history_file=args.history,
             firmware=firmware,
+            hardware=hardware,
         ))
 
         # Exit with appropriate code for CI/CD

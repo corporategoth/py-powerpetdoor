@@ -85,6 +85,12 @@ from .const import (
     FIELD_HAS_REMOTE_ID,
     FIELD_HAS_REMOTE_KEY,
     FIELD_RESET_REASON,
+    # Hardware/firmware version fields
+    FIELD_FW_MAJOR,
+    FIELD_FW_MINOR,
+    FIELD_FW_PATCH,
+    FIELD_HW_VERSION,
+    FIELD_HW_REVISION,
     # Door states
     DOOR_STATE_IDLE,
     DOOR_STATE_CLOSED,
@@ -194,6 +200,12 @@ __all__ = [
     "FIELD_HAS_REMOTE_ID",
     "FIELD_HAS_REMOTE_KEY",
     "FIELD_RESET_REASON",
+    # Constants - Hardware/firmware version fields
+    "FIELD_FW_MAJOR",
+    "FIELD_FW_MINOR",
+    "FIELD_FW_PATCH",
+    "FIELD_HW_VERSION",
+    "FIELD_HW_REVISION",
     # Constants - Door states
     "DOOR_STATE_IDLE",
     "DOOR_STATE_CLOSED",

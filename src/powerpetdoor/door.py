@@ -107,6 +107,8 @@ from .const import (
     FIELD_FW_MAJOR,
     FIELD_FW_MINOR,
     FIELD_FW_PATCH,
+    FIELD_HW_VERSION,
+    FIELD_HW_REVISION,
 )
 
 logger = logging.getLogger(__name__)
@@ -781,6 +783,17 @@ class PowerPetDoor:
         minor = self._hw_info.get(FIELD_FW_MINOR, 0)
         patch = self._hw_info.get(FIELD_FW_PATCH, 0)
         return f"{major}.{minor}.{patch}"
+
+    @property
+    def hardware_version(self) -> str:
+        """Hardware version string."""
+        if not self._hw_info:
+            return ""
+        ver = self._hw_info.get(FIELD_HW_VERSION, "")
+        rev = self._hw_info.get(FIELD_HW_REVISION, "")
+        if not ver and not rev:
+            return ""
+        return f"{ver} rev {rev}"
 
     @property
     def hardware_info(self) -> dict[str, Any]:

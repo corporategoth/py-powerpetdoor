@@ -114,6 +114,11 @@ from ..const import (
     NOTIFY_SENSOR_INDOOR,
     NOTIFY_SENSOR_OUTDOOR,
     FIELD_SENSOR_STATE,
+    FIELD_HW_VERSION,
+    FIELD_HW_REVISION,
+    FIELD_FW_MAJOR,
+    FIELD_FW_MINOR,
+    FIELD_FW_PATCH,
 )
 
 from .state import DoorSimulatorState, Schedule
@@ -333,9 +338,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     @CommandRegistry.handler(CMD_GET_HW_INFO)
     async def _handle_get_hw_info(self, msg: dict, response: dict) -> None:
         response[FIELD_FWINFO] = {
-            "fw_maj": self.state.fw_major,
-            "fw_min": self.state.fw_minor,
-            "fw_pat": self.state.fw_patch,
+            FIELD_FW_MAJOR: self.state.fw_major,
+            FIELD_FW_MINOR: self.state.fw_minor,
+            FIELD_FW_PATCH: self.state.fw_patch,
+            FIELD_HW_VERSION: self.state.hw_ver,
+            FIELD_HW_REVISION: self.state.hw_rev,
         }
 
     @CommandRegistry.handler(CMD_GET_DOOR_BATTERY)

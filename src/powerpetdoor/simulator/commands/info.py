@@ -263,7 +263,9 @@ class InfoCommandsMixin:
         self.simulator.broadcast_hardware_info()
         s = self.simulator.state
         return CommandResult(
-            True, f"Broadcast hwinfo: {s.fw_major}.{s.fw_minor}.{s.fw_patch}"
+            True,
+            f"Broadcast hwinfo: fw {s.fw_major}.{s.fw_minor}.{s.fw_patch}, "
+            f"hw {s.hw_ver} rev {s.hw_rev}",
         )
 
     @subcommand("broadcast", "stats", [], "Broadcast door statistics")
