@@ -532,6 +532,24 @@ class InteractiveSession:
         """Get the History object, or None if not available."""
         return self._history
 
+    def invalidate(self) -> None:
+        """Invalidate (redraw) the prompt.
+
+        Call this when something external changes that affects the prompt display,
+        such as connection status changing. This causes the prompt to be redrawn
+        immediately without waiting for user input.
+        """
+        if self._session is not None and self._session.app is not None:
+            app = self._session.app
+            # Re-evaluate the prompt and update the session's message
+            if self._get_prompt:
+                self._session.message = self._get_prompt()
+            # Reset the layout to clear FormattedTextControl caches
+            app.layout.reset()
+            # Force immediate redraw if app is running
+            if app.is_running:
+                app._redraw()
+
     def resolve_history_recall(self, line: str) -> tuple[str, bool, Optional[str]]:
         """Resolve history recall commands (!!, !n, !-n).
 

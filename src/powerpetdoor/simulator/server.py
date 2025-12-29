@@ -11,7 +11,7 @@ for simulating a Power Pet Door device.
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from ..const import (
     DOOR_STATE_CLOSED,
@@ -114,6 +114,8 @@ class DoorSimulator:
         host: str = "0.0.0.0",
         port: int = 3000,
         state: Optional[DoorSimulatorState] = None,
+        on_connect: Optional[Callable[[], None]] = None,
+        on_disconnect: Optional[Callable[[], None]] = None,
     ):
         self.host = host
         self.port = port
@@ -122,6 +124,8 @@ class DoorSimulator:
         self.protocols: list[DoorSimulatorProtocol] = []
         self._battery_task: Optional[asyncio.Task] = None
         self._running = False
+        self._on_connect = on_connect
+        self._on_disconnect = on_disconnect
 
     async def start(self):
         """Start the simulator server."""
@@ -130,6 +134,8 @@ class DoorSimulator:
         def handle_disconnect(protocol):
             if protocol in self.protocols:
                 self.protocols.remove(protocol)
+                if self._on_disconnect:
+                    self._on_disconnect()
 
         def protocol_factory():
             protocol = DoorSimulatorProtocol(
@@ -138,6 +144,8 @@ class DoorSimulator:
                 on_disconnect=handle_disconnect,
             )
             self.protocols.append(protocol)
+            if self._on_connect:
+                self._on_connect()
             return protocol
 
         self.server = await loop.create_server(

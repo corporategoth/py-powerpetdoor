@@ -180,8 +180,28 @@ async def run_simulator(
             kwargs["hw_rev"] = hardware[1]
         state = DoorSimulatorState(**kwargs)
 
+    # Holder for interactive session (set later if in interactive mode)
+    # Used by callbacks to invalidate prompt on connect/disconnect
+    session_holder: list[Optional[InteractiveSession]] = [None]
+
+    def on_client_connect():
+        """Called when a client connects - invalidate prompt to update color."""
+        if session_holder[0]:
+            session_holder[0].invalidate()
+
+    def on_client_disconnect():
+        """Called when a client disconnects - invalidate prompt to update color."""
+        if session_holder[0]:
+            session_holder[0].invalidate()
+
     # Start the simulator
-    simulator = DoorSimulator(host=host, port=port, state=state)
+    simulator = DoorSimulator(
+        host=host,
+        port=port,
+        state=state,
+        on_connect=on_client_connect,
+        on_disconnect=on_client_disconnect,
+    )
     await simulator.start()
 
     script_runner = ScriptRunner(simulator)
@@ -414,6 +434,9 @@ async def run_simulator(
                     history_file=history_path,
                     is_connected=lambda: bool(simulator.protocols),
                 )
+
+                # Store in holder so connect/disconnect callbacks can invalidate
+                session_holder[0] = interactive
 
                 # Register history with command handler (for history command)
                 if interactive.history:

@@ -368,12 +368,17 @@ async def interactive_mode_async(
                         print(decoded[5:])
                         # Update client status from log messages
                         if "Client connected" in decoded:
+                            old_status = has_clients[0]
                             has_clients[0] = True
+                            if not old_status:
+                                interactive.invalidate()
                         elif "Client disconnected" in decoded or "connection closed" in decoded.lower():
-                            # Check if there might still be other clients
                             # For simplicity, assume disconnected means no clients
                             # (a proper solution would track count)
-                            pass
+                            old_status = has_clients[0]
+                            has_clients[0] = False
+                            if old_status:
+                                interactive.invalidate()
                     elif decoded.startswith("OK:"):
                         # Unescape newlines from protocol
                         msg = decoded[4:].replace('\\n', '\n').replace('\\\\', '\\')
@@ -381,10 +386,13 @@ async def interactive_mode_async(
                         await response_queue.put((True, msg))
                         # Update client count from status responses
                         if "Clients:" in decoded:
+                            old_status = has_clients[0]
                             if "Clients: none" in decoded or "Clients: 0" in decoded:
                                 has_clients[0] = False
                             else:
                                 has_clients[0] = True
+                            if has_clients[0] != old_status:
+                                interactive.invalidate()
                     elif decoded.startswith("ERROR:"):
                         # Unescape newlines from protocol
                         msg = decoded[7:].replace('\\n', '\n').replace('\\\\', '\\')

@@ -467,34 +467,37 @@ class PowerPetDoorClient:
             self.schedule_delete_listeners[name] = schedule_delete
 
     def del_listener(self, name: str) -> None:
-        """Remove all listeners registered under a name."""
-        del self.door_status_listeners[name]
-        del self.settings_listeners[name]
-        del self.sensor_listeners[FIELD_POWER][name]
-        del self.sensor_listeners[FIELD_INSIDE][name]
-        del self.sensor_listeners[FIELD_OUTSIDE][name]
-        del self.sensor_listeners[FIELD_AUTO][name]
-        del self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK][name]
-        del self.sensor_listeners[FIELD_CMD_LOCKOUT][name]
-        del self.sensor_listeners[FIELD_AUTORETRACT][name]
-        del self.notifications_listeners[FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS][name]
-        del self.notifications_listeners[FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS][name]
-        del self.notifications_listeners[FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS][name]
-        del self.notifications_listeners[FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS][name]
-        del self.notifications_listeners[FIELD_LOW_BATTERY_NOTIFICATIONS][name]
-        del self.stats_listeners[FIELD_TOTAL_OPEN_CYCLES][name]
-        del self.stats_listeners[FIELD_TOTAL_AUTO_RETRACTS][name]
-        del self.hw_info_listeners[name]
-        del self.battery_listeners[name]
-        del self.timezone_listeners[name]
-        del self.hold_time_listeners[name]
-        del self.sensor_trigger_voltage_listeners[name]
-        del self.sleep_sensor_trigger_voltage_listeners[name]
-        del self.remote_id_listeners[name]
-        del self.remote_key_listeners[name]
-        del self.reset_reason_listeners[name]
-        del self.schedule_update_listeners[name]
-        del self.schedule_delete_listeners[name]
+        """Remove all listeners registered under a name.
+
+        Safely removes entries - does not raise KeyError if listener wasn't added.
+        """
+        self.door_status_listeners.pop(name, None)
+        self.settings_listeners.pop(name, None)
+        self.sensor_listeners[FIELD_POWER].pop(name, None)
+        self.sensor_listeners[FIELD_INSIDE].pop(name, None)
+        self.sensor_listeners[FIELD_OUTSIDE].pop(name, None)
+        self.sensor_listeners[FIELD_AUTO].pop(name, None)
+        self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK].pop(name, None)
+        self.sensor_listeners[FIELD_CMD_LOCKOUT].pop(name, None)
+        self.sensor_listeners[FIELD_AUTORETRACT].pop(name, None)
+        self.notifications_listeners[FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS].pop(name, None)
+        self.notifications_listeners[FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS].pop(name, None)
+        self.notifications_listeners[FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS].pop(name, None)
+        self.notifications_listeners[FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS].pop(name, None)
+        self.notifications_listeners[FIELD_LOW_BATTERY_NOTIFICATIONS].pop(name, None)
+        self.stats_listeners[FIELD_TOTAL_OPEN_CYCLES].pop(name, None)
+        self.stats_listeners[FIELD_TOTAL_AUTO_RETRACTS].pop(name, None)
+        self.hw_info_listeners.pop(name, None)
+        self.battery_listeners.pop(name, None)
+        self.timezone_listeners.pop(name, None)
+        self.hold_time_listeners.pop(name, None)
+        self.sensor_trigger_voltage_listeners.pop(name, None)
+        self.sleep_sensor_trigger_voltage_listeners.pop(name, None)
+        self.remote_id_listeners.pop(name, None)
+        self.remote_key_listeners.pop(name, None)
+        self.reset_reason_listeners.pop(name, None)
+        self.schedule_update_listeners.pop(name, None)
+        self.schedule_delete_listeners.pop(name, None)
 
     # -------------------------------------------------------------------------
     # Response Handlers - registered via decorator pattern
@@ -890,8 +893,9 @@ class PowerPetDoorClient:
     def handle_connect_failure(self) -> None:
         """Handler for if we fail to connect to the power pet door."""
         if not self._shutdown:
-            _LOGGER.error('Unable to connect to power pet door.')
+            _LOGGER.error('Unable to connect to power pet door. Reconnecting...')
             self.disconnect()
+            self.ensure_future(self.reconnect(self.cfg_reconnect))
 
     async def keepalive(self) -> None:
         _keepalive = self._keepalive
