@@ -290,11 +290,24 @@ def schedule_entry_content_key(entry: dict) -> tuple:
     out_end = (entry.get(FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX, {}).get(FIELD_HOUR, 0),
                entry.get(FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX, {}).get(FIELD_MINUTE, 0))
 
+    # Normalize enabled to boolean - door returns '1'/'0' strings, we use True/False
+    enabled = entry.get(FIELD_ENABLED, True)
+    if isinstance(enabled, str):
+        enabled = enabled == '1'
+
+    # Normalize inside/outside to boolean in case they come as strings
+    inside = entry.get(FIELD_INSIDE, False)
+    if isinstance(inside, str):
+        inside = inside == '1'
+    outside = entry.get(FIELD_OUTSIDE, False)
+    if isinstance(outside, str):
+        outside = outside == '1'
+
     return (
         tuple(entry.get(FIELD_DAYSOFWEEK, [0] * 7)),
-        entry.get(FIELD_INSIDE, False),
-        entry.get(FIELD_OUTSIDE, False),
-        entry.get(FIELD_ENABLED, True),
+        inside,
+        outside,
+        enabled,
         in_start, in_end,
         out_start, out_end,
     )
@@ -303,14 +316,19 @@ def schedule_entry_content_key(entry: dict) -> tuple:
 def compute_schedule_diff(current_schedule: list[dict], new_schedule: list[dict]) -> tuple[list[int], list[dict]]:
     """Compare current and new schedules to determine what needs to change.
 
+    This function optimizes schedule updates by:
+    1. Keeping entries that already match (no change needed)
+    2. Reusing indices from entries to be deleted for new entries (SET instead of DELETE+ADD)
+    3. Only deleting entries when there are more current entries than new entries
+
     Args:
         current_schedule: List of current schedule entries on device
         new_schedule: List of desired schedule entries
 
     Returns:
-        Tuple of (entries_to_delete, entries_to_add) where:
+        Tuple of (entries_to_delete, entries_to_set) where:
         - entries_to_delete: list of indices to delete from device
-        - entries_to_add: list of new schedule entries to add
+        - entries_to_set: list of schedule entries to add/update via SET_SCHEDULE
     """
     # Build lookup of current entries by content key
     current_by_content = {}
@@ -318,22 +336,43 @@ def compute_schedule_diff(current_schedule: list[dict], new_schedule: list[dict]
         key = schedule_entry_content_key(entry)
         current_by_content[key] = entry
 
-    # Build lookup of new entries by content key
-    new_by_content = {}
+    # Build set of indices currently in use
+    current_indices = {entry.get(FIELD_INDEX) for entry in current_schedule}
+
+    # Find entries that already exist (no change needed) and track which new entries need to be set
+    entries_to_set = []
+    matched_indices = set()
+
     for entry in new_schedule:
         key = schedule_entry_content_key(entry)
-        new_by_content[key] = entry
+        if key in current_by_content:
+            # This content already exists - no change needed
+            matched_indices.add(current_by_content[key].get(FIELD_INDEX))
+        else:
+            # This is a new/changed entry that needs to be SET
+            entries_to_set.append(entry)
 
-    # Find entries to delete (in current but not in new)
+    # Indices that can be reused (current indices that weren't matched)
+    reusable_indices = sorted(current_indices - matched_indices)
+
+    # Indices to delete (reusable indices we won't use because we have fewer new entries)
     entries_to_delete = []
-    for key, entry in current_by_content.items():
-        if key not in new_by_content:
-            entries_to_delete.append(entry[FIELD_INDEX])
 
-    # Find entries to add (in new but not in current)
-    entries_to_add = []
-    for key, entry in new_by_content.items():
-        if key not in current_by_content:
-            entries_to_add.append(entry)
+    # Assign indices to entries that need to be SET
+    for i, entry in enumerate(entries_to_set):
+        if i < len(reusable_indices):
+            # Reuse an existing index (this is an UPDATE)
+            entry[FIELD_INDEX] = reusable_indices[i]
+        else:
+            # Need a new index - find the lowest unused index
+            new_index = 0
+            used_indices = matched_indices | set(reusable_indices[:i]) | {e.get(FIELD_INDEX) for e in entries_to_set[:i]}
+            while new_index in used_indices or new_index in current_indices:
+                new_index += 1
+            entry[FIELD_INDEX] = new_index
 
-    return (entries_to_delete, entries_to_add)
+    # Delete any leftover reusable indices we didn't use
+    if len(entries_to_set) < len(reusable_indices):
+        entries_to_delete = reusable_indices[len(entries_to_set):]
+
+    return (entries_to_delete, entries_to_set)

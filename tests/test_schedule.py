@@ -421,14 +421,17 @@ class TestComputeScheduleDiff:
         assert to_delete == [0]  # Index to delete
         assert to_add == []
 
-    def test_modify_entry_detected_as_delete_and_add(self):
-        """Test modifying entry is detected as delete + add."""
+    def test_modify_entry_detected_as_update(self):
+        """Test modifying entry is detected as SET (update), reusing the index."""
         current = [self.create_entry(0, [1, 0, 0, 0, 0, 0, 0], start_hour=8)]
         new = [self.create_entry(0, [1, 0, 0, 0, 0, 0, 0], start_hour=9)]  # Different time
 
-        to_delete, to_add = compute_schedule_diff(current, new)
-        assert to_delete == [0]
-        assert len(to_add) == 1
+        to_delete, to_set = compute_schedule_diff(current, new)
+        # The new entry reuses the old index, so no delete needed
+        assert to_delete == []
+        assert len(to_set) == 1
+        # The SET entry should have index 0 (reused from the entry being replaced)
+        assert to_set[0].get("index") == 0
 
     def test_ignores_index_differences(self):
         """Test same content at different indices is not a change."""
@@ -440,19 +443,41 @@ class TestComputeScheduleDiff:
         assert to_add == []
 
     def test_multiple_changes(self):
-        """Test multiple additions and deletions."""
+        """Test multiple additions and deletions with index reuse."""
         current = [
-            self.create_entry(0, [1, 0, 0, 0, 0, 0, 0]),
-            self.create_entry(1, [0, 1, 0, 0, 0, 0, 0]),
+            self.create_entry(0, [1, 0, 0, 0, 0, 0, 0]),  # Sunday at index 0
+            self.create_entry(1, [0, 1, 0, 0, 0, 0, 0]),  # Monday at index 1
         ]
         new = [
-            self.create_entry(0, [0, 1, 0, 0, 0, 0, 0]),  # Keep Monday
-            self.create_entry(1, [0, 0, 1, 0, 0, 0, 0]),  # Add Tuesday
+            self.create_entry(0, [0, 1, 0, 0, 0, 0, 0]),  # Monday already exists at index 1
+            self.create_entry(1, [0, 0, 1, 0, 0, 0, 0]),  # Tuesday is new
         ]
 
-        to_delete, to_add = compute_schedule_diff(current, new)
-        assert len(to_delete) == 1  # Sunday removed
-        assert len(to_add) == 1  # Tuesday added
+        to_delete, to_set = compute_schedule_diff(current, new)
+        # Monday already exists (matched), Sunday's index (0) is reused for Tuesday
+        # So no deletes needed, just SET Tuesday at index 0
+        assert len(to_delete) == 0
+        assert len(to_set) == 1  # Tuesday with reused index 0
+        assert to_set[0].get("index") == 0  # Reuses Sunday's old index
+
+    def test_more_current_than_new_deletes_excess(self):
+        """Test that excess current entries are deleted when new has fewer entries."""
+        current = [
+            self.create_entry(0, [1, 0, 0, 0, 0, 0, 0]),  # Sunday at index 0
+            self.create_entry(1, [0, 1, 0, 0, 0, 0, 0]),  # Monday at index 1
+            self.create_entry(2, [0, 0, 1, 0, 0, 0, 0]),  # Tuesday at index 2
+        ]
+        new = [
+            self.create_entry(0, [0, 0, 0, 1, 0, 0, 0]),  # Wednesday (new)
+        ]
+
+        to_delete, to_set = compute_schedule_diff(current, new)
+        # None of the current entries match Wednesday
+        # Wednesday reuses index 0 from Sunday
+        # Indices 1 and 2 are excess and should be deleted
+        assert len(to_set) == 1
+        assert to_set[0].get("index") == 0
+        assert set(to_delete) == {1, 2}  # Monday and Tuesday's indices deleted
 
 
 # ============================================================================
