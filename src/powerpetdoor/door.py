@@ -198,8 +198,8 @@ class Schedule:
 
     index: int = 0
     enabled: bool = True
-    # List of 7 values [Sun, Mon, Tue, Wed, Thu, Fri, Sat] where 1=active
-    days_of_week: list = field(default_factory=lambda: [1, 1, 1, 1, 1, 1, 1])
+    # List of 7 booleans [Sun, Mon, Tue, Wed, Thu, Fri, Sat] where True=active
+    days_of_week: list[bool] = field(default_factory=lambda: [True, True, True, True, True, True, True])
     # Which sensor this entry is for
     inside: bool = False
     outside: bool = False
@@ -209,10 +209,12 @@ class Schedule:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to protocol dict format."""
+        # Protocol uses 1/0 for days, convert from booleans
+        days_as_int = [1 if d else 0 for d in self.days_of_week]
         result = {
             FIELD_INDEX: self.index,
             FIELD_ENABLED: self.enabled,
-            FIELD_DAYSOFWEEK: self.days_of_week.copy() if isinstance(self.days_of_week, list) else self.days_of_week,
+            FIELD_DAYSOFWEEK: days_as_int,
             FIELD_INSIDE: self.inside,
             FIELD_OUTSIDE: self.outside,
         }
@@ -259,11 +261,14 @@ class Schedule:
             start = ScheduleTime()
             end = ScheduleTime()
 
-        # Handle daysOfWeek - could be list or legacy bitmask
+        # Handle daysOfWeek - could be list or legacy bitmask, convert to booleans
         days = data.get(FIELD_DAYSOFWEEK, [1, 1, 1, 1, 1, 1, 1])
         if isinstance(days, int):
-            # Convert bitmask to list [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
-            days = [(days >> i) & 1 for i in range(7)]
+            # Convert bitmask to list of booleans [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+            days = [bool((days >> i) & 1) for i in range(7)]
+        else:
+            # Convert 1/0 list to booleans
+            days = [bool(d) for d in days]
 
         # Handle enabled field - could be bool or string
         enabled = data.get(FIELD_ENABLED, True)
