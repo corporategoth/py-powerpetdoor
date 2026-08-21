@@ -12,10 +12,11 @@ from typing import TYPE_CHECKING
 
 from .base import (
     ArgSpec,
+    CommandInfo,
     CommandResult,
     SubcommandInfo,
     get_command_registry,
-    parse_arg,
+    parse_args,
 )
 from .buttons import ButtonCommandsMixin
 from .control import ControlCommandsMixin
@@ -33,6 +34,10 @@ if TYPE_CHECKING:
     from ..server import DoorSimulator
 
 logger = logging.getLogger(__name__)
+
+# Saved "exit" CommandInfo so set_cli_mode(False) can restore it after CLI mode
+# removed it from the registry (the registry entries themselves are deleted).
+_saved_exit_info: CommandInfo | None = None
 
 
 class CommandHandler(
@@ -62,6 +67,8 @@ class CommandHandler(
         script_runner: "ScriptRunner",
         stop_callback: Callable[[], None],
         script_queue: asyncio.Queue | None = None,
+        scripts_dir: str | None = None,
+        allow_script_paths: bool = True,
     ):
         """Initialize the command handler.
 
@@ -70,11 +77,17 @@ class CommandHandler(
             script_runner: The script runner instance
             stop_callback: Function to call to stop the simulator
             script_queue: Optional queue for queueing scripts
+            scripts_dir: Optional directory of extra scripts resolvable by bare name
+            allow_script_paths: If False, the run command only accepts bare
+                script names (no path separators or traversal). Set False when
+                the handler serves an unauthenticated control channel.
         """
         self.simulator = simulator
         self.script_runner = script_runner
         self.stop_callback = stop_callback
         self.script_queue = script_queue
+        self._scripts_dir = scripts_dir
+        self._allow_script_paths = allow_script_paths
         self._history_obj: History | None = None  # Set by cli.py when using prompt_toolkit
         self._history = None  # prompt_toolkit history for InfoCommandsMixin compatibility
         self._interactive_mode = False  # Set by cli.py for interactive sessions
@@ -148,6 +161,10 @@ class CommandHandler(
                 for alias in sub_info.aliases:
                     parent_info.subcommands[alias] = new_sub_info
 
+                # Regenerate auto-generated usage now that subcommands exist
+                if parent_info.auto_usage:
+                    parent_info.usage = parent_info.generate_usage() or None
+
     def set_history(self, history: History):
         """Set the History object for history-related functionality.
 
@@ -181,6 +198,7 @@ class CommandHandler(
         self._cli_mode = enabled
 
         # Dynamically add/remove exit aliases for shutdown
+        global _saved_exit_info
         _command_registry = get_command_registry()
         if "shutdown" not in _command_registry:
             return
@@ -189,34 +207,35 @@ class CommandHandler(
         cli_aliases = ["exit", "q", "quit"]
 
         if enabled:
-            # In CLI mode, exit/q/quit become aliases for shutdown
+            # In CLI mode, exit/q/quit become aliases for shutdown.
             # First, remove the standalone exit command's registry entries
-            # (the exit command itself is hidden via get_help check)
-            if "exit" in _command_registry:
-                exit_info = _command_registry["exit"]
-                # Remove exit command's aliases from registry
+            # (saving the CommandInfo so CLI mode can be turned off again).
+            exit_info = _command_registry.get("exit")
+            if exit_info is not None and exit_info is not shutdown_info:
+                _saved_exit_info = exit_info
+                del _command_registry["exit"]
                 for alias in list(exit_info.aliases):
-                    if alias in _command_registry and _command_registry[alias] is exit_info:
+                    if _command_registry.get(alias) is exit_info:
                         del _command_registry[alias]
 
             # Add exit/q/quit as aliases for shutdown
             for alias in cli_aliases:
                 _command_registry[alias] = shutdown_info
                 if alias not in shutdown_info.aliases:
-                    shutdown_info.aliases = tuple(list(shutdown_info.aliases) + [alias])
+                    shutdown_info.aliases = list(shutdown_info.aliases) + [alias]
         else:
             # Remove exit/q/quit from shutdown aliases
             for alias in cli_aliases:
-                if alias in _command_registry and _command_registry[alias] is shutdown_info:
+                if _command_registry.get(alias) is shutdown_info:
                     del _command_registry[alias]
-            shutdown_info.aliases = tuple(a for a in shutdown_info.aliases if a not in cli_aliases)
+            shutdown_info.aliases = [a for a in shutdown_info.aliases if a not in cli_aliases]
 
-            # Restore exit command's aliases to registry
-            if "exit" in _command_registry:
-                exit_info = _command_registry["exit"]
-                for alias in exit_info.aliases:
+            # Restore the exit command (primary name and aliases)
+            if _saved_exit_info is not None:
+                _command_registry["exit"] = _saved_exit_info
+                for alias in _saved_exit_info.aliases:
                     if alias not in _command_registry:
-                        _command_registry[alias] = exit_info
+                        _command_registry[alias] = _saved_exit_info
 
     async def execute(self, command_str: str) -> CommandResult:
         """Execute a command string and return the result.
@@ -326,7 +345,19 @@ class CommandHandler(
             except Exception as e:
                 return CommandResult(False, f"Error: {e}")
         else:
-            # No args defined - call handler with no arguments
+            # No args defined - reject leftovers instead of silently ignoring them
+            if remaining_parts:
+                if remaining_parts[0].lower() in ("help", "?"):
+                    cmd_str = " ".join(cmd_path)
+                    return CommandResult(
+                        True, f"{cmd_str}: {info.description or 'No help available.'}"
+                    )
+                cmd_str = " ".join(cmd_path)
+                return CommandResult(
+                    False,
+                    f"Unexpected argument(s): {' '.join(remaining_parts)}\nUsage: {cmd_str}",
+                )
+            # Call handler with no arguments
             try:
                 result = handler()
                 if asyncio.iscoroutine(result):
@@ -347,25 +378,7 @@ class CommandHandler(
         Returns:
             (parsed_args, error) - error is None on success
         """
-        parsed = []
-        cmd_str = " ".join(cmd_path)
-        usage = " ".join(spec.generate_usage() for spec in arg_specs)
-
-        for i, spec in enumerate(arg_specs):
-            if i < len(parts):
-                value, error = parse_arg(parts[i], spec)
-                if error:
-                    return [], CommandResult(False, f"{error}\nUsage: {cmd_str} {usage}")
-                parsed.append(value)
-            elif spec.required:
-                return [], CommandResult(
-                    False,
-                    f"Missing required argument: {spec.name}\nUsage: {cmd_str} {usage}",
-                )
-            else:
-                parsed.append(spec.default)
-
-        return parsed, None
+        return parse_args(parts, arg_specs, cmd_path)
 
 
 def register_all_subcommands():
@@ -426,6 +439,10 @@ def register_all_subcommands():
                 parent_info.subcommands[sub_info.name] = new_sub_info
                 for alias in sub_info.aliases:
                     parent_info.subcommands[alias] = new_sub_info
+
+                # Regenerate auto-generated usage now that subcommands exist
+                if parent_info.auto_usage:
+                    parent_info.usage = parent_info.generate_usage() or None
 
 
 # Register subcommands at module load time for prompt completion/highlighting

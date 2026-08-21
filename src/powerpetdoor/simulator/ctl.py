@@ -21,7 +21,7 @@ from ..tz_utils import async_init_timezone_cache
 from .commands.base import (
     CommandResult,
     get_command_registry,
-    parse_arg,
+    parse_args,
 )
 from .commands.control import ControlCommandsMixin
 from .commands.history import History
@@ -35,6 +35,8 @@ from .prompt_common import (
     PROMPT_TOOLKIT_AVAILABLE,
     InputLine,
     InteractiveSession,
+    sanitize_text,
+    unescape_message,
 )
 
 
@@ -177,12 +179,23 @@ class LocalCommandHandler(InfoCommandsMixin, ControlCommandsMixin):
                     help_text = self._get_arg_help(info, cmd_path)
                     return LocalCommandResult(True, help_text)
 
-                # Parse arguments
-                parsed_args, error = self._parse_args(remaining_parts, info.args, cmd_path)
+                # Parse arguments (shared parser also rejects extra arguments)
+                parsed_args, error = parse_args(remaining_parts, info.args, cmd_path)
                 if error:
                     return LocalCommandResult(False, error.message)
                 result = handler(*parsed_args)
             else:
+                if remaining_parts:
+                    if remaining_parts[0].lower() in ("help", "?"):
+                        cmd_str = " ".join(cmd_path)
+                        return LocalCommandResult(
+                            True, f"{cmd_str}: {info.description or 'No help available.'}"
+                        )
+                    cmd_str = " ".join(cmd_path)
+                    return LocalCommandResult(
+                        False,
+                        f"Unexpected argument(s): {' '.join(remaining_parts)}\nUsage: {cmd_str}",
+                    )
                 result = handler()
         except Exception as e:
             return LocalCommandResult(False, f"Error: {e}")
@@ -192,32 +205,6 @@ class LocalCommandHandler(InfoCommandsMixin, ControlCommandsMixin):
             return LocalCommandResult(True, "", exit_ctl=True)
 
         return LocalCommandResult(result.success, result.message)
-
-    def _parse_args(
-        self,
-        parts: list[str],
-        arg_specs: list,
-        cmd_path: list[str],
-    ) -> tuple[list, CommandResult | None]:
-        """Parse argument parts according to ArgSpec definitions."""
-        parsed = []
-        cmd_str = " ".join(cmd_path)
-        usage = " ".join(spec.generate_usage() for spec in arg_specs)
-
-        for i, spec in enumerate(arg_specs):
-            if i < len(parts):
-                value, error = parse_arg(parts[i], spec)
-                if error:
-                    return [], CommandResult(False, f"{error}\nUsage: {cmd_str} {usage}")
-                parsed.append(value)
-            elif spec.required:
-                return [], CommandResult(
-                    False, f"Missing required argument: {spec.name}\nUsage: {cmd_str} {usage}"
-                )
-            else:
-                parsed.append(spec.default)
-
-        return parsed, None
 
 
 if PROMPT_TOOLKIT_AVAILABLE:
@@ -247,35 +234,34 @@ def send_command(
             sock.connect((host, port))
             sock.sendall(f"{command}\n".encode())
 
-            # Read response
-            response = b""
+            # Read response - only complete (newline-terminated) lines are
+            # parsed so a response spanning TCP segments is never truncated
+            buffer = ""
             while True:
                 try:
                     chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    response += chunk
-                    # Check if we got a complete response (OK: or ERROR:)
-                    decoded = response.decode()
-                    # Look for complete response line
-                    for line in decoded.split("\n"):
-                        if line.startswith("OK:") or line.startswith("ERROR:"):
-                            # Unescape newlines from protocol
-                            response_str = line.strip()
-                            success = response_str.startswith("OK:")
-                            # Unescape the message portion
-                            if success:
-                                msg = response_str[4:].replace("\\n", "\n").replace("\\\\", "\\")
-                                return success, f"OK: {msg}"
-                            else:
-                                msg = response_str[7:].replace("\\n", "\n").replace("\\\\", "\\")
-                                return success, f"ERROR: {msg}"
                 except TimeoutError:
+                    return False, (f"Response timeout after {timeout}s waiting for {host}:{port}")
+                if not chunk:
                     break
+                buffer += chunk.decode(errors="replace")
+                # Keep any trailing partial line in the buffer
+                *complete_lines, buffer = buffer.split("\n")
+                for line in complete_lines:
+                    line = line.strip()
+                    if line.startswith("OK:"):
+                        msg = sanitize_text(unescape_message(line[4:]))
+                        return True, f"OK: {msg}"
+                    elif line.startswith("ERROR:"):
+                        msg = sanitize_text(unescape_message(line[7:]))
+                        return False, f"ERROR: {msg}"
+                    # LOG:/STATUS: lines are not command responses - skip them
 
-            response_str = response.decode().strip()
-            success = response_str.startswith("OK:")
-            return success, response_str
+            # Connection closed without a response line
+            leftover = sanitize_text(buffer.strip())
+            if leftover:
+                return False, leftover
+            return False, f"Connection closed without response from {host}:{port}"
 
     except ConnectionRefusedError:
         return False, f"Connection refused to {host}:{port}"
@@ -351,7 +337,8 @@ async def interactive_mode_async(
         """Single task that reads all messages from the socket.
 
         Routes messages to appropriate handlers:
-        - LOG: messages are printed immediately
+        - STATUS: lines update the door-client count (prompt coloring)
+        - LOG: messages are printed immediately (sanitized)
         - OK:/ERROR: messages go to the response queue
         """
         try:
@@ -363,43 +350,29 @@ async def interactive_mode_async(
                         print("\n>>> Simulator disconnected.")
                         stop_event.set()
                         break
-                    decoded = line.decode().strip()
-                    if decoded.startswith("LOG:"):
-                        # Print log message immediately
-                        print(decoded[5:])
-                        # Update client status from log messages
-                        if "Client connected" in decoded:
-                            old_status = has_clients[0]
-                            has_clients[0] = True
-                            if not old_status:
+                    decoded = line.decode(errors="replace").strip()
+                    if decoded.startswith("STATUS:"):
+                        # Structured door-client status from the daemon
+                        payload = decoded[7:].strip()
+                        if payload.startswith("clients="):
+                            try:
+                                count = int(payload[8:])
+                            except ValueError:
+                                continue
+                            new_status = count > 0
+                            if new_status != has_clients[0]:
+                                has_clients[0] = new_status
                                 interactive.invalidate()
-                        elif (
-                            "Client disconnected" in decoded
-                            or "connection closed" in decoded.lower()
-                        ):
-                            # For simplicity, assume disconnected means no clients
-                            # (a proper solution would track count)
-                            old_status = has_clients[0]
-                            has_clients[0] = False
-                            if old_status:
-                                interactive.invalidate()
+                    elif decoded.startswith("LOG:"):
+                        # Print log message immediately (never raw - network
+                        # data must not inject terminal escapes)
+                        print(sanitize_text(unescape_message(decoded[5:])))
                     elif decoded.startswith("OK:"):
-                        # Unescape newlines from protocol
-                        msg = decoded[4:].replace("\\n", "\n").replace("\\\\", "\\")
+                        msg = sanitize_text(unescape_message(decoded[4:]))
                         # Route to response queue
                         await response_queue.put((True, msg))
-                        # Update client count from status responses
-                        if "Clients:" in decoded:
-                            old_status = has_clients[0]
-                            if "Clients: none" in decoded or "Clients: 0" in decoded:
-                                has_clients[0] = False
-                            else:
-                                has_clients[0] = True
-                            if has_clients[0] != old_status:
-                                interactive.invalidate()
                     elif decoded.startswith("ERROR:"):
-                        # Unescape newlines from protocol
-                        msg = decoded[7:].replace("\\n", "\n").replace("\\\\", "\\")
+                        msg = sanitize_text(unescape_message(decoded[7:]))
                         await response_queue.put((False, msg))
                 except asyncio.CancelledError:
                     break
@@ -435,24 +408,14 @@ async def interactive_mode_async(
     # Start the socket reader task
     reader_task = asyncio.create_task(socket_reader())
 
-    # Use patch_stdout if available for proper prompt handling with async output
+    # Use patch_stdout only when prompt_toolkit is actually driving the prompt
     stdout_ctx = None
-    if PROMPT_TOOLKIT_AVAILABLE:
+    if interactive.available:
         stdout_ctx = patch_stdout()
         stdout_ctx.__enter__()
 
-    # Get initial client status
-    try:
-        success, response = await send_command_async("status")
-        if success and "Clients:" in response:
-            # Check specifically for "Clients: none" or "Clients: 0"
-            # (not just "none" anywhere, which would match "Notifications: none")
-            if "Clients: none" in response or "Clients: 0" in response:
-                has_clients[0] = False
-            else:
-                has_clients[0] = True
-    except Exception:
-        pass
+    # Initial client status arrives as a STATUS: line from the daemon
+    # (sent on connect), handled by socket_reader.
 
     async def wait_for_stop():
         """Wait for stop event to be set."""
@@ -460,42 +423,70 @@ async def interactive_mode_async(
 
     prompt_text = f"{host}:{door_port}> "  # Fallback for non-prompt_toolkit
 
+    def _basic_readline() -> "asyncio.Future[str | None]":
+        """Read one line from stdin without blocking the event loop.
+
+        Uses add_reader (not a thread) so a daemon shutdown can end the
+        session immediately instead of waiting for the user to press Enter.
+        """
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[str | None] = loop.create_future()
+        fd = sys.stdin.fileno()
+
+        def on_readable():
+            loop.remove_reader(fd)
+            if fut.cancelled():
+                return
+            line = sys.stdin.readline()
+            fut.set_result(line if line else None)
+
+        def cleanup(_fut):
+            try:
+                loop.remove_reader(fd)
+            except Exception:
+                pass
+
+        sys.stdout.write(prompt_text)
+        sys.stdout.flush()
+        loop.add_reader(fd, on_readable)
+        fut.add_done_callback(cleanup)
+        return fut
+
     try:
         while not stop_event.is_set():
             try:
                 if interactive.available:
                     # Race between prompt and disconnect detection
                     prompt_task = asyncio.create_task(interactive.prompt_async())
-                    stop_task = asyncio.create_task(wait_for_stop())
-
-                    done, pending = await asyncio.wait(
-                        [prompt_task, stop_task],
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-
-                    # Cancel pending tasks
-                    for task in pending:
-                        task.cancel()
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
-
-                    # Check if we stopped due to disconnect
-                    if stop_task in done:
-                        break
-
-                    # Get the prompt result
-                    line = prompt_task.result()
-                    if line is None:
-                        # EOF
-                        break
                 else:
-                    # Basic fallback
-                    line = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: input(prompt_text)
-                    )
-                    line = line.strip()
+                    # Basic fallback - also raced against disconnect so the
+                    # session ends as soon as the daemon goes away
+                    prompt_task = asyncio.ensure_future(_basic_readline())
+                stop_task = asyncio.create_task(wait_for_stop())
+
+                done, pending = await asyncio.wait(
+                    [prompt_task, stop_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                # Cancel pending tasks
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+                # Check if we stopped due to disconnect
+                if stop_task in done:
+                    break
+
+                # Get the prompt result
+                line = prompt_task.result()
+                if line is None:
+                    # EOF
+                    break
+                line = line.strip()
             except EOFError:
                 break
             except KeyboardInterrupt:
@@ -556,67 +547,6 @@ async def interactive_mode_async(
             pass
 
 
-def interactive_mode_basic(host: str, port: int, door_port: int, timeout: float):
-    """Run in interactive mode using basic input (fallback without asyncio)."""
-    # Check connection first
-    connected, error = check_connection(host, port, timeout)
-    if not connected:
-        print(f"Error: {error}")
-        sys.exit(1)
-
-    print(f"Connected to simulator control port at {host}:{port}")
-    print("Type 'help' for commands, 'exit' to quit, 'shutdown' to stop daemon")
-    print()
-
-    # Create local command handler (no history in basic mode - no prompt_toolkit)
-    local_handler = LocalCommandHandler(history=None)
-
-    prompt_text = f"{host}:{door_port}> "
-    try:
-        while True:
-            try:
-                line = input(prompt_text).strip()
-            except EOFError:
-                break
-
-            if not line:
-                continue
-
-            # Check if this is a local command (local_only=True in registry)
-            if local_handler.is_local_command(line):
-                result = local_handler.execute(line)
-                if result.exit_ctl:
-                    break
-                if result.message:
-                    print(f">>> {result.message}")
-                continue
-
-            success, response = send_command(host, port, line, timeout)
-
-            # Check for disconnect
-            if "Connection refused" in response or "Connection timed out" in response:
-                print(f"\n>>> {response}")
-                print("Simulator disconnected.")
-                break
-
-            # Strip OK:/ERROR: prefix for display
-            if response.startswith("OK: "):
-                msg = response[4:]
-            elif response.startswith("ERROR: "):
-                msg = response[7:]
-            else:
-                msg = response
-            if msg:
-                print(f">>> {msg}")
-
-            # If we sent a shutdown command and it succeeded, exit
-            if line.lower() == "shutdown" and success:
-                break
-
-    except KeyboardInterrupt:
-        print("\nExiting.")
-
-
 def interactive_mode(
     host: str,
     port: int,
@@ -663,13 +593,15 @@ Use the 'help' command to see available simulator commands.
         default=5.0,
         help="Command timeout in seconds (default: 5)",
     )
-    if PROMPT_TOOLKIT_AVAILABLE:
-        parser.add_argument(
-            "--history",
-            metavar="FILE",
-            default=str(HISTORY_FILE),
-            help=f"History file path, or 'none' to disable (default: {HISTORY_FILE})",
-        )
+    # Always registered so command lines are portable; ignored (with a note in
+    # the help text) when prompt_toolkit is not installed
+    parser.add_argument(
+        "--history",
+        metavar="FILE",
+        default=str(HISTORY_FILE),
+        help=f"History file path, or 'none' to disable (default: {HISTORY_FILE}). "
+        "Requires prompt_toolkit; ignored otherwise.",
+    )
     parser.add_argument(
         "command", nargs="*", help="Command to send (or use -i for interactive mode)"
     )
@@ -679,8 +611,8 @@ Use the 'help' command to see available simulator commands.
     # Determine door port for prompt display
     door_port = args.door_port if args.door_port is not None else args.port - 1
 
-    # Get history file (None if prompt_toolkit not available)
-    history_file = getattr(args, "history", None)
+    # Get history file (only used when prompt_toolkit drives the session)
+    history_file = args.history if PROMPT_TOOLKIT_AVAILABLE else None
 
     if args.interactive:
         interactive_mode(args.host, args.port, door_port, args.timeout, history_file)

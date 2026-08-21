@@ -160,20 +160,23 @@ class SettingsCommandsMixin:
     @command(
         "holdtime",
         ["t"],
-        "Set hold time in seconds",
+        "Set or show hold time in seconds",
         category="settings",
         args=[
             ArgSpec(
                 "seconds",
                 "float",
+                required=False,
                 min_value=0.1,
                 max_value=900,
-                description="Hold time in seconds (0.1-900)",
+                description="Hold time in seconds (0.1-900), omit to show current value",
             )
         ],
     )
-    def holdtime(self, seconds: float) -> CommandResult:
-        """Set hold time."""
+    def holdtime(self, seconds: float | None = None) -> CommandResult:
+        """Set or show hold time."""
+        if seconds is None:
+            return CommandResult(True, f"Hold time: {self.simulator.state.hold_time}s")
         self.simulator.state.hold_time = seconds
         # Broadcast hold time change to connected PPD clients
         self.simulator.broadcast_hold_time()
@@ -182,7 +185,7 @@ class SettingsCommandsMixin:
     @command(
         "battery",
         ["b"],
-        "Set battery level (random if no value)",
+        "Set or show battery level",
         category="settings",
         args=[
             ArgSpec(
@@ -191,15 +194,23 @@ class SettingsCommandsMixin:
                 required=False,
                 min_value=0,
                 max_value=100,
-                description="Battery percentage (0-100)",
+                description="Battery percentage (0-100), omit to show current value",
             )
         ],
+        subcommands=[SubcommandInfo("random", [], "Set a random battery level (10-100)")],
     )
     def battery(self, percent: int | None = None) -> CommandResult:
-        """Set battery level."""
+        """Set or show battery level."""
         if percent is None:
-            percent = random.randint(10, 100)
+            return CommandResult(True, f"Battery: {self.simulator.state.battery_percent}%")
         pct = max(0, min(100, percent))
+        self.simulator.set_battery(pct)
+        return CommandResult(True, f"Battery set to {pct}%")
+
+    @subcommand("battery", "random", [], "Set a random battery level (10-100)")
+    def battery_random(self) -> CommandResult:
+        """Set a random battery level."""
+        pct = random.randint(10, 100)
         self.simulator.set_battery(pct)
         return CommandResult(True, f"Battery set to {pct}%")
 
@@ -334,7 +345,7 @@ class SettingsCommandsMixin:
         args=[
             ArgSpec(
                 "tz",
-                "str",
+                "string",
                 required=False,
                 description="Timezone (e.g., 'America/New_York' or 'EST5EDT,M3.2.0,M11.1.0')",
                 completer=_timezone_completer,

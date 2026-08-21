@@ -100,6 +100,7 @@ class ScheduleCommandsMixin:
                 "days",
                 required=False,
                 default=[1, 1, 1, 1, 1, 1, 1],
+                default_display="all",
                 description="Days (e.g., mon,tue,wed or all/weekdays/weekends)",
             ),
         ],

@@ -13,6 +13,8 @@ The Power Pet Door simulator is a full-featured testing tool that emulates the b
 - [Quick Start](#quick-start)
 - [Command Line Usage](#command-line-usage)
 - [Interactive Mode](#interactive-mode)
+- [Daemon Mode](#daemon-mode)
+- [Remote Control (ppd-simulator-ctl)](#remote-control-ppd-simulator-ctl)
 - [Programmatic Usage](#programmatic-usage)
 - [Scripting System](#scripting-system)
   - [Script Format](#script-format)
@@ -31,19 +33,31 @@ The simulator is included with the `pypowerpetdoor` package:
 pip install pypowerpetdoor
 ```
 
-For YAML script support, install with the optional dependency:
+Two optional extras enhance it:
 
 ```bash
-pip install pypowerpetdoor[yaml]
-# or
-pip install pyyaml
+# YAML script support (PyYAML)
+pip install pypowerpetdoor[simulator]
+
+# Enhanced interactive prompt: syntax highlighting, tab completion,
+# persistent history (prompt_toolkit)
+pip install pypowerpetdoor[interactive]
+
+# Or both
+pip install "pypowerpetdoor[simulator,interactive]"
 ```
+
+Without the `simulator` extra, the YAML scripting features are unavailable;
+without the `interactive` extra, the interactive prompt falls back to a plain
+input loop with the same commands.
 
 ## Quick Start
 
 Start the simulator on the default port (3000):
 
 ```bash
+ppd-simulator
+# equivalently:
 python -m powerpetdoor.simulator
 ```
 
@@ -51,97 +65,137 @@ Then connect your client to `localhost:3000`.
 
 ## Command Line Usage
 
-### Basic Options
+`ppd-simulator` has three modes:
 
-```bash
-# Start on a specific port
-python -m powerpetdoor.simulator --port 3001
+- **Interactive** (default): a command prompt for driving the simulator by hand.
+- **Script mode** (`--script`): runs one or more test scripts, then keeps
+  serving (or exits, with `--oneshot`).
+- **Daemon mode** (`--daemon`): headless, controlled remotely through a
+  control channel (see [Daemon Mode](#daemon-mode)).
 
-# Bind to a specific address
-python -m powerpetdoor.simulator --host 127.0.0.1
+`--script` and `--daemon` are mutually exclusive.
 
-# Enable debug logging
-python -m powerpetdoor.simulator --debug
-```
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--host`, `-H` `ADDR` | Door-server bind address (default: `0.0.0.0` — all interfaces; the simulator emulates a LAN device). Use `127.0.0.1` to restrict to loopback. |
+| `--port`, `-p` `PORT` | Door protocol port (default: 3000) |
+| `--debug`, `-d` | Enable debug logging |
+| `--script`, `-s` `SCRIPT` | Run a script — built-in name or file path, auto-detected. Repeatable to run scripts in sequence. Implies non-interactive mode. |
+| `--loop` | Run scripts continuously in a loop |
+| `--script-delay` `SECONDS` | Delay between scripts and loop iterations (default: 0) |
+| `--oneshot` | Exit after scripts complete (useful for CI/CD). Takes precedence over `--run-for`. |
+| `--wait-for-client`, `-w` | Wait for a client to connect before starting scripts; scripts stop if the client disconnects |
+| `--list-scripts`, `-l` | List available built-in scripts and exit |
+| `--daemon`, `-D` `[CONTROL_PORT]` | Run in daemon mode with a control channel (default control port: door port + 1) |
+| `--control-host` `ADDR` | Bind address for the daemon control channel (default: `127.0.0.1`). See the [security note](#daemon-mode) before widening this. |
+| `--run-for`, `-r` `SECONDS` | Maximum run time in seconds (`--oneshot` can exit earlier) |
+| `--history` `FILE` | Prompt history file, or `none` to disable (default: `~/.powerpetdoor_simulator_history`; only present when prompt_toolkit is installed) |
+| `--firmware`, `-f` `VERSION` | Firmware version to report as `major.minor.patch` (default: 1.2.3) |
+| `--hardware` `VERSION` | Hardware version to report as `ver.rev` (default: 1.1) |
 
 ### Running Scripts
 
 ```bash
-# Run a built-in script interactively
-python -m powerpetdoor.simulator --script basic_cycle
+# Run a built-in script (then stay running)
+ppd-simulator --script basic_cycle
 
-# Run a script from a file
-python -m powerpetdoor.simulator --script-file /path/to/my_test.yaml
+# Run a script from a file (auto-detected as a path)
+ppd-simulator --script /path/to/my_test.yaml
 
-# Run script and exit (useful for CI/CD)
-python -m powerpetdoor.simulator --script full_test_suite --exit-after-script
+# Run several scripts in sequence, looping, with a delay between runs
+ppd-simulator -s basic_cycle -s obstruction_test --loop --script-delay 2
+
+# Run a script suite and exit (useful for CI/CD)
+ppd-simulator --script full_test_suite --oneshot
 
 # List available built-in scripts
-python -m powerpetdoor.simulator --list-scripts
+ppd-simulator --list-scripts
 ```
 
 ### Exit Codes
 
-When using `--exit-after-script`:
-- **0**: Script completed successfully (all assertions passed)
-- **1**: Script failed (assertion failed or error occurred)
+When using `--oneshot`:
+
+- **0**: All scripts completed successfully (all assertions passed)
+- **1**: A script failed (assertion failed or error occurred)
 
 This makes it easy to integrate with CI/CD pipelines:
 
 ```bash
-python -m powerpetdoor.simulator -s full_test_suite -e || echo "Tests failed!"
+ppd-simulator -s full_test_suite --oneshot || echo "Tests failed!"
 ```
 
 ## Interactive Mode
 
-When running without `--exit-after-script`, the simulator provides an interactive keyboard interface:
+When started without `--script` or `--daemon`, the simulator presents a
+command prompt. Commands are typed words (with short aliases), not single
+keystrokes — press Enter to execute.
+
+With prompt_toolkit installed (`pip install pypowerpetdoor[interactive]`) the
+prompt provides:
+
+- **Syntax highlighting**: commands in green, subcommands in blue, `on`/`off`
+  options in orange, numbers in purple
+- **Tab completion** for commands, subcommands, and argument choices
+- **Persistent history** (`~/.powerpetdoor_simulator_history`, configurable
+  via `--history`), with `!!` / `!n` / `!-n` recall, reverse search, and
+  auto-suggestions. Failed commands are dropped from history and aliases are
+  recorded in canonical form.
+- A `host:port>` prompt that is **white while a door client is connected**
+  and gray otherwise
+
+Without prompt_toolkit, a plain input prompt offers the same commands.
+
+Type `help` (or `?`) at any time for the full command list, and
+`<command> help` (e.g., `schedule add help`) for details on a command's
+arguments and subcommands. Extra arguments in `[brackets]` are optional.
 
 ### Door Operations
 
-| Key | Action |
-|-----|--------|
-| `i` | Trigger inside sensor (pet going out) |
-| `o` | Trigger outside sensor (pet coming in) |
-| `y` | Cycle door (open, hold, close) |
-| `c` | Close door immediately |
-| `h` | Open and hold (stays open until 'c') |
-
-### Physical Buttons
-
-These simulate the physical buttons on the door unit:
-
-| Key | Action |
-|-----|--------|
-| `p` | Toggle power on/off |
-| `m` | Toggle auto/tiMers (schedule enable) |
-| `n` | Toggle iNside sensor enable |
-| `u` | Toggle oUtside sensor enable |
+| Command | Aliases | Action |
+|---------|---------|--------|
+| `inside [duration]` | `i` | Activate the inside sensor (pet going out). `duration` is seconds active (default 0.5); `0` = toggle on/off indefinitely |
+| `outside [duration]` | `o` | Activate the outside sensor (pet coming in); same `duration` semantics |
+| `cycle` | `y` | Full door cycle — open, hold, close (like pressing the door button; bypasses sensor enable checks) |
+| `close` | `c` | Close the door |
+| `hold` | `h`, `open` | Open the door and hold it open |
 
 ### Simulation Events
 
-| Key | Action |
-|-----|--------|
-| `x` | Simulate obstruction (triggers auto-retract) |
-| `d` | Toggle pet in doorway (keeps door open) |
+| Command | Aliases | Action |
+|---------|---------|--------|
+| `obstruction` | `x` | Simulate an obstruction during close (triggers auto-retract if enabled) |
+| `pet arrive` / `pet depart` | | Simulate a pet standing in (or leaving) the doorway. A present pet keeps the door open — the same mechanism as the `pet_presence`/`pet_on`/`pet_off` script actions |
+
+### Physical Buttons
+
+These simulate the physical buttons on the door unit. Each accepts `on`/`off`
+as an argument, or toggles when called bare (a `toggle`/`t` subcommand is also
+available):
+
+| Command | Aliases | Action |
+|---------|---------|--------|
+| `power [on\|off]` | `p` | Main power |
+| `auto [on\|off]` | `m` | Auto/schedule mode (timers) |
+| `inside_enable [on\|off]` | `n` | Inside sensor enable |
+| `outside_enable [on\|off]` | `u` | Outside sensor enable |
 
 ### Settings
 
-| Key | Action |
-|-----|--------|
-| `s` | Toggle outside sensor safety lock |
-| `l` | Toggle command lockout |
-| `a` | Toggle auto-retract |
-| `t <sec>` | Set hold time (e.g., `t 5`) |
-
-### Battery Simulation
-
-| Command | Action |
-|---------|--------|
-| `b [pct]` | Set battery level (random if no value) |
-| `ac [connect\|disconnect]` | Toggle or set AC power connection |
-| `battery_present [on\|off]` | Toggle or set battery presence |
-| `charge_rate <rate>` | Set charge rate (%/min, 0 to disable) |
-| `discharge_rate <rate>` | Set discharge rate (%/min, 0 to disable) |
+| Command | Aliases | Action |
+|---------|---------|--------|
+| `safety [on\|off]` | `s` | Outside sensor safety lock (toggle if bare) |
+| `lockout [on\|off]` | `l` | Command lockout (toggle if bare) |
+| `autoretract [on\|off]` | `a` | Auto-retract on obstruction (toggle if bare) |
+| `holdtime <seconds>` | `t` | Set hold time (0.1–900 seconds) |
+| `battery [percent]` | `b` | Set battery level 0–100 (random 10–100 if omitted) |
+| `ac [connect\|disconnect\|toggle]` | | AC power connection (toggle if bare) |
+| `battery_present [on\|off]` | `bp` | Battery installed/removed (toggle if bare) |
+| `charge_rate [rate]` | `cr` | Set battery charge rate in %/min (`0` disables); bare shows the current rate |
+| `discharge_rate [rate]` | `dcr` | Set battery discharge rate in %/min (`0` disables); bare shows the current rate |
+| `timezone [tz]` | `tz` | Set the timezone (IANA name like `America/New_York` or POSIX string like `EST5EDT,M3.2.0,M11.1.0`); bare shows the current timezone |
 
 ### Notifications
 
@@ -151,30 +205,129 @@ These simulate the physical buttons on the door unit:
 | `notify <name>` | Toggle a notification setting |
 | `notify <name> on\|off` | Set a notification setting |
 
-Available notification names: `inside_on`, `inside_off`, `outside_on`, `outside_off`, `low_battery`
+Available notification names: `inside_on`, `inside_off`, `outside_on`,
+`outside_off`, `low_battery` (aliases `low_bat`, `lowbat`).
 
 ### Schedules
 
-| Key | Action |
-|-----|--------|
-| `1` | Add sample schedule #1 (all days, 6am-10pm) |
-| `2` | Add sample schedule #2 (weekdays, 7am-6pm) |
-| `3` | Delete schedule #1 |
-
-### Scripts
+The `schedule` command (alias `sched`) manages schedule entries:
 
 | Command | Action |
 |---------|--------|
-| `r <name>` | Run a built-in script by name |
-| `file <path>` | Run a script from a file |
-| `/` | List available built-in scripts |
+| `schedule` or `schedule list` | Show all schedules (shows the implicit all-day schedule when none are configured) |
+| `schedule add <inside\|outside\|both> <time> [days]` | Add a schedule, e.g. `schedule add inside 6:00-22:00 weekdays`. `days` is a comma list of day names (`mon,tue,wed`) or a preset (`all`/`weekdays`/`weekends`, default `all`) |
+| `schedule delete <index>` | Delete a schedule (aliases `del`, `rm`, `remove`) |
+| `schedule clear` | Delete all schedules |
+| `schedule enable <index>` | Enable a schedule (alias `on`) |
+| `schedule disable <index>` | Disable a schedule (alias `off`) |
+| `schedule days <index> <days>` | Change a schedule's days |
+| `schedule time <index> <time>` | Change a schedule's time window, e.g. `schedule time 0 7:30-21:15` |
+
+### Scripts
+
+| Command | Aliases | Action |
+|---------|---------|--------|
+| `run <script>` | `r`, `file` | Run a script — built-in name or YAML file path. Scripts are queued and run in the background; the PASSED/FAILED result is logged |
+| `list` | `/`, `scripts` | List available built-in scripts |
 
 ### Info
 
-| Key | Action |
-|-----|--------|
-| `?` or `status` | Show current door state (including battery and notifications) |
-| `q` | Quit simulator |
+| Command | Aliases | Action |
+|---------|---------|--------|
+| `status` | `state`, `info`, `v` | Show the full simulator state (connected clients, door, power, sensors, settings, battery, notifications, schedules, statistics) |
+| `help` | `?` | Show all available commands |
+| `broadcast <what>` | `bc` | Push an unsolicited update to connected door clients. `<what>` is one of `status`, `settings`, `battery`, `hwinfo`, `stats`, `schedules`, `notifications`, `all`. Errors if no client is connected |
+| `history [N\|clear]` | `hist` | Show the last N commands (default 20) or clear history (interactive prompt only; requires prompt_toolkit) |
+
+### Control
+
+| Command | Aliases | Action |
+|---------|---------|--------|
+| `debug [on\|off]` | | Show or set debug logging |
+| `shutdown` | `stop` | Stop the simulator |
+| `exit` | `q`, `quit` | In the interactive CLI these are aliases for `shutdown` |
+| `clear` | `cls` | Clear the screen (interactive prompt only) |
+
+## Daemon Mode
+
+`--daemon` runs the simulator headless, with a plain-text **control channel**
+for remote management (used by `ppd-simulator-ctl`):
+
+```bash
+# Door protocol on 3000, control channel on 3001 (door port + 1)
+ppd-simulator --daemon
+
+# Explicit control port
+ppd-simulator --daemon 4001
+```
+
+The control channel accepts the same commands as the interactive prompt,
+newline-terminated. Each command gets a single response line — `OK: <message>`
+or `ERROR: <message>` (embedded newlines are escaped as `\n`) — and simulator
+log output is streamed to every connected control client as `LOG: <line>`
+messages.
+
+> **Security note**: the control channel is **unauthenticated** — anyone who
+> can connect to it can drive the simulator, run scripts, and shut it down.
+> It therefore binds `127.0.0.1` (loopback only) by default. Pass
+> `--control-host` with a wider address only on networks you trust.
+>
+> The door protocol server itself binds `0.0.0.0` by default because it
+> emulates a LAN device — use `--host 127.0.0.1` if you do not want it
+> reachable from the network.
+
+Over the control channel, `run` accepts only **bare script names** (no path
+separators or traversal), resolved against the known script locations.
+Running an arbitrary YAML file path is only possible locally, via the
+interactive CLI or `--script`.
+
+## Remote Control (ppd-simulator-ctl)
+
+`ppd-simulator-ctl` sends commands to a running daemon's control channel.
+
+### One-Shot Commands
+
+```bash
+ppd-simulator-ctl status            # Show simulator state
+ppd-simulator-ctl inside            # Trigger the inside sensor
+ppd-simulator-ctl holdtime 2        # Change a setting
+ppd-simulator-ctl run basic_cycle   # Run a script (waits for the result)
+ppd-simulator-ctl shutdown          # Stop the daemon
+```
+
+The exit code is **0** on success and **1** on error (unknown command,
+validation failure, or connection failure), so one-shot commands are
+scriptable. For `run`, the exit code reflects the **script result**: 0 if the
+script passed, 1 if it failed.
+
+### Interactive Mode
+
+```bash
+ppd-simulator-ctl -i
+```
+
+Interactive mode keeps a persistent connection and provides the same prompt
+experience as the simulator CLI (syntax highlighting, tab completion, history
+with `!!`/`!n`/`!-n` recall — stored separately in
+`~/.powerpetdoor_ctl_history`). Daemon log output is streamed live into the
+session, and the prompt is colored by the daemon's door-client connection
+status.
+
+A few commands are handled locally by ctl rather than sent to the daemon:
+`help`/`?` (ctl's own help), `exit` (aliases `q`, `quit` — leaves ctl without
+stopping the daemon), `clear`/`cls`, and `history`. Use `shutdown` to stop the
+daemon itself.
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--host`, `-H` `ADDR` | Simulator host (default: `127.0.0.1`) |
+| `--port`, `-p` `PORT` | Control port (default: 3001) |
+| `--door-port`, `-d` `PORT` | Door port shown in the prompt (default: control port − 1) |
+| `--interactive`, `-i` | Run in interactive mode |
+| `--timeout`, `-t` `SECONDS` | Command timeout (default: 5) |
+| `--history` `FILE` | History file path, or `none` to disable (default: `~/.powerpetdoor_ctl_history`; only present when prompt_toolkit is installed) |
 
 ## Programmatic Usage
 
@@ -277,6 +430,8 @@ async def manage_schedules(simulator):
 ### Running Scripts Programmatically
 
 ```python
+from pathlib import Path
+
 from powerpetdoor.simulator import (
     DoorSimulator,
     Script,
@@ -293,7 +448,7 @@ async def run_tests(simulator):
     print(f"Test {'passed' if success else 'failed'}")
 
     # Run a custom script from YAML
-    script = Script.from_file("/path/to/my_test.yaml")
+    script = Script.from_file(Path("/path/to/my_test.yaml"))
     success = await runner.run(script)
 
     # Create a script programmatically
@@ -318,7 +473,7 @@ async def test_client():
     await simulator.start()
 
     # Create client
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     client = PowerPetDoorClient(
         host="127.0.0.1",
         port=3000,
@@ -669,6 +824,7 @@ powerpetdoor/simulator/
 ├── __init__.py      # Public API exports
 ├── state.py         # State dataclasses
 │   ├── DoorTimingConfig   # Timing configuration
+│   ├── BatteryConfig      # Battery simulation configuration
 │   ├── Schedule           # Schedule entry
 │   └── DoorSimulatorState # Full door state
 ├── protocol.py      # Protocol handler
@@ -676,9 +832,15 @@ powerpetdoor/simulator/
 │   └── DoorSimulatorProtocol  # asyncio Protocol
 ├── server.py        # Main simulator class
 │   └── DoorSimulator      # Server lifecycle & control
-├── cli.py           # Command-line interface
-│   ├── run_simulator_interactive()
-│   └── main()
+├── cli.py           # ppd-simulator command-line interface
+│   ├── run_simulator()    # Interactive/script/daemon runner
+│   └── main()             # Entry point / argument parsing
+├── ctl.py           # ppd-simulator-ctl remote-control client
+├── prompt_common.py # Shared prompt machinery (lexer, completer, sessions)
+├── commands/        # Interactive command implementations
+│   ├── handler.py         # CommandHandler dispatch
+│   ├── base.py            # @command/@subcommand registry, ArgSpec parsing
+│   └── ...                # door, buttons, settings, schedules, scripts, info, ...
 ├── scripting.py     # Script execution
 │   ├── Script            # Script container
 │   ├── ScriptStep        # Single step

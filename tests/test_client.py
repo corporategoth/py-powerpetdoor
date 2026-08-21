@@ -11,8 +11,6 @@ import asyncio
 import time
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
 from powerpetdoor import (
     PrioritizedMessage,
     find_end,
@@ -44,10 +42,14 @@ class TestFindEnd:
         """Empty string returns None."""
         assert find_end("") is None
 
-    def test_no_json_raises(self):
-        """String not starting with { raises IndexError."""
-        with pytest.raises(IndexError):
-            find_end("hello world")
+    def test_no_json_returns_none(self):
+        """String not starting with { returns None (never raises).
+
+        The old contract raised IndexError, which let one stray byte from
+        the device escape data_received and poison the connection
+        (security finding 4 / decision D1).
+        """
+        assert find_end("hello world") is None
 
     def test_simple_object(self):
         """Simple JSON object is detected - returns position after closing brace."""
@@ -68,8 +70,17 @@ class TestFindEnd:
         assert find_end('{"key": "val') is None
 
     def test_array_in_object(self):
-        """Arrays within objects are handled (only braces counted)."""
+        """Arrays within objects are handled."""
         json_str = '{"items": [1, 2, 3]}'
+        assert find_end(json_str) == len(json_str)
+
+    def test_brace_inside_string_value(self):
+        """Braces inside JSON string values do not corrupt framing.
+
+        The old brace counter was not string-aware, so a legal payload
+        like '{"a": "}"}' truncated mid-string (test-fanatic C5).
+        """
+        json_str = '{"a": "}"}'
         assert find_end(json_str) == len(json_str)
 
 
@@ -550,7 +561,7 @@ class TestConnectionLost:
         client, _, _ = mock_client
         client._shutdown = False
 
-        with patch.object(client, "reconnect", new_callable=AsyncMock) as mock_reconnect:
+        with patch.object(client, "reconnect", new_callable=AsyncMock):
             with patch.object(client, "ensure_future") as mock_ensure:
                 client.connection_lost(None)
                 # Should schedule reconnect
@@ -561,7 +572,7 @@ class TestConnectionLost:
         client, _, _ = mock_client
         client._shutdown = True
 
-        with patch.object(client, "reconnect", new_callable=AsyncMock) as mock_reconnect:
+        with patch.object(client, "reconnect", new_callable=AsyncMock):
             with patch.object(client, "ensure_future") as mock_ensure:
                 client.connection_lost(None)
                 # Should NOT schedule reconnect
@@ -607,7 +618,8 @@ class TestOutstandingMessages:
         # Allow the event loop to process pending tasks
         await asyncio.sleep(0.01)
 
-        # Future should be resolved
+        # Future should be resolved with the settings payload and untracked
+        assert future.result() == {"power_state": True}
         assert msg_id not in client._outstanding
 
     def test_disconnect_cancels_outstanding(self, mock_client):
@@ -622,3 +634,491 @@ class TestOutstandingMessages:
         assert len(client._outstanding) == 0
         assert future1.cancelled()
         assert future2.cancelled()
+
+
+# ============================================================================
+# Protocol Violation Tests (untrusted network input)
+# ============================================================================
+
+
+def _capture_messages(client) -> list[dict]:
+    """Route data_received dispatch into a list instead of the event loop.
+
+    Replaces process_message with a synchronous recorder so framing tests
+    are deterministic (no task scheduling involved).
+    """
+    received: list[dict] = []
+
+    async def _noop() -> None:
+        pass
+
+    def _record(msg):
+        received.append(msg)
+        return _noop()
+
+    client.process_message = _record
+    client.ensure_future = lambda coro: coro.close()
+    return received
+
+
+class TestClientProtocolViolations:
+    """The client must survive arbitrary bytes from a hostile/broken device."""
+
+    def test_garbage_bytes_do_not_raise_and_are_discarded(self, mock_client):
+        """Pure garbage input neither raises nor poisons the buffer (C4)."""
+        client, _, _ = mock_client
+
+        client.data_received(b"garbage not json")
+
+        assert client._buffer == ""
+
+    def test_garbage_prefix_before_valid_json_recovers(self, mock_client):
+        """A garbage prefix is discarded and the following message parsed."""
+        client, _, _ = mock_client
+        received = _capture_messages(client)
+
+        client.data_received(b'junk{"success": "true", "CMD": "PONG", "PONG": "1"}')
+
+        assert received == [{"success": "true", "CMD": "PONG", "PONG": "1"}]
+        assert client._buffer == ""
+
+    def test_garbage_does_not_poison_subsequent_messages(self, mock_client):
+        """After garbage, later chunks still parse (no permanent wedge)."""
+        client, _, _ = mock_client
+        received = _capture_messages(client)
+
+        client.data_received(b"xxxx")
+        client.data_received(b'{"success": "true", "CMD": "PONG", "PONG": "2"}')
+
+        assert received == [{"success": "true", "CMD": "PONG", "PONG": "2"}]
+
+    def test_non_ascii_bytes_skipped(self, mock_client):
+        """Non-ASCII data is discarded without raising."""
+        client, _, _ = mock_client
+
+        client.data_received(b"\xff\xfe")
+
+        assert client._buffer == ""
+
+    def test_brace_in_string_value_framed_correctly(self, mock_client):
+        """A brace inside a JSON string value does not corrupt framing (C5)."""
+        client, _, _ = mock_client
+        received = _capture_messages(client)
+
+        client.data_received(b'{"success": "true", "CMD": "PONG", "PONG": "}"}')
+        client.data_received(b'{"success": "true", "CMD": "PONG", "PONG": "3"}')
+
+        assert received == [
+            {"success": "true", "CMD": "PONG", "PONG": "}"},
+            {"success": "true", "CMD": "PONG", "PONG": "3"},
+        ]
+        assert client._buffer == ""
+
+    def test_message_split_across_chunks(self, mock_client):
+        """A message split across arbitrary chunk boundaries reassembles."""
+        client, _, _ = mock_client
+        received = _capture_messages(client)
+
+        client.data_received(b'{"success": "tr')
+        client.data_received(b'ue", "CMD": "PO')
+        client.data_received(b'NG", "PONG": "4"}')
+
+        assert received == [{"success": "true", "CMD": "PONG", "PONG": "4"}]
+        assert client._buffer == ""
+
+    def test_whitespace_separated_messages(self, mock_client):
+        """Whitespace/newline separators between messages are tolerated (H3)."""
+        client, _, _ = mock_client
+        received = _capture_messages(client)
+
+        client.data_received(
+            b'{"success": "true", "CMD": "A"}\n {"success": "true", "CMD": "B"}\r\n'
+        )
+
+        assert received == [
+            {"success": "true", "CMD": "A"},
+            {"success": "true", "CMD": "B"},
+        ]
+        assert client._buffer == ""
+
+    def test_malformed_json_frame_skipped(self, mock_client):
+        """A balanced-brace but invalid JSON frame is skipped, not fatal."""
+        client, _, _ = mock_client
+        received = _capture_messages(client)
+
+        client.data_received(b'{"a" broken}{"success": "true", "CMD": "PONG", "PONG": "5"}')
+
+        assert received == [{"success": "true", "CMD": "PONG", "PONG": "5"}]
+        assert client._buffer == ""
+
+    def test_oversized_buffer_disconnects(self, mock_client):
+        """Exceeding the un-parsed buffer cap drops the connection (D1)."""
+        from powerpetdoor.framing import MAX_BUFFER_SIZE
+
+        client, transport, _ = mock_client
+
+        client.data_received(b"{" * (MAX_BUFFER_SIZE + 1))
+
+        assert client._buffer == ""
+        assert client._transport is None
+        assert transport.is_closing()
+
+    def test_empty_chunk_ignored(self, mock_client):
+        """An empty chunk is a no-op."""
+        client, _, _ = mock_client
+
+        client.data_received(b"")
+
+        assert client._buffer == ""
+
+
+# ============================================================================
+# Defensive process_message Tests
+# ============================================================================
+
+
+class TestProcessMessageDefensive:
+    """process_message must treat every field as optional and untrusted."""
+
+    async def test_message_missing_cmd_and_success_dropped(self, mock_client):
+        """A JSON object with no CMD/success/notification is dropped quietly."""
+        client, _, _ = mock_client
+
+        await client.process_message({"mystery": 1})
+
+    async def test_non_dict_message_dropped(self, mock_client):
+        """A non-dict message is dropped quietly."""
+        client, _, _ = mock_client
+
+        await client.process_message("not a dict")
+
+    async def test_message_missing_success_fails_future(self, mock_client):
+        """A response without success fails the matched future (typed)."""
+        from powerpetdoor.client import CommandError
+
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        msg_id = client.msgId
+        future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+
+        await client.process_message({"CMD": "GET_SETTINGS", "msgID": msg_id})
+
+        assert isinstance(future.exception(), CommandError)
+
+    async def test_failure_response_sets_command_error_with_reason(self, mock_client):
+        """success:"false" fails the future with CommandError carrying cmd+reason (L10)."""
+        from powerpetdoor.client import CommandError
+
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        msg_id = client.msgId
+        future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+
+        await client.process_message(
+            {
+                "success": "false",
+                "CMD": "GET_SETTINGS",
+                "msgID": msg_id,
+                "reason": "Door is locked",
+            }
+        )
+
+        err = future.exception()
+        assert isinstance(err, CommandError)
+        assert err.cmd == "GET_SETTINGS"
+        assert err.reason == "Door is locked"
+        assert "Door is locked" in str(err)
+
+    async def test_handler_exception_fails_future(self, mock_client):
+        """A handler crash on a malformed payload fails the future (D3/M3)."""
+        from powerpetdoor.client import CommandError
+
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        msg_id = client.msgId
+        future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+
+        # GET_SETTINGS response missing the settings payload entirely.
+        await client.process_message({"success": "true", "CMD": "GET_SETTINGS", "msgID": msg_id})
+
+        assert future.done()
+        assert isinstance(future.exception(), CommandError)
+
+    async def test_settings_missing_optional_fields_ok(
+        self, mock_client, callback_tracker, make_callback
+    ):
+        """Settings without tz/holdOpenTime/voltages still process (M3)."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        client.add_listener(
+            "test",
+            settings_update=make_callback("settings"),
+            timezone_update=make_callback("tz"),
+            hold_time_update=make_callback("hold"),
+            sensor_trigger_voltage_update=make_callback("voltage"),
+            sleep_sensor_trigger_voltage_update=make_callback("sleep_voltage"),
+        )
+        msg_id = client.msgId
+        future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+
+        settings = {"power_state": "1", "inside": "1"}
+        await client.process_message(
+            {"success": "true", "CMD": "GET_SETTINGS", "msgID": msg_id, "settings": settings}
+        )
+
+        assert future.result() == settings
+        assert callback_tracker["calls"] == ["settings"]
+
+    async def test_listener_exception_isolated(self, mock_client):
+        """One raising listener does not prevent the others running (D3)."""
+        client, _, _ = mock_client
+        calls = []
+
+        def bad_listener(status):
+            calls.append("bad")
+            raise RuntimeError("listener bug")
+
+        def good_listener(status):
+            calls.append(("good", status))
+
+        client.add_listener("bad", door_status_update=bad_listener)
+        client.add_listener("good", door_status_update=good_listener)
+
+        await client.process_message(
+            {"success": "true", "CMD": "DOOR_STATUS", "door_status": "DOOR_CLOSED"}
+        )
+
+        assert calls == ["bad", ("good", "DOOR_CLOSED")]
+
+    async def test_done_future_not_resolved_twice(self, mock_client):
+        """Handlers never call set_result on a completed future (M11)."""
+        client, _, _ = mock_client
+        future = asyncio.get_running_loop().create_future()
+        future.cancel()
+
+        # Must not raise InvalidStateError.
+        client._handle_door_status({"door_status": "DOOR_CLOSED"}, future)
+
+    async def test_response_for_cancelled_future_ignored(self, mock_client):
+        """A late response for a cancelled future is ignored, not fatal (M11)."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        msg_id = client.msgId
+        future = client.send_message(CONFIG, CMD_GET_DOOR_STATUS, notify=True)
+        future.cancel()
+
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": "GET_DOOR_STATUS",
+                "msgID": msg_id,
+                "door_status": "DOOR_CLOSED",
+            }
+        )
+
+        assert future.cancelled()
+
+    async def test_handler_dispatched_before_dequeue(self, mock_client):
+        """The response handler runs before the next message dequeues (M11)."""
+        client, _, _ = mock_client
+        order = []
+
+        client.add_listener("order", door_status_update=lambda s: order.append("handler"))
+
+        async def fake_dequeue():
+            order.append("dequeue")
+
+        client.dequeue_data = fake_dequeue
+        client._last_command = CMD_GET_DOOR_STATUS
+        client._can_dequeue = True
+
+        await client.process_message(
+            {"success": "true", "CMD": "GET_DOOR_STATUS", "door_status": "DOOR_CLOSED"}
+        )
+
+        assert order == ["handler", "dequeue"]
+
+    async def test_unmatched_msgid_response_ignored(self, mock_client):
+        """A response for an unknown msgID does not raise or touch futures."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": "GET_DOOR_STATUS",
+                "msgID": 99999,
+                "door_status": "DOOR_CLOSED",
+            }
+        )
+
+        assert not future.done()
+
+
+# ============================================================================
+# Notification Event Tests (D2)
+# ============================================================================
+
+
+class TestNotificationEvents:
+    """Device-initiated notification events (bare and CMD-style envelopes)."""
+
+    async def test_bare_sensor_indoor_on(self, mock_client):
+        """The documented bare envelope dispatches (event, state)."""
+        from powerpetdoor.const import NOTIFY_SENSOR_INDOOR
+
+        client, _, _ = mock_client
+        events = []
+        client.add_listener("test", notification_event=lambda ev, st: events.append((ev, st)))
+
+        await client.process_message({"SENSOR_INDOOR": "", "sensorState": "on"})
+
+        assert events == [(NOTIFY_SENSOR_INDOOR, "on")]
+
+    async def test_bare_sensor_outdoor_off(self, mock_client):
+        """Outdoor sensor-off bare envelope dispatches correctly."""
+        from powerpetdoor.const import NOTIFY_SENSOR_OUTDOOR
+
+        client, _, _ = mock_client
+        events = []
+        client.add_listener("test", notification_event=lambda ev, st: events.append((ev, st)))
+
+        await client.process_message({"SENSOR_OUTDOOR": "", "sensorState": "off"})
+
+        assert events == [(NOTIFY_SENSOR_OUTDOOR, "off")]
+
+    async def test_bare_low_battery(self, mock_client):
+        """LOW_BATTERY has no sensorState; state is None."""
+        from powerpetdoor.const import NOTIFY_LOW_BATTERY
+
+        client, _, _ = mock_client
+        events = []
+        client.add_listener("test", notification_event=lambda ev, st: events.append((ev, st)))
+
+        await client.process_message({"LOW_BATTERY": ""})
+
+        assert events == [(NOTIFY_LOW_BATTERY, None)]
+
+    async def test_cmd_style_notification_tolerated(self, mock_client):
+        """CMD-style notification envelopes also dispatch (D2 tolerance)."""
+        from powerpetdoor.const import NOTIFY_SENSOR_INDOOR
+
+        client, _, _ = mock_client
+        events = []
+        client.add_listener("test", notification_event=lambda ev, st: events.append((ev, st)))
+
+        await client.process_message(
+            {"success": "true", "CMD": "SENSOR_INDOOR", "sensorState": "on"}
+        )
+
+        assert events == [(NOTIFY_SENSOR_INDOOR, "on")]
+
+    async def test_bare_notification_without_listeners(self, mock_client):
+        """A bare notification with no listeners registered is harmless."""
+        client, _, _ = mock_client
+
+        await client.process_message({"SENSOR_INDOOR": "", "sensorState": "on"})
+
+    async def test_bare_notification_via_data_received(self, mock_client):
+        """The full receive path handles a bare notification envelope."""
+        from powerpetdoor.const import NOTIFY_SENSOR_INDOOR
+
+        client, _, device = mock_client
+        events = []
+        client.add_listener("test", notification_event=lambda ev, st: events.append((ev, st)))
+
+        device.send_response_sync({"SENSOR_INDOOR": "", "sensorState": "on"})
+        await asyncio.sleep(0)
+
+        assert events == [(NOTIFY_SENSOR_INDOOR, "on")]
+
+    async def test_del_listener_removes_notification_event(self, mock_client):
+        """del_listener also clears notification_event listeners."""
+        client, _, _ = mock_client
+        events = []
+        client.add_listener("test", notification_event=lambda ev, st: events.append((ev, st)))
+        client.del_listener("test")
+
+        await client.process_message({"LOW_BATTERY": ""})
+
+        assert events == []
+
+
+# ============================================================================
+# Timing Source Tests (L11)
+# ============================================================================
+
+
+class TestMonotonicTiming:
+    """Intervals must use time.monotonic(); only the PING token is wall-clock."""
+
+    async def test_send_pacing_does_not_use_wall_clock(self, mock_client, monkeypatch):
+        """_send_data rate limiting uses monotonic, never time.time (L11)."""
+        from types import SimpleNamespace
+
+        client, _, _ = mock_client
+        client._last_command = None
+        client._last_send = time.monotonic()
+
+        wall_calls = []
+
+        def fake_wall_time():
+            wall_calls.append(1)
+            return 0.0
+
+        fake_time = SimpleNamespace(time=fake_wall_time, monotonic=time.monotonic)
+        monkeypatch.setattr("powerpetdoor.client.time", fake_time)
+
+        await client._send_data(b'{"config": "GET_DOOR_STATUS"}')
+
+        assert wall_calls == []
+
+    async def test_pong_latency_never_negative_on_clock_step(self, mock_client):
+        """PONG latency survives a wall-clock step (uses monotonic) (L11)."""
+        client, _, _ = mock_client
+        # Simulate an NTP step: the wire token claims a future wall time.
+        client._last_ping = str(round(time.time() * 1000) + 10_000_000)
+        client._last_ping_time = time.monotonic() - 0.05
+
+        latencies = []
+        client.add_handlers("test", on_ping=lambda ms: latencies.append(ms))
+
+        await client.process_message({"success": "true", "CMD": "PONG", "PONG": client._last_ping})
+
+        assert len(latencies) == 1
+        assert latencies[0] >= 0
+        assert client._last_ping is None
+        assert client._failed_pings == 0
+
+    async def test_pong_missing_token_ignored(self, mock_client):
+        """A PONG without its token field is ignored, not fatal."""
+        client, _, _ = mock_client
+        client._last_ping = "12345"
+
+        await client.process_message({"success": "true", "CMD": "PONG"})
+
+        assert client._last_ping == "12345"
+
+
+# ============================================================================
+# Sensor Listener Signature Tests (D4)
+# ============================================================================
+
+
+class TestSensorListenerSignature:
+    """Sensor listeners receive (field, value) — pins the D4 contract."""
+
+    async def test_sensor_listener_receives_field_and_value(self, mock_client):
+        """A per-field sensor listener is invoked as callback(field, value)."""
+        from powerpetdoor.const import FIELD_POWER
+
+        client, _, _ = mock_client
+        calls = []
+        client.add_listener(
+            "test", sensor_update={FIELD_POWER: lambda field, value: calls.append((field, value))}
+        )
+
+        await client.process_message({"success": "true", "CMD": "GET_POWER", "power_state": "1"})
+
+        assert calls == [(FIELD_POWER, True)]

@@ -34,6 +34,8 @@ class ArgSpec:
         arg_type: Type of argument (string, int, float, bool_toggle, choice, time_range, days)
         required: Whether the argument is required
         default: Default value when not provided
+        default_display: Human-readable form of the default for help text
+                        (e.g., "all" instead of a raw Python list)
         choices: Valid choices for "choice" type
         description: Help text describing this argument
         min_value: Minimum value for numeric types
@@ -47,6 +49,7 @@ class ArgSpec:
     arg_type: str  # "string", "int", "float", "bool_toggle", "choice", "time_range", "days"
     required: bool = True
     default: any = None
+    default_display: str | None = None
     choices: list[str] | None = None  # For "choice" type
     description: str = ""
     min_value: float | None = None  # For int/float types
@@ -169,6 +172,8 @@ _DAY_PRESETS = {
     "weekdays": [0, 1, 1, 1, 1, 1, 0],  # Mon-Fri
     "weekends": [1, 0, 0, 0, 0, 0, 1],  # Sun, Sat
 }
+# Public preset names for completion/highlighting
+DAY_PRESET_NAMES = tuple(_DAY_PRESETS)
 
 
 def _parse_days_str(days_str: str) -> list[int]:
@@ -190,6 +195,45 @@ def _parse_days_str(days_str: str) -> list[int]:
     return days
 
 
+def parse_args(
+    parts: list[str],
+    arg_specs: list[ArgSpec],
+    cmd_path: list[str],
+) -> tuple[list, "CommandResult | None"]:
+    """Parse argument parts according to ArgSpec definitions.
+
+    Shared by the daemon CommandHandler and the ctl local command handler.
+
+    Returns:
+        (parsed_args, error) - error is None on success. Extra (unconsumed)
+        arguments are an error so typos are not silently ignored.
+    """
+    parsed = []
+    cmd_str = " ".join(cmd_path)
+    usage = " ".join(spec.generate_usage() for spec in arg_specs)
+
+    if len(parts) > len(arg_specs):
+        extra = " ".join(parts[len(arg_specs) :])
+        return [], CommandResult(
+            False, f"Unexpected argument(s): {extra}\nUsage: {cmd_str} {usage}"
+        )
+
+    for i, spec in enumerate(arg_specs):
+        if i < len(parts):
+            value, error = parse_arg(parts[i], spec)
+            if error:
+                return [], CommandResult(False, f"{error}\nUsage: {cmd_str} {usage}")
+            parsed.append(value)
+        elif spec.required:
+            return [], CommandResult(
+                False, f"Missing required argument: {spec.name}\nUsage: {cmd_str} {usage}"
+            )
+        else:
+            parsed.append(spec.default)
+
+    return parsed, None
+
+
 @dataclass
 class SubcommandInfo:
     """Metadata about a command or subcommand.
@@ -206,6 +250,9 @@ class SubcommandInfo:
     args: list[ArgSpec] = field(default_factory=list)  # Argument specifications
     # Nested subcommand registry: maps name and aliases to SubcommandInfo
     subcommands: dict[str, "SubcommandInfo"] = field(default_factory=dict)
+    # True when usage was auto-generated (so it may be regenerated after
+    # late subcommand registration)
+    auto_usage: bool = False
 
     def __post_init__(self):
         """Build subcommand registry if list was provided."""
@@ -361,6 +408,7 @@ def command(
         # Auto-generate usage if not explicitly provided
         if info.usage is None:
             info.usage = _generate_usage(info) or None
+            info.auto_usage = True
 
         # Register under primary name and all aliases
         _command_registry[name] = info
@@ -416,6 +464,7 @@ def subcommand(
         # Auto-generate usage if not explicitly provided
         if sub_info.usage is None:
             sub_info.usage = _generate_usage(sub_info) or None
+            sub_info.auto_usage = True
 
         # Will be registered later when CommandHandler binds methods
         func._subcommand_info = sub_info

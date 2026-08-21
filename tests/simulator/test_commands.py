@@ -534,11 +534,15 @@ class TestInteractiveOnlyCommands:
 
     @pytest.mark.asyncio
     async def test_help_hides_interactive_commands_when_not_interactive(self, command_handler):
-        """help should not show interactive-only commands when not in interactive mode."""
+        """help should not show interactive-only commands when not in interactive mode.
+
+        Checks the rendered command entries ("clear (cls)" / "history (hist)")
+        because "clear" also appears in the schedule command's subcommand usage.
+        """
         result = await command_handler.execute("help")
         assert result.success is True
-        assert "clear" not in result.message
-        assert "history" not in result.message
+        assert "clear (cls)" not in result.message
+        assert "history (hist)" not in result.message
 
     @pytest.mark.asyncio
     async def test_help_shows_interactive_commands_in_interactive_mode(self, command_handler):
@@ -547,7 +551,7 @@ class TestInteractiveOnlyCommands:
 
         result = await command_handler.execute("help")
         assert result.success is True
-        assert "clear" in result.message
+        assert "clear (cls)" in result.message
 
     @pytest.mark.asyncio
     async def test_set_interactive_mode(self, command_handler):
@@ -559,6 +563,432 @@ class TestInteractiveOnlyCommands:
 
         command_handler.set_interactive_mode(False)
         assert command_handler._interactive_mode is False
+
+
+# ============================================================================
+# Pet Presence Command Tests
+# ============================================================================
+
+
+class TestPetCommand:
+    """Tests for the pet presence command (drives set_pet_in_doorway)."""
+
+    @pytest.mark.asyncio
+    async def test_pet_bare_toggles_on(self, command_handler):
+        """pet with no args toggles pet presence on when off."""
+        state = command_handler.simulator.state
+        state.inside_sensor_active = False
+
+        result = await command_handler.execute("pet")
+        assert result.success is True
+        assert "Pet in doorway" in result.message
+        assert state.inside_sensor_active is True
+
+    @pytest.mark.asyncio
+    async def test_pet_bare_toggles_off(self, command_handler):
+        """pet with no args toggles pet presence off when on."""
+        state = command_handler.simulator.state
+        state.inside_sensor_active = True
+
+        result = await command_handler.execute("pet")
+        assert result.success is True
+        assert "Pet left doorway" in result.message
+        assert state.inside_sensor_active is False
+
+    @pytest.mark.asyncio
+    async def test_pet_on(self, command_handler):
+        state = command_handler.simulator.state
+        state.inside_sensor_active = False
+
+        result = await command_handler.execute("pet on")
+        assert result.success is True
+        assert state.inside_sensor_active is True
+
+    @pytest.mark.asyncio
+    async def test_pet_on_clears_outside_sensor(self, command_handler):
+        """Pet presence uses the inside sensor; sensors are mutually exclusive."""
+        state = command_handler.simulator.state
+        state.outside_sensor_active = True
+
+        result = await command_handler.execute("pet on")
+        assert result.success is True
+        assert state.inside_sensor_active is True
+        assert state.outside_sensor_active is False
+
+    @pytest.mark.asyncio
+    async def test_pet_off(self, command_handler):
+        state = command_handler.simulator.state
+        state.inside_sensor_active = True
+
+        result = await command_handler.execute("pet off")
+        assert result.success is True
+        assert state.inside_sensor_active is False
+
+    @pytest.mark.asyncio
+    async def test_pet_alias_d(self, command_handler):
+        """'d' alias (the key documented in docs/simulator.md) works."""
+        state = command_handler.simulator.state
+        state.inside_sensor_active = False
+
+        result = await command_handler.execute("d")
+        assert result.success is True
+        assert state.inside_sensor_active is True
+
+    @pytest.mark.asyncio
+    async def test_pet_toggle_subcommand(self, command_handler):
+        state = command_handler.simulator.state
+        state.inside_sensor_active = False
+
+        result = await command_handler.execute("pet toggle")
+        assert result.success is True
+        assert state.inside_sensor_active is True
+
+    @pytest.mark.asyncio
+    async def test_pet_invalid_value(self, command_handler):
+        result = await command_handler.execute("pet maybe")
+        assert result.success is False
+        assert "not valid" in result.message
+
+    @pytest.mark.asyncio
+    async def test_pet_in_help(self, command_handler):
+        result = await command_handler.execute("help")
+        assert result.success is True
+        assert "pet (d)" in result.message
+
+
+# ============================================================================
+# No-Argument Show Semantics Tests (battery / holdtime)
+# ============================================================================
+
+
+class TestNoArgShowSemantics:
+    """Bare value commands must SHOW the value, never mutate it."""
+
+    @pytest.mark.asyncio
+    async def test_battery_bare_shows_without_mutating(self, command_handler):
+        state = command_handler.simulator.state
+        state.battery_percent = 73
+
+        result = await command_handler.execute("battery")
+        assert result.success is True
+        assert result.message == "Battery: 73%"
+        assert state.battery_percent == 73
+
+    @pytest.mark.asyncio
+    async def test_battery_set_value(self, command_handler):
+        result = await command_handler.execute("battery 55")
+        assert result.success is True
+        assert "Battery set to 55%" in result.message
+        assert command_handler.simulator.state.battery_percent == 55
+
+    @pytest.mark.asyncio
+    async def test_battery_random_subcommand(self, command_handler):
+        """Randomization moved to an explicit subcommand."""
+        result = await command_handler.execute("battery random")
+        assert result.success is True
+        assert "Battery set to" in result.message
+        assert 10 <= command_handler.simulator.state.battery_percent <= 100
+
+    @pytest.mark.asyncio
+    async def test_holdtime_bare_shows_current_value(self, command_handler):
+        command_handler.simulator.state.hold_time = 7.5
+
+        result = await command_handler.execute("holdtime")
+        assert result.success is True
+        assert result.message == "Hold time: 7.5s"
+        assert command_handler.simulator.state.hold_time == 7.5
+
+    @pytest.mark.asyncio
+    async def test_holdtime_set_value(self, command_handler):
+        result = await command_handler.execute("holdtime 5")
+        assert result.success is True
+        assert "Hold time set to 5.0s" in result.message
+        assert command_handler.simulator.state.hold_time == 5.0
+
+    @pytest.mark.asyncio
+    async def test_holdtime_still_validates_range(self, command_handler):
+        result = await command_handler.execute("holdtime 10000")
+        assert result.success is False
+        assert "above maximum" in result.message
+
+
+# ============================================================================
+# Extra Argument Rejection Tests
+# ============================================================================
+
+
+class TestExtraArgumentRejection:
+    """Unconsumed arguments are an error, not silently ignored."""
+
+    @pytest.mark.asyncio
+    async def test_no_arg_command_rejects_extras(self, command_handler):
+        result = await command_handler.execute("close now please")
+        assert result.success is False
+        assert "Unexpected argument(s): now please" in result.message
+
+    @pytest.mark.asyncio
+    async def test_arg_command_rejects_extras(self, command_handler):
+        result = await command_handler.execute("power on off extra")
+        assert result.success is False
+        assert "Unexpected argument(s): off extra" in result.message
+
+    @pytest.mark.asyncio
+    async def test_holdtime_typo_rejected(self, command_handler):
+        """'holdtime 5 3' (meant 5.3) must not silently set 5."""
+        command_handler.simulator.state.hold_time = 8.0
+        result = await command_handler.execute("holdtime 5 3")
+        assert result.success is False
+        assert "Unexpected argument(s): 3" in result.message
+        assert command_handler.simulator.state.hold_time == 8.0
+
+    @pytest.mark.asyncio
+    async def test_subcommand_rejects_extras(self, command_handler):
+        result = await command_handler.execute("ac toggle extra")
+        assert result.success is False
+        assert "Unexpected argument(s): extra" in result.message
+
+    @pytest.mark.asyncio
+    async def test_no_arg_command_help_still_works(self, command_handler):
+        """'close help' shows the description instead of executing close."""
+        result = await command_handler.execute("close help")
+        assert result.success is True
+        assert "Close the door" in result.message
+
+
+# ============================================================================
+# CLI Mode Registry Restore Tests
+# ============================================================================
+
+
+class TestCliModeRestore:
+    """set_cli_mode(False) must fully restore the exit command."""
+
+    @pytest.mark.asyncio
+    async def test_exit_restored_after_cli_mode(self, command_handler):
+        from powerpetdoor.simulator.commands.base import get_command_registry
+
+        registry = get_command_registry()
+        original_exit = registry["exit"]
+        original_shutdown_aliases = list(registry["shutdown"].aliases)
+
+        command_handler.set_cli_mode(True)
+        # In CLI mode exit/q/quit alias shutdown
+        assert registry["exit"] is registry["shutdown"]
+        assert registry["q"] is registry["shutdown"]
+
+        command_handler.set_cli_mode(False)
+        # exit and ALL its aliases must be back
+        assert registry["exit"] is original_exit
+        assert registry["q"] is original_exit
+        assert registry["quit"] is original_exit
+        # shutdown aliases restored, still a list (dataclass declares list)
+        assert registry["shutdown"].aliases == original_shutdown_aliases
+        assert isinstance(registry["shutdown"].aliases, list)
+        assert isinstance(registry["exit"].aliases, list)
+
+    @pytest.mark.asyncio
+    async def test_exit_executes_after_cli_mode_round_trip(self, command_handler):
+        command_handler.set_cli_mode(True)
+        command_handler.set_cli_mode(False)
+        command_handler.set_interactive_mode(True)
+
+        result = await command_handler.execute("exit")
+        assert result.success is True
+        assert "handled locally" in result.message
+
+
+# ============================================================================
+# Help / Usage Consistency Tests
+# ============================================================================
+
+
+class TestHelpUsageConsistency:
+    """Late-registered subcommands must appear in usage and help."""
+
+    @pytest.mark.asyncio
+    async def test_schedule_usage_lists_subcommands(self, command_handler):
+        from powerpetdoor.simulator.commands.base import get_command_registry
+
+        usage = get_command_registry()["schedule"].usage
+        assert usage is not None
+        for sub in ("add", "clear", "delete", "list"):
+            assert sub in usage
+
+    @pytest.mark.asyncio
+    async def test_notify_and_broadcast_usage_present(self, command_handler):
+        from powerpetdoor.simulator.commands.base import get_command_registry
+
+        registry = get_command_registry()
+        assert registry["notify"].usage is not None
+        assert "inside_on" in registry["notify"].usage
+        assert registry["broadcast"].usage is not None
+        assert "settings" in registry["broadcast"].usage
+
+    @pytest.mark.asyncio
+    async def test_top_level_help_shows_schedule_usage(self, command_handler):
+        result = await command_handler.execute("help")
+        assert result.success is True
+        assert "schedule (sched) [add|" in result.message
+
+    @pytest.mark.asyncio
+    async def test_arg_command_help_lists_subcommands(self, command_handler):
+        """'power help' must mention the registered toggle subcommand."""
+        result = await command_handler.execute("power help")
+        assert result.success is True
+        assert "Subcommands:" in result.message
+        assert "toggle" in result.message
+
+    @pytest.mark.asyncio
+    async def test_schedule_add_help_shows_friendly_default(self, command_handler):
+        """The days default renders as 'all', not a raw Python list."""
+        result = await command_handler.execute("schedule add help")
+        assert result.success is True
+        assert "default: all" in result.message
+        assert "[1, 1" not in result.message
+
+    @pytest.mark.asyncio
+    async def test_history_usage_is_meaningful(self, command_handler):
+        from powerpetdoor.simulator.commands.base import get_command_registry
+
+        assert get_command_registry()["history"].usage == "[clear|N]"
+
+    @pytest.mark.asyncio
+    async def test_timezone_arg_type_is_string(self, command_handler):
+        from powerpetdoor.simulator.commands.base import get_command_registry
+
+        assert get_command_registry()["timezone"].args[0].arg_type == "string"
+
+
+# ============================================================================
+# Script Run Tests (wait mode and path restrictions)
+# ============================================================================
+
+PASSING_SCRIPT = """\
+name: Passing Script
+steps:
+  - action: log
+    message: ok
+"""
+
+FAILING_SCRIPT = """\
+name: Failing Script
+steps:
+  - action: bogus_action
+"""
+
+
+class TestRunWaitMode:
+    """run <script> wait executes synchronously and reflects pass/fail."""
+
+    @pytest.fixture
+    def queued_handler(self, simulator):
+        """A handler with a script queue, like daemon/interactive mode."""
+        handler = CommandHandler(
+            simulator=simulator,
+            script_runner=ScriptRunner(simulator),
+            stop_callback=MagicMock(),
+            script_queue=asyncio.Queue(),
+        )
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_run_queues_by_default(self, queued_handler, tmp_path):
+        script = tmp_path / "pass.yaml"
+        script.write_text(PASSING_SCRIPT)
+
+        result = await queued_handler.execute(f"run {script}")
+        assert result.success is True
+        assert "Queued script" in result.message
+        assert queued_handler.script_queue.qsize() == 1
+
+    @pytest.mark.asyncio
+    async def test_run_wait_reports_pass(self, queued_handler, tmp_path):
+        script = tmp_path / "pass.yaml"
+        script.write_text(PASSING_SCRIPT)
+
+        result = await queued_handler.execute(f"run {script} wait")
+        assert result.success is True
+        assert "Script PASSED" in result.message
+        # Not queued - ran synchronously
+        assert queued_handler.script_queue.qsize() == 0
+
+    @pytest.mark.asyncio
+    async def test_run_wait_reports_fail(self, queued_handler, tmp_path):
+        script = tmp_path / "fail.yaml"
+        script.write_text(FAILING_SCRIPT)
+
+        result = await queued_handler.execute(f"run {script} wait")
+        assert result.success is False
+        assert "Script FAILED" in result.message
+
+    @pytest.mark.asyncio
+    async def test_run_invalid_mode_rejected(self, queued_handler, tmp_path):
+        script = tmp_path / "pass.yaml"
+        script.write_text(PASSING_SCRIPT)
+
+        result = await queued_handler.execute(f"run {script} sideways")
+        assert result.success is False
+        assert "not valid" in result.message
+
+
+class TestScriptPathRestrictions:
+    """load_script path handling for local vs control-channel handlers."""
+
+    @pytest.fixture
+    def restricted_handler(self, simulator, tmp_path):
+        """A handler configured like the daemon control channel."""
+        return CommandHandler(
+            simulator=simulator,
+            script_runner=ScriptRunner(simulator),
+            stop_callback=MagicMock(),
+            scripts_dir=str(tmp_path),
+            allow_script_paths=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_local_handler_accepts_paths(self, command_handler, tmp_path):
+        """The local interactive CLI may still run arbitrary paths."""
+        script = tmp_path / "pass.yaml"
+        script.write_text(PASSING_SCRIPT)
+
+        result = await command_handler.execute(f"run {script}")
+        assert result.success is True
+        assert "Script PASSED" in result.message
+
+    @pytest.mark.asyncio
+    async def test_restricted_rejects_absolute_path(self, restricted_handler, tmp_path):
+        script = tmp_path / "pass.yaml"
+        script.write_text(PASSING_SCRIPT)
+
+        result = await restricted_handler.execute(f"run {script}")
+        assert result.success is False
+        assert "not allowed" in result.message
+
+    @pytest.mark.asyncio
+    async def test_restricted_rejects_traversal(self, restricted_handler):
+        result = await restricted_handler.execute("run ../../etc/passwd")
+        assert result.success is False
+        assert "not allowed" in result.message
+
+    @pytest.mark.asyncio
+    async def test_restricted_rejects_hidden_names(self, restricted_handler):
+        result = await restricted_handler.execute("run .sneaky")
+        assert result.success is False
+        assert "not allowed" in result.message
+
+    @pytest.mark.asyncio
+    async def test_restricted_resolves_scripts_dir_name(self, restricted_handler, tmp_path):
+        (tmp_path / "goodscript.yaml").write_text(PASSING_SCRIPT)
+
+        result = await restricted_handler.execute("run goodscript")
+        assert result.success is True
+        assert "Script PASSED" in result.message
+
+    @pytest.mark.asyncio
+    async def test_restricted_builtin_name_still_loads(self, restricted_handler):
+        """Built-in scripts remain available by bare name (load only)."""
+        script = restricted_handler.load_script("pet_presence_test")
+        assert script.name
 
 
 # ============================================================================

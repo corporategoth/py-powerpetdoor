@@ -12,6 +12,7 @@ and controlling the door simulator.
 import asyncio
 import logging
 import sys
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ..tz_utils import async_init_timezone_cache
@@ -24,6 +25,9 @@ from .prompt_common import (
 from .prompt_common import (
     PROMPT_TOOLKIT_AVAILABLE,
     InteractiveSession,
+    escape_message,
+    sanitize_text,
+    use_prompt_toolkit,
 )
 from .server import DoorSimulator
 
@@ -34,6 +38,18 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+
+class _SanitizingFormatter(logging.Formatter):
+    """Formatter that neutralizes control characters in log output.
+
+    Log records can carry network-derived data (e.g. unknown protocol
+    commands); sanitizing at format time keeps ANSI escapes out of the
+    operator's terminal.
+    """
+
+    def format(self, record) -> str:
+        return sanitize_text(super().format(record))
 
 
 class InteractivePrompt:
@@ -64,7 +80,7 @@ class InteractivePrompt:
 
         # Install a custom handler that clears line before output
         self._handler = _PromptLoggingHandler(self)
-        self._handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        self._handler.setFormatter(_SanitizingFormatter("%(asctime)s [%(levelname)s] %(message)s"))
         root_logger.addHandler(self._handler)
         self.show()
 
@@ -124,6 +140,159 @@ class _PromptLoggingHandler(logging.Handler):
 # Default control port offset from simulator port
 CONTROL_PORT_OFFSET = 1
 
+# Default bind address for the (unauthenticated) daemon control channel.
+# Loopback by default; widening requires an explicit --control-host.
+DEFAULT_CONTROL_HOST = "127.0.0.1"
+
+
+class _ControlLogHandler(logging.Handler):
+    """Logging handler that broadcasts sanitized log lines to control clients."""
+
+    def __init__(self, clients: set[asyncio.StreamWriter]):
+        super().__init__()
+        self._clients = clients
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            # Sanitize control characters and escape newlines so untrusted
+            # (network-derived) data can neither inject terminal escapes nor
+            # forge extra protocol lines.
+            data = f"LOG: {escape_message(sanitize_text(msg))}\n".encode()
+            # Broadcast to all connected control clients
+            for writer in list(self._clients):
+                try:
+                    writer.write(data)
+                    # Don't await drain here - it would block.
+                    # The message will be sent eventually.
+                except Exception:
+                    # Client disconnected, will be cleaned up later
+                    pass
+        except Exception:
+            self.handleError(record)
+
+
+class ControlChannel:
+    """Line-based TCP control channel for daemon mode.
+
+    Protocol (one message per line, ``\\n`` terminated):
+
+    - client -> server: ``<command>``
+    - server -> client: ``OK: <msg>`` / ``ERROR: <msg>`` (command responses,
+      newlines escaped as ``\\n``, control characters sanitized)
+    - server -> client: ``LOG: <msg>`` (broadcast log records, same escaping)
+    - server -> client: ``STATUS: clients=<n>`` (door-client count; sent on
+      connect and whenever a door client connects or disconnects)
+
+    The channel is UNAUTHENTICATED - bind it to loopback unless remote
+    control is explicitly desired.
+    """
+
+    def __init__(
+        self,
+        cmd_handler: CommandHandler,
+        host: str,
+        port: int,
+        stop_event: asyncio.Event,
+        client_count: Callable[[], int] | None = None,
+    ):
+        self.cmd_handler = cmd_handler
+        self.host = host
+        self.port = port
+        self.stop_event = stop_event
+        self._client_count = client_count or (lambda: 0)
+        self.server: asyncio.Server | None = None
+        self.clients: set[asyncio.StreamWriter] = set()
+        self.log_handler: logging.Handler | None = None
+
+    @property
+    def bound_port(self) -> int:
+        """The actual port the control server is listening on."""
+        if self.server and self.server.sockets:
+            return self.server.sockets[0].getsockname()[1]
+        return self.port
+
+    async def start(self):
+        """Start the control server and install the log broadcast handler."""
+        self.server = await asyncio.start_server(self._handle_client, self.host, self.port)
+        logger.info(f"Control server listening on {self.host}:{self.bound_port}")
+
+        self.log_handler = _ControlLogHandler(self.clients)
+        self.log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        logging.getLogger().addHandler(self.log_handler)
+
+    async def stop(self):
+        """Remove the log handler and shut the control server down."""
+        if self.log_handler:
+            logging.getLogger().removeHandler(self.log_handler)
+            self.log_handler = None
+        # Close lingering client connections so their handlers finish
+        # (wait_closed waits for handler completion on Python 3.12.1+)
+        for writer in list(self.clients):
+            try:
+                writer.close()
+            except Exception:
+                pass
+        if self.server:
+            self.server.close()
+            await self.server.wait_closed()
+            self.server = None
+
+    def broadcast_status(self):
+        """Broadcast the door-client count to all control clients.
+
+        This is the structured signal ctl uses for prompt coloring instead of
+        scraping human-readable log lines.
+        """
+        data = f"STATUS: clients={self._client_count()}\n".encode()
+        for writer in list(self.clients):
+            try:
+                writer.write(data)
+            except Exception:
+                pass
+
+    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """Handle a control connection."""
+        addr = writer.get_extra_info("peername")
+        logger.info(f"Control connection from {addr}")
+        self.clients.add(writer)
+        try:
+            # Send initial door-client status so ctl can color its prompt
+            writer.write(f"STATUS: clients={self._client_count()}\n".encode())
+            await writer.drain()
+
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
+                cmd = line.decode(errors="replace").strip()
+                if not cmd:
+                    continue
+
+                result = await self.cmd_handler.execute(cmd)
+                # Sanitize control chars, then escape newlines for the protocol
+                # (ctl will unescape)
+                escaped_msg = escape_message(sanitize_text(result.message))
+                if result.success:
+                    writer.write(f"OK: {escaped_msg}\n".encode())
+                else:
+                    writer.write(f"ERROR: {escaped_msg}\n".encode())
+                await writer.drain()
+
+                # Check if we should exit
+                if self.stop_event.is_set():
+                    break
+        except Exception as e:
+            logger.error(f"Control client error: {e}")
+        finally:
+            self.clients.discard(writer)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            logger.info(f"Control connection closed from {addr}")
+
 
 async def run_simulator(
     host: str = "0.0.0.0",
@@ -136,14 +305,17 @@ async def run_simulator(
     run_for: float | None = None,
     wait_for_client: bool = False,
     control_port: int | None = None,
+    control_host: str = DEFAULT_CONTROL_HOST,
+    scripts_dir: str | None = None,
     history_file: str | None = None,
     firmware: tuple[int, int, int] | None = None,
     hardware: tuple[str, str] | None = None,
+    on_ready: Callable[[int, int | None], None] | None = None,
 ):
     """Run the Power Pet Door simulator.
 
     Args:
-        host: Address to bind the server
+        host: Address to bind the door-protocol server
         port: Port to listen on for door protocol
         scripts: List of scripts to run (file paths or built-in names, auto-detected).
                  Implies non-interactive mode.
@@ -153,15 +325,22 @@ async def run_simulator(
         daemon: If True, run without interactive input and no scripts.
         run_for: Maximum run time in seconds (oneshot can exit earlier)
         wait_for_client: If True, delay script start until a client connects
-        control_port: Port for control commands (default: port + 1 in daemon/script mode)
+        control_port: Port for control commands (only used in daemon mode;
+                      main() defaults it to port + 1 there)
+        control_host: Address to bind the control channel (default: 127.0.0.1).
+                      The control channel is unauthenticated - widening this
+                      exposes full simulator control to the network.
+        scripts_dir: Optional directory of extra scripts runnable by bare name
+        history_file: History file path, or 'none' to disable
         firmware: Firmware version as (major, minor, patch) tuple
         hardware: Hardware version as (ver, rev) tuple
+        on_ready: Optional callback invoked once servers are listening, with
+                  (door_port, control_port) actual bound ports. Useful for
+                  tests and embedding with ephemeral ports.
 
     Returns:
         Script result (True if all passed, False if any failed, None if no scripts)
     """
-    import sys
-
     from .scripting import ScriptRunner
     from .state import DoorSimulatorState
 
@@ -184,16 +363,23 @@ async def run_simulator(
     # Holder for interactive session (set later if in interactive mode)
     # Used by callbacks to invalidate prompt on connect/disconnect
     session_holder: list[InteractiveSession | None] = [None]
+    # Holder for the control channel (set later in daemon mode)
+    # Used by callbacks to broadcast door-client status to control clients
+    channel_holder: list[ControlChannel | None] = [None]
 
     def on_client_connect():
-        """Called when a client connects - invalidate prompt to update color."""
+        """Called when a client connects - update prompt color / notify ctl."""
         if session_holder[0]:
             session_holder[0].invalidate()
+        if channel_holder[0]:
+            channel_holder[0].broadcast_status()
 
     def on_client_disconnect():
-        """Called when a client disconnects - invalidate prompt to update color."""
+        """Called when a client disconnects - update prompt color / notify ctl."""
         if session_holder[0]:
             session_holder[0].invalidate()
+        if channel_holder[0]:
+            channel_holder[0].broadcast_status()
 
     # Start the simulator
     simulator = DoorSimulator(
@@ -205,6 +391,12 @@ async def run_simulator(
     )
     await simulator.start()
 
+    # The actual bound port (differs from `port` when an ephemeral port 0 was
+    # requested, e.g. in tests)
+    actual_port = port
+    if simulator.server and simulator.server.sockets:
+        actual_port = simulator.server.sockets[0].getsockname()[1]
+
     script_runner = ScriptRunner(simulator)
 
     # Set up control structures
@@ -213,12 +405,16 @@ async def run_simulator(
     script_result = [None]  # Use list to allow mutation in nested function
     script_queue: asyncio.Queue[str] = asyncio.Queue()
 
-    # Create command handler
+    # Create command handler. In daemon mode the handler serves the
+    # unauthenticated control channel, so restrict script running to bare
+    # names (no arbitrary filesystem paths).
     cmd_handler = CommandHandler(
         simulator=simulator,
         script_runner=script_runner,
         stop_callback=stop_event.set,
         script_queue=script_queue,
+        scripts_dir=scripts_dir,
+        allow_script_paths=not daemon,
     )
 
     # Determine mode
@@ -230,86 +426,31 @@ async def run_simulator(
         cmd_handler.set_interactive_mode(True)
         cmd_handler.set_cli_mode(True)
 
+    # Start control channel if configured
+    control_channel: ControlChannel | None = None
+    if control_port is not None:
+        control_channel = ControlChannel(
+            cmd_handler=cmd_handler,
+            host=control_host,
+            port=control_port,
+            stop_event=stop_event,
+            client_count=lambda: len(simulator.protocols),
+        )
+        await control_channel.start()
+        channel_holder[0] = control_channel
+
     # Print startup info
-    print(f"Simulator started on port {port}")
-    if control_port:
-        print(f"Control port: {control_port}")
+    print(f"Simulator started on {host}:{actual_port}")
+    if control_channel:
+        print(f"Control channel: {control_host}:{control_channel.bound_port}")
     if interactive:
         print("=" * 65)
         print(cmd_handler.get_help())
         print("=" * 65)
     print()
 
-    # Start control server if configured
-    control_server = None
-    control_clients: set[asyncio.StreamWriter] = set()
-    control_log_handler: logging.Handler | None = None
-
-    if control_port:
-
-        class ControlClientLogHandler(logging.Handler):
-            """Logging handler that broadcasts to control clients."""
-
-            def emit(self, record):
-                try:
-                    msg = self.format(record)
-                    # Send log messages with LOG: prefix
-                    data = f"LOG: {msg}\n".encode()
-                    # Broadcast to all connected control clients
-                    for writer in list(control_clients):
-                        try:
-                            writer.write(data)
-                            # Don't await drain here - it would block
-                            # The message will be sent eventually
-                        except Exception:
-                            # Client disconnected, will be cleaned up later
-                            pass
-                except Exception:
-                    self.handleError(record)
-
-        async def handle_control_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-            """Handle a control connection."""
-            addr = writer.get_extra_info("peername")
-            logger.info(f"Control connection from {addr}")
-            control_clients.add(writer)
-            try:
-                while True:
-                    line = await reader.readline()
-                    if not line:
-                        break
-                    cmd = line.decode().strip()
-                    if not cmd:
-                        continue
-
-                    result = await cmd_handler.execute(cmd)
-                    # Escape newlines for protocol (ctl will unescape)
-                    escaped_msg = result.message.replace("\\", "\\\\").replace("\n", "\\n")
-                    if result.success:
-                        writer.write(f"OK: {escaped_msg}\n".encode())
-                    else:
-                        writer.write(f"ERROR: {escaped_msg}\n".encode())
-                    await writer.drain()
-
-                    # Check if we should exit
-                    if stop_event.is_set():
-                        break
-            except Exception as e:
-                logger.error(f"Control client error: {e}")
-            finally:
-                control_clients.discard(writer)
-                writer.close()
-                await writer.wait_closed()
-                logger.info(f"Control connection closed from {addr}")
-
-        control_server = await asyncio.start_server(handle_control_client, host, control_port)
-        logger.info(f"Control server listening on {host}:{control_port}")
-
-        # Install log handler to broadcast to control clients
-        control_log_handler = ControlClientLogHandler()
-        control_log_handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-        )
-        logging.getLogger().addHandler(control_log_handler)
+    if on_ready:
+        on_ready(actual_port, control_channel.bound_port if control_channel else None)
 
     # Process queued scripts in background
     async def process_script_queue():
@@ -407,6 +548,7 @@ async def run_simulator(
 
     # Set up interactive input if applicable
     stdin_available = False
+    used_stdin_reader = False  # True when the basic add_reader fallback is active
     prompt: InteractivePrompt | None = None
     input_task: asyncio.Task | None = None
     stdout_ctx = None  # prompt_toolkit patch_stdout context
@@ -422,34 +564,34 @@ async def run_simulator(
             pass
 
         if stdin_available:
-            if PROMPT_TOOLKIT_AVAILABLE:
+            # Only use prompt_toolkit on a real terminal; piped/dumb-terminal
+            # stdin falls back to plain input to avoid garbled output
+            if use_prompt_toolkit():
                 # Use InteractiveSession.create for standard prompt setup
                 history_path = history_file if history_file else str(HISTORY_FILE)
-                interactive = InteractiveSession.create(
+                session = InteractiveSession.create(
                     host=host,
-                    port=port,
+                    port=actual_port,
                     history_file=history_path,
                     is_connected=lambda: bool(simulator.protocols),
                 )
 
                 # Store in holder so connect/disconnect callbacks can invalidate
-                session_holder[0] = interactive
+                session_holder[0] = session
 
                 # Register history with command handler (for history command)
-                if interactive.history:
-                    cmd_handler.set_history(interactive.history)
+                if session.history:
+                    cmd_handler.set_history(session.history)
 
                 async def interactive_input_loop():
                     """Async input loop using prompt_toolkit."""
                     try:
-                        async for input_line in interactive.input_loop(
-                            stop_check=stop_event.is_set
-                        ):
+                        async for input_line in session.input_loop(stop_check=stop_event.is_set):
                             if input_line.was_history_recall:
                                 print(f">>> {input_line.original} -> {input_line.resolved}")
 
                             result = await cmd_handler.execute(input_line.resolved)
-                            interactive.handle_result(input_line, result.success)
+                            session.handle_result(input_line, result.success)
 
                             if result.message:
                                 print(f">>> {result.message}")
@@ -473,14 +615,15 @@ async def run_simulator(
                         root_logger.removeHandler(handler)
                 new_handler = logging.StreamHandler(sys.stderr)
                 new_handler.setFormatter(
-                    logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+                    _SanitizingFormatter("%(asctime)s [%(levelname)s] %(message)s")
                 )
                 root_logger.addHandler(new_handler)
 
                 input_task = asyncio.create_task(interactive_input_loop())
             else:
                 # Fallback to basic input with InteractivePrompt
-                prompt_text = f"{host}:{port}> "
+                used_stdin_reader = True
+                prompt_text = f"{host}:{actual_port}> "
                 prompt = InteractivePrompt(prompt_text)
                 reader_removed = [False]  # Use list to allow mutation in nested function
 
@@ -548,7 +691,7 @@ async def run_simulator(
             stdout_ctx.__exit__(None, None, None)
         if prompt:
             prompt.disable()
-        if interactive and stdin_available and not PROMPT_TOOLKIT_AVAILABLE:
+        if used_stdin_reader:
             try:
                 loop.remove_reader(sys.stdin.fileno())
             except Exception:
@@ -558,11 +701,8 @@ async def run_simulator(
             await queue_task
         except asyncio.CancelledError:
             pass
-        if control_server:
-            control_server.close()
-            await control_server.wait_closed()
-        if control_log_handler:
-            logging.getLogger().removeHandler(control_log_handler)
+        if control_channel:
+            await control_channel.stop()
         await simulator.stop()
 
     return script_result[0]
@@ -627,20 +767,37 @@ def main():
         "Mutually exclusive with --script.",
     )
     parser.add_argument(
+        "--control-host",
+        metavar="ADDRESS",
+        default=DEFAULT_CONTROL_HOST,
+        help=f"Address to bind the daemon control channel (default: {DEFAULT_CONTROL_HOST}). "
+        "WARNING: the control channel is UNAUTHENTICATED - anyone who can reach it "
+        "can shut down or fully reconfigure the simulator. Only widen this "
+        "(e.g. 0.0.0.0) on a trusted network.",
+    )
+    parser.add_argument(
+        "--scripts-dir",
+        metavar="DIR",
+        default=None,
+        help="Directory of extra YAML scripts runnable by bare name "
+        "(in addition to the built-in scripts)",
+    )
+    parser.add_argument(
         "--run-for",
         "-r",
         type=float,
         metavar="SECONDS",
         help="Maximum run time in seconds (--oneshot can exit earlier)",
     )
-    # Only add history argument if prompt_toolkit is available
-    if PROMPT_TOOLKIT_AVAILABLE:
-        parser.add_argument(
-            "--history",
-            metavar="FILE",
-            default=str(HISTORY_FILE),
-            help=f"History file path, or 'none' to disable (default: {HISTORY_FILE})",
-        )
+    # Always registered so command lines are portable; ignored (with a note in
+    # the help text) when prompt_toolkit is not installed
+    parser.add_argument(
+        "--history",
+        metavar="FILE",
+        default=str(HISTORY_FILE),
+        help=f"History file path, or 'none' to disable (default: {HISTORY_FILE}). "
+        "Requires prompt_toolkit; ignored otherwise.",
+    )
     parser.add_argument(
         "--firmware",
         "-f",
@@ -718,6 +875,8 @@ def main():
                 run_for=args.run_for,
                 wait_for_client=args.wait_for_client,
                 control_port=control_port,
+                control_host=args.control_host,
+                scripts_dir=args.scripts_dir,
                 history_file=args.history,
                 firmware=firmware,
                 hardware=hardware,
@@ -730,6 +889,8 @@ def main():
 
     except KeyboardInterrupt:
         print("\nSimulator stopped.")
+        # Interrupted runs must not report success to CI (128 + SIGINT)
+        sys.exit(130)
 
 
 if __name__ == "__main__":

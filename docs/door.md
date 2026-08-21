@@ -93,6 +93,7 @@ await door.disconnect()   # Disconnect from the door
 | `connected` | `bool` | Whether currently connected to the door |
 | `host` | `str` | The door's IP address or hostname |
 | `port` | `int` | The door's TCP port |
+| `latency` | `float \| None` | Ping round-trip latency in seconds (`None` before the first ping) |
 
 ## Door Control
 
@@ -260,6 +261,7 @@ print(f"Discharging: {info.discharging}") # No AC and battery present
 | Property | Type | Description |
 |----------|------|-------------|
 | `firmware_version` | `str` | Firmware version (e.g., "1.2.3") |
+| `hardware_version` | `str` | Hardware version (e.g., "1 rev 2") |
 | `hardware_info` | `dict` | Full hardware info dictionary |
 
 ### Statistics Properties
@@ -317,11 +319,11 @@ schedule = await door.get_schedule(0)
 # Create/update a schedule
 from powerpetdoor import Schedule, ScheduleTime
 
-# days_of_week is a list: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+# days_of_week is a list of booleans: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
 schedule = Schedule(
     index=0,
     enabled=True,
-    days_of_week=[1, 1, 1, 1, 1, 1, 1],  # All days
+    days_of_week=[True, True, True, True, True, True, True],  # All days
     inside=True,       # This schedule controls inside sensor
     outside=False,
     start=ScheduleTime(hour=6, minute=0),
@@ -353,6 +355,13 @@ door.on_settings_change(on_settings)
 # Connection events
 door.on_connect(lambda: print("Connected!"))
 door.on_disconnect(lambda: print("Disconnected!"))
+
+# Schedule changes (receives the updated list of Schedule objects whenever
+# a schedule is added, updated, or deleted)
+def on_schedules(schedules: list[Schedule]):
+    print(f"Schedules updated: {len(schedules)} entries")
+
+door.on_schedule_change(on_schedules)
 ```
 
 ## Refreshing State
@@ -416,13 +425,14 @@ class ScheduleTime:
 
 @dataclass
 class Schedule:
-    index: int = 0                              # Schedule slot (0-based)
-    enabled: bool = True                        # Whether schedule is active
-    days_of_week: list = [1,1,1,1,1,1,1]        # [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
-    inside: bool = False                        # Controls inside sensor
-    outside: bool = False                       # Controls outside sensor
-    start: ScheduleTime                         # Start time for sensor
-    end: ScheduleTime                           # End time for sensor
+    index: int = 0                       # Schedule slot (0-based)
+    enabled: bool = True                 # Whether schedule is active
+    # [Sun, Mon, Tue, Wed, Thu, Fri, Sat], defaults to all days
+    days_of_week: list[bool] = [True] * 7
+    inside: bool = False                 # Controls inside sensor
+    outside: bool = False                # Controls outside sensor
+    start: ScheduleTime = ScheduleTime(6, 0)   # Start time for sensor
+    end: ScheduleTime = ScheduleTime(22, 0)    # End time for sensor
 ```
 
 ### Days of Week List
@@ -430,10 +440,11 @@ class Schedule:
 Each schedule entry controls ONE sensor (inside or outside) for specific days and a time window.
 
 ```python
-# days_of_week is a list: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
-# 1 = active, 0 = inactive
+# days_of_week is a list of booleans: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+# True = active, False = inactive
+# (the wire protocol uses 1/0; Schedule converts automatically)
 
-ALL_DAYS  = [1, 1, 1, 1, 1, 1, 1]  # Every day
-WEEKDAYS  = [0, 1, 1, 1, 1, 1, 0]  # Monday-Friday
-WEEKENDS  = [1, 0, 0, 0, 0, 0, 1]  # Saturday-Sunday
+ALL_DAYS  = [True, True, True, True, True, True, True]     # Every day
+WEEKDAYS  = [False, True, True, True, True, True, False]   # Monday-Friday
+WEEKENDS  = [True, False, False, False, False, False, True]  # Saturday-Sunday
 ```

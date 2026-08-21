@@ -31,9 +31,9 @@ This document describes the network protocol used by Power Pet Door devices. For
 |-----------|-------|
 | Transport | TCP |
 | Default Port | 3000 |
-| Encoding | JSON (UTF-8) |
+| Encoding | JSON (ASCII) |
 | Connection Limit | Single client only |
-| Line Terminator | Newline (`\n`) |
+| Message Framing | Brace-matched JSON objects (no terminator) |
 
 The door only accepts one connection at a time.
 
@@ -41,7 +41,22 @@ The door only accepts one connection at a time.
 
 ## Message Format
 
-Messages are single-line JSON objects terminated by newline. All messages include envelope fields for message tracking and direction.
+Messages are JSON objects sent back-to-back over the TCP stream. There is
+**no message terminator**: neither side sends a trailing newline, and
+messages may be separated by optional whitespace. Receivers must frame the
+stream by scanning for balanced braces, ignoring braces that appear inside
+JSON string values (including backslash-escaped quotes). A message may
+arrive split across multiple TCP segments, and one segment may contain
+several messages.
+
+Robust receivers should also:
+
+- Skip whitespace/newlines between objects.
+- Discard any non-JSON bytes up to the next `{` (resynchronization).
+- Cap the amount of un-parsed data they will buffer (this library uses
+  64 KiB) and treat overflow as a protocol violation (drop the connection).
+
+All messages include envelope fields for message tracking and direction.
 
 ### Envelope Fields
 
@@ -161,7 +176,7 @@ Typical interval: 30 seconds
 
 **Response**:
 ```json
-{"success": true, "door_status": "DOOR_RISING"}
+{"success": "true", "door_status": "DOOR_RISING"}
 ```
 
 ### Sensor Control
@@ -183,7 +198,7 @@ Typical interval: 30 seconds
 
 **Response** (GET_SENSORS):
 ```json
-{"success": true, "inside": "1", "outside": "1"}
+{"success": "true", "inside": "1", "outside": "1"}
 ```
 
 ### Power Control
@@ -203,7 +218,7 @@ Typical interval: 30 seconds
 
 **Response** (GET_POWER):
 ```json
-{"success": true, "power_state": "1"}
+{"success": "true", "power_state": "1"}
 ```
 
 ### Safety Settings
@@ -233,9 +248,9 @@ Typical interval: 30 seconds
 
 **Response**:
 ```json
-{"success": true, "settings": {"doorOptions": "1"}}
-{"success": true, "settings": {"outsideSensorSafetyLock": "0"}}
-{"success": true, "settings": {"allowCmdLockout": "0"}}
+{"success": "true", "settings": {"doorOptions": "1"}}
+{"success": "true", "settings": {"outsideSensorSafetyLock": "0"}}
+{"success": "true", "settings": {"allowCmdLockout": "0"}}
 ```
 
 ### Configuration
@@ -257,7 +272,7 @@ Typical interval: 30 seconds
 ```json
 {"config": "GET_HOLD_TIME"}
 ```
-Response: `{"success": true, "holdTime": 1500}`
+Response: `{"success": "true", "holdTime": 1500}`
 
 **SET_HOLD_TIME**:
 ```json
@@ -269,7 +284,7 @@ Note: Value is in **centiseconds** (1500 = 15 seconds)
 ```json
 {"config": "GET_TIMEZONE"}
 ```
-Response: `{"success": true, "tz": "EST5EDT,M3.2.0,M11.1.0"}`
+Response: `{"success": "true", "tz": "EST5EDT,M3.2.0,M11.1.0"}`
 
 **SET_TIMEZONE**:
 ```json
@@ -318,7 +333,7 @@ Response: `{"success": true, "tz": "EST5EDT,M3.2.0,M11.1.0"}`
 ```
 Response:
 ```json
-{"success": true, "door_status": "DOOR_CLOSED"}
+{"success": "true", "door_status": "DOOR_CLOSED"}
 ```
 
 **GET_SETTINGS**:
@@ -328,7 +343,7 @@ Response:
 Response:
 ```json
 {
-  "success": true,
+  "success": "true",
   "settings": {
     "power_state": "1",
     "inside": "1",
@@ -337,13 +352,17 @@ Response:
     "outsideSensorSafetyLock": "0",
     "allowCmdLockout": "0",
     "doorOptions": "1",
-    "holdTime": 1500,
+    "holdOpenTime": 1500,
     "tz": "EST5EDT,M3.2.0,M11.1.0",
     "sensorTriggerVoltage": 50,
     "sleepSensorTriggerVoltage": 50
   }
 }
 ```
+
+Note: within the settings object the hold time key is `holdOpenTime`; the
+dedicated `GET_HOLD_TIME`/`SET_HOLD_TIME` commands use `holdTime`. Both are
+in centiseconds.
 
 **GET_HW_INFO**:
 ```json
@@ -352,7 +371,7 @@ Response:
 Response:
 ```json
 {
-  "success": true,
+  "success": "true",
   "fwInfo": {
     "ver": "1.2.3",
     "rev": "abc123",
@@ -370,7 +389,7 @@ Response:
 Response:
 ```json
 {
-  "success": true,
+  "success": "true",
   "batteryPercent": 85,
   "batteryPresent": "1",
   "acPresent": "1"
@@ -384,7 +403,7 @@ Response:
 Response:
 ```json
 {
-  "success": true,
+  "success": "true",
   "totalOpenCycles": 1234,
   "totalAutoRetracts": 5
 }
@@ -427,9 +446,9 @@ See [Schedule Format](#schedule-format) for the schedule object structure.
 
 **Response**:
 ```json
-{"success": true, "hasRemoteId": true}
-{"success": true, "hasRemoteKey": true}
-{"success": true, "resetReason": "POWER_ON"}
+{"success": "true", "hasRemoteId": "1"}
+{"success": "true", "hasRemoteKey": "1"}
+{"success": "true", "resetReason": "POWER_ON"}
 ```
 
 ---
@@ -445,7 +464,7 @@ See [Schedule Format](#schedule-format) for the schedule object structure.
 | Safety Lock | `outsideSensorSafetyLock` | "0"/"1" | Outside sensor safety lock |
 | Command Lockout | `allowCmdLockout` | "0"/"1" | Command lockout enabled |
 | Autoretract | `doorOptions` | "0"/"1" | Auto-retract on obstruction |
-| Hold Time | `holdTime` | int | Hold time in centiseconds |
+| Hold Time | `holdOpenTime` | int | Hold time in centiseconds (the standalone GET/SET_HOLD_TIME commands use `holdTime`) |
 | Timezone | `tz` | string | POSIX timezone string |
 | Sensor Voltage | `sensorTriggerVoltage` | int | Sensor threshold |
 | Sleep Sensor Voltage | `sleepSensorTriggerVoltage` | int | Sleep mode sensor threshold |
@@ -466,11 +485,20 @@ See [Schedule Format](#schedule-format) for the schedule object structure.
 
 ### Notification Messages (door to client)
 
+Notification events are device-initiated and use a **bare envelope**:
+they carry no `CMD`, `success`, or `msgID` fields. The event name appears
+as a key with an empty-string value; sensor events also carry a
+`sensorState` of `"on"` or `"off"`.
+
 ```json
 {"SENSOR_INDOOR": "", "sensorState": "on"}
 {"SENSOR_OUTDOOR": "", "sensorState": "off"}
 {"LOW_BATTERY": ""}
 ```
+
+Clients should also tolerate CMD-style variants of these events
+(`{"CMD": "SENSOR_INDOOR", "success": "true", "sensorState": "on"}`)
+without treating them as command responses.
 
 ---
 

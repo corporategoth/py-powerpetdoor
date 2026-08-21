@@ -33,6 +33,9 @@ DOOR_TO_PHONE = "d2p"
 SUCCESS_TRUE = "true"
 SUCCESS_FALSE = "false"
 
+# Failure reason field in error responses
+FIELD_REASON = "reason"
+
 # Field names in protocol messages
 FIELD_POWER = "power_state"
 FIELD_INSIDE = "inside"
@@ -146,6 +149,10 @@ NOTIFY_LOW_BATTERY = "LOW_BATTERY"
 
 # Field for notification events
 FIELD_SENSOR_STATE = "sensorState"  # "on" or "off"
+
+# Sensor state values in notification events
+SENSOR_STATE_ON = "on"
+SENSOR_STATE_OFF = "off"
 
 # Response field names for remote/reset commands
 FIELD_HAS_REMOTE_ID = "hasRemoteId"

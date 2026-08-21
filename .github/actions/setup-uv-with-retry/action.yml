@@ -1,6 +1,6 @@
-# SOURCE OF TRUTH: ostinato/.github/actions/setup-uv-with-retry/
-# Plugin repos receive synced copies via ostinato/scripts/sync-plugin-actions.sh.
-# DO NOT EDIT synced copies; edit this file and run the sync script.
+# Adapted from ostinato/.github/actions/setup-uv-with-retry/ (the canonical
+# retry pattern for the shared act_runner). This copy diverges deliberately:
+# the setup-uv action is pinned to a commit SHA per this repo's security policy.
 name: 'Setup uv (with retry)'
 description: >
   Wraps astral-sh/setup-uv@v7 with up to 3 attempts to ride out the
@@ -17,7 +17,7 @@ runs:
   steps:
     - id: try1
       continue-on-error: true
-      uses: astral-sh/setup-uv@v7
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
       with:
         python-version: ${{ inputs.python-version }}
         enable-cache: true
@@ -29,7 +29,7 @@ runs:
     - if: steps.try1.outcome == 'failure'
       id: try2
       continue-on-error: true
-      uses: astral-sh/setup-uv@v7
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
       with:
         python-version: ${{ inputs.python-version }}
         enable-cache: true
@@ -39,7 +39,7 @@ runs:
       run: sleep 30
 
     - if: steps.try1.outcome == 'failure' && steps.try2.outcome == 'failure'
-      uses: astral-sh/setup-uv@v7
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
       with:
         python-version: ${{ inputs.python-version }}
         enable-cache: true

@@ -89,10 +89,13 @@ asyncio.run(main())
 
 ## Constructor
 
+All parameters except `loop` are required (the higher-level `PowerPetDoor`
+class provides defaults for them):
+
 ```python
 client = PowerPetDoorClient(
     host="192.168.1.100",  # IP address or hostname
-    port=3000,              # TCP port (default 3000)
+    port=3000,              # TCP port (the door listens on 3000)
     keepalive=30.0,         # Seconds between keepalive pings (0 to disable)
     timeout=10.0,           # Response timeout in seconds
     reconnect=5.0,          # Reconnect delay in seconds
@@ -260,9 +263,26 @@ client.send_message(COMMAND, CMD_POWER_OFF)
 
 ## Listeners
 
-Register callbacks to receive device state updates:
+Register callbacks to receive device state updates.
+
+The dict-based listeners (`sensor_update`, `notifications_update`,
+`stats_update`) are keyed by field name (or `"*"` for all fields of that
+group) and their callbacks receive two arguments: `(field, value)`. The
+`field` argument identifies which field changed, which is what makes the
+`"*"` wildcard useful. All other listeners receive a single value.
 
 ```python
+from powerpetdoor import (
+    FIELD_AUTO,
+    FIELD_INSIDE,
+    FIELD_LOW_BATTERY_NOTIFICATIONS,
+    FIELD_OUTSIDE,
+    FIELD_POWER,
+    FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
+    FIELD_TOTAL_AUTO_RETRACTS,
+    FIELD_TOTAL_OPEN_CYCLES,
+)
+
 client.add_listener(
     name="my_app",  # Unique identifier for this listener set
 
@@ -274,24 +294,24 @@ client.add_listener(
 
     # Individual sensor updates (by field or "*" for all)
     sensor_update={
-        FIELD_POWER: lambda val: print(f"Power: {val}"),
-        FIELD_INSIDE: lambda val: print(f"Inside: {val}"),
-        FIELD_OUTSIDE: lambda val: print(f"Outside: {val}"),
-        FIELD_AUTO: lambda val: print(f"Auto: {val}"),
+        FIELD_POWER: lambda field, val: print(f"Power: {val}"),
+        FIELD_INSIDE: lambda field, val: print(f"Inside: {val}"),
+        FIELD_OUTSIDE: lambda field, val: print(f"Outside: {val}"),
+        FIELD_AUTO: lambda field, val: print(f"Auto: {val}"),
     },
     # Or use "*" for all sensor fields:
-    # sensor_update={"*": lambda val: print(f"Sensor: {val}")},
+    # sensor_update={"*": lambda field, val: print(f"{field}: {val}")},
 
     # Notification settings updates
     notifications_update={
-        FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: lambda val: print(f"Inside on: {val}"),
-        FIELD_LOW_BATTERY_NOTIFICATIONS: lambda val: print(f"Low battery: {val}"),
+        FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: lambda field, val: print(f"Inside on: {val}"),
+        FIELD_LOW_BATTERY_NOTIFICATIONS: lambda field, val: print(f"Low battery: {val}"),
     },
 
     # Statistics updates
     stats_update={
-        FIELD_TOTAL_OPEN_CYCLES: lambda val: print(f"Cycles: {val}"),
-        FIELD_TOTAL_AUTO_RETRACTS: lambda val: print(f"Retracts: {val}"),
+        FIELD_TOTAL_OPEN_CYCLES: lambda field, val: print(f"Cycles: {val}"),
+        FIELD_TOTAL_AUTO_RETRACTS: lambda field, val: print(f"Retracts: {val}"),
     },
 
     # Other updates
@@ -301,6 +321,10 @@ client.add_listener(
     hold_time_update=lambda time: print(f"Hold time: {time}"),
 )
 ```
+
+The `sensor_update` fields are `FIELD_POWER`, `FIELD_INSIDE`, `FIELD_OUTSIDE`,
+`FIELD_AUTO`, `FIELD_OUTSIDE_SENSOR_SAFETY_LOCK`, `FIELD_CMD_LOCKOUT`, and
+`FIELD_AUTORETRACT` (all exported from the package root).
 
 ### Removing Listeners
 
@@ -314,9 +338,9 @@ client.del_listener("my_app")
 |----------|-------------------|-------------|
 | `door_status_update` | `(status: str)` | Door state changes |
 | `settings_update` | `(settings: dict)` | Full settings dict |
-| `sensor_update` | `{field: (val: bool)}` | Sensor state changes |
-| `notifications_update` | `{field: (val: bool)}` | Notification setting changes |
-| `stats_update` | `{field: (val: int)}` | Statistics updates |
+| `sensor_update` | `{field: (field: str, val: bool)}` | Sensor state changes |
+| `notifications_update` | `{field: (field: str, val: bool)}` | Notification setting changes |
+| `stats_update` | `{field: (field: str, val: int)}` | Statistics updates |
 | `hw_info_update` | `(info: dict)` | Hardware info |
 | `battery_update` | `(data: dict)` | Battery status |
 | `timezone_update` | `(tz: str)` | Timezone string |
@@ -326,6 +350,8 @@ client.del_listener("my_app")
 | `remote_id_update` | `(has_id: bool)` | Remote ID presence |
 | `remote_key_update` | `(has_key: bool)` | Remote key presence |
 | `reset_reason_update` | `(reason: str)` | Last reset reason |
+| `schedule_update` | `(schedule: dict)` | Schedule created or updated |
+| `schedule_delete` | `(index: int)` | Schedule deleted |
 
 ## Connection Handlers
 
@@ -401,19 +427,17 @@ Messages are automatically prioritized:
 | Priority | Message Types |
 |----------|--------------|
 | Critical (0) | PING/PONG keepalives |
-| High (1) | Door control (OPEN, CLOSE) |
-| Medium (2) | Status queries |
-| Low (3) | Configuration changes |
+| High (1) | Door control (OPEN, OPEN_AND_HOLD, CLOSE) |
+| Medium (2) | Settings changes (enable/disable, power, SET_*) |
+| Low (3) | Status queries (GET_*) and schedule commands |
 
 This ensures keepalives and urgent door commands are processed before routine queries.
 
-## Default Timing
+## Timing
 
-The client uses these default timing values:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| Min message interval | 200ms | Delay between messages to avoid overwhelming device |
-| Keepalive interval | 30s | PING/PONG frequency |
-| Response timeout | 10s | Max wait for command response |
-| Reconnect delay | 5s | Wait before reconnecting after disconnect |
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Min message interval | 200ms (fixed) | Delay between messages to avoid overwhelming the device |
+| Keepalive interval | constructor `keepalive` | PING/PONG frequency (`PowerPetDoor` defaults to 30s) |
+| Response timeout | constructor `timeout` | Max wait for a command response (`PowerPetDoor` defaults to 10s) |
+| Reconnect delay | constructor `reconnect` | Wait before reconnecting after disconnect (`PowerPetDoor` defaults to 5s) |

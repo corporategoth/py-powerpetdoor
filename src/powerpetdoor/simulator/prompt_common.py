@@ -9,12 +9,20 @@ This module provides syntax highlighting, tab completion, styling, and
 the InteractiveSession class for the simulator command-line interfaces.
 """
 
+import os
+import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .commands.base import get_canonical_command, get_command_registry
+from .commands.base import (
+    DAY_NAMES,
+    DAY_PRESET_NAMES,
+    get_canonical_command,
+    get_command_registry,
+)
 
 # Import CommandHandler to ensure all command modules are loaded and their
 # @command/@subcommand decorators populate the registry. This is needed for
@@ -40,6 +48,58 @@ if TYPE_CHECKING:
 # History file paths
 CLI_HISTORY_FILE = Path.home() / ".powerpetdoor_simulator_history"
 CTL_HISTORY_FILE = Path.home() / ".powerpetdoor_ctl_history"
+
+# C0 control characters (except tab/newline), DEL, and C1 control characters.
+# These must never reach a terminal unescaped - ESC sequences can clear the
+# screen, move the cursor, or worse on vulnerable terminal emulators.
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def sanitize_text(text: str) -> str:
+    """Neutralize terminal control characters in untrusted text.
+
+    Replaces C0 controls (except tab and newline), DEL, and C1 controls with
+    their visible ``\\xNN`` escape so network-derived data cannot inject ANSI
+    escape sequences into an operator's terminal.
+    """
+    return _CONTROL_CHAR_RE.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+
+
+def escape_message(msg: str) -> str:
+    """Escape a message for the line-based control protocol.
+
+    Backslashes are doubled first, then newlines become ``\\n``, so a message
+    always occupies exactly one protocol line and cannot forge extra lines.
+    """
+    return msg.replace("\\", "\\\\").replace("\n", "\\n")
+
+
+def unescape_message(msg: str) -> str:
+    """Reverse :func:`escape_message`.
+
+    Splits on escaped backslashes FIRST so a literal backslash followed by an
+    ``n`` (e.g. a Windows path like ``scripts\\new.yaml``) is not corrupted
+    into a newline.
+    """
+    return "\\".join(segment.replace("\\n", "\n") for segment in msg.split("\\\\"))
+
+
+def use_prompt_toolkit() -> bool:
+    """Whether prompt_toolkit should drive the interactive session.
+
+    Requires prompt_toolkit to be installed AND stdin to be a real terminal
+    (not a pipe or a dumb terminal) - otherwise prompt_toolkit produces
+    garbled output and the plain-input fallback is used instead.
+    """
+    if not PROMPT_TOOLKIT_AVAILABLE:
+        return False
+    try:
+        if sys.stdin is None or not sys.stdin.isatty():
+            return False
+    except (OSError, ValueError):
+        return False
+    return os.environ.get("TERM") != "dumb"
+
 
 # Style for syntax highlighting
 SIMULATOR_STYLE = (
@@ -68,6 +128,18 @@ _SUBCOMMANDS: set[str] = set()
 _OPTIONS: set[str] = set()
 
 
+def _collect_arg_options(args: list) -> None:
+    """Collect highlightable option words from a list of ArgSpecs."""
+    for arg in args:
+        if arg.arg_type == "bool_toggle":
+            _OPTIONS.update(["on", "off"])
+        elif arg.arg_type == "days":
+            _OPTIONS.update(DAY_PRESET_NAMES)
+            _OPTIONS.update(DAY_NAMES)
+        elif arg.choices:
+            _OPTIONS.update(c.lower() for c in arg.choices)
+
+
 def _collect_subcommands_and_options(subcommands: dict) -> None:
     """Recursively collect subcommand names and options from a subcommand registry."""
     for info in subcommands.values():
@@ -75,11 +147,7 @@ def _collect_subcommands_and_options(subcommands: dict) -> None:
         for alias in info.aliases:
             _SUBCOMMANDS.add(alias)
         # Collect choices from args (any arg type with choices, not just "choice" type)
-        for arg in info.args:
-            if arg.arg_type == "bool_toggle":
-                _OPTIONS.update(["on", "off"])
-            elif arg.choices:
-                _OPTIONS.update(c.lower() for c in arg.choices)
+        _collect_arg_options(info.args)
         # Recurse into nested subcommands
         if info.subcommands:
             _collect_subcommands_and_options(info.subcommands)
@@ -95,11 +163,7 @@ def init_command_sets():
         for alias in info.aliases:
             _ALIASES.add(alias)
         # Collect options from command args (any arg type with choices)
-        for arg in info.args:
-            if arg.arg_type == "bool_toggle":
-                _OPTIONS.update(["on", "off"])
-            elif arg.choices:
-                _OPTIONS.update(c.lower() for c in arg.choices)
+        _collect_arg_options(info.args)
         # Collect subcommands recursively
         if info.subcommands:
             _collect_subcommands_and_options(info.subcommands)
@@ -316,20 +380,31 @@ if PROMPT_TOOLKIT_AVAILABLE:
                             result.append((alias, f"Alias for {sub_info.name}"))
             return sorted(result, key=lambda x: x[0])
 
-        def _get_arg_options_for_info(self, info, prefix: str = "") -> list[tuple[str, str]]:
-            """Get argument options for a CommandInfo.
+        def _get_arg_options_for_info(
+            self, info, prefix: str = "", arg_index: int = 0
+        ) -> list[tuple[str, str]]:
+            """Get argument options for a CommandInfo at a specific argument position.
 
             Args:
                 info: The CommandInfo to get options for
                 prefix: The current partial text being completed (for path-aware completers)
+                arg_index: Which argument position (0-based) is being completed
             """
-            if not info or not info.args:
+            if not info or not info.args or arg_index >= len(info.args):
                 return []
 
-            # Check the first arg's type
-            arg = info.args[0]
+            # Check the arg at the position being completed
+            arg = info.args[arg_index]
             if arg.arg_type == "bool_toggle":
                 return [("on", "Enable"), ("off", "Disable")]
+            elif arg.arg_type == "days":
+                options = [
+                    ("all", "Every day"),
+                    ("weekdays", "Monday-Friday"),
+                    ("weekends", "Saturday+Sunday"),
+                ]
+                options.extend((day, "") for day in DAY_NAMES)
+                return options
             elif arg.arg_type == "choice" and arg.choices:
                 return [(c.lower(), c) for c in arg.choices]
             # Also check for choices on string args (like history's "clear")
@@ -388,18 +463,33 @@ if PROMPT_TOOLKIT_AVAILABLE:
                 info, depth = self._traverse_to_current_info(completed_words)
 
                 if info:
+                    # Words beyond the command/subcommand path are consumed arguments;
+                    # complete the argument at the cursor's position, not position 0.
+                    consumed_args = len(completed_words) - depth
+
                     # Collect all possible completions
                     all_completions = []
 
-                    # Add subcommands
-                    all_completions.extend(self._get_subcommands_for_info(info))
+                    if consumed_args == 0:
+                        # Add subcommands
+                        all_completions.extend(self._get_subcommands_for_info(info))
 
-                    # Add argument options (on/off, choices, etc.)
-                    # Pass word_before as prefix for path-aware completers
-                    all_completions.extend(self._get_arg_options_for_info(info, word_before))
+                        # Add first-argument options (on/off, choices, etc.)
+                        # Pass word_before as prefix for path-aware completers
+                        all_completions.extend(
+                            self._get_arg_options_for_info(info, word_before, arg_index=0)
+                        )
 
-                    # Add help pseudo-subcommand
-                    all_completions.extend(self._get_help_completions(info))
+                        # Add help pseudo-subcommand
+                        all_completions.extend(self._get_help_completions(info))
+                    else:
+                        # Arguments already consumed: only offer options for the
+                        # argument at this position (no subcommands, no help)
+                        all_completions.extend(
+                            self._get_arg_options_for_info(
+                                info, word_before, arg_index=consumed_args
+                            )
+                        )
 
                     # Yield matching completions (case-insensitive)
                     for name, desc in all_completions:
@@ -465,7 +555,10 @@ class InteractiveSession:
         self._session = None
         self._history: History | None = None
 
-        if PROMPT_TOOLKIT_AVAILABLE:
+        # Only create a PromptSession when stdin is a real terminal;
+        # piped/dumb-terminal sessions use the callers' plain-input fallback
+        # instead of producing garbled prompt_toolkit output.
+        if use_prompt_toolkit():
             from prompt_toolkit import PromptSession
             from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 

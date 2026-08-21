@@ -10,10 +10,22 @@ and can be used by both the interactive CLI and the control client.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _create_private_file(path: str | Path) -> None:
+    """Create a file with owner-only (0600) permissions.
+
+    Tightens permissions on an existing file as well, so history files never
+    remain world-readable regardless of the process umask.
+    """
+    fd = os.open(str(path), os.O_CREAT, 0o600)
+    os.close(fd)
+    os.chmod(str(path), 0o600)
 
 
 class History:
@@ -64,6 +76,12 @@ class History:
             if history_file is None or str(history_file).lower() == "none":
                 self._history = InMemoryHistory()
             else:
+                # Create the file with 0600 before FileHistory touches it so
+                # command history is never world-readable
+                try:
+                    _create_private_file(history_file)
+                except OSError as e:
+                    logger.warning(f"Could not create history file {history_file}: {e}")
                 self._history = FileHistory(str(history_file))
         except ImportError:
             # prompt_toolkit not available

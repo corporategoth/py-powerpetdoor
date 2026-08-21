@@ -112,14 +112,14 @@ See [docs/client.md](docs/client.md) for complete documentation.
 The library includes a full-featured door simulator for testing without hardware:
 
 ```bash
-# Run interactive simulator
+# Run interactive simulator (also available as the ppd-simulator entry point)
 python -m powerpetdoor.simulator
 
-# Run with test script
+# Run with a test script (built-in name or file path)
 python -m powerpetdoor.simulator --script basic_cycle
 
-# Run in CI/CD (exit on completion)
-python -m powerpetdoor.simulator --script full_test_suite --exit-after-script
+# Run in CI/CD (exit on completion; exit code reflects pass/fail)
+python -m powerpetdoor.simulator --script full_test_suite --oneshot
 ```
 
 See [docs/simulator.md](docs/simulator.md) for complete documentation.
@@ -134,12 +134,15 @@ powerpetdoor/
 ├── schedule.py        # Schedule utilities
 ├── tz_utils.py        # Timezone utilities
 └── simulator/         # Door simulator submodule
-    ├── state.py       # Simulator state dataclasses
-    ├── protocol.py    # Command handler registry
-    ├── server.py      # DoorSimulator server
-    ├── cli.py         # Interactive CLI
-    ├── scripting.py   # YAML script runner
-    └── scripts/       # Built-in test scripts
+    ├── state.py           # Simulator state dataclasses
+    ├── protocol.py        # Protocol handler (asyncio Protocol + command registry)
+    ├── server.py          # DoorSimulator server
+    ├── cli.py             # ppd-simulator CLI (interactive/script/daemon modes)
+    ├── ctl.py             # ppd-simulator-ctl remote-control client
+    ├── prompt_common.py   # Shared prompt_toolkit machinery (highlighting, completion)
+    ├── commands/          # Interactive command implementations
+    ├── scripting.py       # YAML script runner
+    └── scripts/           # Built-in test scripts
 ```
 
 ## Schedule Utilities

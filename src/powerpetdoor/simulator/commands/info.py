@@ -31,31 +31,33 @@ class InfoCommandsMixin:
     def _is_history_available(self) -> bool:
         """Check if history features are available.
 
-        Returns True if prompt_toolkit is installed, regardless of whether
-        set_history() has been called yet.
+        Returns True when a history object has been registered, or when
+        prompt_toolkit is installed AND usable for the current session
+        (interactive terminal). Piped/dumb-terminal sessions fall back to
+        basic input, which has no history.
         """
         if self._history is not None:
             return True
-        # Check if prompt_toolkit is available
-        try:
-            import prompt_toolkit
+        # Deferred import to avoid a circular import at module load time
+        from ..prompt_common import use_prompt_toolkit
 
-            return True
-        except ImportError:
-            return False
+        return use_prompt_toolkit()
 
-    def _get_subcommand_help(self, info: SubcommandInfo, cmd_path: list[str]) -> str:
+    def _get_subcommand_help(
+        self, info: SubcommandInfo, cmd_path: list[str], header: str | None = None
+    ) -> str:
         """Generate help text for a command's subcommands.
 
         Args:
             info: The command/subcommand info
             cmd_path: List of command parts leading to this point (e.g., ["schedule"])
+            header: Optional header line (defaults to "<command> subcommands:")
 
         Returns:
             Formatted help string
         """
         cmd_str = " ".join(cmd_path)
-        lines = [f"{cmd_str} subcommands:"]
+        lines = [header if header is not None else f"{cmd_str} subcommands:"]
 
         # Get unique subcommands (not aliases)
         seen = set()
@@ -104,10 +106,16 @@ class InfoCommandsMixin:
             if arg.choices:
                 constraints.append(f"choices: {', '.join(arg.choices)}")
             if arg.default is not None and not arg.required:
-                constraints.append(f"default: {arg.default}")
+                constraints.append(f"default: {arg.default_display or arg.default}")
 
             constraint_str = f" ({', '.join(constraints)})" if constraints else ""
             lines.append(f"  {arg.name}: {desc} [{required}]{constraint_str}")
+
+        # Also list registered subcommands so help doesn't hide them
+        # (e.g. "power toggle" when power also takes an on/off argument)
+        if info.subcommands:
+            lines.append("")
+            lines.append(self._get_subcommand_help(info, cmd_path, header="Subcommands:"))
 
         return "\n".join(lines)
 
@@ -304,9 +312,10 @@ class InfoCommandsMixin:
         ["hist"],
         "Show or manage command history",
         category="info",
+        usage="[clear|N]",
         args=[
             ArgSpec(
-                "arg",
+                "action",
                 "string",
                 required=False,
                 choices=["clear"],

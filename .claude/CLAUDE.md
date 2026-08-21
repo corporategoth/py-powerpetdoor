@@ -69,29 +69,33 @@ uv run mypy src
 # Run the simulator interactively
 uv run ppd-simulator
 
-# Run a simulator script headless (CI style)
-uv run python -m powerpetdoor.simulator --script full_test_suite --exit-after-script
+# Run a simulator script headless (CI style; exit code reflects pass/fail)
+uv run python -m powerpetdoor.simulator --script full_test_suite --oneshot
 ```
 
 ## Version Matrix Maintenance (MANDATORY)
 
 **When committing code, ensure all Python version references are current.**
-Check https://www.python.org/downloads/ — support all active (non-EOL)
-CPython versions.
+The project supports a declared matrix of CPython versions (currently
+**3.11–3.14**). All version references below must match that matrix exactly.
 
 ### Files that must stay in sync
 
 | File | What to update |
 |------|---------------|
-| `.github/workflows/ci.yml` | `REFERENCE_PYTHON` env var and `matrix.python-version` arrays |
+| `.github/workflows/test.yml` | `REFERENCE_PYTHON` env var and `matrix.python-version` arrays |
+| `.github/workflows/release.yml` | `matrix.python-version` array and the publish job's Python pin |
 | `pyproject.toml` | `requires-python`, `Programming Language :: Python :: 3.x` classifiers |
 | `pyproject.toml` | `target-version` (ruff), `python_version` (mypy) — oldest supported Python |
 
 ### Rules
 
-1. **Remove EOL versions** promptly — don't test against unsupported runtimes
-2. **Add new stable versions** when they reach their first stable release
-3. **Minimum Python version** settings track the oldest still-supported version
+1. **Remove versions the project drops** promptly (typically at EOL) — don't
+   test against runtimes outside the declared matrix
+2. **Add new stable versions** to the matrix promptly when they reach their
+   first stable release
+3. **Minimum Python version** settings track the oldest version in the
+   declared matrix
 4. **`REFERENCE_PYTHON`** is the latest stable Python; it controls which matrix
    entry uploads coverage data and which version runs single-version jobs (lint,
    coverage-report)
