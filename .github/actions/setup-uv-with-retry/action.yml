@@ -1,0 +1,45 @@
+# SOURCE OF TRUTH: ostinato/.github/actions/setup-uv-with-retry/
+# Plugin repos receive synced copies via ostinato/scripts/sync-plugin-actions.sh.
+# DO NOT EDIT synced copies; edit this file and run the sync script.
+name: 'Setup uv (with retry)'
+description: >
+  Wraps astral-sh/setup-uv@v7 with up to 3 attempts to ride out the
+  act-runner action-cache race that happens when many matrix jobs read
+  /data/act-cache/<sha> concurrently.
+
+inputs:
+  python-version:
+    required: true
+    description: Python version for uv to install
+
+runs:
+  using: composite
+  steps:
+    - id: try1
+      continue-on-error: true
+      uses: astral-sh/setup-uv@v7
+      with:
+        python-version: ${{ inputs.python-version }}
+        enable-cache: true
+
+    - if: steps.try1.outcome == 'failure'
+      shell: bash
+      run: sleep 10
+
+    - if: steps.try1.outcome == 'failure'
+      id: try2
+      continue-on-error: true
+      uses: astral-sh/setup-uv@v7
+      with:
+        python-version: ${{ inputs.python-version }}
+        enable-cache: true
+
+    - if: steps.try1.outcome == 'failure' && steps.try2.outcome == 'failure'
+      shell: bash
+      run: sleep 30
+
+    - if: steps.try1.outcome == 'failure' && steps.try2.outcome == 'failure'
+      uses: astral-sh/setup-uv@v7
+      with:
+        python-version: ${{ inputs.python-version }}
+        enable-cache: true

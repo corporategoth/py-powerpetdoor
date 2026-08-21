@@ -2,6 +2,7 @@
 
 [![Buy Me Coffee][buymecoffee]][donation]
 
+[![Tests][tests-shield]][tests]
 [![Github Release][releases-shield]][releases]
 [![Github Activity][commits-shield]][commits]
 [![License][license-shield]][license]
@@ -183,6 +184,8 @@ MIT License - see LICENSE file for details.
 [commits]: https://github.com/corporategoth/py-powerpetdoor/commits/main
 [license]: https://github.com/corporategoth/py-powerpetdoor/blob/main/LICENSE
 [license-shield]: https://img.shields.io/github/license/corporategoth/py-powerpetdoor.svg?style=for-the-badge
+[tests-shield]: https://img.shields.io/github/actions/workflow/status/corporategoth/py-powerpetdoor/test.yml?branch=main&label=tests&style=for-the-badge
+[tests]: https://github.com/corporategoth/py-powerpetdoor/actions/workflows/test.yml
 [releases-shield]: https://img.shields.io/github/release/corporategoth/py-powerpetdoor.svg?style=for-the-badge
 [releases]: https://github.com/corporategoth/py-powerpetdoor/releases
 [pypi-shield]: https://img.shields.io/pypi/v/pypowerpetdoor.svg?style=for-the-badge

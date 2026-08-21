@@ -41,8 +41,14 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-xdist>=3.0.0",
+    "pytest-cov>=5.0.0",
+    "hypothesis>=6.100.0",
     "pyyaml>=6.0",
     "prompt_toolkit>=3.0.0",
+    # Static analysis
+    "mypy>=1.13.0",
+    "ruff>=0.8.0",
+    "types-PyYAML>=6.0",
 ]
 
 [project.urls]
@@ -64,3 +70,66 @@ where = ["src"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-n auto"
+
+[tool.coverage.run]
+source = ["src/powerpetdoor"]
+branch = true
+parallel = true
+omit = [
+    "*/__init__.py",
+    "*/__main__.py",
+]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = false
+precision = 2
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "@overload",
+    "\\.\\.\\.",
+]
+
+[tool.coverage.paths]
+source = [
+    "src/powerpetdoor",
+    "*/src/powerpetdoor",
+]
+
+[tool.coverage.html]
+directory = "coverage_html"
+title = "pypowerpetdoor Coverage Report"
+show_contexts = true
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
+[tool.coverage.json]
+output = "coverage.json"
+pretty_print = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = [
+    # Line too long - protocol constants and messages read better unwrapped
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test files use long literal protocol payloads and mock class names
+"tests/**/*.py" = ["E501", "N806"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

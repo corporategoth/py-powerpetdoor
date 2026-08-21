@@ -1,0 +1,187 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+# Only one run per ref at a time. The CI host is a single shared act_runner,
+# so two concurrent runs of this workflow compete for host-level resources
+# (the action cache, etc.). Cancelling the older in-progress run when a new
+# commit arrives avoids those collisions and saves runner capacity.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+# Reference version used for linting and single-version jobs.
+# Update REFERENCE_PYTHON when a new Python version becomes the latest stable release.
+env:
+  REFERENCE_PYTHON: "3.14"
+
+jobs:
+  # Pre-warm the act_runner action cache sequentially to prevent race conditions.
+  # Without this, parallel matrix jobs all try to git-clone/pull the same action
+  # into the shared /data/act-cache/ directory simultaneously, corrupting checkouts.
+  cache-actions:
+    name: Cache Actions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-uv-with-retry
+        with:
+          python-version: ${{ env.REFERENCE_PYTHON }}
+
+  lint:
+    name: Lint
+    needs: [cache-actions]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-uv-with-retry
+        with:
+          python-version: ${{ env.REFERENCE_PYTHON }}
+      - name: Create virtual environment
+        run: uv venv && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+      - name: Install linting tools
+        run: uv pip install 'ruff==0.14.13' mypy types-PyYAML
+      - name: Check linting
+        run: ruff check src tests
+      - name: Check formatting
+        run: ruff format --check src tests
+      - name: Check types
+        run: mypy src
+
+  # Unit tests run the FULL Python matrix and every matrix entry uploads its
+  # coverage data. Version-specific code paths (sys.version_info branches,
+  # stdlib behavior differences) are only exercised on some interpreters, so
+  # coverage is combined across ALL supported versions before the 100% gate.
+  unit-tests:
+    name: Unit Tests (py${{ matrix.python-version }})
+    needs: [cache-actions]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-uv-with-retry
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Create virtual environment
+        run: uv venv && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+      - name: Install dependencies
+        run: uv pip install -e ".[dev]"
+      - name: Run unit tests
+        run: pytest --ignore=tests/fuzz --tb=line -q --cov --cov-report=xml --cov-fail-under=0
+        env:
+          COVERAGE_FILE: .coverage.py${{ matrix.python-version }}
+      - name: Upload coverage data
+        if: ${{ always() }}
+        uses: christopherhx/gitea-upload-artifact@v4
+        with:
+          name: coverage-py${{ matrix.python-version }}
+          path: |
+            .coverage.py${{ matrix.python-version }}
+            coverage.xml
+
+  fuzz-tests:
+    name: Fuzz Tests
+    needs: [cache-actions]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-uv-with-retry
+        with:
+          python-version: ${{ env.REFERENCE_PYTHON }}
+      - name: Create virtual environment
+        run: uv venv && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+      - name: Install dependencies
+        run: uv pip install -e ".[dev]"
+      - name: Run fuzz tests
+        run: pytest tests/fuzz -v --hypothesis-seed=0
+
+  coverage-report:
+    name: Coverage Report
+    runs-on: ubuntu-latest
+    needs: [unit-tests]
+    if: ${{ always() }}
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-uv-with-retry
+        with:
+          python-version: ${{ env.REFERENCE_PYTHON }}
+      - name: Create virtual environment
+        run: uv venv && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+      - name: Install dependencies
+        run: uv pip install -e ".[dev]"
+      - name: Download py3.11 coverage
+        uses: christopherhx/gitea-download-artifact@v4
+        with:
+          name: coverage-py3.11
+          path: coverage-data/py3.11
+        continue-on-error: true
+      - name: Download py3.12 coverage
+        uses: christopherhx/gitea-download-artifact@v4
+        with:
+          name: coverage-py3.12
+          path: coverage-data/py3.12
+        continue-on-error: true
+      - name: Download py3.13 coverage
+        uses: christopherhx/gitea-download-artifact@v4
+        with:
+          name: coverage-py3.13
+          path: coverage-data/py3.13
+        continue-on-error: true
+      - name: Download py3.14 coverage
+        uses: christopherhx/gitea-download-artifact@v4
+        with:
+          name: coverage-py3.14
+          path: coverage-data/py3.14
+        continue-on-error: true
+      - name: Combine Python coverage
+        run: |
+          cp coverage-data/py3.11/.coverage.py3.11 . 2>/dev/null || true
+          cp coverage-data/py3.12/.coverage.py3.12 . 2>/dev/null || true
+          cp coverage-data/py3.13/.coverage.py3.13 . 2>/dev/null || true
+          cp coverage-data/py3.14/.coverage.py3.14 . 2>/dev/null || true
+          coverage combine
+          coverage xml
+          coverage html
+          coverage json
+          coverage report --show-missing --fail-under=0
+      - name: Generate gaps report
+        run: python scripts/generate_gaps_report.py
+      - name: Commit updated TESTING_GAPS.md
+        if: github.event_name == 'push'
+        run: |
+          git config user.name "CI Bot"
+          git config user.email "ci@neuromancy.net"
+          git add tests/TESTING_GAPS.md
+          if ! git diff --cached --quiet; then
+            git commit -m "[skip ci] Update TESTING_GAPS.md from coverage report"
+            git push
+          fi
+        continue-on-error: true
+      - name: Upload coverage to Codecov
+        if: ${{ env.CODECOV_TOKEN != '' }}
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ env.CODECOV_TOKEN }}
+          files: coverage.xml
+          flags: python
+          fail_ci_if_error: false
+      - name: Upload coverage report
+        uses: christopherhx/gitea-upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage_html/
+            coverage.json
+          if-no-files-found: ignore
+      - name: Check coverage threshold
+        run: coverage report > /dev/null
