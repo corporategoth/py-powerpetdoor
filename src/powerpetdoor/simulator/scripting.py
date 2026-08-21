@@ -45,7 +45,6 @@ Available actions:
 
 import asyncio
 import logging
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -77,10 +76,25 @@ class ScriptError(Exception):
     pass
 
 
-class AssertionFailed(ScriptError):
+class ScriptAssertionError(ScriptError):
     """Assertion in script failed."""
 
     pass
+
+
+#: Backwards-compatible alias for :class:`ScriptAssertionError`.
+AssertionFailed = ScriptAssertionError
+
+#: wait_for conditions that map directly to door-status values. These are
+#: awaited via the simulator's deterministic wait_for_status hook instead of
+#: polling.
+_STATUS_WAIT_CONDITIONS: dict[str, tuple[str, ...]] = {
+    "door_closed": (DOOR_STATE_CLOSED,),
+    "door_open": (DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP),
+    "door_rising": (DOOR_STATE_RISING,),
+    "door_holding": (DOOR_STATE_HOLDING,),
+    "door_keepup": (DOOR_STATE_KEEPUP,),
+}
 
 
 @dataclass
@@ -209,6 +223,7 @@ class ScriptRunner:
         self.simulator = simulator
         self.running = False
         self._stop_requested = False
+        self._stop_event = asyncio.Event()
 
     async def run(self, script: Script, verbose: bool = True) -> bool:
         """Execute a script.
@@ -217,6 +232,7 @@ class ScriptRunner:
         """
         self.running = True
         self._stop_requested = False
+        self._stop_event.clear()
 
         if verbose:
             logger.info(f"Running script: {script.name}")
@@ -238,7 +254,7 @@ class ScriptRunner:
                 logger.info(f"Script '{script.name}' completed successfully")
             return True
 
-        except AssertionFailed as e:
+        except ScriptAssertionError as e:
             logger.error(f"Assertion failed at step {step.line_number}: {e}")
             return False
         except ScriptError as e:
@@ -253,6 +269,7 @@ class ScriptRunner:
     def stop(self):
         """Request the script to stop."""
         self._stop_requested = True
+        self._stop_event.set()
 
     async def _execute_step(self, step: ScriptStep):
         """Execute a single script step."""
@@ -274,8 +291,8 @@ class ScriptRunner:
                 self.simulator.activate_sensor("inside", 0)
 
         elif action == "pet_off":
-            # Clear inside sensor
-            state.inside_sensor_active = False
+            # Clear inside sensor (via the simulator so the engine is woken)
+            self.simulator.set_pet_in_doorway(False)
 
         elif action == "inside":
             # Activate inside sensor with optional duration
@@ -352,19 +369,55 @@ class ScriptRunner:
             raise ScriptError(f"Unknown action: {action}")
 
     async def _wait_for_condition(self, condition: str, timeout: float):
-        """Wait for a condition to become true."""
-        state = self.simulator.state
-        start = time.time()
+        """Wait for a condition to become true.
 
-        while time.time() - start < timeout:
+        Door-status conditions use the simulator's deterministic
+        ``wait_for_status`` hook; other conditions fall back to a
+        deadline-bounded poll. A concurrent :meth:`stop` interrupts the
+        wait immediately.
+        """
+        if self._stop_requested:
+            raise ScriptError("Script stopped while waiting")
+        # Validates the condition name up front (raises on unknown)
+        if self._check_condition(condition):
+            return
+
+        statuses = _STATUS_WAIT_CONDITIONS.get(condition.lower().replace("-", "_"))
+        if statuses is not None:
+            await self._wait_for_status(condition, statuses, timeout)
+            return
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
             if self._stop_requested:
                 raise ScriptError("Script stopped while waiting")
-
             if self._check_condition(condition):
                 return
+            await asyncio.sleep(0.05)
 
-            await asyncio.sleep(0.1)
+        raise ScriptError(f"Timeout waiting for condition: {condition}")
 
+    async def _wait_for_status(
+        self, condition: str, statuses: tuple[str, ...], timeout: float
+    ) -> None:
+        """Await a door-status transition (or stop request) with a timeout."""
+        waiter = asyncio.ensure_future(self.simulator.wait_for_status(statuses))
+        stopper = asyncio.ensure_future(self._stop_event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {waiter, stopper}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            for task in (waiter, stopper):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(waiter, stopper, return_exceptions=True)
+
+        if stopper in done:
+            raise ScriptError("Script stopped while waiting")
+        if waiter in done and not waiter.cancelled() and waiter.exception() is None:
+            return
         raise ScriptError(f"Timeout waiting for condition: {condition}")
 
     def _check_condition(self, condition: str) -> bool:
@@ -502,7 +555,7 @@ class ScriptRunner:
         actual_normalized = actual.upper() if condition == "door_status" else actual.lower()
 
         if actual_normalized != expected_normalized:
-            raise AssertionFailed(f"{condition}: expected '{expected}', got '{actual}'")
+            raise ScriptAssertionError(f"{condition}: expected '{expected}', got '{actual}'")
 
 
 # Directory containing built-in script files
@@ -569,23 +622,19 @@ def script_completer(prefix: str = "") -> list[tuple[str, str]]:
             # User typed a directory path ending with /
             search_dir = prefix_path
             dir_prefix = prefix  # e.g., "./" or "src/"
-            name_prefix = ""
         elif "/" in prefix or "\\" in prefix:
             # User is typing a path like "./scripts/bas" or "./da"
             search_dir = prefix_path.parent
             # Get the directory prefix as a string (preserves "./")
             last_sep = max(prefix.rfind("/"), prefix.rfind("\\"))
             dir_prefix = prefix[: last_sep + 1]  # e.g., "./" from "./da"
-            name_prefix = prefix[last_sep + 1 :]  # e.g., "da" from "./da"
         else:
             # Just a name prefix like "bas"
             search_dir = None
             dir_prefix = ""
-            name_prefix = prefix
     else:
         search_dir = None
         dir_prefix = ""
-        name_prefix = ""
 
     # If searching in a specific directory, list files there
     if search_dir is not None:

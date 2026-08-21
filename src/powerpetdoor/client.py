@@ -8,15 +8,15 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
+import inspect
 import json
 import logging
-import queue
+import random
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
-
-import async_timeout
 
 from .const import (
     CMD_CHECK_RESET_REASON,
@@ -122,6 +122,11 @@ _LOGGER = logging.getLogger(__name__)
 #: Maximum retry attempts before dropping a message
 MAX_FAILED_MSG = 2
 MAX_FAILED_PINGS = 3
+
+#: Cap on the exponential reconnect backoff delay, in seconds (L1)
+MAX_RECONNECT_DELAY = 300.0
+#: Maximum fraction of the backoff delay added as random jitter (L1)
+RECONNECT_JITTER = 0.25
 
 
 class CommandError(Exception):
@@ -242,13 +247,23 @@ class PowerPetDoorClient:
     including connection management, message queuing with priorities,
     keepalive/ping-pong, and callback-based event notification.
 
+    Thread safety: all methods except ``stop()`` and
+    ``run_coroutine_threadsafe()`` must be called from the event loop
+    thread. To drive the client from another thread, wrap calls in a
+    coroutine and submit it with ``run_coroutine_threadsafe()``.
+
     Args:
         host: IP address or hostname of the Power Pet Door
         port: TCP port number (typically 3000)
         keepalive: Seconds between keepalive pings (0 to disable)
         timeout: Seconds to wait for responses
-        reconnect: Seconds to wait before reconnecting after disconnect
-        loop: Optional asyncio event loop (creates one if not provided)
+        reconnect: Base seconds to wait before reconnecting after a
+            disconnect; consecutive failures back off exponentially with
+            jitter, capped at MAX_RECONNECT_DELAY
+        loop: Optional asyncio event loop. If not provided, the client
+            latches onto the running loop at connect()/start() time; the
+            blocking start() path creates a private loop only when no
+            loop is running.
 
     Example:
         client = PowerPetDoorClient("192.168.1.100", 3000, 30.0, 10.0, 5.0)
@@ -267,10 +282,13 @@ class PowerPetDoorClient:
 
         self._shutdown = False
         self._ownLoop = False
-        self._eventLoop = None
+        self._eventLoop: asyncio.AbstractEventLoop | None = None
         self._transport = None
         self._keepalive = None
         self._check_receipt = None
+        self._reconnect_task: asyncio.Task | None = None
+        self._reconnect_attempts = 0
+        self._was_connected = False
         self._last_ping = None
         self._last_command = None
         self._can_dequeue = False
@@ -278,18 +296,18 @@ class PowerPetDoorClient:
         self._last_ping_time = 0.0
         self._failed_msg = 0
         self._failed_pings = 0
+        self._inflight_msg_id: int | None = None
         self._buffer = ""
-        self._outstanding = {}
-        self._queue = queue.PriorityQueue()
+        self._outstanding: dict[int, asyncio.Future] = {}
+        # Plain heapq: the client is loop-thread-only (see class docstring),
+        # so a lock-based queue.PriorityQueue would only imply a thread
+        # safety the rest of the class does not provide (L20).
+        self._queue: list[PrioritizedMessage] = []
         self._msg_sequence = 0  # Counter for FIFO ordering within same priority
 
-        if loop:
+        if loop is not None:
             _LOGGER.info("Latching onto an existing event loop.")
-            self._ownLoop = False
             self._eventLoop = loop
-        else:
-            self._ownLoop = True
-            self._eventLoop = asyncio.new_event_loop()
 
         self.msgId = 1
         self.replyMsgId = None
@@ -305,14 +323,14 @@ class PowerPetDoorClient:
             FIELD_CMD_LOCKOUT: {},
             FIELD_AUTORETRACT: {},
         }
-        self.notifications_listeners: dict[str, dict[str, Callable[[bool], None]]] = {
+        self.notifications_listeners: dict[str, dict[str, Callable[[str, bool | None], None]]] = {
             FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: {},
             FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: {},
             FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: {},
             FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: {},
             FIELD_LOW_BATTERY_NOTIFICATIONS: {},
         }
-        self.stats_listeners: dict[str, dict[str, Callable[[int], None]]] = {
+        self.stats_listeners: dict[str, dict[str, Callable[[str, int], None]]] = {
             FIELD_TOTAL_OPEN_CYCLES: {},
             FIELD_TOTAL_AUTO_RETRACTS: {},
         }
@@ -335,11 +353,23 @@ class PowerPetDoorClient:
         self.on_disconnect: dict[str, Callable[[], Awaitable[None]]] = {}
         self.on_ping: dict[str, Callable[[int], None]] = {}
 
-    # Theses functions wrap asyncio but ensure the loop is correct!
+    def _get_loop(self) -> asyncio.AbstractEventLoop:
+        """Resolve the event loop, latching onto the running loop if needed.
+
+        Raises:
+            RuntimeError: If no loop was configured and none is running.
+        """
+        if self._eventLoop is None:
+            self._eventLoop = asyncio.get_running_loop()
+        return self._eventLoop
+
+    # These functions wrap asyncio but ensure the loop is correct!
     def ensure_future(self, *args: Any, **kwargs: Any):
-        return asyncio.ensure_future(*args, loop=self._eventLoop, **kwargs)
+        return asyncio.ensure_future(*args, loop=self._get_loop(), **kwargs)
 
     def run_coroutine_threadsafe(self, *args: Any, **kwargs: Any):
+        if self._eventLoop is None:
+            raise RuntimeError("run_coroutine_threadsafe() requires the client to be started first")
         return asyncio.run_coroutine_threadsafe(*args, loop=self._eventLoop, **kwargs)
 
     def add_handlers(
@@ -365,10 +395,14 @@ class PowerPetDoorClient:
             self.on_ping[name] = on_ping
 
     def del_handlers(self, name: str) -> None:
-        """Remove connection lifecycle callbacks by name."""
-        del self.on_connect[name]
-        del self.on_disconnect[name]
-        del self.on_ping[name]
+        """Remove connection lifecycle callbacks by name.
+
+        Safe for names that were never registered, or only partially
+        registered - it does not raise KeyError (M6).
+        """
+        self.on_connect.pop(name, None)
+        self.on_disconnect.pop(name, None)
+        self.on_ping.pop(name, None)
 
     def add_listener(
         self,
@@ -376,8 +410,8 @@ class PowerPetDoorClient:
         door_status_update: Callable[[str], None] | None = None,
         settings_update: Callable[[dict], None] | None = None,
         sensor_update: dict[str, Callable[[str, bool | None], None]] | None = None,
-        notifications_update: dict[str, Callable[[bool], None]] | None = None,
-        stats_update: dict[str, Callable[[int], None]] | None = None,
+        notifications_update: dict[str, Callable[[str, bool | None], None]] | None = None,
+        stats_update: dict[str, Callable[[str, int], None]] | None = None,
         hw_info_update: Callable[[dict], None] | None = None,
         battery_update: Callable[[dict], None] | None = None,
         timezone_update: Callable[[str], None] | None = None,
@@ -400,8 +434,10 @@ class PowerPetDoorClient:
             sensor_update: Dict mapping sensor field (or "*" for all) to a
                 callback invoked as ``callback(field, value)`` where value
                 is the coerced boolean (or None if unrecognized)
-            notifications_update: Dict mapping notification field to callback
-            stats_update: Dict mapping stats field to callback
+            notifications_update: Dict mapping notification field (or "*")
+                to a callback invoked as ``callback(field, value)``
+            stats_update: Dict mapping stats field (or "*") to a callback
+                invoked as ``callback(field, value)``
             hw_info_update: Called with hardware info dict
             battery_update: Called with battery status dict
             timezone_update: Called with timezone string
@@ -655,7 +691,7 @@ class PowerPetDoorClient:
         for field_name in notification_fields:
             if self.notifications_listeners[field_name] and field_name in notifications:
                 val = make_bool(notifications[field_name])
-                self._notify_listeners(self.notifications_listeners[field_name], val)
+                self._notify_listeners(self.notifications_listeners[field_name], field_name, val)
         self._resolve_future(future, notifications)
 
     @ResponseHandlerRegistry.handler(CMD_GET_DOOR_OPEN_STATS)
@@ -663,11 +699,15 @@ class PowerPetDoorClient:
         """Handle door open stats response."""
         if self.stats_listeners[FIELD_TOTAL_OPEN_CYCLES] and FIELD_TOTAL_OPEN_CYCLES in msg:
             self._notify_listeners(
-                self.stats_listeners[FIELD_TOTAL_OPEN_CYCLES], msg[FIELD_TOTAL_OPEN_CYCLES]
+                self.stats_listeners[FIELD_TOTAL_OPEN_CYCLES],
+                FIELD_TOTAL_OPEN_CYCLES,
+                msg[FIELD_TOTAL_OPEN_CYCLES],
             )
         if self.stats_listeners[FIELD_TOTAL_AUTO_RETRACTS] and FIELD_TOTAL_AUTO_RETRACTS in msg:
             self._notify_listeners(
-                self.stats_listeners[FIELD_TOTAL_AUTO_RETRACTS], msg[FIELD_TOTAL_AUTO_RETRACTS]
+                self.stats_listeners[FIELD_TOTAL_AUTO_RETRACTS],
+                FIELD_TOTAL_AUTO_RETRACTS,
+                msg[FIELD_TOTAL_AUTO_RETRACTS],
             )
         self._resolve_future(
             future,
@@ -808,11 +848,17 @@ class PowerPetDoorClient:
 
     @ResponseHandlerRegistry.handler(CMD_DELETE_SCHEDULE)
     def _handle_delete_schedule(self, msg: dict, future) -> None:
-        """Handle delete schedule response."""
-        if FIELD_INDEX in msg:
-            index = msg[FIELD_INDEX]
+        """Handle delete schedule response.
+
+        Firmware that echoes the deleted index triggers the
+        schedule_delete listeners; either way a successful envelope
+        acknowledges the deletion, so the future resolves (with the index,
+        or None when it was not echoed) rather than timing out (D3).
+        """
+        index = msg.get(FIELD_INDEX)
+        if index is not None:
             self._notify_listeners(self.schedule_delete_listeners, index)
-            self._resolve_future(future, index)
+        self._resolve_future(future, index)
 
     @ResponseHandlerRegistry.handler(CMD_GET_SCHEDULE, CMD_SET_SCHEDULE)
     def _handle_schedule(self, msg: dict, future) -> None:
@@ -895,13 +941,34 @@ class PowerPetDoorClient:
                 return True
         return False
 
+    def _dispatch_handler(self, name: str, callback: Callable) -> None:
+        """Invoke a lifecycle handler, supporting sync and async callables.
+
+        Exceptions from the handler are logged, never propagated (D3).
+        """
+        try:
+            result = callback()
+        except Exception:
+            _LOGGER.exception("Connection handler %r raised", name)
+            return
+        if inspect.isawaitable(result):
+            self.ensure_future(result)
+
     def start(self) -> None:
         """Start the client and initiate connection.
 
-        If an event loop was not provided in the constructor,
-        this will block until stop() is called.
+        If no event loop was provided in the constructor and none is
+        running, a private loop is created and this call blocks until
+        stop() is called.
         """
         self._shutdown = False
+        if self._eventLoop is None:
+            try:
+                self._eventLoop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._ownLoop = True
+                self._eventLoop = asyncio.new_event_loop()
+
         self.ensure_future(self.connect())
 
         if self._ownLoop:
@@ -911,64 +978,139 @@ class PowerPetDoorClient:
             _LOGGER.info("Connection shut down.")
 
     def stop(self) -> None:
-        """Stop the client and close connection."""
+        """Stop the client and close the connection (thread-safe).
+
+        Marshals the shutdown onto the event loop, so it may be called
+        from any thread; also stops a private loop created by start().
+        From the loop thread, shutdown() may be used directly instead.
+        """
         self._shutdown = True
 
         _LOGGER.info("Shutting down Power Pet Door client connection...")
+        if self._eventLoop is None:
+            return
         self._eventLoop.call_soon_threadsafe(self.disconnect)
         if self._ownLoop:
             self._eventLoop.call_soon_threadsafe(self._eventLoop.stop)
 
+    def shutdown(self) -> None:
+        """Shut down the client: stop reconnecting and close the connection.
+
+        Idempotent, and safe to call before connect(). After shutdown()
+        the client stays down - connect() becomes a no-op - until
+        reset_shutdown() (or start()) is called. Must be called from the
+        event loop thread; use stop() from other threads.
+        """
+        self._shutdown = True
+        self.disconnect()
+
+    def reset_shutdown(self) -> None:
+        """Re-enable the client after shutdown()/stop() so it may connect again."""
+        self._shutdown = False
+
     async def connect(self) -> None:
-        """Establish connection to the device."""
+        """Establish connection to the device.
+
+        On failure (unreachable/refused/timeout) the error is logged and a
+        reconnect attempt is scheduled with backoff; this method only
+        raises asyncio.CancelledError. No-op after shutdown()/stop().
+        """
+        if self._shutdown:
+            _LOGGER.debug("Ignoring connect() while shut down")
+            return
+        loop = self._get_loop()
         _LOGGER.info(
-            str.format(
-                "Started to connect to Power Pet Door... at {0}:{1}", self.cfg_host, self.cfg_port
-            )
+            "Started to connect to Power Pet Door... at %s:%s", self.cfg_host, self.cfg_port
         )
         try:
-            async with async_timeout.timeout(self.cfg_timeout):
-                coro = self._eventLoop.create_connection(lambda: self, self.cfg_host, self.cfg_port)
-                await coro
-        except:
+            async with asyncio.timeout(self.cfg_timeout):
+                await loop.create_connection(lambda: self, self.cfg_host, self.cfg_port)
+        except (OSError, TimeoutError) as err:
+            _LOGGER.error(
+                "Unable to connect to Power Pet Door at %s:%s: %s",
+                self.cfg_host,
+                self.cfg_port,
+                err,
+            )
             self.handle_connect_failure()
 
     def connection_made(self, transport) -> None:
         """asyncio callback for a successful connection."""
         _LOGGER.info("Connection Successful!")
         self._transport = transport
-        self._can_dequeue = True
+        self._was_connected = True
+        self._reconnect_attempts = 0
 
         if self.cfg_keepalive:
             self._keepalive = self.ensure_future(self.keepalive())
 
+        # Flush anything that was enqueued while disconnected (L3),
+        # otherwise open the dequeue gate for the next enqueue.
+        if self._queue:
+            self._can_dequeue = False
+            self.ensure_future(self.dequeue_data())
+        else:
+            self._can_dequeue = True
+
         # Caller code
-        for callback in self.on_connect.values():
-            self.ensure_future(callback())
+        for name, callback in list(self.on_connect.items()):
+            self._dispatch_handler(name, callback)
 
     def connection_lost(self, exc) -> None:
         """asyncio callback for connection lost."""
         self.disconnect()
         if not self._shutdown:
             _LOGGER.error("The server closed the connection. Reconnecting...")
-            self.ensure_future(self.reconnect(self.cfg_reconnect))
+            self._schedule_reconnect()
+
+    def _next_reconnect_delay(self) -> float:
+        """Compute the next reconnect delay (L1).
+
+        Exponential backoff starting at cfg_reconnect, doubling per
+        consecutive failed attempt up to MAX_RECONNECT_DELAY, plus up to
+        RECONNECT_JITTER fractional random jitter so multiple clients do
+        not retry in lockstep against the single-connection device.
+        """
+        delay = min(
+            self.cfg_reconnect * (2 ** min(self._reconnect_attempts, 16)), MAX_RECONNECT_DELAY
+        )
+        self._reconnect_attempts += 1
+        return delay + random.uniform(0, delay * RECONNECT_JITTER)
+
+    def _schedule_reconnect(self) -> None:
+        """Schedule a tracked reconnect attempt (cancelled by disconnect/stop)."""
+        self._reconnect_task = self.ensure_future(self.reconnect(self._next_reconnect_delay()))
 
     async def reconnect(self, delay) -> None:
-        """Reconnect after a delay."""
+        """Reconnect after a delay, unless the client has been shut down."""
         await asyncio.sleep(delay)
+        if self._shutdown:
+            return
         await self.connect()
 
     def disconnect(self) -> None:
-        """Close connection and cleanup."""
-        _LOGGER.debug("Closing connection with server...")
+        """Close connection and cleanup.
+
+        Safe to call at any time - including before connect() and multiple
+        times. Pending reconnect attempts are cancelled, outstanding
+        notify futures are failed with ConnectionError (never cancelled,
+        so callers can distinguish disconnection from task cancellation),
+        and on_disconnect handlers fire only if a connection actually
+        existed (L2).
+        """
+        was_connected = self._was_connected
+        self._was_connected = False
+        if was_connected:
+            _LOGGER.debug("Closing connection with server...")
         self._can_dequeue = False
         self._last_ping = None
         self._last_command = None
         self._last_send = 0
         self._failed_msg = 0
         self._failed_pings = 0
+        self._inflight_msg_id = None
         self._buffer = ""
-        self._queue = queue.PriorityQueue()
+        self._queue.clear()
         self._msg_sequence = 0  # Reset sequence counter
 
         if self._keepalive:
@@ -977,24 +1119,37 @@ class PowerPetDoorClient:
         if self._check_receipt:
             self._check_receipt.cancel()
             self._check_receipt = None
+        if self._reconnect_task is not None:
+            task = self._reconnect_task
+            self._reconnect_task = None
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if task is not current:
+                task.cancel()
         if self._transport:
             self._transport.close()
             self._transport = None
 
-        for future in self._outstanding.values():
-            future.cancel("Connection Terminated")
-        self._outstanding = {}
+        for future in list(self._outstanding.values()):
+            if not future.done():
+                future.set_exception(
+                    ConnectionError("Connection closed before a response was received")
+                )
+        self._outstanding.clear()
 
         # Caller code
-        for callback in self.on_disconnect.values():
-            self.ensure_future(callback())
+        if was_connected:
+            for name, callback in list(self.on_disconnect.items()):
+                self._dispatch_handler(name, callback)
 
     def handle_connect_failure(self) -> None:
         """Handler for if we fail to connect to the power pet door."""
         if not self._shutdown:
             _LOGGER.error("Unable to connect to power pet door. Reconnecting...")
             self.disconnect()
-            self.ensure_future(self.reconnect(self.cfg_reconnect))
+            self._schedule_reconnect()
 
     async def keepalive(self) -> None:
         _keepalive = self._keepalive
@@ -1004,10 +1159,12 @@ class PowerPetDoorClient:
                 self._failed_pings += 1
                 if self._failed_pings < MAX_FAILED_PINGS:
                     _LOGGER.warning(
-                        f"Last PING not responded to {self._failed_pings} of {MAX_FAILED_PINGS}..."
+                        "Last PING not responded to %d of %d...",
+                        self._failed_pings,
+                        MAX_FAILED_PINGS,
                     )
                 else:
-                    _LOGGER.error(f"Last PING not responded to {self._failed_pings} times.")
+                    _LOGGER.error("Last PING not responded to %d times.", self._failed_pings)
                     self.disconnect()
                     return
 
@@ -1018,6 +1175,15 @@ class PowerPetDoorClient:
             self._last_ping_time = time.monotonic()
             self.send_message(PING, self._last_ping)
 
+    def _fail_inflight_future(self, exc: Exception) -> None:
+        """Fail the future paired with the in-flight message, if any (H4)."""
+        if self._inflight_msg_id is None:
+            return
+        future = self._outstanding.get(self._inflight_msg_id)
+        self._inflight_msg_id = None
+        if future is not None and not future.done():
+            future.set_exception(exc)
+
     async def check_receipt(self, rawdata) -> None:
         _check_receipt = self._check_receipt
         await asyncio.sleep(self.cfg_timeout)
@@ -1025,13 +1191,25 @@ class PowerPetDoorClient:
             self._failed_msg += 1
             if self._failed_msg < MAX_FAILED_MSG:
                 _LOGGER.warning(
-                    f"Did not receive a response to a {self._last_command} message in more than {self.cfg_timeout} seconds, retrying."
+                    "Did not receive a response to a %s message in more than %s seconds, retrying.",
+                    self._last_command,
+                    self.cfg_timeout,
                 )
             else:
                 _LOGGER.error(
-                    f"Did not receive a response to a {self._last_command} message in more than {self.cfg_timeout} seconds {self._failed_msg} times, dropped."
+                    "Did not receive a response to a %s message in more than %s seconds %s times, dropped.",
+                    self._last_command,
+                    self.cfg_timeout,
+                    self._failed_msg,
                 )
                 self._failed_msg = 0
+                # Fail fast: the documented `await future` pattern must not
+                # hang forever on a dropped message (H4).
+                self._fail_inflight_future(
+                    TimeoutError(
+                        f"No response to {self._last_command} after {MAX_FAILED_MSG} attempts"
+                    )
+                )
         else:
             self._failed_msg = 0
 
@@ -1044,11 +1222,12 @@ class PowerPetDoorClient:
     def enqueue_data(self, data, priority: int = PRIORITY_LOW) -> None:
         """Enqueue a message with the given priority.
 
-        Lower priority values are processed first.
+        Lower priority values are processed first. Must be called from
+        the event loop thread (see class docstring).
         """
         msg = PrioritizedMessage(priority=priority, sequence=self._msg_sequence, data=data)
         self._msg_sequence += 1
-        self._queue.put(msg)
+        heapq.heappush(self._queue, msg)
         if self._transport and self._can_dequeue:
             self._can_dequeue = False
             self.ensure_future(self.dequeue_data())
@@ -1065,8 +1244,14 @@ class PowerPetDoorClient:
             diff = time.monotonic() - self._last_send
             if diff < MINIMUM_TIME_BETWEEN_MSGS:
                 await asyncio.sleep(MINIMUM_TIME_BETWEEN_MSGS - diff)
+            # Re-check after the sleep: disconnect() may have run in the
+            # meantime and cleared the transport (M7).
+            transport = self._transport
+            if transport is None or transport.is_closing():
+                _LOGGER.warning("Connection closed while waiting to send; dropping message")
+                return
             _LOGGER.debug("TX > %s", rawdata)
-            self._transport.write(rawdata)
+            transport.write(rawdata)
             self._last_send = time.monotonic()
 
             if self.cfg_keepalive:
@@ -1077,11 +1262,12 @@ class PowerPetDoorClient:
             else:
                 await self.dequeue_data()
 
-        except RuntimeError as err:
+        except (RuntimeError, OSError) as err:
             _LOGGER.error("Failed to write to the stream. (%s)", err)
             self.disconnect()
 
     async def dequeue_data(self) -> None:
+        """Send the next queued message, if the connection is idle."""
         if not self._transport:
             _LOGGER.warning("Attempted to write to the stream without a connection active")
             return
@@ -1090,30 +1276,28 @@ class PowerPetDoorClient:
             _LOGGER.warning("Attempted to send data while another message is still outstanding")
             return
 
-        """Raw data send- just make sure it's encoded properly and logged."""
-        if self._queue.empty():
+        if not self._queue:
             self._can_dequeue = True
             return
 
-        try:
-            prioritized_msg = self._queue.get_nowait()
-            data = prioritized_msg.data  # Extract actual message data from PrioritizedMessage
-            if COMMAND in data:
-                self._last_command = data[COMMAND]
-            elif CONFIG in data:
-                self._last_command = data[CONFIG]
-            elif PING in data:
-                self._last_command = PONG
-            else:
-                _LOGGER.warning("Sending unknown command type")
-                self._last_command = None
+        prioritized_msg = heapq.heappop(self._queue)
+        data = prioritized_msg.data  # Extract actual message data from PrioritizedMessage
+        if COMMAND in data:
+            self._last_command = data[COMMAND]
+        elif CONFIG in data:
+            self._last_command = data[CONFIG]
+        elif PING in data:
+            self._last_command = PONG
+        else:
+            _LOGGER.warning("Sending unknown command type")
+            self._last_command = None
 
-            self._failed_msg = 0
-            rawdata = json.dumps(data).encode("ascii")
-            await self._send_data(rawdata)
-
-        except queue.Empty:
-            _LOGGER.warning("Attempted to dequeue from an empty queue")
+        # Track the in-flight msgId so check_receipt can fail its future
+        # if the message is ultimately dropped (H4).
+        self._inflight_msg_id = data.get(FIELD_MSG_ID)
+        self._failed_msg = 0
+        rawdata = json.dumps(data).encode("ascii")
+        await self._send_data(rawdata)
 
     def data_received(self, rawdata) -> None:
         """asyncio callback for any data received from the power pet door.
@@ -1210,10 +1394,15 @@ class PowerPetDoorClient:
                         _LOGGER.exception("Error handling %s response: %s", cmd, json.dumps(msg))
                         if future is not None and not future.done():
                             future.set_exception(CommandError(cmd, "Malformed response"))
-
-                # Cancel unfulfilled futures
-                if future is not None and not future.done():
-                    future.cancel()
+                    # A handler that ran but could not resolve its future
+                    # means the payload lacked the expected field. Fail it
+                    # typed - never cancel() an API caller's future (L9).
+                    if future is not None and not future.done():
+                        future.set_exception(CommandError(cmd, "Response missing expected field"))
+                elif future is not None and not future.done():
+                    # Successful response with no specialized handler: the
+                    # acknowledgment itself is the result.
+                    future.set_result(msg)
             else:
                 reason = msg.get(FIELD_REASON)
                 _LOGGER.warning("Error reported by device: %s", json.dumps(msg))
@@ -1223,7 +1412,9 @@ class PowerPetDoorClient:
             if dequeue:
                 await self.dequeue_data()
 
-    def send_message(self, type: str, arg: str, notify: bool = False, **kwargs) -> None:
+    def send_message(
+        self, type: str, arg: str, notify: bool = False, **kwargs
+    ) -> asyncio.Future | None:
         """Send a message to the Power Pet Door.
 
         Args:
@@ -1233,16 +1424,20 @@ class PowerPetDoorClient:
             **kwargs: Additional message parameters
 
         Returns:
-            Future if notify=True, otherwise None
+            asyncio.Future if notify=True, otherwise None. The future
+            resolves with the response payload, or raises CommandError
+            (device-reported failure or malformed response), TimeoutError
+            (message dropped after retries) or ConnectionError (connection
+            lost before a response arrived).
         """
         msg_id = self.msgId
         rv = None
         if notify:
-            rv = self._eventLoop.create_future()
+            rv = self._get_loop().create_future()
             self._outstanding[msg_id] = rv
 
-            def cleanup(arg: asyncio.Future) -> None:
-                del self._outstanding[msg_id]
+            def cleanup(fut: asyncio.Future) -> None:
+                self._outstanding.pop(msg_id, None)
 
             rv.add_done_callback(cleanup)
 
@@ -1262,7 +1457,7 @@ class PowerPetDoorClient:
     @property
     def available(self) -> bool:
         """Whether the client is connected and available."""
-        return self._transport and not self._transport.is_closing()
+        return bool(self._transport and not self._transport.is_closing())
 
     @property
     def host(self) -> str:

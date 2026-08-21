@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import threading
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,6 +27,19 @@ _iana_timezones: list[str] | None = None
 _iana_to_posix: dict[str, str] = {}
 _posix_to_iana: dict[str, str] = {}
 _cache_initialized: bool = False
+# Serializes cache initialization so concurrent initializers cannot run
+# the (expensive) tzdata scan twice (L12).
+_cache_lock = threading.Lock()
+
+# POSIX TZ abbreviations are either alphabetic (EST) or, in modern tzdata,
+# angle-bracket-quoted alphanumeric/sign forms such as <+05> or <-03> (L18).
+_POSIX_ABBREV = r"[A-Za-z]+|<[A-Za-z0-9+\-]+>"
+_POSIX_TZ_RE = re.compile(
+    rf"^({_POSIX_ABBREV})"
+    r"([+-]?\d+(?::\d+(?::\d+)?)?)"
+    rf"(?:({_POSIX_ABBREV})"
+    r"([+-]?\d+(?::\d+(?::\d+)?)?)?)?"
+)
 
 
 def _extract_posix_from_tzif(iana_timezone: str) -> str | None:
@@ -98,23 +113,28 @@ async def async_init_timezone_cache() -> None:
     """Initialize timezone caches in a thread (non-blocking).
 
     Uses asyncio.to_thread to run blocking I/O in a thread pool.
-    Must be called once before using other functions.
+    Must be called once before using other functions. Safe to call
+    concurrently: the tzdata scan runs at most once (L12).
     """
     if _cache_initialized:
         return
 
-    await asyncio.to_thread(_build_timezone_caches)
+    await asyncio.to_thread(init_timezone_cache_sync)
 
 
 def init_timezone_cache_sync() -> None:
     """Initialize timezone caches synchronously (blocking).
 
     Use async_init_timezone_cache() for non-blocking initialization.
+    Safe to call concurrently: the tzdata scan runs at most once (L12).
     """
     if _cache_initialized:
         return
 
-    _build_timezone_caches()
+    with _cache_lock:
+        if _cache_initialized:
+            return
+        _build_timezone_caches()
 
 
 def is_cache_initialized() -> bool:
@@ -125,12 +145,13 @@ def is_cache_initialized() -> bool:
 def get_available_timezones() -> list[str]:
     """Get sorted list of available IANA timezone names.
 
-    Returns empty list if cache not initialized.
+    Returns a copy - mutating the returned list does not affect the
+    internal cache (L12). Returns empty list if cache not initialized.
     """
     if _iana_timezones is None:
         _LOGGER.warning("Timezone cache not initialized, returning empty list")
         return []
-    return _iana_timezones
+    return list(_iana_timezones)
 
 
 def get_posix_tz_string(iana_timezone: str) -> str | None:
@@ -152,11 +173,17 @@ def find_iana_for_posix(posix_tz: str) -> str | None:
 def parse_posix_tz_string(posix_tz: str) -> dict | None:
     """Parse a POSIX TZ string into its components.
 
+    Handles both alphabetic abbreviations (``EST5EDT,M3.2.0,M11.1.0``)
+    and the angle-bracket forms modern tzdata emits for numeric zone
+    names (``<+05>-5``, ``<-03>3``); the brackets are stripped from the
+    returned abbreviations (L18).
+
     Args:
         posix_tz: POSIX TZ string (e.g., 'EST5EDT,M3.2.0,M11.1.0')
 
     Returns:
-        Dictionary with parsed components or None if parsing fails
+        Dictionary with parsed components, or None if the input is empty
+        or no valid abbreviation/offset could be parsed.
     """
     if not posix_tz:
         return None
@@ -171,31 +198,24 @@ def parse_posix_tz_string(posix_tz: str) -> dict | None:
         "dst_end": None,
     }
 
-    try:
-        if "," in posix_tz:
-            tz_part, rules = posix_tz.split(",", 1)
-            rule_parts = rules.split(",")
-            if len(rule_parts) >= 2:
-                result["dst_start"] = rule_parts[0]
-                result["dst_end"] = rule_parts[1]
-        else:
-            tz_part = posix_tz
+    if "," in posix_tz:
+        tz_part, rules = posix_tz.split(",", 1)
+        rule_parts = rules.split(",")
+        if len(rule_parts) >= 2:
+            result["dst_start"] = rule_parts[0]
+            result["dst_end"] = rule_parts[1]
+    else:
+        tz_part = posix_tz
 
-        import re
-
-        match = re.match(
-            r"^([A-Za-z]+)(-?\d+(?::\d+(?::\d+)?)?)"
-            r"(?:([A-Za-z]+)(-?\d+(?::\d+(?::\d+)?)?)?)?",
-            tz_part,
-        )
-        if match:
-            result["std_abbrev"] = match.group(1)
-            result["std_offset"] = match.group(2)
-            result["dst_abbrev"] = match.group(3)
-            result["dst_offset"] = match.group(4)
-
-        return result
-
-    except Exception as e:
-        _LOGGER.debug("Error parsing POSIX TZ string %s: %s", posix_tz, e)
+    match = _POSIX_TZ_RE.match(tz_part)
+    if not match:
+        _LOGGER.debug("Could not parse POSIX TZ string: %s", posix_tz)
         return None
+
+    result["std_abbrev"] = match.group(1).strip("<>")
+    result["std_offset"] = match.group(2)
+    dst_abbrev = match.group(3)
+    result["dst_abbrev"] = dst_abbrev.strip("<>") if dst_abbrev else None
+    result["dst_offset"] = match.group(4)
+
+    return result

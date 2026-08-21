@@ -471,3 +471,100 @@ class TestIsSensorBlockingClose:
         """When cmd_lockout is disabled, sensors should block as normal."""
         state = DoorSimulatorState(inside_sensor_active=True, inside=True, cmd_lockout=False)
         assert state.is_sensor_blocking_close() is True
+
+
+# ============================================================================
+# Timezone Resolution Tests (M9: POSIX wire values)
+# ============================================================================
+
+
+class TestGetTzinfo:
+    """Tests for DoorSimulatorState.get_tzinfo timezone resolution."""
+
+    def test_iana_name_resolves_directly(self):
+        """An IANA timezone name resolves without the cache."""
+        state = DoorSimulatorState(timezone="America/New_York")
+        assert state.get_tzinfo().key == "America/New_York"
+
+    def test_posix_wire_value_maps_to_iana(self):
+        """A POSIX TZ string (as stored by SET_TIMEZONE) maps back to IANA."""
+        from powerpetdoor import tz_utils
+
+        tz_utils.init_timezone_cache_sync()
+        posix = tz_utils.get_posix_tz_string("America/New_York")
+        assert posix == "EST5EDT,M3.2.0,M11.1.0"
+
+        state = DoorSimulatorState(timezone=posix)
+        tzinfo = state.get_tzinfo()
+        # Any IANA zone sharing this POSIX rule is acceptable; it must
+        # observe US-eastern UTC offsets, not UTC.
+        from datetime import datetime, timedelta
+
+        january = datetime(2026, 1, 15, 12, 0, tzinfo=tzinfo)
+        assert january.utcoffset() == timedelta(hours=-5)
+        july = datetime(2026, 7, 15, 12, 0, tzinfo=tzinfo)
+        assert july.utcoffset() == timedelta(hours=-4)
+
+    def test_unresolvable_timezone_falls_back_to_utc_with_single_warning(self, caplog):
+        """Unknown values fall back to UTC and warn exactly once per value."""
+        import logging
+
+        state = DoorSimulatorState(timezone="Not/A/Real_Zone")
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.state"):
+            assert state.get_tzinfo().key == "UTC"
+            assert state.get_tzinfo().key == "UTC"
+
+        warnings = [rec for rec in caplog.records if "falling back to UTC" in rec.getMessage()]
+        assert len(warnings) == 1
+
+    def test_warning_re_emitted_for_new_value(self, caplog):
+        """Changing to a different bad value warns again."""
+        import logging
+
+        state = DoorSimulatorState(timezone="Bad/Zone_One")
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.state"):
+            state.get_tzinfo()
+            state.timezone = "Bad/Zone_Two"
+            state.get_tzinfo()
+
+        warnings = [rec for rec in caplog.records if "falling back to UTC" in rec.getMessage()]
+        assert len(warnings) == 2
+
+    def test_schedule_evaluation_with_posix_timezone(self):
+        """Schedules evaluate (not UTC-fallback) after a wire SET_TIMEZONE value."""
+        from powerpetdoor import tz_utils
+
+        tz_utils.init_timezone_cache_sync()
+        state = DoorSimulatorState(timezone="EST5EDT,M3.2.0,M11.1.0", auto=True)
+
+        # A 24/7 schedule window allows the sensor regardless of local time
+        state.schedules[0] = Schedule(
+            index=0,
+            enabled=True,
+            days_of_week=[1, 1, 1, 1, 1, 1, 1],
+            inside=True,
+            start_hour=0,
+            start_min=0,
+            end_hour=23,
+            end_min=59,
+        )
+        assert state.is_sensor_allowed_by_schedule("inside") is True
+
+        # A zero-length window never allows it
+        state.schedules[0] = Schedule(
+            index=0,
+            enabled=True,
+            days_of_week=[1, 1, 1, 1, 1, 1, 1],
+            inside=True,
+            start_hour=0,
+            start_min=0,
+            end_hour=0,
+            end_min=0,
+        )
+        assert state.is_sensor_allowed_by_schedule("inside") is False
+
+    def test_hold_time_accepts_float(self):
+        """hold_time is a float field (T2)."""
+        state = DoorSimulatorState(hold_time=2.5)
+        assert state.hold_time == 2.5
+        assert DoorSimulatorState.__dataclass_fields__["hold_time"].type is float

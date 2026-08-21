@@ -41,6 +41,9 @@ from powerpetdoor.const import (
     FIELD_INSIDE,
     FIELD_OUTSIDE,
     FIELD_POWER,
+    NOTIFY_LOW_BATTERY,
+    NOTIFY_SENSOR_INDOOR,
+    SENSOR_STATE_ON,
 )
 from powerpetdoor.simulator import (
     DoorSimulator,
@@ -285,7 +288,7 @@ class TestControlCommands:
         """CLOSE command should close the door."""
         # First open the door
         await simulator.open_door(hold=True)
-        await asyncio.sleep(0.2)
+        await simulator.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
 
         callback = tracker.make_callback("door_status")
         client.add_listener("test", door_status_update=callback)
@@ -294,11 +297,7 @@ class TestControlCommands:
         client.send_message(COMMAND, CMD_CLOSE)
 
         # Wait for close to complete
-        for _ in range(50):
-            if simulator.state.door_status == DOOR_STATE_CLOSED:
-                break
-            await asyncio.sleep(0.1)
-
+        await simulator.wait_for_status(DOOR_STATE_CLOSED, timeout=5.0)
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
     @pytest.mark.asyncio
@@ -509,6 +508,105 @@ class TestClientCallbacks:
 
 
 # ============================================================================
+# Settings Round-Trip Tests (client wire format -> simulator state)
+# ============================================================================
+
+
+class TestSettingsRoundTrips:
+    """The simulator honors the exact wire formats the client/door send."""
+
+    @pytest.mark.asyncio
+    async def test_door_set_notifications_round_trip(self, simulator):
+        """door.set_notifications (top-level "1"/"0" fields) updates the simulator."""
+        from powerpetdoor import PowerPetDoor
+
+        port = simulator.server.sockets[0].getsockname()[1]
+        door = PowerPetDoor(
+            host="127.0.0.1",
+            port=port,
+            keepalive=0,
+            timeout=5.0,
+            reconnect=1.0,
+            loop=asyncio.get_running_loop(),
+        )
+        await door.connect()
+        try:
+            assert simulator.state.sensor_on_indoor is False
+            assert simulator.state.low_battery is True
+
+            await door.set_notifications(inside_on=True, low_battery=False)
+
+            assert simulator.state.sensor_on_indoor is True
+            assert simulator.state.low_battery is False
+        finally:
+            await door.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_delete_schedule_response_echoes_index(self, client, simulator):
+        """DELETE_SCHEDULE responses echo the deleted index to the client."""
+        from powerpetdoor.const import CMD_DELETE_SCHEDULE, FIELD_INDEX
+        from powerpetdoor.simulator import Schedule as SimSchedule
+
+        simulator.state.schedules[2] = SimSchedule(index=2, inside=True)
+
+        future = client.send_message(CONFIG, CMD_DELETE_SCHEDULE, notify=True, **{FIELD_INDEX: 2})
+        result = await asyncio.wait_for(future, timeout=2.0)
+
+        # The client resolves the future with the echoed index
+        assert result == 2
+        assert 2 not in simulator.state.schedules
+
+
+# ============================================================================
+# Notification Event Round-Trip Tests (D2: bare envelope)
+# ============================================================================
+
+
+class TestNotificationEvents:
+    """Simulator emits bare notification envelopes; client dispatches them."""
+
+    @pytest.mark.asyncio
+    async def test_sensor_notification_round_trip(self, client, simulator, tracker):
+        """Simulator sensor event -> client notification_event listener."""
+        callback = tracker.make_callback("notify")
+        client.add_listener("test", notification_event=callback)
+
+        # Enable the notification and trigger the (closed) door's sensor
+        simulator.state.sensor_on_indoor = True
+        simulator.trigger_sensor("inside")
+
+        assert await tracker.wait_for("notify", timeout=2.0)
+        calls = tracker.get_calls("notify")
+        assert calls[0] == (NOTIFY_SENSOR_INDOOR, SENSOR_STATE_ON)
+
+    @pytest.mark.asyncio
+    async def test_low_battery_notification_round_trip(self, client, simulator, tracker):
+        """Simulator low-battery event -> client notification_event listener."""
+        callback = tracker.make_callback("notify")
+        client.add_listener("test", notification_event=callback)
+
+        simulator.state.low_battery = True
+        simulator.set_battery(15)  # crosses the 20% threshold
+
+        assert await tracker.wait_for("notify", timeout=2.0)
+        calls = tracker.get_calls("notify")
+        # LOW_BATTERY carries no sensorState
+        assert calls[0] == (NOTIFY_LOW_BATTERY, None)
+
+    @pytest.mark.asyncio
+    async def test_disabled_sensor_notification_not_emitted(self, client, simulator, tracker):
+        """No notification event reaches the client when the setting is off."""
+        callback = tracker.make_callback("notify")
+        client.add_listener("test", notification_event=callback)
+
+        # sensor_on_indoor defaults to disabled
+        simulator.trigger_sensor("inside")
+
+        assert await tracker.wait_for("notify", timeout=0.3) is False
+        assert tracker.get_calls("notify") == []
+
+
+# ============================================================================
 # Full Door Cycle Tests
 # ============================================================================
 
@@ -528,12 +626,9 @@ class TestDoorCycles:
         # Trigger sensor
         simulator.trigger_sensor("inside")
 
-        # Wait for cycle to complete
-        for _ in range(100):  # 10 seconds max
-            if simulator.state.door_status == DOOR_STATE_CLOSED:
-                if simulator.state.total_open_cycles > initial_cycles:
-                    break
-            await asyncio.sleep(0.1)
+        # Wait for cycle to complete: first the open, then the close
+        await simulator.wait_for_status(DOOR_STATE_RISING, timeout=2.0)
+        await simulator.wait_for_status(DOOR_STATE_CLOSED, timeout=10.0)
 
         # Cycle should have completed
         assert simulator.state.total_open_cycles == initial_cycles + 1
@@ -546,27 +641,15 @@ class TestDoorCycles:
     @pytest.mark.asyncio
     async def test_client_initiated_open_close(self, client, simulator):
         """Client-initiated open/close should work correctly."""
-        # Open door
+        # Open door (a plain OPEN parks in HOLDING until the hold expires)
         client.send_message(COMMAND, CMD_OPEN)
-
-        # Wait for door to open
-        for _ in range(50):
-            if simulator.state.door_status in (DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP):
-                break
-            await asyncio.sleep(0.1)
-
-        assert simulator.state.door_status in (DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP)
+        result = await simulator.wait_for_status(DOOR_STATE_HOLDING, timeout=5.0)
+        assert result == DOOR_STATE_HOLDING
 
         # Close door
         client.send_message(COMMAND, CMD_CLOSE)
-
-        # Wait for door to close
-        for _ in range(50):
-            if simulator.state.door_status == DOOR_STATE_CLOSED:
-                break
-            await asyncio.sleep(0.1)
-
-        assert simulator.state.door_status == DOOR_STATE_CLOSED
+        result = await simulator.wait_for_status(DOOR_STATE_CLOSED, timeout=5.0)
+        assert result == DOOR_STATE_CLOSED
 
 
 # ============================================================================

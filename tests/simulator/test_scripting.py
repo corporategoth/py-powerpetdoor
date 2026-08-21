@@ -21,7 +21,9 @@ from powerpetdoor.simulator import (
 )
 from powerpetdoor.simulator.scripting import (
     YAML_AVAILABLE,
+    AssertionFailed,
     Script,
+    ScriptAssertionError,
     ScriptError,
     ScriptRunner,
     ScriptStep,
@@ -31,6 +33,12 @@ from powerpetdoor.simulator.scripting import (
 
 # Skip marker for tests that require PyYAML
 requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
+
+
+def test_assertion_failed_alias():
+    """AssertionFailed remains as a compatibility alias (renamed for N818)."""
+    assert AssertionFailed is ScriptAssertionError
+    assert issubclass(ScriptAssertionError, ScriptError)
 
 
 # ============================================================================
@@ -279,25 +287,40 @@ class TestScriptRunner:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_stop_script(self, runner, simulator):
-        """stop() should stop a running script."""
-        # Use multiple steps since stop is checked at the start of each step
-        script = Script.from_simple_commands(
-            [
-                "wait 0.1",
-                "wait 0.1",
-                "wait 0.1",
-                "wait 10",  # Long wait that should be skipped
-            ]
-        )
+    async def test_wait_for_non_status_condition_already_true(self, runner, simulator):
+        """wait_for on a non-status condition returns when already true."""
+        simulator.state.power = False
+        script = Script.from_simple_commands(["wait_for power_off 5"])
+        result = await runner.run(script, verbose=False)
+        assert result is True
 
-        async def run_and_stop():
-            task = asyncio.create_task(runner.run(script, verbose=False))
-            await asyncio.sleep(0.25)  # Let first two waits complete
-            runner.stop()
-            return await task
+    @pytest.mark.asyncio
+    async def test_wait_for_non_status_condition_timeout(self, runner, simulator):
+        """wait_for on a non-status condition times out when never true."""
+        script = Script.from_simple_commands(["wait_for power_off 0.3"])
+        result = await runner.run(script, verbose=False)
+        assert result is False
 
-        result = await run_and_stop()
+    @pytest.mark.asyncio
+    async def test_wait_for_unknown_condition_fails(self, runner, simulator):
+        """wait_for on an unknown condition fails the script."""
+        script = Script.from_simple_commands(["wait_for bogus_condition 1"])
+        result = await runner.run(script, verbose=False)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_stop_script_interrupts_wait_for(self, runner, simulator):
+        """stop() must interrupt a wait_for immediately (no wall-clock wait)."""
+        # The door never reaches KEEPUP, so only stop() can end this wait
+        script = Script.from_simple_commands(["wait_for door_keepup 30"])
+
+        task = asyncio.create_task(runner.run(script, verbose=False))
+        # Let the runner enter the wait_for step
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        runner.stop()
+
+        result = await asyncio.wait_for(task, timeout=2.0)
         assert result is False
 
     @pytest.mark.asyncio

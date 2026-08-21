@@ -20,7 +20,7 @@ Example usage:
     client.start()
 """
 
-from .client import PowerPetDoorClient, PrioritizedMessage, find_end, make_bool
+from .client import CommandError, PowerPetDoorClient, PrioritizedMessage, find_end, make_bool
 from .const import (
     CMD_CHECK_RESET_REASON,
     CMD_CLOSE,
@@ -95,15 +95,20 @@ from .const import (
     FIELD_OUTSIDE,
     FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
     FIELD_POWER,
+    FIELD_REASON,
     FIELD_RESET_REASON,
     FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
     FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
     FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
     FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_STATE,
     FIELD_SETTINGS,
     FIELD_SUCCESS,
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
+    NOTIFY_LOW_BATTERY,
+    NOTIFY_SENSOR_INDOOR,
+    NOTIFY_SENSOR_OUTDOOR,
     PHONE_TO_DOOR,
     PING,
     PONG,
@@ -111,6 +116,8 @@ from .const import (
     PRIORITY_HIGH,
     PRIORITY_LOW,
     PRIORITY_MEDIUM,
+    SENSOR_STATE_OFF,
+    SENSOR_STATE_ON,
 )
 from .door import (
     BatteryInfo,
@@ -149,6 +156,7 @@ __all__ = [
     "Schedule",
     "ScheduleTime",
     # Client
+    "CommandError",
     "PowerPetDoorClient",
     "PrioritizedMessage",
     "find_end",
@@ -181,7 +189,15 @@ __all__ = [
     "FIELD_DIRECTION",
     "FIELD_MSG_ID",
     "FIELD_MSG_ID_RESPONSE",
+    "FIELD_REASON",
     "PHONE_TO_DOOR",
+    # Constants - Notification events
+    "FIELD_SENSOR_STATE",
+    "NOTIFY_LOW_BATTERY",
+    "NOTIFY_SENSOR_INDOOR",
+    "NOTIFY_SENSOR_OUTDOOR",
+    "SENSOR_STATE_OFF",
+    "SENSOR_STATE_ON",
     # Constants - Commands
     "CMD_CHECK_RESET_REASON",
     "CMD_CLOSE",

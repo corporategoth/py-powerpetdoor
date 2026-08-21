@@ -133,6 +133,49 @@ schedule_template = {
 }
 
 
+def _require_complete_entry(sched: dict, position: int) -> None:
+    """Validate that a schedule entry is fully populated for compression (T7).
+
+    compress_schedule() reads every field of every entry, so each entry
+    must carry a 7-element daysOfWeek list, the inside/outside flags, and
+    all four time sub-dicts with hour/min keys. Start from
+    ``schedule_template`` (deep-copied) to guarantee completeness.
+
+    Raises:
+        ValueError: With a clear message identifying the offending entry.
+    """
+    if not isinstance(sched, dict):
+        raise ValueError(f"Schedule entry {position} is not a dict: {sched!r}")
+
+    days = sched.get(FIELD_DAYSOFWEEK)
+    if not isinstance(days, list) or len(days) != 7:
+        raise ValueError(
+            f"Schedule entry {position} needs a 7-element {FIELD_DAYSOFWEEK!r} list: {sched!r}"
+        )
+
+    for flag in (FIELD_INSIDE, FIELD_OUTSIDE):
+        if flag not in sched:
+            raise ValueError(f"Schedule entry {position} is missing {flag!r}: {sched!r}")
+
+    time_keys = (
+        FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX,
+        FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX,
+        FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX,
+        FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX,
+    )
+    for key in time_keys:
+        time_field = sched.get(key)
+        if (
+            not isinstance(time_field, dict)
+            or FIELD_HOUR not in time_field
+            or FIELD_MINUTE not in time_field
+        ):
+            raise ValueError(
+                f"Schedule entry {position} is missing time field {key!r} "
+                f"(expected a dict with {FIELD_HOUR!r}/{FIELD_MINUTE!r}): {sched!r}"
+            )
+
+
 def compress_schedule(schedule: list[dict]) -> list[dict]:
     """Compress a schedule to minimize the number of entries.
 
@@ -141,12 +184,22 @@ def compress_schedule(schedule: list[dict]) -> list[dict]:
     - Same time periods on different days are combined
     - Inside and outside entries with matching times/days are combined
 
+    Every entry must be fully populated (all four time sub-dicts, the
+    inside/outside flags, and a 7-element daysOfWeek list) - start from
+    ``schedule_template``. The input is not modified.
+
     Args:
-        schedule: List of schedule entry dictionaries
+        schedule: List of fully-populated schedule entry dictionaries
 
     Returns:
         Compressed list of schedule entries with sequential indices
+
+    Raises:
+        ValueError: If an entry is missing required fields (T7).
     """
+    for position, sched in enumerate(schedule):
+        _require_complete_entry(sched, position)
+
     expanded_sched = {
         FIELD_INSIDE: {},
         FIELD_OUTSIDE: {},
@@ -351,6 +404,10 @@ def compute_schedule_diff(
     2. Reusing indices from entries to be deleted for new entries (SET instead of DELETE+ADD)
     3. Only deleting entries when there are more current entries than new entries
 
+    Neither input list is modified: the returned ``entries_to_set`` are
+    deep copies of the new entries with their ``index`` field reassigned
+    (L13).
+
     Args:
         current_schedule: List of current schedule entries on device
         new_schedule: List of desired schedule entries
@@ -358,7 +415,8 @@ def compute_schedule_diff(
     Returns:
         Tuple of (entries_to_delete, entries_to_set) where:
         - entries_to_delete: list of indices to delete from device
-        - entries_to_set: list of schedule entries to add/update via SET_SCHEDULE
+        - entries_to_set: list of schedule entries (copies) to add/update
+          via SET_SCHEDULE
     """
     # Build lookup of current entries by content key
     current_by_content = {}
@@ -379,8 +437,10 @@ def compute_schedule_diff(
             # This content already exists - no change needed
             matched_indices.add(current_by_content[key].get(FIELD_INDEX))
         else:
-            # This is a new/changed entry that needs to be SET
-            entries_to_set.append(entry)
+            # This is a new/changed entry that needs to be SET. Copy it so
+            # the index reassignment below never mutates the caller's
+            # input (L13).
+            entries_to_set.append(deepcopy(entry))
 
     # Indices that can be reused (current indices that weren't matched)
     reusable_indices = sorted(current_indices - matched_indices)

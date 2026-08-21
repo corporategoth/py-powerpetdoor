@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from .client import PowerPetDoorClient
+from .client import PowerPetDoorClient, make_bool
 from .const import (
     # Commands
     CMD_CLOSE,
@@ -127,14 +127,22 @@ class DoorStatus(Enum):
     KEEPUP = DOOR_STATE_KEEPUP
     CLOSING_TOP_OPEN = DOOR_STATE_CLOSING_TOP_OPEN
     CLOSING_MID_OPEN = DOOR_STATE_CLOSING_MID_OPEN
+    #: Status string not recognized (e.g. newer firmware); the door is in
+    #: an indeterminate state - neither is_open nor is_closed is True.
+    UNKNOWN = "UNKNOWN"
 
     @classmethod
     def from_string(cls, value: str) -> DoorStatus:
-        """Convert a string status to enum."""
+        """Convert a string status to enum.
+
+        Unrecognized status strings map to :attr:`UNKNOWN` with a warning
+        logged - never silently claim a possibly-open door is closed (L16).
+        """
         for status in cls:
             if status.value == value:
                 return status
-        return cls.CLOSED  # Default fallback
+        logger.warning("Unknown door status from device: %r", value)
+        return cls.UNKNOWN
 
 
 @dataclass
@@ -373,6 +381,13 @@ class PowerPetDoor:
         self._schedules: list[Schedule] = []
         self._latency: float | None = None
 
+        # Connection synchronization (M10): set by the client's on_connect
+        # hook, cleared on disconnect. _initialized marks that the initial
+        # connect()+refresh() completed, so later on_connect events are
+        # auto-reconnects that must resynchronize the cache.
+        self._connected_event = asyncio.Event()
+        self._initialized = False
+
         # User callbacks
         self._status_callbacks: list[Callable[[DoorStatus], None]] = []
         self._settings_callbacks: list[Callable[[dict[str, Any]], None]] = []
@@ -419,8 +434,28 @@ class PowerPetDoor:
         """
         return self._latency
 
-    async def connect(self) -> None:
-        """Connect to the door and fetch initial state."""
+    async def connect(self, *, timeout: float | None = None) -> None:
+        """Connect to the door and fetch initial state.
+
+        Waits (event-driven, no polling) for the connection to establish
+        and performs an initial refresh() so cached properties are valid
+        when this returns. May be called again after disconnect().
+
+        Args:
+            timeout: Seconds to wait for the connection to establish.
+                Defaults to default_timeout.
+
+        Raises:
+            ConnectionError: If the connection is not established within
+                the timeout. The client is fully shut down first (no
+                background reconnect keeps running), so connect() may
+                safely be retried.
+        """
+        # Re-arm the client in case disconnect() was called earlier (M6).
+        self._client.reset_shutdown()
+        self._connected_event.clear()
+        self._initialized = False
+
         # Register callbacks to keep cache updated
         self._client.add_listener(
             "_door_facade",
@@ -463,21 +498,34 @@ class PowerPetDoor:
 
         await self._client.connect()
 
-        # Wait for connection to establish
-        for _ in range(50):  # 5 seconds max
-            if self._client.available:
-                break
-            await asyncio.sleep(0.1)
+        # Wait for the connection, signalled by the client's on_connect
+        # hook - no polling (M10).
+        effective_timeout = timeout if timeout is not None else self.default_timeout
+        try:
+            async with asyncio.timeout(effective_timeout):
+                await self._connected_event.wait()
+        except TimeoutError:
+            # Tear down cleanly so no background reconnect loop survives a
+            # raised connect(), then report the failure to the caller.
+            self._client.shutdown()
+            self._client.del_listener("_door_facade")
+            self._client.del_handlers("_door_facade")
+            raise ConnectionError(
+                f"Failed to connect to Power Pet Door at {self._host}:{self._port}"
+            ) from None
 
-        if self._client.available:
-            await self.refresh()
+        await self.refresh()
+        self._initialized = True
 
     async def disconnect(self) -> None:
-        """Disconnect from the door."""
-        self._client._shutdown = True
+        """Disconnect from the door and stop automatic reconnection.
+
+        Idempotent: safe to call multiple times, and before connect().
+        """
+        self._initialized = False
+        self._client.shutdown()
         self._client.del_listener("_door_facade")
         self._client.del_handlers("_door_facade")
-        self._client.disconnect()
 
     # =========================================================================
     # Door Control
@@ -850,7 +898,7 @@ class PowerPetDoor:
             low_battery: Notify on low battery.
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
-        settings = {
+        merged = {
             FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: (
                 inside_on if inside_on is not None else self._notifications.inside_on
             ),
@@ -867,6 +915,8 @@ class PowerPetDoor:
                 low_battery if low_battery is not None else self._notifications.low_battery
             ),
         }
+        # The wire protocol uses "1"/"0" strings (docs/protocol.md).
+        settings = {key: "1" if value else "0" for key, value in merged.items()}
         await asyncio.wait_for(
             self._client.send_message(CONFIG, CMD_SET_NOTIFICATIONS, notify=True, **settings),
             timeout=timeout if timeout is not None else self.default_timeout,
@@ -919,6 +969,10 @@ class PowerPetDoor:
             self._client.send_message(CONFIG, CMD_DELETE_SCHEDULE, notify=True, index=index),
             timeout=timeout if timeout is not None else self.default_timeout,
         )
+        # Keep the cache correct even when the device does not echo the
+        # deleted index (the listener is a no-op if it already ran).
+        if any(s.index == index for s in self._schedules):
+            self._on_schedule_delete(index)
 
     async def refresh_schedules(self, *, timeout: float | None = None) -> list[Schedule]:
         """Refresh and return the schedule list.
@@ -1096,23 +1150,29 @@ class PowerPetDoor:
                     logger.exception("Error in status callback")
 
     def _on_settings(self, settings: dict[str, Any]) -> None:
-        """Handle settings update from client."""
-        # Update cached values from settings dict
-        if FIELD_POWER in settings:
-            self._power = bool(settings[FIELD_POWER])
-        if FIELD_INSIDE in settings:
-            self._inside_sensor = bool(settings[FIELD_INSIDE])
-        if FIELD_OUTSIDE in settings:
-            self._outside_sensor = bool(settings[FIELD_OUTSIDE])
-        if FIELD_AUTO in settings:
-            self._auto = bool(settings[FIELD_AUTO])
-        if FIELD_OUTSIDE_SENSOR_SAFETY_LOCK in settings:
-            self._safety_lock = bool(settings[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK])
-        if FIELD_AUTORETRACT in settings:
-            self._autoretract = bool(settings[FIELD_AUTORETRACT])
-        if FIELD_CMD_LOCKOUT in settings:
+        """Handle settings update from client.
+
+        Wire values are protocol strings ("0"/"1"), so they must be
+        coerced with make_bool - bool("0") is True, which would cache the
+        inverse of the device state (test-fanatic H1). Unrecognized values
+        leave the cached state untouched.
+        """
+        # (settings field, cache attribute, inverted?)
+        boolean_fields = (
+            (FIELD_POWER, "_power", False),
+            (FIELD_INSIDE, "_inside_sensor", False),
+            (FIELD_OUTSIDE, "_outside_sensor", False),
+            (FIELD_AUTO, "_auto", False),
+            (FIELD_OUTSIDE_SENSOR_SAFETY_LOCK, "_safety_lock", False),
+            (FIELD_AUTORETRACT, "_autoretract", False),
             # Inverted: cmd_lockout disabled means pet proximity keep open
-            self._pet_proximity_keep_open = not bool(settings[FIELD_CMD_LOCKOUT])
+            (FIELD_CMD_LOCKOUT, "_pet_proximity_keep_open", True),
+        )
+        for field_name, attr, inverted in boolean_fields:
+            if field_name in settings:
+                value = make_bool(settings[field_name])
+                if value is not None:
+                    setattr(self, attr, (not value) if inverted else value)
 
         for callback in self._settings_callbacks:
             try:
@@ -1120,41 +1180,38 @@ class PowerPetDoor:
             except Exception:
                 logger.exception("Error in settings callback")
 
-    def _on_power_update(self, *args) -> None:
-        # Handle both (value) and (field, value) signatures
-        value = args[-1]
-        self._power = value
+    # Sensor listeners are invoked by the client as callback(field, value)
+    # (decision D4); value is None when the wire value was unrecognized,
+    # in which case the cached state is left untouched.
 
-    def _on_inside_update(self, *args) -> None:
-        # Handle both (value) and (field, value) signatures
-        value = args[-1]
-        self._inside_sensor = value
+    def _on_power_update(self, field_name: str, value: bool | None) -> None:
+        if value is not None:
+            self._power = value
 
-    def _on_outside_update(self, *args) -> None:
-        # Handle both (value) and (field, value) signatures
-        value = args[-1]
-        self._outside_sensor = value
+    def _on_inside_update(self, field_name: str, value: bool | None) -> None:
+        if value is not None:
+            self._inside_sensor = value
 
-    def _on_auto_update(self, *args) -> None:
-        # Handle both (value) and (field, value) signatures
-        value = args[-1]
-        self._auto = value
+    def _on_outside_update(self, field_name: str, value: bool | None) -> None:
+        if value is not None:
+            self._outside_sensor = value
 
-    def _on_safety_lock_update(self, *args) -> None:
-        # Handle both (value) and (field, value) signatures
-        value = args[-1]
-        self._safety_lock = value
+    def _on_auto_update(self, field_name: str, value: bool | None) -> None:
+        if value is not None:
+            self._auto = value
 
-    def _on_autoretract_update(self, *args) -> None:
-        # Handle both (value) and (field, value) signatures
-        value = args[-1]
-        self._autoretract = value
+    def _on_safety_lock_update(self, field_name: str, value: bool | None) -> None:
+        if value is not None:
+            self._safety_lock = value
 
-    def _on_cmd_lockout_update(self, *args) -> None:
-        # Handle both (value) and (field, value) signatures
-        value = args[-1]
+    def _on_autoretract_update(self, field_name: str, value: bool | None) -> None:
+        if value is not None:
+            self._autoretract = value
+
+    def _on_cmd_lockout_update(self, field_name: str, value: bool | None) -> None:
         # Inverted logic
-        self._pet_proximity_keep_open = not value
+        if value is not None:
+            self._pet_proximity_keep_open = not value
 
     def _on_battery_update(self, data: dict[str, Any]) -> None:
         """Handle battery update from client."""
@@ -1174,29 +1231,46 @@ class PowerPetDoor:
     def _on_hw_info_update(self, data: dict[str, Any]) -> None:
         self._hw_info = data
 
-    def _on_total_cycles_update(self, value: int) -> None:
+    # Stats and notification listeners are invoked by the client as
+    # callback(field, value) (decision D4 / backend M2).
+
+    def _on_total_cycles_update(self, field_name: str, value: int) -> None:
         self._total_open_cycles = value
 
-    def _on_total_retracts_update(self, value: int) -> None:
+    def _on_total_retracts_update(self, field_name: str, value: int) -> None:
         self._total_auto_retracts = value
 
-    def _on_notify_inside_on(self, value: bool) -> None:
-        self._notifications.inside_on = value
+    def _on_notify_inside_on(self, field_name: str, value: bool | None) -> None:
+        if value is not None:
+            self._notifications.inside_on = value
 
-    def _on_notify_inside_off(self, value: bool) -> None:
-        self._notifications.inside_off = value
+    def _on_notify_inside_off(self, field_name: str, value: bool | None) -> None:
+        if value is not None:
+            self._notifications.inside_off = value
 
-    def _on_notify_outside_on(self, value: bool) -> None:
-        self._notifications.outside_on = value
+    def _on_notify_outside_on(self, field_name: str, value: bool | None) -> None:
+        if value is not None:
+            self._notifications.outside_on = value
 
-    def _on_notify_outside_off(self, value: bool) -> None:
-        self._notifications.outside_off = value
+    def _on_notify_outside_off(self, field_name: str, value: bool | None) -> None:
+        if value is not None:
+            self._notifications.outside_off = value
 
-    def _on_notify_low_battery(self, value: bool) -> None:
-        self._notifications.low_battery = value
+    def _on_notify_low_battery(self, field_name: str, value: bool | None) -> None:
+        if value is not None:
+            self._notifications.low_battery = value
 
     async def _on_connect(self) -> None:
         """Handle connection established."""
+        self._connected_event.set()
+        # After a client-level auto-reconnect the cached state may be
+        # stale; resynchronize before notifying callbacks (M10). The
+        # initial connect() performs its own refresh.
+        if self._initialized:
+            try:
+                await self.refresh()
+            except Exception:
+                logger.exception("Error refreshing state after reconnect")
         for callback in self._connect_callbacks:
             try:
                 callback()
@@ -1205,6 +1279,7 @@ class PowerPetDoor:
 
     async def _on_disconnect(self) -> None:
         """Handle connection lost."""
+        self._connected_event.clear()
         self._latency = None  # Reset latency since we're no longer connected
         for callback in self._disconnect_callbacks:
             try:

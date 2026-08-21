@@ -7,6 +7,10 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import pytest
 
 import powerpetdoor.tz_utils as tz_utils
@@ -82,6 +86,26 @@ class TestCacheInitialization:
         await tz_utils.async_init_timezone_cache()
         assert tz_utils.is_cache_initialized() is True
 
+    @pytest.mark.asyncio
+    async def test_concurrent_async_init_builds_cache_once(self, reset_cache, monkeypatch):
+        """Two concurrent initializers must run the tzdata scan once (L12)."""
+        calls = []
+        real_build = tz_utils._build_timezone_caches
+
+        def counting_build():
+            calls.append(1)
+            real_build()
+
+        monkeypatch.setattr(tz_utils, "_build_timezone_caches", counting_build)
+
+        await asyncio.gather(
+            tz_utils.async_init_timezone_cache(),
+            tz_utils.async_init_timezone_cache(),
+        )
+
+        assert calls == [1]
+        assert tz_utils.is_cache_initialized() is True
+
     def test_cache_not_initialized_returns_false(self, reset_cache):
         """is_cache_initialized returns False when not initialized."""
         assert tz_utils.is_cache_initialized() is False
@@ -124,6 +148,15 @@ class TestGetAvailableTimezones:
         result = tz_utils.get_available_timezones()
         assert result == []
 
+    def test_returns_copy_not_internal_cache(self):
+        """Mutating the returned list must not affect the cache (L12)."""
+        result = tz_utils.get_available_timezones()
+        original_len = len(result)
+
+        result.clear()
+
+        assert len(tz_utils.get_available_timezones()) == original_len
+
 
 # ============================================================================
 # IANA to POSIX Conversion Tests
@@ -157,8 +190,9 @@ class TestGetPosixTzString:
         """Europe/London should convert to GMT/BST format."""
         result = tz_utils.get_posix_tz_string("Europe/London")
         assert result is not None
-        # London uses GMT in winter and BST in summer
-        assert "GMT" in result or "BST" in result
+        # London uses GMT in winter and BST in summer - both must appear
+        assert "GMT" in result
+        assert "BST" in result
 
     def test_invalid_timezone_returns_none(self):
         """Invalid timezone name should return None."""
@@ -174,8 +208,9 @@ class TestGetPosixTzString:
         """POSIX strings should have expected format with DST rules."""
         result = tz_utils.get_posix_tz_string("America/New_York")
         assert result is not None
-        # Should contain DST transition rules like M3.2.0 (March 2nd Sunday)
-        assert "M3" in result or "M11" in result
+        # US DST: starts 2nd Sunday of March, ends 1st Sunday of November
+        assert "M3.2.0" in result
+        assert "M11.1.0" in result
 
     def test_non_dst_timezone(self):
         """Timezones without DST should still work."""
@@ -323,6 +358,45 @@ class TestParsePosixTzString:
         assert result["std_offset"] == "0"
         assert result["dst_abbrev"] == "BST"
 
+    def test_parse_angle_bracket_negative(self):
+        """<-03>3 (e.g. Buenos_Aires) parses with brackets stripped (L18)."""
+        result = tz_utils.parse_posix_tz_string("<-03>3")
+        assert result is not None
+        assert result["std_abbrev"] == "-03"
+        assert result["std_offset"] == "3"
+        assert result["dst_abbrev"] is None
+
+    def test_parse_angle_bracket_positive(self):
+        """<+05>-5 (e.g. Asia/Yekaterinburg style) parses correctly (L18)."""
+        result = tz_utils.parse_posix_tz_string("<+05>-5")
+        assert result is not None
+        assert result["std_abbrev"] == "+05"
+        assert result["std_offset"] == "-5"
+
+    def test_parse_angle_bracket_with_dst(self):
+        """Angle-bracket abbreviations with DST rules parse fully (L18)."""
+        result = tz_utils.parse_posix_tz_string("<-04>4<-03>,M9.1.6/24,M4.1.6/24")
+        assert result is not None
+        assert result["std_abbrev"] == "-04"
+        assert result["std_offset"] == "4"
+        assert result["dst_abbrev"] == "-03"
+        assert result["dst_start"] == "M9.1.6/24"
+        assert result["dst_end"] == "M4.1.6/24"
+
+    def test_parse_real_tzdata_angle_bracket_zone(self):
+        """A real tzdata zone with a numeric abbreviation parses (L18/M2)."""
+        posix = tz_utils.get_posix_tz_string("America/Argentina/Buenos_Aires")
+        assert posix == "<-03>3"
+        result = tz_utils.parse_posix_tz_string(posix)
+        assert result is not None
+        assert result["std_abbrev"] == "-03"
+        assert result["std_offset"] == "3"
+
+    def test_parse_no_match_returns_none(self):
+        """Input with no parseable abbreviation returns None (M2 contract)."""
+        assert tz_utils.parse_posix_tz_string("123") is None
+        assert tz_utils.parse_posix_tz_string("!!!") is None
+
 
 # ============================================================================
 # Integration Tests
@@ -332,35 +406,43 @@ class TestParsePosixTzString:
 class TestIntegration:
     """Integration tests for timezone utilities."""
 
-    def test_all_timezones_have_posix(self):
-        """Most timezones should have POSIX mappings."""
+    def test_every_timezone_has_parseable_posix(self):
+        """Exhaustive: every tzdata zone has a POSIX string and it parses (M2).
+
+        No sampling, no ratios, no skips - the pinned tzdata dependency
+        ships a TZif footer for every zone, and the parser must handle
+        every one of them (including angle-bracket abbreviations).
+        """
         timezones = tz_utils.get_available_timezones()
-        with_posix = 0
+        assert timezones  # Cache is initialized
+
+        missing_posix = [tz for tz in timezones if tz_utils.get_posix_tz_string(tz) is None]
+        assert missing_posix == []
+
+        unparseable = []
         for tz in timezones:
-            if tz_utils.get_posix_tz_string(tz) is not None:
-                with_posix += 1
-
-        # At least 90% of timezones should have POSIX mappings
-        assert with_posix / len(timezones) > 0.9
-
-    def test_posix_strings_are_parseable(self):
-        """All POSIX strings from conversions should be parseable."""
-        sample_timezones = [
-            "America/New_York",
-            "America/Los_Angeles",
-            "Europe/London",
-            "Europe/Paris",
-            "Asia/Tokyo",
-            "Australia/Sydney",
-        ]
-
-        for tz in sample_timezones:
             posix = tz_utils.get_posix_tz_string(tz)
-            if posix:
-                parsed = tz_utils.parse_posix_tz_string(posix)
-                assert parsed is not None, f"Failed to parse POSIX for {tz}: {posix}"
-                assert parsed["std_abbrev"] is not None
-                assert parsed["std_offset"] is not None
+            parsed = tz_utils.parse_posix_tz_string(posix)
+            if parsed is None or parsed["std_abbrev"] is None or parsed["std_offset"] is None:
+                unparseable.append((tz, posix))
+        assert unparseable == []
+
+    def test_new_york_posix_matches_zoneinfo_transitions(self):
+        """The parsed DST rule matches real zoneinfo behavior (M2).
+
+        M3.2.0 means DST starts the 2nd Sunday of March: 2026-03-08.
+        The UTC offset must differ across that transition.
+        """
+        posix = tz_utils.get_posix_tz_string("America/New_York")
+        parsed = tz_utils.parse_posix_tz_string(posix)
+        assert parsed["dst_start"] == "M3.2.0"
+        assert parsed["dst_end"] == "M11.1.0"
+
+        zone = ZoneInfo("America/New_York")
+        before = datetime(2026, 3, 7, 12, 0, tzinfo=zone).utcoffset()
+        after = datetime(2026, 3, 9, 12, 0, tzinfo=zone).utcoffset()
+        assert before.total_seconds() == -5 * 3600  # EST
+        assert after.total_seconds() == -4 * 3600  # EDT
 
     def test_us_timezones(self):
         """Test common US timezones."""

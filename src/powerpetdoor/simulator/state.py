@@ -8,6 +8,8 @@
 This module contains all the state-related dataclasses used by the simulator.
 """
 
+import logging
+import zoneinfo
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -39,7 +41,9 @@ from ..const import (
     FIELD_START_TIME_SUFFIX,
     FIELD_TZ,
 )
-from ..tz_utils import get_posix_tz_string, is_cache_initialized
+from ..tz_utils import find_iana_for_posix, get_posix_tz_string, is_cache_initialized
+
+logger = logging.getLogger(__name__)
 
 # Note: FIELD_INSIDE and FIELD_OUTSIDE are used both as:
 # 1. Settings fields for sensor enable/disable (string "0"/"1")
@@ -272,8 +276,10 @@ class DoorSimulatorState:
     battery_config: BatteryConfig = field(default_factory=BatteryConfig)
 
     # Settings
+    # timezone holds either an IANA name (set locally) or a POSIX TZ string
+    # (as received on the wire via SET_TIMEZONE); get_tzinfo() resolves both.
     timezone: str = "America/New_York"
-    hold_time: int = 2
+    hold_time: float = 2.0
     sensor_trigger_voltage: int = 100
     sleep_sensor_trigger_voltage: int = 50
 
@@ -310,6 +316,10 @@ class DoorSimulatorState:
     # These represent the physical sensor detecting something (e.g., pet in doorway)
     inside_sensor_active: bool = False
     outside_sensor_active: bool = False
+
+    # Internal: remembers which timezone value already produced a UTC-fallback
+    # warning, so the warning is logged once per value.
+    _tz_warned_for: str | None = field(default=None, repr=False, compare=False)
 
     @property
     def sensor_active(self) -> bool:
@@ -374,6 +384,37 @@ class DoorSimulatorState:
         """Get list of schedule indices (matches real device behavior)."""
         return list(self.schedules.keys())
 
+    def get_tzinfo(self) -> zoneinfo.ZoneInfo:
+        """Resolve the configured timezone to a usable tzinfo.
+
+        ``timezone`` may be an IANA name (e.g. "America/New_York") or a wire
+        POSIX TZ string (e.g. "EST5EDT,M3.2.0,M11.1.0" as received via
+        SET_TIMEZONE). POSIX values are mapped back to an IANA zone via
+        :func:`~powerpetdoor.tz_utils.find_iana_for_posix` (requires the
+        timezone cache to be initialized). Falls back to UTC - with a
+        warning logged once per value - when neither resolves.
+        """
+        try:
+            return zoneinfo.ZoneInfo(self.timezone)
+        except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+            pass
+
+        iana = find_iana_for_posix(self.timezone)
+        if iana:
+            try:
+                return zoneinfo.ZoneInfo(iana)
+            except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+                pass
+
+        if self._tz_warned_for != self.timezone:
+            logger.warning(
+                "Simulator: cannot resolve timezone %r; falling back to UTC "
+                "for schedule evaluation",
+                self.timezone,
+            )
+            self._tz_warned_for = self.timezone
+        return zoneinfo.ZoneInfo("UTC")
+
     def is_sensor_allowed_by_schedule(self, sensor: str) -> bool:
         """Check if a sensor trigger is allowed based on schedules.
 
@@ -395,17 +436,7 @@ class DoorSimulatorState:
             return True
 
         # Check if any schedule allows this sensor at the current time
-        try:
-            import zoneinfo
-
-            tz = zoneinfo.ZoneInfo(self.timezone)
-        except Exception:
-            # Fallback to UTC if timezone is invalid
-            import zoneinfo
-
-            tz = zoneinfo.ZoneInfo("UTC")
-
-        now = datetime.now(tz)
+        now = datetime.now(self.get_tzinfo())
 
         for schedule in self.schedules.values():
             if schedule.is_sensor_allowed(sensor, now.hour, now.minute, now.weekday()):

@@ -92,6 +92,10 @@ or on error:
 
 Note: Response includes `CMD` echoing the command name, and `success` is a string `"true"`/`"false"`.
 
+Unknown or unsupported commands are answered with the error envelope
+(`"success": "false"`, `"reason": "Unknown command"`) rather than being
+silently accepted.
+
 ---
 
 ## Message Types

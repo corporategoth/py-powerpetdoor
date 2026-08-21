@@ -86,6 +86,25 @@ await door.connect()      # Connect and fetch initial state
 await door.disconnect()   # Disconnect from the door
 ```
 
+`connect()` waits (event-driven, no polling) for the connection and
+performs an initial state refresh, so cached properties are valid when
+it returns. It accepts an optional `timeout` keyword (defaults to
+`default_timeout`) and **raises `ConnectionError`** if the connection
+cannot be established in time - in that case the underlying client is
+fully shut down first (no reconnect attempts keep running in the
+background), so `connect()` may safely be retried.
+
+`disconnect()` stops automatic reconnection and closes the connection.
+It is idempotent: calling it twice, or before `connect()`, is safe.
+After `disconnect()`, calling `connect()` again re-arms the client.
+
+While connected, the underlying client automatically reconnects if the
+connection drops (with exponential backoff and jitter - see
+[client.md](client.md#reconnect-backoff)). After every automatic
+reconnect the door schedules a full `refresh()` so cached state never
+silently serves stale pre-disconnect values; `on_connect`/`on_disconnect`
+callbacks fire around each transition.
+
 ### Connection Properties
 
 | Property | Type | Description |
@@ -133,7 +152,13 @@ DoorStatus.HOLDING         # Door open, holding before auto-close
 DoorStatus.KEEPUP          # Door locked open (open_and_hold)
 DoorStatus.CLOSING_TOP_OPEN   # Door closing from top
 DoorStatus.CLOSING_MID_OPEN   # Door closing from middle
+DoorStatus.UNKNOWN         # Unrecognized status string from the device
 ```
+
+`DoorStatus.UNKNOWN` is reported (with a warning logged) when the
+device sends a status string this library does not recognize - for
+example from a newer firmware. While the status is `UNKNOWN`, `is_open`,
+`is_closed`, and `is_closing` are all `False` and `position` is `0`.
 
 ## Sensors
 

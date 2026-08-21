@@ -50,42 +50,41 @@ client.start()
 
 ### Async Mode
 
-For integration with an existing asyncio event loop:
+For integration with an existing asyncio event loop (the client latches
+onto the running loop automatically - passing `loop` is optional):
 
 ```python
 import asyncio
 from powerpetdoor import PowerPetDoorClient, CONFIG, CMD_GET_SETTINGS
 
 async def main():
-    loop = asyncio.get_running_loop()
-
     client = PowerPetDoorClient(
         host="192.168.1.100",
         port=3000,
         keepalive=30.0,
         timeout=10.0,
         reconnect=5.0,
-        loop=loop
     )
 
-    # Connect
+    # Connect. On success client.available is True when this returns; on
+    # failure the client logs the error and schedules reconnect attempts
+    # in the background (it does not raise).
     await client.connect()
 
-    # Wait for connection to establish
-    for _ in range(50):  # 5 seconds max
-        if client.available:
-            break
-        await asyncio.sleep(0.1)
+    if client.available:
+        # Send command and wait for response
+        settings = await client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+        print(f"Settings: {settings}")
 
-    # Send command and wait for response
-    settings = await client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
-    print(f"Settings: {settings}")
-
-    # Cleanup
-    client.stop()
+    # Cleanup: stops reconnection and closes the connection
+    client.shutdown()
 
 asyncio.run(main())
 ```
+
+> **Tip**: The higher-level [`PowerPetDoor`](door.md) class wraps this
+> with `await door.connect()` that *does* raise `ConnectionError` on
+> failure.
 
 ## Constructor
 
@@ -109,8 +108,13 @@ client = PowerPetDoorClient(
 | `port` | `int` | TCP port number (typically 3000) |
 | `keepalive` | `float` | Seconds between keepalive pings (0 to disable) |
 | `timeout` | `float` | Seconds to wait for responses |
-| `reconnect` | `float` | Seconds to wait before reconnecting after disconnect |
-| `loop` | `AbstractEventLoop` | Optional asyncio event loop (creates one if not provided) |
+| `reconnect` | `float` | Base delay before reconnecting after a disconnect (see [Reconnect Backoff](#reconnect-backoff)) |
+| `loop` | `AbstractEventLoop` | Optional asyncio event loop. If omitted, the client latches onto the running loop at `connect()`/`start()` time; the blocking `start()` path creates a private loop only when no loop is running |
+
+> **Thread safety**: All methods except `stop()` and
+> `run_coroutine_threadsafe()` must be called from the event loop
+> thread. To drive the client from another thread, wrap the call in a
+> coroutine and submit it via `client.run_coroutine_threadsafe(...)`.
 
 ## Connection Management
 
@@ -125,18 +129,52 @@ client = PowerPetDoorClient(
 ### Methods
 
 ```python
-# Start client (blocks if no event loop provided)
+# Start client (blocks if no event loop is provided or running)
 client.start()
 
-# Stop client and close connection
+# Stop client and close connection (thread-safe; also stops a private loop)
 client.stop()
 
-# Async connect (for use with existing event loop)
+# Async connect (for use with an existing event loop).
+# Does not raise on failure: the error is logged and reconnect attempts
+# are scheduled in the background. No-op after shutdown()/stop().
 await client.connect()
 
-# Close connection without stopping event loop
+# Shut down: cancel pending reconnects and close the connection.
+# Idempotent; must be called from the event loop thread.
+client.shutdown()
+
+# Re-enable a shut-down client so connect() works again
+client.reset_shutdown()
+
+# Close the connection WITHOUT preventing an in-progress reconnect cycle
+# from being scheduled by a later connection loss (prefer shutdown())
 client.disconnect()
 ```
+
+### Lifecycle Semantics
+
+- `connect()` returns once the TCP connection is established
+  (`client.available` is `True`) or the attempt failed (a background
+  reconnect is then scheduled). It only raises `asyncio.CancelledError`.
+- On connection loss the client automatically reconnects (see below)
+  unless `shutdown()`/`stop()` was called.
+- `shutdown()`/`stop()` cancel any pending reconnect attempt - the
+  client never reconnects after shutdown.
+- `disconnect()` fails all outstanding `notify=True` futures with
+  `ConnectionError` and fires `on_disconnect` handlers only if a
+  connection actually existed (failed connection attempts do not
+  produce disconnect events).
+- After `shutdown()`, call `reset_shutdown()` (or `start()`) before
+  connecting again.
+
+### Reconnect Backoff
+
+The `reconnect` constructor argument is the *base* delay. On each
+consecutive failed attempt the delay doubles, up to a cap of 300
+seconds, with up to 25% random jitter added so several clients do not
+retry in lockstep against the single-connection device. A successful
+connection resets the backoff to the base delay.
 
 ## Sending Messages
 
@@ -165,6 +203,35 @@ client.send_message(CONFIG, CMD_SET_HOLD_TIME, notify=True, holdTime=1500)
 
 - If `notify=False`: Returns `None`
 - If `notify=True`: Returns an `asyncio.Future` that resolves with the response
+
+### Response Errors
+
+A `notify=True` future never hangs forever - it always completes with
+one of:
+
+- **The response payload** on success (for commands with no specialized
+  response parser, e.g. `CMD_OPEN`, the raw acknowledgment message dict).
+- **`CommandError`** when the device reports failure (`success:
+  "false"`) or the response payload was malformed/missing its expected
+  field. `CommandError` carries `cmd` and `reason` attributes (the
+  device's `reason` field, when provided).
+- **`TimeoutError`** when the message was dropped after exhausting
+  retries (no response from the device).
+- **`ConnectionError`** when the connection closed before a response
+  arrived.
+
+```python
+from powerpetdoor import CommandError, CONFIG, CMD_GET_SCHEDULE
+
+try:
+    schedule = await client.send_message(CONFIG, CMD_GET_SCHEDULE, notify=True, index=99)
+except CommandError as err:
+    print(f"Device rejected {err.cmd}: {err.reason}")
+except TimeoutError:
+    print("Device did not respond")
+except ConnectionError:
+    print("Connection lost")
+```
 
 ## Message Types and Commands
 
@@ -326,6 +393,40 @@ The `sensor_update` fields are `FIELD_POWER`, `FIELD_INSIDE`, `FIELD_OUTSIDE`,
 `FIELD_AUTO`, `FIELD_OUTSIDE_SENSOR_SAFETY_LOCK`, `FIELD_CMD_LOCKOUT`, and
 `FIELD_AUTORETRACT` (all exported from the package root).
 
+### Notification Events
+
+The device announces sensor and battery events on its own initiative
+(outside the command/response flow). Register a `notification_event`
+listener to receive them:
+
+```python
+from powerpetdoor import (
+    NOTIFY_LOW_BATTERY,
+    NOTIFY_SENSOR_INDOOR,
+    NOTIFY_SENSOR_OUTDOOR,
+    SENSOR_STATE_ON,
+)
+
+def on_event(event: str, state: str | None) -> None:
+    if event == NOTIFY_SENSOR_INDOOR and state == SENSOR_STATE_ON:
+        print("Pet detected at the indoor sensor!")
+    elif event == NOTIFY_LOW_BATTERY:
+        print("Battery is low")
+
+client.add_listener("my_app", notification_event=on_event)
+```
+
+The callback receives `(event, state)`:
+
+- `event` is one of `NOTIFY_SENSOR_INDOOR`, `NOTIFY_SENSOR_OUTDOOR`, or
+  `NOTIFY_LOW_BATTERY`.
+- `state` is the reported `sensorState` (`SENSOR_STATE_ON`/`SENSOR_STATE_OFF`,
+  i.e. `"on"`/`"off"`), or `None` when the event carries no state
+  (`NOTIFY_LOW_BATTERY`).
+
+Both the documented bare envelope (`{"SENSOR_INDOOR": "", "sensorState":
+"on"}`) and CMD-style variants are dispatched to the same listeners.
+
 ### Removing Listeners
 
 ```python
@@ -352,6 +453,7 @@ client.del_listener("my_app")
 | `reset_reason_update` | `(reason: str)` | Last reset reason |
 | `schedule_update` | `(schedule: dict)` | Schedule created or updated |
 | `schedule_delete` | `(index: int)` | Schedule deleted |
+| `notification_event` | `(event: str, state: str \| None)` | Device-initiated sensor/battery event |
 
 ## Connection Handlers
 
@@ -440,4 +542,4 @@ This ensures keepalives and urgent door commands are processed before routine qu
 | Min message interval | 200ms (fixed) | Delay between messages to avoid overwhelming the device |
 | Keepalive interval | constructor `keepalive` | PING/PONG frequency (`PowerPetDoor` defaults to 30s) |
 | Response timeout | constructor `timeout` | Max wait for a command response (`PowerPetDoor` defaults to 10s) |
-| Reconnect delay | constructor `reconnect` | Wait before reconnecting after disconnect (`PowerPetDoor` defaults to 5s) |
+| Reconnect delay | constructor `reconnect` | Base delay before reconnecting (`PowerPetDoor` defaults to 5s); doubles per failed attempt with jitter, capped at 300s |

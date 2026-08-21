@@ -8,14 +8,19 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import time
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from powerpetdoor import (
+    PowerPetDoorClient,
     PrioritizedMessage,
     find_end,
     make_bool,
 )
+from powerpetdoor.client import MAX_FAILED_MSG, MAX_FAILED_PINGS
 from powerpetdoor.const import (
     CMD_CLOSE,
     CMD_GET_DOOR_STATUS,
@@ -176,8 +181,21 @@ class TestClientConnection:
         assert client.available is True
 
     def test_unavailable_when_disconnected(self, disconnected_client):
-        """Client is unavailable when no transport."""
-        assert not disconnected_client.available
+        """available is a real False when no transport, never None (L4)."""
+        assert disconnected_client.available is False
+
+    async def test_loopless_client_resolves_running_loop(self):
+        """loop=None latches onto the running loop at use time (D5/C1)."""
+        client = PowerPetDoorClient(
+            host="127.0.0.1", port=3000, keepalive=0, timeout=1.0, reconnect=1.0
+        )
+
+        assert client._eventLoop is None  # No dead private loop created
+        future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+
+        assert client._eventLoop is asyncio.get_running_loop()
+        assert future.get_loop() is asyncio.get_running_loop()
+        future.cancel()
 
     def test_host_property(self, mock_client):
         """Host property returns configured host."""
@@ -208,7 +226,7 @@ class TestClientConnection:
 
         client.disconnect()
 
-        assert client._queue.empty()
+        assert client._queue == []
 
     def test_disconnect_resets_sequence(self, mock_client):
         """Disconnect resets the message sequence counter."""
@@ -252,7 +270,7 @@ class TestMessageQueue:
 
         client.enqueue_data({"test": "data"}, priority=PRIORITY_LOW)
 
-        assert not client._queue.empty()
+        assert client._queue
 
     def test_enqueue_increments_sequence(self, mock_client):
         """Each enqueue increments the sequence counter."""
@@ -276,9 +294,9 @@ class TestMessageQueue:
         client.enqueue_data({"cmd": "critical"}, priority=PRIORITY_CRITICAL)
 
         # Get messages in priority order
-        msg1 = client._queue.get_nowait()
-        msg2 = client._queue.get_nowait()
-        msg3 = client._queue.get_nowait()
+        msg1 = heapq.heappop(client._queue)
+        msg2 = heapq.heappop(client._queue)
+        msg3 = heapq.heappop(client._queue)
 
         assert msg1.data["cmd"] == "critical"
         assert msg2.data["cmd"] == "high"
@@ -293,9 +311,9 @@ class TestMessageQueue:
         client.enqueue_data({"order": 2}, priority=PRIORITY_LOW)
         client.enqueue_data({"order": 3}, priority=PRIORITY_LOW)
 
-        msg1 = client._queue.get_nowait()
-        msg2 = client._queue.get_nowait()
-        msg3 = client._queue.get_nowait()
+        msg1 = heapq.heappop(client._queue)
+        msg2 = heapq.heappop(client._queue)
+        msg3 = heapq.heappop(client._queue)
 
         assert msg1.data["order"] == 1
         assert msg2.data["order"] == 2
@@ -318,7 +336,7 @@ class TestSendMessage:
         client.send_message(COMMAND, CMD_OPEN)
 
         # Message should be queued
-        assert not client._queue.empty()
+        assert client._queue
 
     def test_send_message_increments_msgid(self, mock_client):
         """Each send_message increments the message ID."""
@@ -356,7 +374,7 @@ class TestSendMessage:
         client.send_message(COMMAND, CMD_CLOSE)
 
         # Check priority of queued messages
-        msg = client._queue.get_nowait()
+        msg = heapq.heappop(client._queue)
         assert msg.priority == PRIORITY_HIGH
 
     def test_send_message_low_priority_for_status(self, mock_client):
@@ -366,7 +384,7 @@ class TestSendMessage:
 
         client.send_message(CONFIG, CMD_GET_SETTINGS)
 
-        msg = client._queue.get_nowait()
+        msg = heapq.heappop(client._queue)
         assert msg.priority == PRIORITY_LOW
 
 
@@ -379,13 +397,13 @@ class TestDataReceived:
     """Tests for data_received and message processing."""
 
     def test_valid_json_processed(self, mock_client):
-        """Valid JSON is processed correctly."""
-        client, _, device = mock_client
+        """Valid JSON is decoded and dispatched to process_message."""
+        client, _, _ = mock_client
+        received = _capture_messages(client)
 
-        # Send a response
-        device.respond_success(1, "TEST_CMD", extra_field="value")
+        client.data_received(b'{"success": "true", "CMD": "TEST_CMD", "msgId": 1}')
 
-        # The message should be processed (we can verify by checking buffer is empty)
+        assert received == [{"success": "true", "CMD": "TEST_CMD", "msgId": 1}]
         assert client._buffer == ""
 
     def test_partial_json_buffered(self, mock_client):
@@ -399,16 +417,19 @@ class TestDataReceived:
         assert client._buffer == partial
 
     def test_multiple_messages_processed(self, mock_client):
-        """Multiple complete messages in one chunk are all processed."""
+        """Multiple complete messages in one chunk are all dispatched."""
         client, _, _ = mock_client
+        received = _capture_messages(client)
 
-        # Send two complete JSON objects
         data = (
             '{"success": "true", "CMD": "A", "msgId": 1}{"success": "true", "CMD": "B", "msgId": 2}'
         )
         client.data_received(data.encode("ascii"))
 
-        # Buffer should be empty after processing both
+        assert received == [
+            {"success": "true", "CMD": "A", "msgId": 1},
+            {"success": "true", "CMD": "B", "msgId": 2},
+        ]
         assert client._buffer == ""
 
     def test_buffered_partial_completed(self, mock_client):
@@ -441,21 +462,74 @@ class TestListenerSystem:
 
         assert "test_listener" in client.door_status_listeners
 
-    def test_del_listener(self, mock_client, make_callback):
-        """del_listener removes a callback from door_status_listeners."""
+    def test_del_listener_removes_from_all_registries(self, mock_client, make_callback):
+        """del_listener() removes the name from every listener registry (C3)."""
         client, _, _ = mock_client
         callback = make_callback("test")
 
-        # Add to door_status_listeners directly for isolated test
-        client.door_status_listeners["test_listener"] = callback
+        client.add_listener(
+            "test_listener",
+            door_status_update=callback,
+            settings_update=callback,
+            sensor_update={"*": callback},
+            notifications_update={"*": callback},
+            stats_update={"*": callback},
+            hw_info_update=callback,
+            battery_update=callback,
+            timezone_update=callback,
+            hold_time_update=callback,
+            sensor_trigger_voltage_update=callback,
+            sleep_sensor_trigger_voltage_update=callback,
+            remote_id_update=callback,
+            remote_key_update=callback,
+            reset_reason_update=callback,
+            schedule_update=callback,
+            schedule_delete=callback,
+            notification_event=callback,
+        )
 
-        # Verify it was added
-        assert "test_listener" in client.door_status_listeners
+        client.del_listener("test_listener")
 
-        # Remove it directly (del_listener expects all listeners to exist)
-        del client.door_status_listeners["test_listener"]
+        registries = [
+            client.door_status_listeners,
+            client.settings_listeners,
+            *client.sensor_listeners.values(),
+            *client.notifications_listeners.values(),
+            *client.stats_listeners.values(),
+            client.hw_info_listeners,
+            client.battery_listeners,
+            client.timezone_listeners,
+            client.hold_time_listeners,
+            client.sensor_trigger_voltage_listeners,
+            client.sleep_sensor_trigger_voltage_listeners,
+            client.remote_id_listeners,
+            client.remote_key_listeners,
+            client.reset_reason_listeners,
+            client.schedule_update_listeners,
+            client.schedule_delete_listeners,
+            client.notification_event_listeners,
+        ]
+        for registry in registries:
+            assert "test_listener" not in registry
 
-        assert "test_listener" not in client.door_status_listeners
+    def test_del_listener_unknown_name_is_noop(self, mock_client, make_callback):
+        """del_listener() for a never-added name does not raise (C3)."""
+        client, _, _ = mock_client
+        client.add_listener("kept", door_status_update=make_callback("kept"))
+
+        client.del_listener("never_added")
+
+        assert "kept" in client.door_status_listeners
+
+    def test_del_handlers_partial_registration_is_safe(self, mock_client, make_async_callback):
+        """del_handlers() must not raise when only some handlers exist (M6)."""
+        client, _, _ = mock_client
+        client.add_handlers("partial", on_connect=make_async_callback("connect"))
+
+        client.del_handlers("partial")
+        client.del_handlers("never_added")
+
+        assert "partial" not in client.on_connect
 
     async def test_listener_invoked_on_message(self, mock_client, callback_tracker, make_callback):
         """Listener callback is invoked when relevant message received."""
@@ -492,50 +566,77 @@ class TestListenerSystem:
 
 
 class TestKeepalive:
-    """Tests for the PING/PONG keepalive mechanism."""
+    """Tests for the PING/PONG keepalive mechanism (real keepalive(), C2)."""
 
-    def test_ping_sends_message(self, mock_client):
-        """Keepalive sends PING message to queue."""
+    @staticmethod
+    def _arm_keepalive(client):
+        """Prepare a client so keepalive() runs its body immediately.
+
+        keepalive() only acts when self._keepalive holds a non-cancelled
+        handle; cfg_keepalive=0 makes its internal sleep instantaneous.
+        """
+        client.cfg_keepalive = 0
+        client._keepalive = asyncio.get_running_loop().create_future()
+        client._can_dequeue = False  # Keep the PING in the queue for inspection
+
+    async def test_keepalive_sends_ping(self, mock_client):
+        """keepalive() itself enqueues a PING carrying the last-ping token."""
+        client, _, _ = mock_client
+        self._arm_keepalive(client)
+        client._last_ping = None
+
+        await client.keepalive()
+
+        assert client._last_ping is not None
+        assert client._queue
+        msg = heapq.heappop(client._queue)
+        assert msg.data[PING] == client._last_ping
+
+    async def test_keepalive_unanswered_ping_increments_failed_pings(self, mock_client):
+        """An unanswered PING increments the failure counter and re-pings."""
+        client, _, _ = mock_client
+        self._arm_keepalive(client)
+        client._last_ping = "123"
+        client._failed_pings = 0
+
+        await client.keepalive()
+
+        assert client._failed_pings == 1
+        assert client._queue  # A new PING was enqueued
+
+    async def test_keepalive_disconnects_after_max_failed_pings(self, mock_client):
+        """Reaching MAX_FAILED_PINGS unanswered pings drops the connection."""
         client, transport, _ = mock_client
-        client._can_dequeue = False  # Prevent async processing
+        self._arm_keepalive(client)
+        client._last_ping = "123"
+        client._failed_pings = MAX_FAILED_PINGS - 1
 
-        # Manually trigger a ping (in reality, this is done via keepalive timer)
-        client._last_ping = str(round(time.time() * 1000))
-        client.send_message(PING, client._last_ping)
+        await client.keepalive()
 
-        # Check the message was queued
-        assert not client._queue.empty()
-        msg = client._queue.get_nowait()
-        assert PING in msg.data
+        assert client._transport is None
+        assert transport.is_closing()
+        assert not client._queue  # No new PING after disconnect
 
     async def test_pong_clears_last_ping(self, mock_client):
         """Successful PONG response clears _last_ping."""
         client, _, device = mock_client
 
-        # Set a pending ping
         ping_value = "123456789"
         client._last_ping = ping_value
 
-        # Respond with PONG
-        device.respond_to_ping(1, ping_value)
-
-        # Allow the event loop to process pending tasks
-        await asyncio.sleep(0.01)
+        await client.process_message({FIELD_SUCCESS: "true", "CMD": "PONG", "PONG": ping_value})
 
         assert client._last_ping is None
 
-    def test_failed_ping_increments_counter(self, mock_client):
-        """Failed PING response increments failed counter."""
+    async def test_pong_resets_failed_pings(self, mock_client):
+        """A matching PONG resets the failed-ping counter to zero."""
         client, _, _ = mock_client
+        client._failed_pings = 2
+        client._last_ping = "424242"
 
-        initial_failed = client._failed_pings
-        client._last_ping = "123"  # Set pending ping
+        await client.process_message({FIELD_SUCCESS: "true", "CMD": "PONG", "PONG": "424242"})
 
-        # The keepalive mechanism will increment on timeout
-        # We'll simulate by directly incrementing
-        client._failed_pings += 1
-
-        assert client._failed_pings == initial_failed + 1
+        assert client._failed_pings == 0
 
 
 # ============================================================================
@@ -544,7 +645,7 @@ class TestKeepalive:
 
 
 class TestConnectionLost:
-    """Tests for connection_lost handling."""
+    """Tests for connection_lost and reconnect scheduling (H2/H5)."""
 
     def test_connection_lost_triggers_disconnect(self, mock_client):
         """connection_lost triggers disconnect cleanup."""
@@ -556,29 +657,246 @@ class TestConnectionLost:
 
         assert client._transport is None
 
-    def test_connection_lost_triggers_reconnect_when_not_shutdown(self, mock_client):
-        """connection_lost triggers reconnect when not shutdown."""
+    async def test_connection_lost_schedules_tracked_reconnect(self, mock_client):
+        """connection_lost creates a tracked reconnect task (H2)."""
         client, _, _ = mock_client
-        client._shutdown = False
 
-        with patch.object(client, "reconnect", new_callable=AsyncMock):
-            with patch.object(client, "ensure_future") as mock_ensure:
-                client.connection_lost(None)
-                # Should schedule reconnect
-                assert mock_ensure.called
+        with patch.object(client, "connect", new_callable=AsyncMock) as mock_connect:
+            client.cfg_reconnect = 0
+            client.connection_lost(None)
 
-    def test_connection_lost_no_reconnect_when_shutdown(self, mock_client):
-        """connection_lost does not reconnect when shutdown is True."""
+            task = client._reconnect_task
+            assert task is not None
+            await task
+            assert mock_connect.await_count == 1
+
+    async def test_connection_lost_no_reconnect_when_shutdown(self, mock_client):
+        """connection_lost does not schedule a reconnect after shutdown."""
         client, _, _ = mock_client
         client._shutdown = True
 
-        with patch.object(client, "reconnect", new_callable=AsyncMock):
-            with patch.object(client, "ensure_future") as mock_ensure:
-                client.connection_lost(None)
-                # Should NOT schedule reconnect
-                # Check that ensure_future wasn't called with reconnect
-                for call in mock_ensure.call_args_list:
-                    assert "reconnect" not in str(call)
+        client.connection_lost(None)
+
+        assert client._reconnect_task is None
+
+    async def test_stop_during_reconnect_delay_cancels_reconnect(self, mock_client):
+        """Drop -> stop() during the reconnect delay -> no zombie reconnect (H2)."""
+        client, _, _ = mock_client
+
+        with patch.object(client, "connect", new_callable=AsyncMock) as mock_connect:
+            client.connection_lost(None)  # cfg_reconnect=1.0 delay from fixture
+            task = client._reconnect_task
+            assert task is not None
+
+            client.stop()
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert mock_connect.await_count == 0
+            assert client._reconnect_task is None
+
+    async def test_shutdown_cancels_pending_reconnect(self, mock_client):
+        """The public shutdown() also cancels a pending reconnect (M6/H2)."""
+        client, _, _ = mock_client
+
+        with patch.object(client, "connect", new_callable=AsyncMock) as mock_connect:
+            client.connection_lost(None)
+            task = client._reconnect_task
+            assert task is not None
+
+            client.shutdown()
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert mock_connect.await_count == 0
+
+    async def test_reconnect_skips_connect_when_shutdown(self, mock_client):
+        """reconnect() checks the shutdown flag after its delay (H2)."""
+        client, _, _ = mock_client
+
+        with patch.object(client, "connect", new_callable=AsyncMock) as mock_connect:
+            client._shutdown = True
+            await client.reconnect(0)
+
+            assert mock_connect.await_count == 0
+
+    async def test_connect_is_noop_when_shutdown(self, disconnected_client):
+        """connect() refuses to run once the client is shut down (H2)."""
+        client = disconnected_client
+        client._shutdown = True
+
+        await client.connect()
+
+        assert client._transport is None
+
+    async def test_reset_shutdown_reenables_connect(self, disconnected_client):
+        """reset_shutdown() clears the flag so connect() runs again (M6)."""
+        client = disconnected_client
+        client.shutdown()
+        assert client._shutdown is True
+
+        client.reset_shutdown()
+
+        assert client._shutdown is False
+
+
+class TestReconnectBehavior:
+    """Reconnect against a real TCP server (H5)."""
+
+    async def test_client_reconnects_after_server_restart(self, client_config):
+        """The client automatically reconnects when the server comes back."""
+
+        async def handle(reader, writer):
+            pass  # Accept and hold the connection open
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+
+        client = PowerPetDoorClient(
+            host="127.0.0.1",
+            port=port,
+            keepalive=0,
+            timeout=2.0,
+            reconnect=0.05,
+            loop=asyncio.get_running_loop(),
+        )
+        connected = asyncio.Event()
+        client.add_handlers("test", on_connect=connected.set)
+
+        try:
+            await client.connect()
+            async with asyncio.timeout(2.0):
+                await connected.wait()
+            assert client.available is True
+
+            # Kill the server and the client's connection.
+            connected.clear()
+            server.close()
+            await server.wait_closed()
+            client._transport.close()
+
+            # Restart a server on the same port; the client must reconnect.
+            server = await asyncio.start_server(handle, "127.0.0.1", port)
+            async with asyncio.timeout(5.0):
+                await connected.wait()
+            assert client.available is True
+        finally:
+            client.shutdown()
+            server.close()
+            await server.wait_closed()
+
+    async def test_connect_failure_schedules_retry(self, client_config, unused_tcp_port):
+        """A refused connection schedules a backoff retry, not an exception."""
+        client = PowerPetDoorClient(
+            host="127.0.0.1",
+            port=unused_tcp_port,
+            keepalive=0,
+            timeout=1.0,
+            reconnect=0.05,
+            loop=asyncio.get_running_loop(),
+        )
+
+        with patch.object(client, "reconnect", new_callable=AsyncMock) as mock_reconnect:
+            await client.connect()
+            task = client._reconnect_task
+            assert task is not None
+            await task
+
+            assert mock_reconnect.await_count == 1
+            (delay,) = mock_reconnect.await_args.args
+            assert delay >= client.cfg_reconnect
+
+    async def test_reconnect_backoff_grows_and_is_capped(self, disconnected_client):
+        """Backoff doubles per failed attempt, jittered, capped (L1)."""
+        from powerpetdoor.client import MAX_RECONNECT_DELAY, RECONNECT_JITTER
+
+        client = disconnected_client
+        client.cfg_reconnect = 5.0
+
+        first = client._next_reconnect_delay()
+        second = client._next_reconnect_delay()
+        third = client._next_reconnect_delay()
+
+        assert 5.0 <= first <= 5.0 * (1 + RECONNECT_JITTER)
+        assert 10.0 <= second <= 10.0 * (1 + RECONNECT_JITTER)
+        assert 20.0 <= third <= 20.0 * (1 + RECONNECT_JITTER)
+
+        # Many failures later, the delay is capped.
+        client._reconnect_attempts = 50
+        capped = client._next_reconnect_delay()
+        assert capped <= MAX_RECONNECT_DELAY * (1 + RECONNECT_JITTER)
+
+    async def test_successful_connection_resets_backoff(self, mock_client):
+        """connection_made resets the reconnect attempt counter (L1)."""
+        client, transport, _ = mock_client
+        client._reconnect_attempts = 7
+
+        client.connection_made(transport)
+
+        assert client._reconnect_attempts == 0
+
+
+class TestDisconnectTransitions:
+    """on_disconnect must fire only on real connected->disconnected (L2)."""
+
+    async def test_on_disconnect_fires_after_real_connection(self, mock_client):
+        """Disconnecting an established connection notifies handlers."""
+        client, _, _ = mock_client
+        disconnected = asyncio.Event()
+        client.add_handlers("test", on_disconnect=disconnected.set)
+
+        client.disconnect()
+
+        async with asyncio.timeout(1.0):
+            await disconnected.wait()
+
+    async def test_on_disconnect_not_fired_when_never_connected(self, disconnected_client):
+        """A failed connect attempt must not produce disconnect events (L2)."""
+        client = disconnected_client
+        events = []
+
+        async def on_disconnect():
+            events.append("disconnect")
+
+        client.add_handlers("test", on_disconnect=on_disconnect)
+        client.disconnect()
+        await asyncio.sleep(0)  # Let any (wrongly) scheduled callbacks run
+
+        assert events == []
+
+    async def test_on_disconnect_not_fired_twice(self, mock_client):
+        """A second disconnect() must not re-notify handlers (L2)."""
+        client, _, _ = mock_client
+        count = 0
+
+        async def on_disconnect():
+            nonlocal count
+            count += 1
+
+        client.add_handlers("test", on_disconnect=on_disconnect)
+        client.disconnect()
+        client.disconnect()
+        await asyncio.sleep(0)
+
+        assert count == 1
+
+
+class TestQueueFlushOnConnect:
+    """Messages enqueued while disconnected flush on reconnect (L3)."""
+
+    async def test_connection_made_kicks_nonempty_queue(self, disconnected_client, mock_transport):
+        """connection_made drains messages queued while disconnected."""
+        client = disconnected_client
+        client.send_message(COMMAND, CMD_OPEN)  # Queued: no transport yet
+        assert client._queue
+
+        client.connection_made(mock_transport)
+        async with asyncio.timeout(1.0):
+            while not mock_transport.written_data:
+                await asyncio.sleep(0)
+
+        sent = mock_transport.get_last_message()
+        assert sent[COMMAND] == CMD_OPEN
 
 
 # ============================================================================
@@ -622,18 +940,132 @@ class TestOutstandingMessages:
         assert future.result() == {"power_state": True}
         assert msg_id not in client._outstanding
 
-    def test_disconnect_cancels_outstanding(self, mock_client):
-        """Disconnect cancels all outstanding futures."""
+    async def test_disconnect_fails_outstanding_with_connection_error(self, mock_client):
+        """Disconnect fails in-flight futures with ConnectionError, not cancel (M1/L9)."""
         client, _, _ = mock_client
+        loop_errors = []
+        loop = asyncio.get_running_loop()
+        old_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda lp, ctx: loop_errors.append(ctx))
 
-        future1 = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
-        future2 = client.send_message(CONFIG, CMD_GET_DOOR_STATUS, notify=True)
+        try:
+            future1 = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+            future2 = client.send_message(CONFIG, CMD_GET_DOOR_STATUS, notify=True)
+
+            client.disconnect()
+
+            assert len(client._outstanding) == 0
+            assert isinstance(future1.exception(), ConnectionError)
+            assert isinstance(future2.exception(), ConnectionError)
+
+            # Let the done-callbacks run: they must not raise KeyError
+            # into the loop's exception handler (M1).
+            await asyncio.sleep(0)
+            assert loop_errors == []
+        finally:
+            loop.set_exception_handler(old_handler)
+
+    async def test_awaiting_caller_sees_connection_error(self, mock_client):
+        """The documented `await future` pattern gets a typed error on disconnect."""
+        client, _, _ = mock_client
+        future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
 
         client.disconnect()
 
-        assert len(client._outstanding) == 0
-        assert future1.cancelled()
-        assert future2.cancelled()
+        with pytest.raises(ConnectionError):
+            await future
+
+
+# ============================================================================
+# check_receipt Retry Machinery Tests (H4)
+# ============================================================================
+
+
+class TestCheckReceipt:
+    """Retry, drop, and success paths of the receipt checker (H4)."""
+
+    async def test_dropped_message_future_raises_timeout(self, mock_client):
+        """After MAX_FAILED_MSG timeouts the future fails with TimeoutError (H4)."""
+        client, transport, _ = mock_client
+        client.cfg_timeout = 0.05
+
+        future = client.send_message(COMMAND, CMD_OPEN, notify=True)
+
+        try:
+            async with asyncio.timeout(5.0):
+                await future
+        except TimeoutError:
+            pass
+
+        # The drop (not our safety timeout) must have failed the future.
+        assert future.done()
+        assert not future.cancelled()
+        assert isinstance(future.exception(), TimeoutError)
+
+    async def test_check_receipt_retransmits_on_timeout(self, mock_client):
+        """The unacknowledged message is retransmitted exactly once."""
+        client, transport, _ = mock_client
+        client.cfg_timeout = 0.05
+
+        future = client.send_message(COMMAND, CMD_OPEN, notify=True)
+        try:
+            async with asyncio.timeout(5.0):
+                await future
+        except TimeoutError:
+            pass
+
+        assert len(transport.written_data) == MAX_FAILED_MSG
+        assert transport.written_data[0] == transport.written_data[1]
+        assert client._failed_msg == 0
+
+    async def test_response_cancels_check_receipt(self, mock_client):
+        """A prompt response stops the retry timer; no retransmit occurs."""
+        client, transport, device = mock_client
+        client.cfg_timeout = 0.05
+
+        msg_id = client.msgId
+        future = client.send_message(COMMAND, CMD_OPEN, notify=True)
+
+        # Wait for the message to actually go out, then respond.
+        async with asyncio.timeout(2.0):
+            while not transport.written_data:
+                await asyncio.sleep(0)
+        await client.process_message(
+            {FIELD_SUCCESS: "true", "CMD": CMD_OPEN, "msgID": msg_id, "door_status": "DOOR_RISING"}
+        )
+
+        result = await asyncio.wait_for(future, timeout=2.0)
+        assert result["CMD"] == CMD_OPEN  # No handler: resolves with the raw ack
+        assert client._check_receipt is None
+        assert len(transport.written_data) == 1
+
+    async def test_send_data_runtime_error_disconnects(self, mock_client):
+        """A transport write failure triggers a clean disconnect."""
+        client, transport, _ = mock_client
+
+        def broken_write(data):
+            raise RuntimeError("broken pipe")
+
+        transport.write = broken_write
+        client._last_command = None
+
+        await client._send_data(b'{"config": "GET_DOOR_STATUS"}')
+
+        assert client._transport is None
+
+    async def test_send_data_transport_gone_after_sleep(self, mock_client):
+        """disconnect() during the rate-limit sleep is not fatal (M7)."""
+        client, transport, _ = mock_client
+        client._last_command = None
+        client._last_send = time.monotonic()  # Forces the rate-limit sleep
+
+        send_task = asyncio.ensure_future(client._send_data(b'{"config": "X"}'))
+        await asyncio.sleep(0)  # Let _send_data reach its sleep
+        client.disconnect()
+
+        await send_task  # Must not raise AttributeError
+
+        assert transport.written_data == []
 
 
 # ============================================================================
@@ -938,6 +1370,36 @@ class TestProcessMessageDefensive:
 
         assert order == ["handler", "dequeue"]
 
+    async def test_success_missing_expected_field_fails_future(self, mock_client):
+        """A handler that cannot resolve its future fails it typed, not cancel (L9)."""
+        from powerpetdoor.client import CommandError
+
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        msg_id = client.msgId
+        future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+
+        # GET_POWER response without the power_state payload field.
+        await client.process_message({"success": "true", "CMD": "GET_POWER", "msgID": msg_id})
+
+        assert future.done()
+        assert not future.cancelled()
+        err = future.exception()
+        assert isinstance(err, CommandError)
+        assert err.reason == "Response missing expected field"
+
+    async def test_success_without_handler_resolves_with_raw_message(self, mock_client):
+        """A successful response with no registered handler is the ack itself."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        msg_id = client.msgId
+        future = client.send_message(COMMAND, CMD_OPEN, notify=True)
+
+        msg = {"success": "true", "CMD": CMD_OPEN, "msgID": msg_id}
+        await client.process_message(msg)
+
+        assert future.result() == msg
+
     async def test_unmatched_msgid_response_ignored(self, mock_client):
         """A response for an unknown msgID does not raise or touch futures."""
         client, _, _ = mock_client
@@ -1107,7 +1569,7 @@ class TestMonotonicTiming:
 
 
 class TestSensorListenerSignature:
-    """Sensor listeners receive (field, value) — pins the D4 contract."""
+    """Dict-based listeners receive (field, value) — pins the D4 contract."""
 
     async def test_sensor_listener_receives_field_and_value(self, mock_client):
         """A per-field sensor listener is invoked as callback(field, value)."""
@@ -1122,3 +1584,56 @@ class TestSensorListenerSignature:
         await client.process_message({"success": "true", "CMD": "GET_POWER", "power_state": "1"})
 
         assert calls == [(FIELD_POWER, True)]
+
+    async def test_notifications_listener_receives_field_and_value(self, mock_client):
+        """Notification listeners are invoked as callback(field, value) (M2)."""
+        from powerpetdoor.const import (
+            FIELD_LOW_BATTERY_NOTIFICATIONS,
+            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
+        )
+
+        client, _, _ = mock_client
+        calls = []
+        client.add_listener(
+            "test",
+            notifications_update={"*": lambda field, value: calls.append((field, value))},
+        )
+
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": "GET_NOTIFICATIONS",
+                "notifications": {
+                    FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: "1",
+                    FIELD_LOW_BATTERY_NOTIFICATIONS: "0",
+                },
+            }
+        )
+
+        assert (FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS, True) in calls
+        assert (FIELD_LOW_BATTERY_NOTIFICATIONS, False) in calls
+        assert len(calls) == 2
+
+    async def test_stats_listener_receives_field_and_value(self, mock_client):
+        """Stats listeners are invoked as callback(field, value) (M2)."""
+        from powerpetdoor.const import (
+            FIELD_TOTAL_AUTO_RETRACTS,
+            FIELD_TOTAL_OPEN_CYCLES,
+        )
+
+        client, _, _ = mock_client
+        calls = []
+        client.add_listener(
+            "test", stats_update={"*": lambda field, value: calls.append((field, value))}
+        )
+
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": "GET_DOOR_OPEN_STATS",
+                FIELD_TOTAL_OPEN_CYCLES: 42,
+                FIELD_TOTAL_AUTO_RETRACTS: 7,
+            }
+        )
+
+        assert calls == [(FIELD_TOTAL_OPEN_CYCLES, 42), (FIELD_TOTAL_AUTO_RETRACTS, 7)]

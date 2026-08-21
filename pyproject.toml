@@ -26,7 +26,6 @@ classifiers = [
 ]
 keywords = ["power pet door", "pet door", "home automation", "iot"]
 dependencies = [
-    "async-timeout>=4.0.0",
     "tzdata>=2024.1",
 ]
 

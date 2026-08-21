@@ -156,6 +156,18 @@ class TestValidateScheduleEntry:
         }
         assert validate_schedule_entry(entry) is True
 
+    def test_non_container_time_field_fails(self, valid_schedule_entry):
+        """A time field of a non-container type returns False, not a crash."""
+        valid_schedule_entry[FIELD_INSIDE] = True
+        valid_schedule_entry[FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX] = 600
+        assert validate_schedule_entry(valid_schedule_entry) is False
+
+    def test_string_time_field_fails(self, valid_schedule_entry):
+        """A time field given as a string like '6:00' fails validation."""
+        valid_schedule_entry[FIELD_INSIDE] = True
+        valid_schedule_entry[FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX] = "6:00"
+        assert validate_schedule_entry(valid_schedule_entry) is False
+
 
 # ============================================================================
 # Schedule Compression Tests
@@ -331,6 +343,110 @@ class TestCompressSchedule:
         result = compress_schedule(entries)
         assert result[0][FIELD_INDEX] == 0
         assert result[1][FIELD_INDEX] == 1
+
+
+class TestCompressScheduleEdgeCases:
+    """Boundary and negative cases for compress_schedule (H11/T7)."""
+
+    create_schedule_entry = TestCompressSchedule.create_schedule_entry
+
+    def test_sparse_entry_raises_value_error(self):
+        """An entry missing its time fields raises a clear ValueError (T7)."""
+        sparse = {FIELD_DAYSOFWEEK: [1, 1, 1, 1, 1, 1, 1], FIELD_INSIDE: True}
+
+        with pytest.raises(ValueError, match="missing"):
+            compress_schedule([sparse])
+
+    def test_missing_daysofweek_raises_value_error(self):
+        """An entry without daysOfWeek raises a clear ValueError (T7)."""
+        entry = self.create_schedule_entry(0, [1] * 7, inside=True, in_start=(6, 0), in_end=(10, 0))
+        del entry[FIELD_DAYSOFWEEK]
+
+        with pytest.raises(ValueError, match="daysOfWeek"):
+            compress_schedule([entry])
+
+    def test_non_dict_entry_raises_value_error(self):
+        """A non-dict entry raises a clear ValueError (T7)."""
+        with pytest.raises(ValueError, match="not a dict"):
+            compress_schedule(["not-a-schedule"])
+
+    def test_error_identifies_entry_position(self):
+        """The ValueError names the offending entry's position (T7)."""
+        good = self.create_schedule_entry(0, [1] * 7, inside=True, in_start=(6, 0), in_end=(10, 0))
+        with pytest.raises(ValueError, match="entry 1"):
+            compress_schedule([good, {}])
+
+    def test_compress_does_not_mutate_input(self):
+        """compress_schedule must not modify the caller's entries."""
+        entry = self.create_schedule_entry(
+            3, [1, 0, 1, 0, 1, 0, 1], inside=True, in_start=(6, 0), in_end=(10, 0)
+        )
+        snapshot = deepcopy(entry)
+
+        compress_schedule([entry])
+
+        assert entry == snapshot
+
+    def test_compress_merges_adjacent_windows(self):
+        """end == next start merges into one window (the >= boundary)."""
+        entries = [
+            self.create_schedule_entry(0, [1] * 7, inside=True, in_start=(6, 0), in_end=(10, 0)),
+            self.create_schedule_entry(1, [1] * 7, inside=True, in_start=(10, 0), in_end=(14, 0)),
+        ]
+
+        result = compress_schedule(entries)
+
+        assert len(result) == 1
+        start_key = FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX
+        end_key = FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX
+        assert result[0][start_key] == {FIELD_HOUR: 6, FIELD_MINUTE: 0}
+        assert result[0][end_key] == {FIELD_HOUR: 14, FIELD_MINUTE: 0}
+
+    def test_compress_zero_length_window_preserved(self):
+        """A start == end window survives as a zero-length entry."""
+        entry = self.create_schedule_entry(
+            0, [1, 0, 0, 0, 0, 0, 0], inside=True, in_start=(8, 30), in_end=(8, 30)
+        )
+
+        result = compress_schedule([entry])
+
+        assert len(result) == 1
+        start_key = FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX
+        end_key = FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX
+        assert result[0][start_key] == {FIELD_HOUR: 8, FIELD_MINUTE: 30}
+        assert result[0][end_key] == {FIELD_HOUR: 8, FIELD_MINUTE: 30}
+
+    def test_compress_2359_boundary(self):
+        """A 23:59 end time is preserved exactly."""
+        entry = self.create_schedule_entry(
+            0, [1] * 7, inside=True, in_start=(0, 0), in_end=(23, 59)
+        )
+
+        result = compress_schedule([entry])
+
+        end_key = FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX
+        assert result[0][end_key] == {FIELD_HOUR: 23, FIELD_MINUTE: 59}
+
+    def test_compress_duplicate_entries_collapse(self):
+        """Two identical entries collapse to one."""
+        entry = self.create_schedule_entry(
+            0, [0, 1, 1, 1, 1, 1, 0], inside=True, in_start=(6, 0), in_end=(22, 0)
+        )
+        duplicate = deepcopy(entry)
+        duplicate[FIELD_INDEX] = 1
+
+        result = compress_schedule([entry, duplicate])
+
+        assert len(result) == 1
+        assert result[0][FIELD_DAYSOFWEEK] == [0, 1, 1, 1, 1, 1, 0]
+
+    def test_compress_all_days_zero_drops_entry(self):
+        """An entry active on no days produces no output."""
+        entry = self.create_schedule_entry(0, [0] * 7, inside=True, in_start=(6, 0), in_end=(22, 0))
+
+        result = compress_schedule([entry])
+
+        assert result == []
 
 
 # ============================================================================
@@ -513,6 +629,22 @@ class TestComputeScheduleDiff:
         assert len(to_set) == 1
         assert to_set[0].get("index") == 0
         assert set(to_delete) == {1, 2}  # Monday and Tuesday's indices deleted
+
+    def test_diff_does_not_mutate_inputs(self):
+        """compute_schedule_diff must not modify either input list (L13)."""
+        current = [self.create_entry(0, [1, 0, 0, 0, 0, 0, 0], start_hour=8)]
+        new = [self.create_entry(9, [1, 0, 0, 0, 0, 0, 0], start_hour=10)]
+        current_snapshot = deepcopy(current)
+        new_snapshot = deepcopy(new)
+
+        to_delete, to_set = compute_schedule_diff(current, new)
+
+        assert current == current_snapshot
+        assert new == new_snapshot
+        # The returned entry is a copy with a reassigned index...
+        assert to_set[0][FIELD_INDEX] == 0
+        # ...while the caller's entry keeps its original index.
+        assert new[0][FIELD_INDEX] == 9
 
 
 # ============================================================================

@@ -186,7 +186,7 @@ class TestBasicProtocol:
     async def test_get_door_status(self, capture, simulator):
         """GET_DOOR_STATUS should return current status."""
         await capture.send({CONFIG: CMD_GET_DOOR_STATUS, "msgId": 1})
-        messages = await capture.receive_all(timeout=0.5)
+        await capture.receive_all(timeout=0.5)
 
         status_msg = capture.find_message(CMD_GET_DOOR_STATUS)
         assert status_msg is not None
@@ -234,7 +234,7 @@ class TestDoorOperationMessages:
         """Closing door should send status update messages."""
         # First open the door
         await simulator.open_door(hold=True)
-        await asyncio.sleep(0.1)
+        await simulator.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
 
         # Clear any existing messages
         await capture.receive_all(timeout=0.2)
@@ -244,7 +244,7 @@ class TestDoorOperationMessages:
         await capture.send({CONFIG: CMD_CLOSE, "msgId": 1})
 
         # Wait for close response and status updates
-        messages = await capture.receive_until(
+        await capture.receive_until(
             lambda m: m.get(FIELD_DOOR_STATUS) == DOOR_STATE_CLOSED, timeout=3.0
         )
 
@@ -260,7 +260,7 @@ class TestDoorOperationMessages:
         simulator.trigger_sensor("inside")
 
         # Wait for door to start opening
-        messages = await capture.receive_until(
+        await capture.receive_until(
             lambda m: m.get(FIELD_DOOR_STATUS) in (DOOR_STATE_RISING, DOOR_STATE_HOLDING),
             timeout=2.0,
         )
@@ -321,14 +321,14 @@ class TestMultiClient:
             simulator.trigger_sensor("inside")
 
             # Both clients should receive status updates
-            msgs1 = await cap1.receive_until(
+            await cap1.receive_until(
                 lambda m: (
                     m.get(FIELD_DOOR_STATUS) == DOOR_STATE_RISING
                     or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_HOLDING
                 ),
                 timeout=2.0,
             )
-            msgs2 = await cap2.receive_until(
+            await cap2.receive_until(
                 lambda m: (
                     m.get(FIELD_DOOR_STATUS) == DOOR_STATE_RISING
                     or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_HOLDING

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -19,6 +20,8 @@ from powerpetdoor.const import (
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
+    FIELD_DOOR_STATUS,
+    NOTIFY_LOW_BATTERY,
 )
 from powerpetdoor.simulator import (
     BatteryConfig,
@@ -27,6 +30,15 @@ from powerpetdoor.simulator import (
     DoorTimingConfig,
     Schedule,
 )
+
+FULL_CYCLE_SEQUENCE = [
+    DOOR_STATE_RISING,
+    DOOR_STATE_SLOWING,
+    DOOR_STATE_HOLDING,
+    DOOR_STATE_CLOSING_TOP_OPEN,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    DOOR_STATE_CLOSED,
+]
 
 # ============================================================================
 # Test Fixtures
@@ -81,42 +93,34 @@ class TestDoorSimulator:
 
     @pytest.mark.asyncio
     async def test_open_door(self, simulator):
-        """open_door should change door state."""
+        """open_door with hold=True should reach and stay in KEEPUP."""
         assert simulator.state.door_status == DOOR_STATE_CLOSED
         await simulator.open_door(hold=True)
-        await asyncio.sleep(0.1)
-        # Should be KEEPUP when hold=True
-        assert simulator.state.door_status in (DOOR_STATE_RISING, DOOR_STATE_KEEPUP)
+        result = await simulator.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+        assert result == DOOR_STATE_KEEPUP
 
     @pytest.mark.asyncio
     async def test_close_door(self, simulator):
-        """close_door should close the door."""
+        """close_door should fully close the door."""
         await simulator.open_door(hold=True)
-        await asyncio.sleep(0.1)
+        await simulator.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+
         await simulator.close_door()
-        await asyncio.sleep(0.2)
-        # Should be closing or closed
-        assert simulator.state.door_status in (
-            DOOR_STATE_SLOWING,
-            DOOR_STATE_CLOSING_TOP_OPEN,
-            DOOR_STATE_CLOSING_MID_OPEN,
-            DOOR_STATE_CLOSED,
-        )
+        result = await simulator.wait_for_status(DOOR_STATE_CLOSED, timeout=2.0)
+        assert result == DOOR_STATE_CLOSED
 
     @pytest.mark.asyncio
     async def test_trigger_sensor_opens_door(self, simulator):
-        """trigger_sensor should open the door."""
+        """trigger_sensor should start opening the door immediately."""
         assert simulator.state.door_status == DOOR_STATE_CLOSED
         simulator.trigger_sensor("inside")
-        await asyncio.sleep(0.1)
-        assert simulator.state.door_status != DOOR_STATE_CLOSED
+        assert simulator.state.door_status == DOOR_STATE_RISING
 
     @pytest.mark.asyncio
     async def test_trigger_sensor_ignored_when_power_off(self, simulator):
         """trigger_sensor should be ignored when power is off."""
         simulator.set_power(False)
         simulator.trigger_sensor("inside")
-        await asyncio.sleep(0.1)
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
     @pytest.mark.asyncio
@@ -124,7 +128,6 @@ class TestDoorSimulator:
         """trigger_sensor should be ignored when sensor is disabled."""
         simulator.state.inside = False
         simulator.trigger_sensor("inside")
-        await asyncio.sleep(0.1)
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
     @pytest.mark.asyncio
@@ -132,13 +135,11 @@ class TestDoorSimulator:
         """Outside sensor should be ignored when safety lock is enabled."""
         simulator.state.safety_lock = True
         simulator.trigger_sensor("outside")
-        await asyncio.sleep(0.1)
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
         # Inside sensor should still work
         simulator.trigger_sensor("inside")
-        await asyncio.sleep(0.1)
-        assert simulator.state.door_status != DOOR_STATE_CLOSED
+        assert simulator.state.door_status == DOOR_STATE_RISING
 
     def test_set_battery(self, simulator):
         """set_battery should update battery percent."""
@@ -196,22 +197,16 @@ class TestDoorOperationSequences:
 
     @pytest.mark.asyncio
     async def test_full_open_close_cycle(self, simulator):
-        """Door should go through complete open/close cycle."""
-        states_seen = set()
+        """A sensor trigger runs the exact full open/close sequence."""
+        seen: list[str] = []
+        unsubscribe = simulator.add_status_listener(seen.append)
 
-        # Use trigger_sensor which starts the operation in a task (non-blocking)
         simulator.trigger_sensor("inside")
+        await simulator.wait_for_status(DOOR_STATE_CLOSED, timeout=5.0)
+        unsubscribe()
 
-        # Track states over time
-        for _ in range(50):
-            states_seen.add(simulator.state.door_status)
-            await asyncio.sleep(0.05)
-            # Early exit if we've seen the full cycle
-            if DOOR_STATE_CLOSED in states_seen and len(states_seen) > 1:
-                break
-
-        # Should have seen at least rising or holding state
-        assert DOOR_STATE_RISING in states_seen or DOOR_STATE_HOLDING in states_seen
+        assert seen == FULL_CYCLE_SEQUENCE
+        assert simulator.state.total_open_cycles == 1
 
     @pytest.mark.asyncio
     async def test_sensor_active_state(self, simulator):
@@ -235,14 +230,133 @@ class TestDoorOperationSequences:
     async def test_open_and_hold_keeps_door_open(self, simulator):
         """open_door with hold=True should keep door open indefinitely."""
         await simulator.open_door(hold=True)
-        await asyncio.sleep(0.2)
+        await simulator.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
 
-        # Should be in KEEPUP state (held open)
+        # KEEPUP is terminal: the sequence task has finished and the door stays
+        await asyncio.gather(simulator.engine._task, return_exceptions=True)
         assert simulator.state.door_status == DOOR_STATE_KEEPUP
 
-        # Wait more time - should still be KEEPUP
-        await asyncio.sleep(0.3)
-        assert simulator.state.door_status == DOOR_STATE_KEEPUP
+    @pytest.mark.asyncio
+    async def test_wait_for_status_timeout(self, simulator):
+        """wait_for_status raises TimeoutError when never reached."""
+        with pytest.raises(TimeoutError):
+            await simulator.wait_for_status(DOOR_STATE_KEEPUP, timeout=0.05)
+
+
+# ============================================================================
+# Engine Path Parity Tests (M12: one engine, identical behavior)
+# ============================================================================
+
+
+class TestEnginePathParity:
+    """Door behavior must be identical with and without a connected client."""
+
+    async def _run_retract_cycle(self, simulator) -> list[str]:
+        """Open-and-hold, close, obstruct during close, observe full sequence."""
+        seen: list[str] = []
+        unsubscribe = simulator.add_status_listener(seen.append)
+
+        await simulator.open_door(hold=True)
+        await simulator.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+        await simulator.close_door()
+        # Pet enters the doorway while the door is closing
+        simulator.trigger_sensor("inside")
+        await simulator.wait_for_status(DOOR_STATE_CLOSED, timeout=5.0)
+
+        unsubscribe()
+        return seen
+
+    @pytest.mark.asyncio
+    async def test_retract_cycle_identical_with_and_without_client(self, timing_config):
+        """The full transition sequence matches exactly on both paths."""
+        state = DoorSimulatorState(timing=timing_config, hold_time=0.1)
+        sim = DoorSimulator(port=0, state=state)
+        await sim.start()
+        try:
+            # Path 1: no client connected
+            no_client_seen = await self._run_retract_cycle(sim)
+            assert sim.state.total_auto_retracts == 1
+
+            # Path 2: a client is connected and watches the broadcasts
+            port = sim.server.sockets[0].getsockname()[1]
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            try:
+                with_client_seen = await self._run_retract_cycle(sim)
+                assert sim.state.total_auto_retracts == 2
+
+                assert with_client_seen == no_client_seen
+
+                # The connected client observed the same status sequence
+                # (read until the final CLOSED broadcast has arrived)
+                text = ""
+                broadcast_statuses: list[str] = []
+                deadline = asyncio.get_running_loop().time() + 5.0
+                while asyncio.get_running_loop().time() < deadline:
+                    chunk = await asyncio.wait_for(reader.read(65536), timeout=1.0)
+                    text += chunk.decode("ascii")
+                    broadcast_statuses = [
+                        msg[FIELD_DOOR_STATUS]
+                        for msg in _parse_json_stream(text)
+                        if FIELD_DOOR_STATUS in msg
+                    ]
+                    if len(broadcast_statuses) >= len(with_client_seen):
+                        break
+                assert broadcast_statuses == with_client_seen
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        finally:
+            await sim.stop()
+
+    @pytest.mark.asyncio
+    async def test_hold_extension_identical_with_and_without_client(self, timing_config):
+        """Sensor re-trigger extends the hold deadline on both paths."""
+        state = DoorSimulatorState(timing=timing_config, hold_time=10.0)
+        sim = DoorSimulator(port=0, state=state)
+        await sim.start()
+        loop = asyncio.get_running_loop()
+        try:
+            deadlines = []
+            for connect_client in (False, True):
+                if connect_client:
+                    port = sim.server.sockets[0].getsockname()[1]
+                    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+                simulator_engine = sim.engine
+                sim.trigger_sensor("inside")
+                await sim.wait_for_status(DOOR_STATE_HOLDING, timeout=2.0)
+
+                simulator_engine._last_sensor_trigger = 0.0  # outside retrigger window
+                sim.trigger_sensor("inside")
+                deadlines.append(simulator_engine._hold_deadline - loop.time())
+
+                # Reset for the next round
+                await sim.close_door()
+                await sim.wait_for_status(DOOR_STATE_CLOSED, timeout=2.0)
+                if connect_client:
+                    writer.close()
+                    await writer.wait_closed()
+
+            # Both paths granted a full fresh hold_time
+            assert deadlines[0] == pytest.approx(10.0, abs=0.5)
+            assert deadlines[1] == pytest.approx(10.0, abs=0.5)
+        finally:
+            await sim.stop()
+
+
+def _parse_json_stream(data: str) -> list[dict]:
+    """Parse back-to-back JSON objects from a captured stream."""
+    decoder = json.JSONDecoder()
+    messages = []
+    pos = 0
+    while pos < len(data):
+        if data[pos].isspace():
+            pos += 1
+            continue
+        msg, end = decoder.raw_decode(data, pos)
+        messages.append(msg)
+        pos = end
+    return messages
 
 
 # ============================================================================
@@ -566,3 +680,111 @@ class TestBroadcastFunctions:
         finally:
             writer.close()
             await writer.wait_closed()
+
+
+# ============================================================================
+# Notification Event Tests (D2: bare envelope)
+# ============================================================================
+
+
+class TestLowBatteryNotification:
+    """Low battery notifications use the bare envelope from protocol.md."""
+
+    @pytest.mark.asyncio
+    async def test_set_battery_crossing_threshold_sends_bare_envelope(self, simulator):
+        """Crossing the threshold emits exactly {"LOW_BATTERY": ""}."""
+        port = simulator.server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            await asyncio.sleep(0.05)  # let the connection register
+            simulator.state.low_battery = True
+            simulator.set_battery(15)  # 100 -> 15 crosses the 20% threshold
+
+            data = await asyncio.wait_for(reader.read(4096), timeout=1.0)
+            messages = _parse_json_stream(data.decode("ascii"))
+            low_battery = [m for m in messages if NOTIFY_LOW_BATTERY in m]
+            assert low_battery == [{NOTIFY_LOW_BATTERY: ""}]
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_no_notification_when_disabled(self, simulator):
+        """No LOW_BATTERY event when the notification setting is off."""
+        port = simulator.server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            await asyncio.sleep(0.05)
+            simulator.state.low_battery = False
+            simulator.set_battery(15)
+
+            # The battery status broadcast still arrives, but no notification
+            data = await asyncio.wait_for(reader.read(4096), timeout=1.0)
+            messages = _parse_json_stream(data.decode("ascii"))
+            assert all(NOTIFY_LOW_BATTERY not in m for m in messages)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+
+# ============================================================================
+# Shutdown Cleanliness Tests (L14: no leaked tasks)
+# ============================================================================
+
+
+class TestShutdownCleanliness:
+    """stop() must cancel and await every simulator-owned task."""
+
+    @pytest.mark.asyncio
+    async def test_stop_with_door_mid_cycle(self, timing_config):
+        """Stopping mid-cycle leaves no pending engine task."""
+        state = DoorSimulatorState(timing=timing_config, hold_time=1)
+        sim = DoorSimulator(port=0, state=state)
+        await sim.start()
+
+        sim.trigger_sensor("inside")
+        assert sim.engine._task is not None
+
+        await sim.stop()
+        assert sim.engine._task is None
+        assert sim.engine._retired == set()
+        assert sim.engine._aux_tasks == set()
+        assert sim._battery_task is None
+        assert all(task.done() for task in sim._tasks)
+
+    @pytest.mark.asyncio
+    async def test_stop_with_pending_sensor_timer(self, timing_config):
+        """A pending timed sensor deactivation is cancelled by stop()."""
+        state = DoorSimulatorState(timing=timing_config, hold_time=1)
+        sim = DoorSimulator(port=0, state=state)
+        await sim.start()
+
+        sim.activate_sensor("inside", duration=30.0)
+        assert len(sim.engine._aux_tasks) == 1
+        timer_task = next(iter(sim.engine._aux_tasks))
+
+        await sim.stop()
+        assert timer_task.cancelled()
+        assert sim.engine._aux_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_stop_with_connected_client_mid_cycle(self, timing_config):
+        """Stopping with a connected client cancels protocol tasks cleanly."""
+        state = DoorSimulatorState(timing=timing_config, hold_time=1)
+        sim = DoorSimulator(port=0, state=state)
+        await sim.start()
+
+        port = sim.server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            await asyncio.sleep(0.05)
+            assert len(sim.protocols) == 1
+            protocol = sim.protocols[0]
+
+            sim.trigger_sensor("inside")
+            await sim.stop()
+
+            assert all(task.done() for task in protocol._tasks)
+            assert sim.protocols == []
+        finally:
+            writer.close()

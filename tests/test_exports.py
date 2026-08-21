@@ -99,6 +99,36 @@ class TestAllExports:
         missing = [name for name in documented if name not in powerpetdoor.__all__]
         assert missing == []
 
+    def test_notification_and_error_exports(self):
+        """CommandError and the notification-event constants are exported.
+
+        Wave 1a handoff: the notification listener API and typed command
+        errors are public API, so their names must be importable from the
+        package root.
+        """
+        required = [
+            "CommandError",
+            "FIELD_REASON",
+            "FIELD_SENSOR_STATE",
+            "NOTIFY_LOW_BATTERY",
+            "NOTIFY_SENSOR_INDOOR",
+            "NOTIFY_SENSOR_OUTDOOR",
+            "SENSOR_STATE_OFF",
+            "SENSOR_STATE_ON",
+        ]
+        missing = [name for name in required if name not in powerpetdoor.__all__]
+        assert missing == []
+        unresolvable = [name for name in required if not hasattr(powerpetdoor, name)]
+        assert unresolvable == []
+
+    def test_command_error_carries_cmd_and_reason(self):
+        """CommandError exposes cmd and reason and renders both."""
+        err = powerpetdoor.CommandError("OPEN", "Door is locked")
+        assert err.cmd == "OPEN"
+        assert err.reason == "Door is locked"
+        assert "OPEN" in str(err)
+        assert "Door is locked" in str(err)
+
 
 class TestDocImports:
     """Every documented package-root import block must execute."""
