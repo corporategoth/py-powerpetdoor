@@ -212,7 +212,9 @@ class ControlChannel:
     def bound_port(self) -> int:
         """The actual port the control server is listening on."""
         if self.server and self.server.sockets:
-            return self.server.sockets[0].getsockname()[1]
+            # getsockname() is untyped in typeshed; for AF_INET it is (host, port)
+            port: int = self.server.sockets[0].getsockname()[1]
+            return port
         return self.port
 
     async def start(self):

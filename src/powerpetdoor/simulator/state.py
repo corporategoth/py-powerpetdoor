@@ -307,7 +307,7 @@ class DoorSimulatorState:
     low_battery: bool = True
 
     # Schedules (stored by index)
-    schedules: dict = field(default_factory=dict)
+    schedules: dict[int, Schedule] = field(default_factory=dict)
 
     # Timing configuration
     timing: DoorTimingConfig = field(default_factory=DoorTimingConfig)

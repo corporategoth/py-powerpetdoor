@@ -5,7 +5,7 @@
 
 """Info and status commands."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .base import (
     ArgSpec,
@@ -25,8 +25,9 @@ class InfoCommandsMixin:
     """Mixin providing info and status commands."""
 
     simulator: "DoorSimulator"
-    _history: any  # prompt_toolkit history object
+    _history: Any  # prompt_toolkit history object
     _interactive_mode: bool  # Whether running in interactive mode
+    _cli_mode: bool  # Whether running in CLI interactive mode (vs ctl/daemon)
 
     def _is_history_available(self) -> bool:
         """Check if history features are available.

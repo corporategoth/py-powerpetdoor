@@ -783,7 +783,13 @@ class TestReconnectBehavior:
         """The client automatically reconnects when the server comes back."""
 
         async def handle(reader, writer):
-            pass  # Accept and hold the connection open
+            # Hold the connection open until the peer disconnects, then
+            # close the writer so no StreamWriter is left to be finalized
+            # by the GC (ResourceWarning under filterwarnings=error).
+            try:
+                await reader.read()
+            finally:
+                writer.close()
 
         server = await asyncio.start_server(handle, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
@@ -805,11 +811,13 @@ class TestReconnectBehavior:
                 await connected.wait()
             assert client.available is True
 
-            # Kill the server and the client's connection.
+            # Kill the server and the client's connection. The client side
+            # closes first: wait_closed() waits for connection handlers on
+            # Python 3.12.1+, and handle() only finishes once it sees EOF.
             connected.clear()
             server.close()
-            await server.wait_closed()
             client._transport.close()
+            await server.wait_closed()
 
             # Restart a server on the same port; the client must reconnect.
             server = await asyncio.start_server(handle, "127.0.0.1", port)
@@ -1270,6 +1278,28 @@ class TestProcessMessageDefensive:
         await client.process_message({"CMD": "GET_SETTINGS", "msgID": msg_id})
 
         assert isinstance(future.exception(), CommandError)
+
+    async def test_success_message_without_cmd_resolves_future_with_msg(self, mock_client):
+        """A success envelope with no CMD acknowledges the matched future.
+
+        No CMD means no specialized handler (the registry lookup returns
+        None), so the acknowledgment itself is the result.
+        """
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        msg_id = client.msgId
+        future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+
+        msg = {"success": "true", "msgID": msg_id}
+        await client.process_message(msg)
+
+        assert future.result() is msg
+
+    def test_response_handler_registry_get_none_returns_none(self):
+        """The registry lookup accepts a missing (None) CMD field."""
+        from powerpetdoor.client import ResponseHandlerRegistry
+
+        assert ResponseHandlerRegistry.get(None) is None
 
     async def test_failure_response_sets_command_error_with_reason(self, mock_client):
         """success:"false" fails the future with CommandError carrying cmd+reason (L10)."""

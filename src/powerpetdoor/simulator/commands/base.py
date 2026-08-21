@@ -12,7 +12,10 @@ used by all command handlers.
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, TypeVar, cast
+
+#: Preserves the decorated function's exact signature through @command/@subcommand
+F = TypeVar("F", bound=Callable[..., Any])
 
 
 @dataclass
@@ -99,7 +102,7 @@ class ArgSpec:
     name: str
     arg_type: str  # "string", "int", "float", "bool_toggle", "choice", "time_range", "days"
     required: bool = True
-    default: any = None
+    default: Any = None
     default_display: str | None = None
     choices: list[str] | None = None  # For "choice" type
     description: str = ""
@@ -131,7 +134,7 @@ _BOOL_TRUE = ("on", "true", "1", "yes")
 _BOOL_FALSE = ("off", "false", "0", "no")
 
 
-def parse_arg(value: str, spec: ArgSpec) -> tuple[any, str | None]:
+def parse_arg(value: str, spec: ArgSpec) -> tuple[Any, str | None]:
     """Parse and validate an argument value.
 
     Returns:
@@ -154,13 +157,13 @@ def parse_arg(value: str, spec: ArgSpec) -> tuple[any, str | None]:
 
     elif spec.arg_type == "float":
         try:
-            parsed = float(value)
+            parsed_float = float(value)
             # Validate limits
-            if spec.min_value is not None and parsed < spec.min_value:
+            if spec.min_value is not None and parsed_float < spec.min_value:
                 return None, f"'{value}' is below minimum ({spec.min_value})"
-            if spec.max_value is not None and parsed > spec.max_value:
+            if spec.max_value is not None and parsed_float > spec.max_value:
                 return None, f"'{value}' is above maximum ({spec.max_value})"
-            return parsed, None
+            return parsed_float, None
         except ValueError:
             return None, f"'{value}' is not a valid number"
 
@@ -333,6 +336,23 @@ class CommandInfo(SubcommandInfo):
     local_only: bool = False  # If True, command is handled locally by ctl, not sent to daemon
 
 
+class _CommandFunc(Protocol):
+    """A callable carrying the metadata attached by the @command decorator."""
+
+    _command_info: CommandInfo
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
+class _SubcommandFunc(Protocol):
+    """A callable carrying the metadata attached by the @subcommand decorator."""
+
+    _subcommand_info: SubcommandInfo
+    _parent_path: list[str]
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
 def _build_subcommand_registry(
     subcommand_list: list[SubcommandInfo],
 ) -> dict[str, SubcommandInfo]:
@@ -425,7 +445,7 @@ def command(
     args: list[ArgSpec] | None = None,
     interactive_only: bool = False,
     local_only: bool = False,
-):
+) -> Callable[[F], F]:
     """Decorator to register a method as a command.
 
     Args:
@@ -440,7 +460,7 @@ def command(
         local_only: If True, command is handled locally by ctl, not sent to daemon
     """
 
-    def decorator(func: Callable) -> Callable:
+    def decorator(func: F) -> F:
         subcommand_registry = _build_subcommand_registry(subcommands) if subcommands else {}
 
         info = CommandInfo(
@@ -467,11 +487,13 @@ def command(
             _command_registry[alias] = info
 
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             return func(*args, **kwargs)
 
-        wrapper._command_info = info
-        return wrapper
+        # Function attributes are untyped in general; the Protocol cast keeps
+        # the metadata attachment type-checked without an ignore.
+        cast(_CommandFunc, wrapper)._command_info = info
+        return cast(F, wrapper)
 
     return decorator
 
@@ -483,7 +505,7 @@ def subcommand(
     description: str = "",
     usage: str | None = None,
     args: list[ArgSpec] | None = None,
-):
+) -> Callable[[F], F]:
     """Decorator to register a method as a subcommand handler.
 
     This decorator must be applied AFTER the parent command is registered.
@@ -498,7 +520,7 @@ def subcommand(
         args: List of ArgSpec for argument parsing
     """
 
-    def decorator(func: Callable) -> Callable:
+    def decorator(func: F) -> F:
         # Normalize parent_path to list
         path = [parent_path] if isinstance(parent_path, str) else list(parent_path)
 
@@ -517,9 +539,12 @@ def subcommand(
             sub_info.usage = _generate_usage(sub_info) or None
             sub_info.auto_usage = True
 
-        # Will be registered later when CommandHandler binds methods
-        func._subcommand_info = sub_info
-        func._parent_path = path
+        # Will be registered later when CommandHandler binds methods.
+        # Function attributes are untyped in general; the Protocol cast keeps
+        # the metadata attachment type-checked without an ignore.
+        sub_func = cast(_SubcommandFunc, func)
+        sub_func._subcommand_info = sub_info
+        sub_func._parent_path = path
         return func
 
     return decorator

@@ -5,7 +5,7 @@
 
 """Schedule management commands."""
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from .base import DAY_NAMES, ArgSpec, CommandResult, command, subcommand
 
@@ -144,11 +144,11 @@ class ScheduleCommandsMixin:
             f"{self._format_time(start_h, start_m)}-{self._format_time(end_h, end_m)}",
         )
 
-    def _get_schedule(self, idx: int) -> tuple[Optional["Schedule"], CommandResult | None]:
-        """Get a schedule by index, returning error if not found."""
+    def _get_schedule(self, idx: int) -> "Schedule | CommandResult":
+        """Get a schedule by index, or a failure CommandResult if not found."""
         if idx not in self.simulator.state.schedules:
-            return None, CommandResult(False, f"Schedule #{idx} not found")
-        return self.simulator.state.schedules[idx], None
+            return CommandResult(False, f"Schedule #{idx} not found")
+        return self.simulator.state.schedules[idx]
 
     @subcommand(
         "schedule",
@@ -185,9 +185,9 @@ class ScheduleCommandsMixin:
     )
     def schedule_delete(self, index: int) -> CommandResult:
         """Delete a schedule by index."""
-        sched, err = self._get_schedule(index)
-        if err:
-            return err
+        sched = self._get_schedule(index)
+        if isinstance(sched, CommandResult):
+            return sched
         self.simulator.remove_schedule(index)
         return CommandResult(True, f"Deleted schedule #{index}")
 
@@ -207,9 +207,9 @@ class ScheduleCommandsMixin:
     )
     def schedule_enable(self, index: int) -> CommandResult:
         """Enable a schedule by index."""
-        sched, err = self._get_schedule(index)
-        if err:
-            return err
+        sched = self._get_schedule(index)
+        if isinstance(sched, CommandResult):
+            return sched
         sched.enabled = True
         self.simulator.broadcast_schedule(sched)
         return CommandResult(True, f"Schedule #{index} enabled")
@@ -230,9 +230,9 @@ class ScheduleCommandsMixin:
     )
     def schedule_disable(self, index: int) -> CommandResult:
         """Disable a schedule by index."""
-        sched, err = self._get_schedule(index)
-        if err:
-            return err
+        sched = self._get_schedule(index)
+        if isinstance(sched, CommandResult):
+            return sched
         sched.enabled = False
         self.simulator.broadcast_schedule(sched)
         return CommandResult(True, f"Schedule #{index} disabled")
@@ -258,9 +258,9 @@ class ScheduleCommandsMixin:
     )
     def schedule_days(self, index: int, days: list[int]) -> CommandResult:
         """Set the days for a schedule."""
-        sched, err = self._get_schedule(index)
-        if err:
-            return err
+        sched = self._get_schedule(index)
+        if isinstance(sched, CommandResult):
+            return sched
         sched.days_of_week = days
         self.simulator.broadcast_schedule(sched)
         return CommandResult(True, f"Schedule #{index} days: {self._format_days(days)}")
@@ -286,9 +286,9 @@ class ScheduleCommandsMixin:
     )
     def schedule_time(self, index: int, time: tuple[int, int, int, int]) -> CommandResult:
         """Set the time window for a schedule."""
-        sched, err = self._get_schedule(index)
-        if err:
-            return err
+        sched = self._get_schedule(index)
+        if isinstance(sched, CommandResult):
+            return sched
         start_h, start_m, end_h, end_m = time
         sched.start_hour = start_h
         sched.start_min = start_m

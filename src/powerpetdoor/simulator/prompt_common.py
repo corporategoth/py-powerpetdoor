@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 from .commands.base import (
     DAY_NAMES,
     DAY_PRESET_NAMES,
+    SubcommandInfo,
     get_canonical_command,
     get_command_registry,
 )
@@ -32,6 +33,7 @@ from .commands.history import History
 
 # Try to import prompt_toolkit for enhanced interactive features
 try:
+    from prompt_toolkit import PromptSession
     from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.lexers import Lexer
     from prompt_toolkit.styles import Style
@@ -41,6 +43,7 @@ except ImportError:
     PROMPT_TOOLKIT_AVAILABLE = False
 
 if TYPE_CHECKING:
+    from prompt_toolkit import PromptSession
     from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.lexers import Lexer
     from prompt_toolkit.styles import Style
@@ -187,7 +190,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
     class SimulatorLexer(Lexer):
         """Syntax highlighter for simulator commands."""
 
-        def _get_current_command_info(self, words: list[str]):
+        def _get_current_command_info(self, words: list[str]) -> tuple[SubcommandInfo | None, int]:
             """Traverse command hierarchy and return current command info.
 
             Returns:
@@ -203,7 +206,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
             if cmd not in registry:
                 return None, 0
 
-            info = registry[cmd]
+            info: SubcommandInfo = registry[cmd]
             depth = 1
 
             # Traverse subcommand hierarchy
@@ -233,7 +236,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
             if cmd not in registry:
                 return set()
 
-            info = registry[cmd]
+            info: SubcommandInfo = registry[cmd]
 
             # Traverse to the right depth
             for i in range(1, depth):
@@ -330,7 +333,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                             commands.append((alias, f"Alias for {info.name}"))
             return sorted(commands, key=lambda x: x[0])
 
-        def _traverse_to_current_info(self, words: list[str]):
+        def _traverse_to_current_info(self, words: list[str]) -> tuple[SubcommandInfo | None, int]:
             """Traverse command hierarchy based on words already typed.
 
             Returns:
@@ -346,7 +349,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
             if cmd not in registry:
                 return None, 0
 
-            info = registry[cmd]
+            info: SubcommandInfo = registry[cmd]
             depth = 1
 
             # Traverse subcommand hierarchy
@@ -361,7 +364,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
 
             return info, depth
 
-        def _get_subcommands_for_info(self, info) -> list[tuple[str, str]]:
+        def _get_subcommands_for_info(self, info: SubcommandInfo | None) -> list[tuple[str, str]]:
             """Get subcommands for a CommandInfo with descriptions."""
             if not info or not info.subcommands:
                 return []
@@ -381,7 +384,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
             return sorted(result, key=lambda x: x[0])
 
         def _get_arg_options_for_info(
-            self, info, prefix: str = "", arg_index: int = 0
+            self, info: SubcommandInfo | None, prefix: str = "", arg_index: int = 0
         ) -> list[tuple[str, str]]:
             """Get argument options for a CommandInfo at a specific argument position.
 
@@ -425,7 +428,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                     return []
             return []
 
-        def _get_help_completions(self, info) -> list[tuple[str, str]]:
+        def _get_help_completions(self, info: SubcommandInfo | None) -> list[tuple[str, str]]:
             """Get help pseudo-subcommands if command has subcommands or args."""
             if not info:
                 return []
@@ -552,14 +555,13 @@ class InteractiveSession:
         """
         self._prompt_text = prompt_text
         self._get_prompt = get_prompt
-        self._session = None
+        self._session: PromptSession | None = None
         self._history: History | None = None
 
         # Only create a PromptSession when stdin is a real terminal;
         # piped/dumb-terminal sessions use the callers' plain-input fallback
         # instead of producing garbled prompt_toolkit output.
         if use_prompt_toolkit():
-            from prompt_toolkit import PromptSession
             from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 
             self._history = History(history_file)

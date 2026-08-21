@@ -69,6 +69,7 @@ where = ["src"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-n auto"
+filterwarnings = ["error"]
 
 [tool.coverage.run]
 source = ["src/powerpetdoor"]

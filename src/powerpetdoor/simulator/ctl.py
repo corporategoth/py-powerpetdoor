@@ -14,12 +14,14 @@ import argparse
 import asyncio
 import socket
 import sys
+from typing import TYPE_CHECKING, cast
 
 from ..tz_utils import async_init_timezone_cache
 
 # Import command infrastructure for local command handling
 from .commands.base import (
     CommandResult,
+    SubcommandInfo,
     get_command_registry,
     parse_args,
 )
@@ -38,6 +40,9 @@ from .prompt_common import (
     sanitize_text,
     unescape_message,
 )
+
+if TYPE_CHECKING:
+    from .server import DoorSimulator
 
 
 class LocalCommandResult:
@@ -62,7 +67,9 @@ class LocalCommandHandler(InfoCommandsMixin, ControlCommandsMixin):
         self._cli_mode = False  # Not CLI mode, so exit is separate command
         self._history_obj = history  # History class instance
         self._history = history.prompt_toolkit_history if history else None  # For InfoCommandsMixin
-        self.simulator = None  # Not needed for local commands
+        # Local commands never touch the simulator; the cast satisfies the
+        # mixins' declared type without constructing a simulator here.
+        self.simulator = cast("DoorSimulator", None)  # Not needed for local commands
         self.stop_callback = lambda: None  # Placeholder, not used for local commands
 
     def exit_ctl(self) -> CommandResult:
@@ -127,7 +134,7 @@ class LocalCommandHandler(InfoCommandsMixin, ControlCommandsMixin):
         if cmd not in registry:
             return LocalCommandResult(False, f"Unknown command: {cmd}")
 
-        info = registry[cmd]
+        info: SubcommandInfo = registry[cmd]
         cmd_path = [info.name]
 
         # Traverse subcommand hierarchy
@@ -499,9 +506,11 @@ async def interactive_mode_async(
                 continue
 
             # Handle history recall commands (!!, !n, !-n)
-            resolved_line, was_history_recall, error = interactive.resolve_history_recall(line)
-            if error:
-                print(f">>> {error}")
+            resolved_line, was_history_recall, recall_error = interactive.resolve_history_recall(
+                line
+            )
+            if recall_error:
+                print(f">>> {recall_error}")
                 continue
 
             input_line = InputLine(

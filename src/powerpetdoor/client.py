@@ -8,15 +8,16 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import heapq
 import inspect
 import json
 import logging
 import random
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, overload
 
 from .const import (
     CMD_CHECK_RESET_REASON,
@@ -181,8 +182,14 @@ class ResponseHandlerRegistry:
         return decorator
 
     @classmethod
-    def get(cls, cmd: str) -> Callable | None:
-        """Get the handler for a command, or None if not found."""
+    def get(cls, cmd: str | None) -> Callable | None:
+        """Get the handler for a command, or None if not found.
+
+        Accepts None (a response envelope may omit CMD entirely) so callers
+        do not need to special-case malformed messages.
+        """
+        if cmd is None:
+            return None
         return cls._handlers.get(cmd)
 
 
@@ -217,11 +224,11 @@ def find_end(s: str) -> int | None:
     return find_frame_end(s)
 
 
-def make_bool(v: str | int | bool):
+def make_bool(v: str | int | bool | None) -> bool | None:
     """Convert various types to boolean.
 
     Args:
-        v: Value to convert (string, int, or bool)
+        v: Value to convert (string, int, bool, or None)
 
     Returns:
         True for "1", "true", "yes", "on", non-zero int, or True
@@ -240,7 +247,7 @@ def make_bool(v: str | int | bool):
         return v
 
 
-class PowerPetDoorClient:
+class PowerPetDoorClient(asyncio.Protocol):
     """Client for communicating with Power Pet Door devices.
 
     This client handles the network protocol for Power Pet Door devices,
@@ -349,8 +356,10 @@ class PowerPetDoorClient:
         self.schedule_delete_listeners: dict[str, Callable[[int], None]] = {}
         self.notification_event_listeners: dict[str, Callable[[str, str | None], None]] = {}
 
-        self.on_connect: dict[str, Callable[[], Awaitable[None]]] = {}
-        self.on_disconnect: dict[str, Callable[[], Awaitable[None]]] = {}
+        # Lifecycle handlers may be plain callables or coroutine functions;
+        # _dispatch_handler schedules any awaitable result on the loop.
+        self.on_connect: dict[str, Callable[[], Awaitable[None] | None]] = {}
+        self.on_disconnect: dict[str, Callable[[], Awaitable[None] | None]] = {}
         self.on_ping: dict[str, Callable[[int], None]] = {}
 
     def _get_loop(self) -> asyncio.AbstractEventLoop:
@@ -367,24 +376,24 @@ class PowerPetDoorClient:
     def ensure_future(self, *args: Any, **kwargs: Any):
         return asyncio.ensure_future(*args, loop=self._get_loop(), **kwargs)
 
-    def run_coroutine_threadsafe(self, *args: Any, **kwargs: Any):
+    def run_coroutine_threadsafe(self, coro: Coroutine[Any, Any, Any]) -> concurrent.futures.Future:
         if self._eventLoop is None:
             raise RuntimeError("run_coroutine_threadsafe() requires the client to be started first")
-        return asyncio.run_coroutine_threadsafe(*args, loop=self._eventLoop, **kwargs)
+        return asyncio.run_coroutine_threadsafe(coro, self._eventLoop)
 
     def add_handlers(
         self,
         name: str,
-        on_connect: Callable[[], None] | None = None,
-        on_disconnect: Callable[[], None] | None = None,
+        on_connect: Callable[[], Awaitable[None] | None] | None = None,
+        on_disconnect: Callable[[], Awaitable[None] | None] | None = None,
         on_ping: Callable[[int], None] | None = None,
     ) -> None:
         """Register connection lifecycle callbacks.
 
         Args:
             name: Unique identifier for this set of handlers
-            on_connect: Called when connection is established
-            on_disconnect: Called when connection is lost
+            on_connect: Called when connection is established (sync or async)
+            on_disconnect: Called when connection is lost (sync or async)
             on_ping: Called with latency in ms after successful ping
         """
         if on_connect:
@@ -1072,7 +1081,7 @@ class PowerPetDoorClient:
         not retry in lockstep against the single-connection device.
         """
         delay = min(
-            self.cfg_reconnect * (2 ** min(self._reconnect_attempts, 16)), MAX_RECONNECT_DELAY
+            self.cfg_reconnect * (2.0 ** min(self._reconnect_attempts, 16)), MAX_RECONNECT_DELAY
         )
         self._reconnect_attempts += 1
         return delay + random.uniform(0, delay * RECONNECT_JITTER)
@@ -1299,7 +1308,7 @@ class PowerPetDoorClient:
         rawdata = json.dumps(data).encode("ascii")
         await self._send_data(rawdata)
 
-    def data_received(self, rawdata) -> None:
+    def data_received(self, data) -> None:
         """asyncio callback for any data received from the power pet door.
 
         All received bytes are untrusted. The stream is framed by the
@@ -1308,17 +1317,17 @@ class PowerPetDoorClient:
         exceeding the un-parsed buffer cap drops the connection. This
         callback never raises on arbitrary input.
         """
-        if not rawdata:
+        if not data:
             return
 
         try:
-            data = rawdata.decode("ascii")
+            decoded = data.decode("ascii")
         except UnicodeDecodeError as err:
             _LOGGER.error("Received non-ASCII data from device (%s); discarding chunk", err)
             return
 
-        _LOGGER.debug("RX < %s", data)
-        frames, self._buffer, diag = extract_frames(self._buffer + data)
+        _LOGGER.debug("RX < %s", decoded)
+        frames, self._buffer, diag = extract_frames(self._buffer + decoded)
 
         for frame in frames:
             try:
@@ -1412,8 +1421,18 @@ class PowerPetDoorClient:
             if dequeue:
                 await self.dequeue_data()
 
+    @overload
     def send_message(
-        self, type: str, arg: str, notify: bool = False, **kwargs
+        self, type: str, arg: str, notify: Literal[True], **kwargs: Any
+    ) -> asyncio.Future: ...
+
+    @overload
+    def send_message(
+        self, type: str, arg: str, notify: Literal[False] = ..., **kwargs: Any
+    ) -> None: ...
+
+    def send_message(
+        self, type: str, arg: str, notify: bool = False, **kwargs: Any
     ) -> asyncio.Future | None:
         """Send a message to the Power Pet Door.
 

@@ -16,6 +16,32 @@ from powerpetdoor import PowerPetDoorClient
 from powerpetdoor.const import FIELD_SUCCESS
 
 # ============================================================================
+# Session Hygiene
+# ============================================================================
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _managed_main_thread_event_loop():
+    """Give pytest-asyncio's policy juggling a loop we close ourselves.
+
+    pytest-asyncio's ``_temporary_event_loop_policy`` (scoped-runner setup)
+    calls ``asyncio.get_event_loop()``, which on Python <= 3.13 implicitly
+    creates a main-thread event loop that is never closed. That loop is
+    eventually garbage collected mid-session and emits an unclosed-loop
+    ResourceWarning attributed to an arbitrary test - a hard failure under
+    ``filterwarnings = ["error"]``. Pre-setting a loop here means the
+    implicit-creation path is never taken, and this fixture closes the loop
+    deterministically at session end. On Python 3.14+ the implicit creation
+    path no longer exists, and this fixture is simply harmless.
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    yield
+    asyncio.set_event_loop(None)
+    loop.close()
+
+
+# ============================================================================
 # Mock Transport and Protocol
 # ============================================================================
 

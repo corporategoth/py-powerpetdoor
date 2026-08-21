@@ -8,7 +8,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from .base import (
     ArgSpec,
@@ -105,7 +105,7 @@ class CommandHandler(
         # Register subcommand handlers from decorated methods
         self._register_subcommand_handlers()
 
-    def _register_subcommand_handlers(self):
+    def _register_subcommand_handlers(self) -> None:
         """Register subcommand handlers from @subcommand decorated methods."""
         _command_registry = get_command_registry()
 
@@ -132,17 +132,18 @@ class CommandHandler(
 
                 # Navigate to the parent through the path
                 parent_info: SubcommandInfo = _command_registry[parent_path[0]]
+                path_broken = False
                 for i, part in enumerate(parent_path[1:], 1):
                     if part not in parent_info.subcommands:
                         logger.warning(
                             f"Subcommand '{part}' not found in path "
                             f"{parent_path[:i]} for '{sub_info.name}'"
                         )
-                        parent_info = None
+                        path_broken = True
                         break
                     parent_info = parent_info.subcommands[part]
 
-                if parent_info is None:
+                if path_broken:
                     continue
 
                 # Create a new SubcommandInfo with the handler bound
@@ -364,7 +365,10 @@ class CommandHandler(
             except Exception as e:
                 return CommandResult(False, f"Error: {e}")
 
-        return result
+        # Handlers are looked up dynamically (getattr), so the type checker
+        # cannot see their return type; every command handler returns a
+        # CommandResult (or a coroutine resolving to one, awaited above).
+        return cast(CommandResult, result)
 
     def _parse_args(
         self,
@@ -380,7 +384,7 @@ class CommandHandler(
         return parse_args(parts, arg_specs, cmd_path)
 
 
-def register_all_subcommands():
+def register_all_subcommands() -> None:
     """Register all subcommands from CommandHandler class at module load time.
 
     This function scans CommandHandler and its mixin base classes for methods
@@ -409,14 +413,15 @@ def register_all_subcommands():
                     continue
 
                 # Navigate to the parent through the path
-                parent_info = _command_registry[parent_path[0]]
+                parent_info: SubcommandInfo = _command_registry[parent_path[0]]
+                path_broken = False
                 for part in parent_path[1:]:
                     if part not in parent_info.subcommands:
-                        parent_info = None
+                        path_broken = True
                         break
                     parent_info = parent_info.subcommands[part]
 
-                if parent_info is None:
+                if path_broken:
                     continue
 
                 # Skip if already registered

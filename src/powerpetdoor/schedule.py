@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from copy import deepcopy
 from datetime import time
+from typing import Any, cast
 
 from .const import (
     FIELD_DAYSOFWEEK,
@@ -200,7 +201,7 @@ def compress_schedule(schedule: list[dict]) -> list[dict]:
     for position, sched in enumerate(schedule):
         _require_complete_entry(sched, position)
 
-    expanded_sched = {
+    expanded_sched: dict[str, dict[int, list[dict[str, time]]]] = {
         FIELD_INSIDE: {},
         FIELD_OUTSIDE: {},
     }
@@ -256,7 +257,7 @@ def compress_schedule(schedule: list[dict]) -> list[dict]:
 
     # Step 3 .. Combine days of week
     def collapse_split_field(xsched: dict) -> list:
-        out = []
+        out: list[dict[str, Any]] = []
         for day, daysched in xsched.items():
             for sched in daysched:
                 found = False
@@ -424,18 +425,20 @@ def compute_schedule_diff(
         key = schedule_entry_content_key(entry)
         current_by_content[key] = entry
 
-    # Build set of indices currently in use
-    current_indices = {entry.get(FIELD_INDEX) for entry in current_schedule}
+    # Build set of indices currently in use. Entries are raw protocol dicts
+    # (untyped); device entries always carry an integer index, so cast tells
+    # the type checker what .get() returns without changing runtime behavior.
+    current_indices = {cast(int, entry.get(FIELD_INDEX)) for entry in current_schedule}
 
     # Find entries that already exist (no change needed) and track which new entries need to be set
     entries_to_set = []
-    matched_indices = set()
+    matched_indices: set[int] = set()
 
     for entry in new_schedule:
         key = schedule_entry_content_key(entry)
         if key in current_by_content:
             # This content already exists - no change needed
-            matched_indices.add(current_by_content[key].get(FIELD_INDEX))
+            matched_indices.add(cast(int, current_by_content[key].get(FIELD_INDEX)))
         else:
             # This is a new/changed entry that needs to be SET. Copy it so
             # the index reassignment below never mutates the caller's
