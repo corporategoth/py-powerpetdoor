@@ -86,11 +86,13 @@ jobs:
             .coverage.py${{ matrix.python-version }}
             coverage.xml
 
+  # Runs on every push and PR: the property suite is ~2s and has caught real
+  # framing bugs — excluding it from PR CI would let property regressions
+  # merge green and only fail after the fact on main.
   fuzz-tests:
     name: Fuzz Tests
     needs: [cache-actions]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup-uv-with-retry
