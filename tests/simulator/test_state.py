@@ -4,28 +4,27 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for simulator state module (state.py)."""
+
 from __future__ import annotations
 
-import pytest
-
-from powerpetdoor.simulator import (
-    DoorSimulatorState,
-    Schedule,
-    DoorTimingConfig,
-    BatteryConfig,
-)
 from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
-    FIELD_POWER,
-    FIELD_INSIDE,
     FIELD_AUTO,
+    FIELD_INSIDE,
+    FIELD_POWER,
     FIELD_TZ,
 )
-
+from powerpetdoor.simulator import (
+    BatteryConfig,
+    DoorSimulatorState,
+    DoorTimingConfig,
+    Schedule,
+)
 
 # ============================================================================
 # DoorTimingConfig Tests
 # ============================================================================
+
 
 class TestDoorTimingConfig:
     """Tests for DoorTimingConfig dataclass."""
@@ -55,6 +54,7 @@ class TestDoorTimingConfig:
 # ============================================================================
 # BatteryConfig Tests
 # ============================================================================
+
 
 class TestBatteryConfig:
     """Tests for BatteryConfig dataclass."""
@@ -87,6 +87,7 @@ class TestBatteryConfig:
 # ============================================================================
 # Schedule Tests
 # ============================================================================
+
 
 class TestSchedule:
     """Tests for Schedule dataclass."""
@@ -258,6 +259,7 @@ class TestSchedule:
 # DoorSimulatorState Tests
 # ============================================================================
 
+
 class TestDoorSimulatorState:
     """Tests for DoorSimulatorState dataclass."""
 
@@ -355,6 +357,7 @@ class TestDoorSimulatorState:
 # Sensor Detection Model Tests
 # ============================================================================
 
+
 class TestSensorDetectionModel:
     """Tests for the sensor detection model (inside_sensor_active, outside_sensor_active)."""
 
@@ -405,29 +408,17 @@ class TestIsSensorBlockingClose:
 
     def test_outside_sensor_active_and_enabled(self):
         """Outside sensor should block close when active, enabled, and NOT safety-locked."""
-        state = DoorSimulatorState(
-            outside_sensor_active=True,
-            outside=True,
-            safety_lock=False
-        )
+        state = DoorSimulatorState(outside_sensor_active=True, outside=True, safety_lock=False)
         assert state.is_sensor_blocking_close() is True
 
     def test_outside_sensor_active_but_disabled(self):
         """Outside sensor should NOT block close when active but disabled."""
-        state = DoorSimulatorState(
-            outside_sensor_active=True,
-            outside=False,
-            safety_lock=False
-        )
+        state = DoorSimulatorState(outside_sensor_active=True, outside=False, safety_lock=False)
         assert state.is_sensor_blocking_close() is False
 
     def test_outside_sensor_active_but_safety_locked(self):
         """Outside sensor should NOT block close when safety-locked."""
-        state = DoorSimulatorState(
-            outside_sensor_active=True,
-            outside=True,
-            safety_lock=True
-        )
+        state = DoorSimulatorState(outside_sensor_active=True, outside=True, safety_lock=True)
         assert state.is_sensor_blocking_close() is False
 
     def test_inside_blocks_even_with_safety_lock(self):
@@ -435,7 +426,7 @@ class TestIsSensorBlockingClose:
         state = DoorSimulatorState(
             inside_sensor_active=True,
             inside=True,
-            safety_lock=True  # Safety lock only affects outside sensor
+            safety_lock=True,  # Safety lock only affects outside sensor
         )
         assert state.is_sensor_blocking_close() is True
 
@@ -443,10 +434,7 @@ class TestIsSensorBlockingClose:
         """Should block if at least one active sensor is enabled."""
         # Inside active and enabled, outside active but disabled
         state = DoorSimulatorState(
-            inside_sensor_active=True,
-            inside=True,
-            outside_sensor_active=True,
-            outside=False
+            inside_sensor_active=True, inside=True, outside_sensor_active=True, outside=False
         )
         assert state.is_sensor_blocking_close() is True
 
@@ -456,44 +444,30 @@ class TestIsSensorBlockingClose:
             inside=False,
             outside_sensor_active=True,
             outside=True,
-            safety_lock=False
+            safety_lock=False,
         )
         assert state.is_sensor_blocking_close() is True
 
     def test_both_sensors_active_both_disabled(self):
         """Should NOT block if both active sensors are disabled."""
         state = DoorSimulatorState(
-            inside_sensor_active=True,
-            inside=False,
-            outside_sensor_active=True,
-            outside=False
+            inside_sensor_active=True, inside=False, outside_sensor_active=True, outside=False
         )
         assert state.is_sensor_blocking_close() is False
 
     def test_cmd_lockout_prevents_inside_blocking(self):
         """When cmd_lockout is enabled, inside sensor should NOT block close."""
-        state = DoorSimulatorState(
-            inside_sensor_active=True,
-            inside=True,
-            cmd_lockout=True
-        )
+        state = DoorSimulatorState(inside_sensor_active=True, inside=True, cmd_lockout=True)
         assert state.is_sensor_blocking_close() is False
 
     def test_cmd_lockout_prevents_outside_blocking(self):
         """When cmd_lockout is enabled, outside sensor should NOT block close."""
         state = DoorSimulatorState(
-            outside_sensor_active=True,
-            outside=True,
-            safety_lock=False,
-            cmd_lockout=True
+            outside_sensor_active=True, outside=True, safety_lock=False, cmd_lockout=True
         )
         assert state.is_sensor_blocking_close() is False
 
     def test_cmd_lockout_disabled_allows_blocking(self):
         """When cmd_lockout is disabled, sensors should block as normal."""
-        state = DoorSimulatorState(
-            inside_sensor_active=True,
-            inside=True,
-            cmd_lockout=False
-        )
+        state = DoorSimulatorState(inside_sensor_active=True, inside=True, cmd_lockout=False)
         assert state.is_sensor_blocking_close() is True

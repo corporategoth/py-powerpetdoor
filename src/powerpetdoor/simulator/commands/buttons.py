@@ -5,7 +5,7 @@
 
 """Physical button toggle commands."""
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from .base import ArgSpec, CommandResult, SubcommandInfo, command, subcommand
 
@@ -19,8 +19,12 @@ class ButtonCommandsMixin:
     simulator: "DoorSimulator"
 
     def _toggle_bool(
-        self, attr: str, name: str, value: Optional[bool], fmt: str = "ON|OFF",
-        broadcast_func: Optional[str] = None
+        self,
+        attr: str,
+        name: str,
+        value: bool | None,
+        fmt: str = "ON|OFF",
+        broadcast_func: str | None = None,
     ) -> CommandResult:
         """Toggle or set a boolean state attribute.
 
@@ -69,16 +73,14 @@ class ButtonCommandsMixin:
         ],
         subcommands=[SubcommandInfo("toggle", ["t"], "Toggle power state")],
     )
-    def power(self, value: Optional[bool] = None) -> CommandResult:
+    def power(self, value: bool | None = None) -> CommandResult:
         """Toggle or set power state."""
-        return self._toggle_bool("power", "Power", value,
-                                 broadcast_func="broadcast_power")
+        return self._toggle_bool("power", "Power", value, broadcast_func="broadcast_power")
 
     @subcommand("power", "toggle", ["t"], "Toggle power state")
     def power_toggle(self) -> CommandResult:
         """Toggle power state."""
-        return self._toggle_bool("power", "Power", None,
-                                 broadcast_func="broadcast_power")
+        return self._toggle_bool("power", "Power", None, broadcast_func="broadcast_power")
 
     @command(
         "auto",
@@ -95,16 +97,14 @@ class ButtonCommandsMixin:
         ],
         subcommands=[SubcommandInfo("toggle", ["t"], "Toggle auto mode")],
     )
-    def auto(self, value: Optional[bool] = None) -> CommandResult:
+    def auto(self, value: bool | None = None) -> CommandResult:
         """Toggle or set auto (schedule) mode."""
-        return self._toggle_bool("auto", "Auto (schedule)", value,
-                                 broadcast_func="broadcast_auto")
+        return self._toggle_bool("auto", "Auto (schedule)", value, broadcast_func="broadcast_auto")
 
     @subcommand("auto", "toggle", ["t"], "Toggle auto mode")
     def auto_toggle(self) -> CommandResult:
         """Toggle auto mode."""
-        return self._toggle_bool("auto", "Auto (schedule)", None,
-                                 broadcast_func="broadcast_auto")
+        return self._toggle_bool("auto", "Auto (schedule)", None, broadcast_func="broadcast_auto")
 
     @command(
         "inside_enable",
@@ -121,16 +121,26 @@ class ButtonCommandsMixin:
         ],
         subcommands=[SubcommandInfo("toggle", ["t"], "Toggle inside sensor enable")],
     )
-    def inside_enable(self, value: Optional[bool] = None) -> CommandResult:
+    def inside_enable(self, value: bool | None = None) -> CommandResult:
         """Toggle or set inside sensor enable."""
-        return self._toggle_bool("inside", "Inside sensor", value, "enabled|disabled",
-                                 broadcast_func="broadcast_inside_sensor")
+        return self._toggle_bool(
+            "inside",
+            "Inside sensor",
+            value,
+            "enabled|disabled",
+            broadcast_func="broadcast_inside_sensor",
+        )
 
     @subcommand("inside_enable", "toggle", ["t"], "Toggle inside sensor enable")
     def inside_enable_toggle(self) -> CommandResult:
         """Toggle inside sensor enable."""
-        return self._toggle_bool("inside", "Inside sensor", None, "enabled|disabled",
-                                 broadcast_func="broadcast_inside_sensor")
+        return self._toggle_bool(
+            "inside",
+            "Inside sensor",
+            None,
+            "enabled|disabled",
+            broadcast_func="broadcast_inside_sensor",
+        )
 
     @command(
         "outside_enable",
@@ -147,13 +157,23 @@ class ButtonCommandsMixin:
         ],
         subcommands=[SubcommandInfo("toggle", ["t"], "Toggle outside sensor enable")],
     )
-    def outside_enable(self, value: Optional[bool] = None) -> CommandResult:
+    def outside_enable(self, value: bool | None = None) -> CommandResult:
         """Toggle or set outside sensor enable."""
-        return self._toggle_bool("outside", "Outside sensor", value, "enabled|disabled",
-                                 broadcast_func="broadcast_outside_sensor")
+        return self._toggle_bool(
+            "outside",
+            "Outside sensor",
+            value,
+            "enabled|disabled",
+            broadcast_func="broadcast_outside_sensor",
+        )
 
     @subcommand("outside_enable", "toggle", ["t"], "Toggle outside sensor enable")
     def outside_enable_toggle(self) -> CommandResult:
         """Toggle outside sensor enable."""
-        return self._toggle_bool("outside", "Outside sensor", None, "enabled|disabled",
-                                 broadcast_func="broadcast_outside_sensor")
+        return self._toggle_bool(
+            "outside",
+            "Outside sensor",
+            None,
+            "enabled|disabled",
+            broadcast_func="broadcast_outside_sensor",
+        )

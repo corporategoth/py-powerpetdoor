@@ -13,114 +13,113 @@ import asyncio
 import json
 import logging
 import time
-from typing import Callable, Optional, TYPE_CHECKING
-
-from ..tz_utils import get_posix_tz_string, is_cache_initialized
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from ..const import (
-    COMMAND,
-    PING,
-    PONG,
-    DOOR_STATUS,
-    FIELD_MSG_ID,
-    FIELD_MSG_ID_RESPONSE,
-    FIELD_DIRECTION,
-    FIELD_CMD,
-    DOOR_TO_PHONE,
-    DOOR_STATE_CLOSED,
-    DOOR_STATE_RISING,
-    DOOR_STATE_HOLDING,
-    DOOR_STATE_KEEPUP,
-    DOOR_STATE_SLOWING,
-    DOOR_STATE_CLOSING_TOP_OPEN,
-    DOOR_STATE_CLOSING_MID_OPEN,
-    CMD_GET_SETTINGS,
-    CMD_GET_DOOR_STATUS,
-    CMD_GET_SENSORS,
-    CMD_GET_POWER,
+    CMD_CHECK_RESET_REASON,
+    CMD_CLOSE,
+    CMD_DELETE_SCHEDULE,
+    CMD_DISABLE_AUTO,
+    CMD_DISABLE_AUTORETRACT,
+    CMD_DISABLE_CMD_LOCKOUT,
+    CMD_DISABLE_INSIDE,
+    CMD_DISABLE_OUTSIDE,
+    CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
+    CMD_ENABLE_AUTO,
+    CMD_ENABLE_AUTORETRACT,
+    CMD_ENABLE_CMD_LOCKOUT,
+    CMD_ENABLE_INSIDE,
+    CMD_ENABLE_OUTSIDE,
+    CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
     CMD_GET_AUTO,
-    CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
-    CMD_GET_CMD_LOCKOUT,
     CMD_GET_AUTORETRACT,
-    CMD_GET_HW_INFO,
+    CMD_GET_CMD_LOCKOUT,
     CMD_GET_DOOR_BATTERY,
     CMD_GET_DOOR_OPEN_STATS,
-    CMD_GET_NOTIFICATIONS,
-    CMD_GET_TIMEZONE,
+    CMD_GET_DOOR_STATUS,
     CMD_GET_HOLD_TIME,
-    CMD_GET_SENSOR_TRIGGER_VOLTAGE,
-    CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
-    CMD_GET_SCHEDULE_LIST,
-    CMD_SET_SCHEDULE_LIST,
+    CMD_GET_HW_INFO,
+    CMD_GET_NOTIFICATIONS,
+    CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
+    CMD_GET_POWER,
     CMD_GET_SCHEDULE,
-    CMD_SET_SCHEDULE,
-    CMD_DELETE_SCHEDULE,
+    CMD_GET_SCHEDULE_LIST,
+    CMD_GET_SENSOR_TRIGGER_VOLTAGE,
+    CMD_GET_SENSORS,
+    CMD_GET_SETTINGS,
+    CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+    CMD_GET_TIMEZONE,
     CMD_HAS_REMOTE_ID,
     CMD_HAS_REMOTE_KEY,
-    CMD_CHECK_RESET_REASON,
     CMD_OPEN,
     CMD_OPEN_AND_HOLD,
-    CMD_CLOSE,
-    CMD_ENABLE_INSIDE,
-    CMD_DISABLE_INSIDE,
-    CMD_ENABLE_OUTSIDE,
-    CMD_DISABLE_OUTSIDE,
-    CMD_ENABLE_AUTO,
-    CMD_DISABLE_AUTO,
-    CMD_POWER_ON,
     CMD_POWER_OFF,
-    CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
-    CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
-    CMD_ENABLE_CMD_LOCKOUT,
-    CMD_DISABLE_CMD_LOCKOUT,
-    CMD_ENABLE_AUTORETRACT,
-    CMD_DISABLE_AUTORETRACT,
-    CMD_SET_TIMEZONE,
+    CMD_POWER_ON,
     CMD_SET_HOLD_TIME,
     CMD_SET_NOTIFICATIONS,
+    CMD_SET_SCHEDULE,
+    CMD_SET_SCHEDULE_LIST,
     CMD_SET_SENSOR_TRIGGER_VOLTAGE,
     CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
-    FIELD_POWER,
-    FIELD_INSIDE,
-    FIELD_OUTSIDE,
+    CMD_SET_TIMEZONE,
+    COMMAND,
+    DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    DOOR_STATE_CLOSING_TOP_OPEN,
+    DOOR_STATE_HOLDING,
+    DOOR_STATE_KEEPUP,
+    DOOR_STATE_RISING,
+    DOOR_STATE_SLOWING,
+    DOOR_STATUS,
+    DOOR_TO_PHONE,
+    FIELD_AC_PRESENT,
     FIELD_AUTO,
-    FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
-    FIELD_CMD_LOCKOUT,
     FIELD_AUTORETRACT,
-    FIELD_SETTINGS,
-    FIELD_NOTIFICATIONS,
-    FIELD_TZ,
-    FIELD_HOLD_TIME,
-    FIELD_DOOR_STATUS,
-    FIELD_SUCCESS,
-    SUCCESS_TRUE,
-    SUCCESS_FALSE,
-    FIELD_FWINFO,
     FIELD_BATTERY_PERCENT,
     FIELD_BATTERY_PRESENT,
-    FIELD_AC_PRESENT,
-    FIELD_SENSOR_TRIGGER_VOLTAGE,
-    FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
-    FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
-    FIELD_LOW_BATTERY_NOTIFICATIONS,
-    FIELD_TOTAL_OPEN_CYCLES,
-    FIELD_TOTAL_AUTO_RETRACTS,
-    FIELD_SCHEDULES,
-    FIELD_SCHEDULE,
-    FIELD_INDEX,
-    NOTIFY_SENSOR_INDOOR,
-    NOTIFY_SENSOR_OUTDOOR,
-    FIELD_SENSOR_STATE,
-    FIELD_HW_VERSION,
-    FIELD_HW_REVISION,
+    FIELD_CMD,
+    FIELD_CMD_LOCKOUT,
+    FIELD_DIRECTION,
+    FIELD_DOOR_STATUS,
     FIELD_FW_MAJOR,
     FIELD_FW_MINOR,
     FIELD_FW_PATCH,
+    FIELD_FWINFO,
+    FIELD_HOLD_TIME,
+    FIELD_HW_REVISION,
+    FIELD_HW_VERSION,
+    FIELD_INDEX,
+    FIELD_INSIDE,
+    FIELD_LOW_BATTERY_NOTIFICATIONS,
+    FIELD_MSG_ID,
+    FIELD_MSG_ID_RESPONSE,
+    FIELD_NOTIFICATIONS,
+    FIELD_OUTSIDE,
+    FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
+    FIELD_POWER,
+    FIELD_SCHEDULE,
+    FIELD_SCHEDULES,
+    FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_STATE,
+    FIELD_SENSOR_TRIGGER_VOLTAGE,
+    FIELD_SETTINGS,
+    FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+    FIELD_SUCCESS,
+    FIELD_TOTAL_AUTO_RETRACTS,
+    FIELD_TOTAL_OPEN_CYCLES,
+    FIELD_TZ,
+    NOTIFY_SENSOR_INDOOR,
+    NOTIFY_SENSOR_OUTDOOR,
+    PING,
+    PONG,
+    SUCCESS_FALSE,
+    SUCCESS_TRUE,
 )
-
+from ..tz_utils import get_posix_tz_string, is_cache_initialized
 from .state import DoorSimulatorState, Schedule
 
 if TYPE_CHECKING:
@@ -148,13 +147,15 @@ class CommandRegistry:
             async def handle_get_settings(self, msg, response):
                 response[FIELD_SETTINGS] = self.state.get_settings()
         """
+
         def decorator(func):
             cls._handlers[cmd] = func
             return func
+
         return decorator
 
     @classmethod
-    def get(cls, cmd: str) -> Optional[Callable]:
+    def get(cls, cmd: str) -> Callable | None:
         """Get the handler for a command, or None if not found."""
         return cls._handlers.get(cmd)
 
@@ -165,17 +166,17 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     def __init__(
         self,
         state: DoorSimulatorState,
-        on_command: Optional[Callable[[str, dict], None]] = None,
-        broadcast_status: Optional[Callable[[], None]] = None,
-        on_disconnect: Optional[Callable[["DoorSimulatorProtocol"], None]] = None,
+        on_command: Callable[[str, dict], None] | None = None,
+        broadcast_status: Callable[[], None] | None = None,
+        on_disconnect: Callable[["DoorSimulatorProtocol"], None] | None = None,
     ):
         self.state = state
         self.on_command = on_command
         self.broadcast_status = broadcast_status
         self.on_disconnect = on_disconnect
-        self.transport: Optional[asyncio.Transport] = None
+        self.transport: asyncio.Transport | None = None
         self.buffer = ""
-        self._door_task: Optional[asyncio.Task] = None
+        self._door_task: asyncio.Task | None = None
         self._hold_remaining: float = 0
         self._last_sensor_trigger: float = 0
 
@@ -215,7 +216,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         except Exception as e:
             logger.error(f"Simulator: Error receiving data: {e}")
 
-    def _find_json_end(self, s: str) -> Optional[int]:
+    def _find_json_end(self, s: str) -> int | None:
         """Find the end of a JSON object in a string."""
         if not s or s[0] != "{":
             return None
@@ -259,11 +260,19 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
         # Handle PING
         if PING in msg:
-            self._send({FIELD_CMD: PONG, PONG: msg[PING], FIELD_SUCCESS: SUCCESS_TRUE, FIELD_DIRECTION: DOOR_TO_PHONE})
+            self._send(
+                {
+                    FIELD_CMD: PONG,
+                    PONG: msg[PING],
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
             return
 
         # Client sends commands under "config" key for queries, "cmd" for actions
         from ..const import CONFIG
+
         cmd = msg.get(CONFIG) or msg.get(COMMAND)
         if not cmd:
             return
@@ -325,15 +334,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     @CommandRegistry.handler(CMD_GET_CMD_LOCKOUT)
     async def _handle_get_cmd_lockout(self, msg: dict, response: dict) -> None:
-        response[FIELD_SETTINGS] = {
-            FIELD_CMD_LOCKOUT: "1" if self.state.cmd_lockout else "0"
-        }
+        response[FIELD_SETTINGS] = {FIELD_CMD_LOCKOUT: "1" if self.state.cmd_lockout else "0"}
 
     @CommandRegistry.handler(CMD_GET_AUTORETRACT)
     async def _handle_get_autoretract(self, msg: dict, response: dict) -> None:
-        response[FIELD_SETTINGS] = {
-            FIELD_AUTORETRACT: "1" if self.state.autoretract else "0"
-        }
+        response[FIELD_SETTINGS] = {FIELD_AUTORETRACT: "1" if self.state.autoretract else "0"}
 
     @CommandRegistry.handler(CMD_GET_HW_INFO)
     async def _handle_get_hw_info(self, msg: dict, response: dict) -> None:
@@ -797,12 +802,14 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     def _send_door_status(self):
         """Send unsolicited door status update to this client only."""
-        self._send({
-            FIELD_CMD: DOOR_STATUS,
-            FIELD_DOOR_STATUS: self.state.door_status,
-            FIELD_SUCCESS: SUCCESS_TRUE,
-            FIELD_DIRECTION: DOOR_TO_PHONE,
-        })
+        self._send(
+            {
+                FIELD_CMD: DOOR_STATUS,
+                FIELD_DOOR_STATUS: self.state.door_status,
+                FIELD_SUCCESS: SUCCESS_TRUE,
+                FIELD_DIRECTION: DOOR_TO_PHONE,
+            }
+        )
 
     def _broadcast_or_send_status(self):
         """Broadcast door status to all clients, or send to this client only."""
@@ -832,12 +839,14 @@ class DoorSimulatorProtocol(asyncio.Protocol):
                 return
             notify_type = NOTIFY_SENSOR_OUTDOOR
 
-        self._send({
-            FIELD_CMD: notify_type,
-            FIELD_SENSOR_STATE: state,
-            FIELD_SUCCESS: SUCCESS_TRUE,
-            FIELD_DIRECTION: DOOR_TO_PHONE,
-        })
+        self._send(
+            {
+                FIELD_CMD: notify_type,
+                FIELD_SENSOR_STATE: state,
+                FIELD_SUCCESS: SUCCESS_TRUE,
+                FIELD_DIRECTION: DOOR_TO_PHONE,
+            }
+        )
         logger.debug(f"Simulator: Sent {sensor} sensor {state} notification")
 
     def trigger_sensor(self, sensor: str):

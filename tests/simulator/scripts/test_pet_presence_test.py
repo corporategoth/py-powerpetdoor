@@ -4,17 +4,14 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for the pet_presence_test built-in script."""
+
 from __future__ import annotations
 
 import pytest
 
-from powerpetdoor.simulator.scripting import get_builtin_script, YAML_AVAILABLE
+from powerpetdoor.simulator.scripting import YAML_AVAILABLE, get_builtin_script
 
-
-requires_yaml = pytest.mark.skipif(
-    not YAML_AVAILABLE,
-    reason="PyYAML not installed"
-)
+requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
 
 
 @requires_yaml
@@ -59,6 +56,7 @@ class TestPetPresenceTestMessages:
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         status_updates = message_capture.find_status_updates()
@@ -67,19 +65,17 @@ class TestPetPresenceTestMessages:
     @pytest.mark.asyncio
     async def test_door_opens_during_pet_presence(self, runner, simulator, message_capture):
         """Door should open when pet presence is simulated."""
-        from powerpetdoor.const import DOOR_STATE_RISING, DOOR_STATE_HOLDING
+        from powerpetdoor.const import DOOR_STATE_HOLDING, DOOR_STATE_RISING
 
         script = get_builtin_script("pet_presence_test")
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         statuses = message_capture.get_status_sequence()
-        has_open = any(
-            s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING)
-            for s in statuses
-        )
+        has_open = any(s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING) for s in statuses)
         assert has_open, f"Should see door open during pet presence: {statuses}"
 
     @pytest.mark.asyncio
@@ -91,12 +87,10 @@ class TestPetPresenceTestMessages:
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         statuses = message_capture.get_status_sequence()
         # Should see holding or keepup states while pet is present
-        has_hold = any(
-            s in (DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP)
-            for s in statuses
-        )
+        has_hold = any(s in (DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP) for s in statuses)
         assert has_hold, f"Should see door holding open for pet: {statuses}"

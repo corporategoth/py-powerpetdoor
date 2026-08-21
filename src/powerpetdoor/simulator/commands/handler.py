@@ -7,7 +7,8 @@
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Callable, Optional
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from .base import (
     ArgSpec,
@@ -16,10 +17,10 @@ from .base import (
     get_command_registry,
     parse_arg,
 )
-from .history import History
 from .buttons import ButtonCommandsMixin
 from .control import ControlCommandsMixin
 from .door import DoorCommandsMixin
+from .history import History
 from .info import InfoCommandsMixin
 from .notifications import NotifyCommandsMixin
 from .schedules import ScheduleCommandsMixin
@@ -28,8 +29,8 @@ from .settings import SettingsCommandsMixin
 from .simulation import SimulationCommandsMixin
 
 if TYPE_CHECKING:
-    from ..server import DoorSimulator
     from ..scripting import ScriptRunner
+    from ..server import DoorSimulator
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ class CommandHandler(
         simulator: "DoorSimulator",
         script_runner: "ScriptRunner",
         stop_callback: Callable[[], None],
-        script_queue: Optional[asyncio.Queue] = None,
+        script_queue: asyncio.Queue | None = None,
     ):
         """Initialize the command handler.
 
@@ -208,9 +209,7 @@ class CommandHandler(
             for alias in cli_aliases:
                 if alias in _command_registry and _command_registry[alias] is shutdown_info:
                     del _command_registry[alias]
-            shutdown_info.aliases = tuple(
-                a for a in shutdown_info.aliases if a not in cli_aliases
-            )
+            shutdown_info.aliases = tuple(a for a in shutdown_info.aliases if a not in cli_aliases)
 
             # Restore exit command's aliases to registry
             if "exit" in _command_registry:
@@ -241,30 +240,22 @@ class CommandHandler(
 
         # Look up command in registry
         if cmd not in _command_registry:
-            return CommandResult(
-                False, f"Unknown command: {cmd}. Type 'help' for commands."
-            )
+            return CommandResult(False, f"Unknown command: {cmd}. Type 'help' for commands.")
 
         # Check for interactive-only commands (hide them when not in interactive mode)
         cmd_info = _command_registry[cmd]
         if cmd_info.interactive_only and not self._interactive_mode:
-            return CommandResult(
-                False, f"Unknown command: {cmd}. Type 'help' for commands."
-            )
+            return CommandResult(False, f"Unknown command: {cmd}. Type 'help' for commands.")
 
         # Reject local_only commands when running as daemon control port
         # In CLI mode (_cli_mode=True) or interactive mode, these are handled normally
         # Daemon control port has _interactive_mode=False and _cli_mode=False
         if cmd_info.local_only and not self._cli_mode and not self._interactive_mode:
-            return CommandResult(
-                False, f"Unknown command: {cmd}. Type 'help' for commands."
-            )
+            return CommandResult(False, f"Unknown command: {cmd}. Type 'help' for commands.")
 
         # Hide history command when prompt_toolkit is not available
         if cmd in ("history", "hist") and not self._is_history_available():
-            return CommandResult(
-                False, f"Unknown command: {cmd}. Type 'help' for commands."
-            )
+            return CommandResult(False, f"Unknown command: {cmd}. Type 'help' for commands.")
 
         info: SubcommandInfo = _command_registry[cmd]
         cmd_path = [_command_registry[cmd].name]  # Track command path for help
@@ -304,8 +295,7 @@ class CommandHandler(
                 cmd_str = " ".join(cmd_path)
                 return CommandResult(
                     False,
-                    f"Unknown {cmd_str} subcommand: {subcmd}\n"
-                    f"Available: {', '.join(subnames)}",
+                    f"Unknown {cmd_str} subcommand: {subcmd}\nAvailable: {', '.join(subnames)}",
                 )
 
         # Build remaining argument parts
@@ -313,9 +303,7 @@ class CommandHandler(
 
         # Get the handler
         if info.handler is None:
-            return CommandResult(
-                False, f"No handler for: {' '.join(parts[:part_idx])}"
-            )
+            return CommandResult(False, f"No handler for: {' '.join(parts[:part_idx])}")
 
         handler = getattr(self, info.handler.__name__)
 
@@ -353,7 +341,7 @@ class CommandHandler(
         parts: list[str],
         arg_specs: list[ArgSpec],
         cmd_path: list[str],
-    ) -> tuple[list, Optional[CommandResult]]:
+    ) -> tuple[list, CommandResult | None]:
         """Parse argument parts according to ArgSpec definitions.
 
         Returns:
@@ -367,9 +355,7 @@ class CommandHandler(
             if i < len(parts):
                 value, error = parse_arg(parts[i], spec)
                 if error:
-                    return [], CommandResult(
-                        False, f"{error}\nUsage: {cmd_str} {usage}"
-                    )
+                    return [], CommandResult(False, f"{error}\nUsage: {cmd_str} {usage}")
                 parsed.append(value)
             elif spec.required:
                 return [], CommandResult(

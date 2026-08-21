@@ -14,17 +14,8 @@ import argparse
 import asyncio
 import socket
 import sys
-from typing import Optional
 
 from ..tz_utils import async_init_timezone_cache
-
-# Import shared prompt_toolkit components
-from .prompt_common import (
-    PROMPT_TOOLKIT_AVAILABLE,
-    CTL_HISTORY_FILE as HISTORY_FILE,
-    InteractiveSession,
-    InputLine,
-)
 
 # Import command infrastructure for local command handling
 from .commands.base import (
@@ -32,9 +23,19 @@ from .commands.base import (
     get_command_registry,
     parse_arg,
 )
+from .commands.control import ControlCommandsMixin
 from .commands.history import History
 from .commands.info import InfoCommandsMixin
-from .commands.control import ControlCommandsMixin
+from .prompt_common import (
+    CTL_HISTORY_FILE as HISTORY_FILE,
+)
+
+# Import shared prompt_toolkit components
+from .prompt_common import (
+    PROMPT_TOOLKIT_AVAILABLE,
+    InputLine,
+    InteractiveSession,
+)
 
 
 class LocalCommandResult:
@@ -264,12 +265,12 @@ def send_command(
                             success = response_str.startswith("OK:")
                             # Unescape the message portion
                             if success:
-                                msg = response_str[4:].replace('\\n', '\n').replace('\\\\', '\\')
+                                msg = response_str[4:].replace("\\n", "\n").replace("\\\\", "\\")
                                 return success, f"OK: {msg}"
                             else:
-                                msg = response_str[7:].replace('\\n', '\n').replace('\\\\', '\\')
+                                msg = response_str[7:].replace("\\n", "\n").replace("\\\\", "\\")
                                 return success, f"ERROR: {msg}"
-                except socket.timeout:
+                except TimeoutError:
                     break
 
             response_str = response.decode().strip()
@@ -278,7 +279,7 @@ def send_command(
 
     except ConnectionRefusedError:
         return False, f"Connection refused to {host}:{port}"
-    except socket.timeout:
+    except TimeoutError:
         return False, f"Connection timed out to {host}:{port}"
     except Exception as e:
         return False, f"Error: {e}"
@@ -297,14 +298,14 @@ def check_connection(host: str, port: int, timeout: float = 2.0) -> tuple[bool, 
             return True, ""
     except ConnectionRefusedError:
         return False, f"Connection refused - simulator not running on {host}:{port}"
-    except socket.timeout:
+    except TimeoutError:
         return False, f"Connection timed out to {host}:{port}"
     except Exception as e:
         return False, f"Connection error: {e}"
 
 
 async def interactive_mode_async(
-    host: str, port: int, door_port: int, timeout: float, history_file: Optional[str]
+    host: str, port: int, door_port: int, timeout: float, history_file: str | None
 ):
     """Run in interactive mode using asyncio with log streaming."""
     # Initialize timezone cache for completion
@@ -372,7 +373,10 @@ async def interactive_mode_async(
                             has_clients[0] = True
                             if not old_status:
                                 interactive.invalidate()
-                        elif "Client disconnected" in decoded or "connection closed" in decoded.lower():
+                        elif (
+                            "Client disconnected" in decoded
+                            or "connection closed" in decoded.lower()
+                        ):
                             # For simplicity, assume disconnected means no clients
                             # (a proper solution would track count)
                             old_status = has_clients[0]
@@ -381,7 +385,7 @@ async def interactive_mode_async(
                                 interactive.invalidate()
                     elif decoded.startswith("OK:"):
                         # Unescape newlines from protocol
-                        msg = decoded[4:].replace('\\n', '\n').replace('\\\\', '\\')
+                        msg = decoded[4:].replace("\\n", "\n").replace("\\\\", "\\")
                         # Route to response queue
                         await response_queue.put((True, msg))
                         # Update client count from status responses
@@ -395,7 +399,7 @@ async def interactive_mode_async(
                                 interactive.invalidate()
                     elif decoded.startswith("ERROR:"):
                         # Unescape newlines from protocol
-                        msg = decoded[7:].replace('\\n', '\n').replace('\\\\', '\\')
+                        msg = decoded[7:].replace("\\n", "\n").replace("\\\\", "\\")
                         await response_queue.put((False, msg))
                 except asyncio.CancelledError:
                     break
@@ -421,11 +425,9 @@ async def interactive_mode_async(
 
             # Wait for response from the reader task
             try:
-                success, response = await asyncio.wait_for(
-                    response_queue.get(), timeout=timeout
-                )
+                success, response = await asyncio.wait_for(response_queue.get(), timeout=timeout)
                 return success, response
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return False, "Response timeout"
         except Exception as e:
             return False, f"Error: {e}"
@@ -620,7 +622,7 @@ def interactive_mode(
     port: int,
     door_port: int,
     timeout: float,
-    history_file: Optional[str] = None,
+    history_file: str | None = None,
 ):
     """Run in interactive mode, sending commands from stdin."""
     # Use async mode for log streaming support
@@ -645,9 +647,7 @@ Use the 'help' command to see available simulator commands.
     parser.add_argument(
         "--host", "-H", default="127.0.0.1", help="Simulator host (default: 127.0.0.1)"
     )
-    parser.add_argument(
-        "--port", "-p", type=int, default=3001, help="Control port (default: 3001)"
-    )
+    parser.add_argument("--port", "-p", type=int, default=3001, help="Control port (default: 3001)")
     parser.add_argument(
         "--door-port",
         "-d",
@@ -655,9 +655,7 @@ Use the 'help' command to see available simulator commands.
         default=None,
         help="Door simulator port for prompt display (default: control_port - 1)",
     )
-    parser.add_argument(
-        "--interactive", "-i", action="store_true", help="Run in interactive mode"
-    )
+    parser.add_argument("--interactive", "-i", action="store_true", help="Run in interactive mode")
     parser.add_argument(
         "--timeout",
         "-t",

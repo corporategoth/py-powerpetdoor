@@ -4,17 +4,14 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for the schedule_test built-in script."""
+
 from __future__ import annotations
 
 import pytest
 
-from powerpetdoor.simulator.scripting import get_builtin_script, YAML_AVAILABLE
+from powerpetdoor.simulator.scripting import YAML_AVAILABLE, get_builtin_script
 
-
-requires_yaml = pytest.mark.skipif(
-    not YAML_AVAILABLE,
-    reason="PyYAML not installed"
-)
+requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
 
 
 @requires_yaml
@@ -40,11 +37,7 @@ class TestScheduleTest:
         script = get_builtin_script("schedule_test")
 
         # Find log messages
-        log_messages = [
-            s.params.get("message", "")
-            for s in script.steps
-            if s.action == "log"
-        ]
+        log_messages = [s.params.get("message", "") for s in script.steps if s.action == "log"]
         log_text = " ".join(log_messages)
 
         # Should have test sections
@@ -77,6 +70,7 @@ class TestScheduleTestMessages:
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         # Schedule tests may not trigger door movement, but should generate
@@ -87,22 +81,20 @@ class TestScheduleTestMessages:
     @pytest.mark.asyncio
     async def test_door_opens_with_schedule_enabled(self, runner, simulator, message_capture):
         """When schedule is active, door operations should work."""
-        from powerpetdoor.const import DOOR_STATE_RISING, DOOR_STATE_HOLDING
+        from powerpetdoor.const import DOOR_STATE_HOLDING, DOOR_STATE_RISING
 
         script = get_builtin_script("schedule_test")
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         statuses = message_capture.get_status_sequence()
         # If the schedule test triggers door operations, verify we see them
         if statuses:
             # If there are status updates, verify they include expected states
-            has_movement = any(
-                s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING)
-                for s in statuses
-            )
+            has_movement = any(s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING) for s in statuses)
             # This is informational - schedule tests may or may not trigger door
             if not has_movement:
                 # That's okay - schedule tests may only test schedule configuration

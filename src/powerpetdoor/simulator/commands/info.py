@@ -5,7 +5,7 @@
 
 """Info and status commands."""
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from .base import (
     ArgSpec,
@@ -44,9 +44,7 @@ class InfoCommandsMixin:
         except ImportError:
             return False
 
-    def _get_subcommand_help(
-        self, info: SubcommandInfo, cmd_path: list[str]
-    ) -> str:
+    def _get_subcommand_help(self, info: SubcommandInfo, cmd_path: list[str]) -> str:
         """Generate help text for a command's subcommands.
 
         Args:
@@ -113,9 +111,7 @@ class InfoCommandsMixin:
 
         return "\n".join(lines)
 
-    @command(
-        "status", ["state", "info", "v"], "Show current simulator state", category="info"
-    )
+    @command("status", ["state", "info", "v"], "Show current simulator state", category="info")
     def status(self) -> CommandResult:
         """Show current simulator state."""
         s = self.simulator.state
@@ -214,15 +210,13 @@ class InfoCommandsMixin:
         """Show help for all commands."""
         return CommandResult(True, self.get_help())
 
-    def _require_clients(self) -> Optional[CommandResult]:
+    def _require_clients(self) -> CommandResult | None:
         """Check if clients are connected. Returns error result if not."""
         if not self.simulator.protocols:
             return CommandResult(False, "No clients connected")
         return None
 
-    @command(
-        "broadcast", ["bc"], "Broadcast data to connected clients", category="info"
-    )
+    @command("broadcast", ["bc"], "Broadcast data to connected clients", category="info")
     def broadcast(self) -> CommandResult:
         """Show broadcast help (default action). Use 'broadcast help' for subcommands."""
         # Default action: show help for subcommands
@@ -322,7 +316,7 @@ class InfoCommandsMixin:
         interactive_only=True,
         local_only=True,
     )
-    def history(self, arg: Optional[str] = None) -> CommandResult:
+    def history(self, arg: str | None = None) -> CommandResult:
         """Show or manage command history.
 
         Subcommands:
@@ -361,9 +355,7 @@ class InfoCommandsMixin:
                 if limit <= 0:
                     return CommandResult(False, "Number must be positive")
             except ValueError:
-                return CommandResult(
-                    False, f"Invalid argument: {arg}. Use 'clear' or a number."
-                )
+                return CommandResult(False, f"Invalid argument: {arg}. Use 'clear' or a number.")
 
         # Get history entries
         try:
@@ -431,8 +423,6 @@ class InfoCommandsMixin:
                 aliases = ", ".join(info.aliases) if info.aliases else ""
                 alias_str = f" ({aliases})" if aliases else ""
                 usage_str = f" {info.usage}" if info.usage else ""
-                lines.append(
-                    f"  {info.name}{alias_str}{usage_str} - {info.description}"
-                )
+                lines.append(f"  {info.name}{alias_str}{usage_str} - {info.description}")
 
         return "\n".join(lines)

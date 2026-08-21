@@ -8,108 +8,107 @@
 from __future__ import annotations
 
 import asyncio
-import async_timeout
-import logging
 import json
-import time
+import logging
 import queue
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from collections.abc import Callable, Awaitable
+import async_timeout
 
 from .const import (
-    COMMAND,
-    CONFIG,
-    PING,
-    PONG,
-    FIELD_MSG_ID,
-    FIELD_MSG_ID_RESPONSE,
-    FIELD_DIRECTION,
-    FIELD_CMD,
-    PHONE_TO_DOOR,
-    PRIORITY_CRITICAL,
-    PRIORITY_LOW,
-    COMMAND_PRIORITIES,
-    DOOR_STATUS,
-    CMD_GET_SETTINGS,
-    CMD_GET_SENSORS,
-    CMD_GET_POWER,
-    CMD_GET_AUTO,
-    CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
-    CMD_GET_CMD_LOCKOUT,
-    CMD_GET_AUTORETRACT,
-    CMD_GET_DOOR_STATUS,
-    CMD_GET_DOOR_OPEN_STATS,
-    CMD_DISABLE_INSIDE,
-    CMD_ENABLE_INSIDE,
-    CMD_DISABLE_OUTSIDE,
-    CMD_ENABLE_OUTSIDE,
-    CMD_DISABLE_AUTO,
-    CMD_ENABLE_AUTO,
-    CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
-    CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
-    CMD_DISABLE_CMD_LOCKOUT,
-    CMD_ENABLE_CMD_LOCKOUT,
-    CMD_DISABLE_AUTORETRACT,
-    CMD_ENABLE_AUTORETRACT,
-    CMD_POWER_ON,
-    CMD_POWER_OFF,
-    CMD_GET_SCHEDULE_LIST,
+    CMD_CHECK_RESET_REASON,
     CMD_DELETE_SCHEDULE,
-    CMD_GET_SCHEDULE,
-    CMD_SET_SCHEDULE,
-    CMD_GET_HW_INFO,
+    CMD_DISABLE_AUTO,
+    CMD_DISABLE_AUTORETRACT,
+    CMD_DISABLE_CMD_LOCKOUT,
+    CMD_DISABLE_INSIDE,
+    CMD_DISABLE_OUTSIDE,
+    CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
+    CMD_ENABLE_AUTO,
+    CMD_ENABLE_AUTORETRACT,
+    CMD_ENABLE_CMD_LOCKOUT,
+    CMD_ENABLE_INSIDE,
+    CMD_ENABLE_OUTSIDE,
+    CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
+    CMD_GET_AUTO,
+    CMD_GET_AUTORETRACT,
+    CMD_GET_CMD_LOCKOUT,
     CMD_GET_DOOR_BATTERY,
+    CMD_GET_DOOR_OPEN_STATS,
+    CMD_GET_DOOR_STATUS,
+    CMD_GET_HOLD_TIME,
+    CMD_GET_HW_INFO,
+    CMD_GET_NOTIFICATIONS,
+    CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
+    CMD_GET_POWER,
+    CMD_GET_SCHEDULE,
+    CMD_GET_SCHEDULE_LIST,
+    CMD_GET_SENSOR_TRIGGER_VOLTAGE,
+    CMD_GET_SENSORS,
+    CMD_GET_SETTINGS,
+    CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+    CMD_GET_TIMEZONE,
     CMD_HAS_REMOTE_ID,
     CMD_HAS_REMOTE_KEY,
-    CMD_CHECK_RESET_REASON,
-    CMD_GET_NOTIFICATIONS,
-    CMD_SET_NOTIFICATIONS,
-    CMD_GET_HOLD_TIME,
+    CMD_POWER_OFF,
+    CMD_POWER_ON,
     CMD_SET_HOLD_TIME,
-    CMD_GET_TIMEZONE,
-    CMD_SET_TIMEZONE,
-    CMD_GET_SENSOR_TRIGGER_VOLTAGE,
+    CMD_SET_NOTIFICATIONS,
+    CMD_SET_SCHEDULE,
     CMD_SET_SENSOR_TRIGGER_VOLTAGE,
-    CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
-    FIELD_SUCCESS,
-    SUCCESS_TRUE,
-    FIELD_DOOR_STATUS,
-    FIELD_SETTINGS,
-    FIELD_NOTIFICATIONS,
-    FIELD_TZ,
-    FIELD_SCHEDULE,
-    FIELD_SCHEDULES,
-    FIELD_INDEX,
-    FIELD_HOLD_TIME,
-    FIELD_HOLD_OPEN_TIME,
-    FIELD_VOLTAGE,
-    FIELD_POWER,
-    FIELD_INSIDE,
-    FIELD_OUTSIDE,
+    CMD_SET_TIMEZONE,
+    COMMAND,
+    COMMAND_PRIORITIES,
+    CONFIG,
+    DOOR_STATUS,
+    FIELD_AC_PRESENT,
     FIELD_AUTO,
-    FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
-    FIELD_CMD_LOCKOUT,
     FIELD_AUTORETRACT,
-    FIELD_FWINFO,
     FIELD_BATTERY_PERCENT,
     FIELD_BATTERY_PRESENT,
-    FIELD_AC_PRESENT,
-    FIELD_SENSOR_TRIGGER_VOLTAGE,
-    FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
-    FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
-    FIELD_LOW_BATTERY_NOTIFICATIONS,
-    FIELD_TOTAL_OPEN_CYCLES,
-    FIELD_TOTAL_AUTO_RETRACTS,
+    FIELD_CMD,
+    FIELD_CMD_LOCKOUT,
+    FIELD_DIRECTION,
+    FIELD_DOOR_STATUS,
+    FIELD_FWINFO,
     FIELD_HAS_REMOTE_ID,
     FIELD_HAS_REMOTE_KEY,
+    FIELD_HOLD_OPEN_TIME,
+    FIELD_HOLD_TIME,
+    FIELD_INDEX,
+    FIELD_INSIDE,
+    FIELD_LOW_BATTERY_NOTIFICATIONS,
+    FIELD_MSG_ID,
+    FIELD_MSG_ID_RESPONSE,
+    FIELD_NOTIFICATIONS,
+    FIELD_OUTSIDE,
+    FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
+    FIELD_POWER,
     FIELD_RESET_REASON,
+    FIELD_SCHEDULE,
+    FIELD_SCHEDULES,
+    FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_TRIGGER_VOLTAGE,
+    FIELD_SETTINGS,
+    FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+    FIELD_SUCCESS,
+    FIELD_TOTAL_AUTO_RETRACTS,
+    FIELD_TOTAL_OPEN_CYCLES,
+    FIELD_TZ,
     MINIMUM_TIME_BETWEEN_MSGS,
+    PHONE_TO_DOOR,
+    PING,
+    PONG,
+    PRIORITY_CRITICAL,
+    PRIORITY_LOW,
+    SUCCESS_TRUE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -140,10 +139,12 @@ class ResponseHandlerRegistry:
             def _handle_power(self, msg, future):
                 ...
         """
+
         def decorator(func):
             for cmd in cmds:
                 cls._handlers[cmd] = func
             return func
+
         return decorator
 
     @classmethod
@@ -159,6 +160,7 @@ class PrioritizedMessage:
     Lower priority values are processed first.
     Sequence number ensures FIFO order within the same priority level.
     """
+
     priority: int
     sequence: int = field(compare=True)
     data: Any = field(compare=False)
@@ -180,18 +182,18 @@ def find_end(s) -> int | None:
     if not len(s):
         return None
 
-    if s[0] != '{':
+    if s[0] != "{":
         raise IndexError("Block does not start with '{'")
 
     parens = 0
     for i, c in enumerate(s):
-        if c == '{':
+        if c == "{":
             parens += 1
-        elif c == '}':
+        elif c == "}":
             parens -= 1
 
         if parens == 0:
-            return i+1
+            return i + 1
 
     return None
 
@@ -240,8 +242,9 @@ class PowerPetDoorClient:
         client.start()
     """
 
-    def __init__(self, host: str, port: int, keepalive: float, timeout: float,
-                 reconnect: float, loop=None) -> None:
+    def __init__(
+        self, host: str, port: int, keepalive: float, timeout: float, reconnect: float, loop=None
+    ) -> None:
         self.cfg_host = host
         self.cfg_port = port
         self.cfg_keepalive = keepalive
@@ -260,7 +263,7 @@ class PowerPetDoorClient:
         self._last_send = 0
         self._failed_msg = 0
         self._failed_pings = 0
-        self._buffer = ''
+        self._buffer = ""
         self._outstanding = {}
         self._queue = queue.PriorityQueue()
         self._msg_sequence = 0  # Counter for FIFO ordering within same priority
@@ -323,11 +326,13 @@ class PowerPetDoorClient:
     def run_coroutine_threadsafe(self, *args: Any, **kwargs: Any):
         return asyncio.run_coroutine_threadsafe(*args, loop=self._eventLoop, **kwargs)
 
-    def add_handlers(self, name: str,
-                     on_connect: Callable[[], None] | None = None,
-                     on_disconnect: Callable[[], None] | None = None,
-                     on_ping: Callable[[int], None] | None = None,
-                     ) -> None:
+    def add_handlers(
+        self,
+        name: str,
+        on_connect: Callable[[], None] | None = None,
+        on_disconnect: Callable[[], None] | None = None,
+        on_ping: Callable[[int], None] | None = None,
+    ) -> None:
         """Register connection lifecycle callbacks.
 
         Args:
@@ -349,24 +354,26 @@ class PowerPetDoorClient:
         del self.on_disconnect[name]
         del self.on_ping[name]
 
-    def add_listener(self, name: str,
-                     door_status_update: Callable[[str], None] | None = None,
-                     settings_update: Callable[[dict], None] | None = None,
-                     sensor_update: dict[str, Callable[[bool], None]] | None = None,
-                     notifications_update: dict[str, Callable[[bool], None]] | None = None,
-                     stats_update: dict[str, Callable[[int], None]] | None = None,
-                     hw_info_update: Callable[[dict], None] | None = None,
-                     battery_update: Callable[[dict], None] | None = None,
-                     timezone_update: Callable[[str], None] | None = None,
-                     hold_time_update: Callable[[int], None] | None = None,
-                     sensor_trigger_voltage_update: Callable[[int], None] | None = None,
-                     sleep_sensor_trigger_voltage_update: Callable[[int], None] | None = None,
-                     remote_id_update: Callable[[bool], None] | None = None,
-                     remote_key_update: Callable[[bool], None] | None = None,
-                     reset_reason_update: Callable[[str], None] | None = None,
-                     schedule_update: Callable[[dict], None] | None = None,
-                     schedule_delete: Callable[[int], None] | None = None,
-                     ) -> None:
+    def add_listener(
+        self,
+        name: str,
+        door_status_update: Callable[[str], None] | None = None,
+        settings_update: Callable[[dict], None] | None = None,
+        sensor_update: dict[str, Callable[[bool], None]] | None = None,
+        notifications_update: dict[str, Callable[[bool], None]] | None = None,
+        stats_update: dict[str, Callable[[int], None]] | None = None,
+        hw_info_update: Callable[[dict], None] | None = None,
+        battery_update: Callable[[dict], None] | None = None,
+        timezone_update: Callable[[str], None] | None = None,
+        hold_time_update: Callable[[int], None] | None = None,
+        sensor_trigger_voltage_update: Callable[[int], None] | None = None,
+        sleep_sensor_trigger_voltage_update: Callable[[int], None] | None = None,
+        remote_id_update: Callable[[bool], None] | None = None,
+        remote_key_update: Callable[[bool], None] | None = None,
+        reset_reason_update: Callable[[str], None] | None = None,
+        schedule_update: Callable[[dict], None] | None = None,
+        schedule_delete: Callable[[int], None] | None = None,
+    ) -> None:
         """Register callbacks for device state updates.
 
         Args:
@@ -411,38 +418,68 @@ class PowerPetDoorClient:
                 if FIELD_AUTO in sensor_update:
                     self.sensor_listeners[FIELD_AUTO][name] = sensor_update[FIELD_AUTO]
                 if FIELD_OUTSIDE_SENSOR_SAFETY_LOCK in sensor_update:
-                    self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK][name] = sensor_update[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK]
+                    self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK][name] = sensor_update[
+                        FIELD_OUTSIDE_SENSOR_SAFETY_LOCK
+                    ]
                 if FIELD_CMD_LOCKOUT in sensor_update:
-                    self.sensor_listeners[FIELD_CMD_LOCKOUT][name] = sensor_update[FIELD_CMD_LOCKOUT]
+                    self.sensor_listeners[FIELD_CMD_LOCKOUT][name] = sensor_update[
+                        FIELD_CMD_LOCKOUT
+                    ]
                 if FIELD_AUTORETRACT in sensor_update:
-                    self.sensor_listeners[FIELD_AUTORETRACT][name] = sensor_update[FIELD_AUTORETRACT]
+                    self.sensor_listeners[FIELD_AUTORETRACT][name] = sensor_update[
+                        FIELD_AUTORETRACT
+                    ]
         if notifications_update:
             if "*" in notifications_update:
-                self.notifications_listeners[FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS][name] = notifications_update["*"]
-                self.notifications_listeners[FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS][name] = notifications_update["*"]
-                self.notifications_listeners[FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS][name] = notifications_update["*"]
-                self.notifications_listeners[FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS][name] = notifications_update["*"]
-                self.notifications_listeners[FIELD_LOW_BATTERY_NOTIFICATIONS][name] = notifications_update["*"]
+                self.notifications_listeners[FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS][name] = (
+                    notifications_update["*"]
+                )
+                self.notifications_listeners[FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS][name] = (
+                    notifications_update["*"]
+                )
+                self.notifications_listeners[FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS][name] = (
+                    notifications_update["*"]
+                )
+                self.notifications_listeners[FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS][name] = (
+                    notifications_update["*"]
+                )
+                self.notifications_listeners[FIELD_LOW_BATTERY_NOTIFICATIONS][name] = (
+                    notifications_update["*"]
+                )
             else:
                 if FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS in notifications_update:
-                    self.notifications_listeners[FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS][name] = notifications_update[FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS]
+                    self.notifications_listeners[FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS][name] = (
+                        notifications_update[FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS]
+                    )
                 if FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS in notifications_update:
-                    self.notifications_listeners[FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS][name] = notifications_update[FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS]
+                    self.notifications_listeners[FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS][name] = (
+                        notifications_update[FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS]
+                    )
                 if FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS in notifications_update:
-                    self.notifications_listeners[FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS][name] = notifications_update[FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS]
+                    self.notifications_listeners[FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS][name] = (
+                        notifications_update[FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS]
+                    )
                 if FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS in notifications_update:
-                    self.notifications_listeners[FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS][name] = notifications_update[FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS]
+                    self.notifications_listeners[FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS][name] = (
+                        notifications_update[FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS]
+                    )
                 if FIELD_LOW_BATTERY_NOTIFICATIONS in notifications_update:
-                    self.notifications_listeners[FIELD_LOW_BATTERY_NOTIFICATIONS][name] = notifications_update[FIELD_LOW_BATTERY_NOTIFICATIONS]
+                    self.notifications_listeners[FIELD_LOW_BATTERY_NOTIFICATIONS][name] = (
+                        notifications_update[FIELD_LOW_BATTERY_NOTIFICATIONS]
+                    )
         if stats_update:
             if "*" in stats_update:
                 self.stats_listeners[FIELD_TOTAL_OPEN_CYCLES][name] = stats_update["*"]
                 self.stats_listeners[FIELD_TOTAL_AUTO_RETRACTS][name] = stats_update["*"]
             else:
                 if FIELD_TOTAL_OPEN_CYCLES in stats_update:
-                    self.stats_listeners[FIELD_TOTAL_OPEN_CYCLES][name] = stats_update[FIELD_TOTAL_OPEN_CYCLES]
+                    self.stats_listeners[FIELD_TOTAL_OPEN_CYCLES][name] = stats_update[
+                        FIELD_TOTAL_OPEN_CYCLES
+                    ]
                 if FIELD_TOTAL_AUTO_RETRACTS in stats_update:
-                    self.stats_listeners[FIELD_TOTAL_AUTO_RETRACTS][name] = stats_update[FIELD_TOTAL_AUTO_RETRACTS]
+                    self.stats_listeners[FIELD_TOTAL_AUTO_RETRACTS][name] = stats_update[
+                        FIELD_TOTAL_AUTO_RETRACTS
+                    ]
         if hw_info_update:
             self.hw_info_listeners[name] = hw_info_update
         if battery_update:
@@ -524,7 +561,10 @@ class PowerPetDoorClient:
             (FIELD_INSIDE, self.sensor_listeners[FIELD_INSIDE]),
             (FIELD_OUTSIDE, self.sensor_listeners[FIELD_OUTSIDE]),
             (FIELD_AUTO, self.sensor_listeners[FIELD_AUTO]),
-            (FIELD_OUTSIDE_SENSOR_SAFETY_LOCK, self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK]),
+            (
+                FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
+                self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK],
+            ),
             (FIELD_CMD_LOCKOUT, self.sensor_listeners[FIELD_CMD_LOCKOUT]),
             (FIELD_AUTORETRACT, self.sensor_listeners[FIELD_AUTORETRACT]),
         ]
@@ -580,14 +620,19 @@ class PowerPetDoorClient:
             for callback in self.stats_listeners[FIELD_TOTAL_AUTO_RETRACTS].values():
                 callback(msg[FIELD_TOTAL_AUTO_RETRACTS])
         if future:
-            future.set_result({
-                FIELD_TOTAL_OPEN_CYCLES: msg[FIELD_TOTAL_OPEN_CYCLES],
-                FIELD_TOTAL_AUTO_RETRACTS: msg[FIELD_TOTAL_AUTO_RETRACTS],
-            })
+            future.set_result(
+                {
+                    FIELD_TOTAL_OPEN_CYCLES: msg[FIELD_TOTAL_OPEN_CYCLES],
+                    FIELD_TOTAL_AUTO_RETRACTS: msg[FIELD_TOTAL_AUTO_RETRACTS],
+                }
+            )
 
     @ResponseHandlerRegistry.handler(
-        CMD_GET_SENSORS, CMD_ENABLE_INSIDE, CMD_DISABLE_INSIDE,
-        CMD_ENABLE_OUTSIDE, CMD_DISABLE_OUTSIDE
+        CMD_GET_SENSORS,
+        CMD_ENABLE_INSIDE,
+        CMD_DISABLE_INSIDE,
+        CMD_ENABLE_OUTSIDE,
+        CMD_DISABLE_OUTSIDE,
     )
     def _handle_sensors(self, msg: dict, future) -> None:
         """Handle sensor enable/disable responses."""
@@ -632,7 +677,7 @@ class PowerPetDoorClient:
     @ResponseHandlerRegistry.handler(
         CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
         CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
-        CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK
+        CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
     )
     def _handle_safety_lock(self, msg: dict, future) -> None:
         """Handle outside sensor safety lock responses."""
@@ -826,7 +871,11 @@ class PowerPetDoorClient:
 
     async def connect(self) -> None:
         """Establish connection to the device."""
-        _LOGGER.info(str.format("Started to connect to Power Pet Door... at {0}:{1}", self.cfg_host, self.cfg_port))
+        _LOGGER.info(
+            str.format(
+                "Started to connect to Power Pet Door... at {0}:{1}", self.cfg_host, self.cfg_port
+            )
+        )
         try:
             async with async_timeout.timeout(self.cfg_timeout):
                 coro = self._eventLoop.create_connection(lambda: self, self.cfg_host, self.cfg_port)
@@ -851,7 +900,7 @@ class PowerPetDoorClient:
         """asyncio callback for connection lost."""
         self.disconnect()
         if not self._shutdown:
-            _LOGGER.error('The server closed the connection. Reconnecting...')
+            _LOGGER.error("The server closed the connection. Reconnecting...")
             self.ensure_future(self.reconnect(self.cfg_reconnect))
 
     async def reconnect(self, delay) -> None:
@@ -861,14 +910,14 @@ class PowerPetDoorClient:
 
     def disconnect(self) -> None:
         """Close connection and cleanup."""
-        _LOGGER.debug('Closing connection with server...')
+        _LOGGER.debug("Closing connection with server...")
         self._can_dequeue = False
         self._last_ping = None
         self._last_command = None
         self._last_send = 0
         self._failed_msg = 0
         self._failed_pings = 0
-        self._buffer = ''
+        self._buffer = ""
         self._queue = queue.PriorityQueue()
         self._msg_sequence = 0  # Reset sequence counter
 
@@ -893,7 +942,7 @@ class PowerPetDoorClient:
     def handle_connect_failure(self) -> None:
         """Handler for if we fail to connect to the power pet door."""
         if not self._shutdown:
-            _LOGGER.error('Unable to connect to power pet door. Reconnecting...')
+            _LOGGER.error("Unable to connect to power pet door. Reconnecting...")
             self.disconnect()
             self.ensure_future(self.reconnect(self.cfg_reconnect))
 
@@ -904,14 +953,15 @@ class PowerPetDoorClient:
             if self._last_ping is not None:
                 self._failed_pings += 1
                 if self._failed_pings < MAX_FAILED_PINGS:
-                    _LOGGER.warning('Last PING not responded to {} of {}...'.format(self._failed_pings,
-                        MAX_FAILED_PINGS))
+                    _LOGGER.warning(
+                        f"Last PING not responded to {self._failed_pings} of {MAX_FAILED_PINGS}..."
+                    )
                 else:
-                    _LOGGER.error('Last PING not responded to {} times.'.format(self._failed_pings))
+                    _LOGGER.error(f"Last PING not responded to {self._failed_pings} times.")
                     self.disconnect()
                     return
 
-            self._last_ping = str(round(time.time()*1000))
+            self._last_ping = str(round(time.time() * 1000))
             self.send_message(PING, self._last_ping)
 
     async def check_receipt(self, rawdata) -> None:
@@ -920,9 +970,13 @@ class PowerPetDoorClient:
         if _check_receipt and not _check_receipt.cancelled():
             self._failed_msg += 1
             if self._failed_msg < MAX_FAILED_MSG:
-                _LOGGER.warning('Did not receive a response to a {} message in more than {} seconds, retrying.'.format(self._last_command, self.cfg_timeout))
+                _LOGGER.warning(
+                    f"Did not receive a response to a {self._last_command} message in more than {self.cfg_timeout} seconds, retrying."
+                )
             else:
-                _LOGGER.error('Did not receive a response to a {} message in more than {} seconds {} times, dropped.'.format(self._last_command, self.cfg_timeout, self._failed_msg))
+                _LOGGER.error(
+                    f"Did not receive a response to a {self._last_command} message in more than {self.cfg_timeout} seconds {self._failed_msg} times, dropped."
+                )
                 self._failed_msg = 0
         else:
             self._failed_msg = 0
@@ -938,11 +992,7 @@ class PowerPetDoorClient:
 
         Lower priority values are processed first.
         """
-        msg = PrioritizedMessage(
-            priority=priority,
-            sequence=self._msg_sequence,
-            data=data
-        )
+        msg = PrioritizedMessage(priority=priority, sequence=self._msg_sequence, data=data)
         self._msg_sequence += 1
         self._queue.put(msg)
         if self._transport and self._can_dequeue:
@@ -951,7 +1001,7 @@ class PowerPetDoorClient:
 
     async def _send_data(self, rawdata) -> None:
         if not self._transport:
-            _LOGGER.warning('Attempted to write to the stream without a connection active')
+            _LOGGER.warning("Attempted to write to the stream without a connection active")
             return
 
         if self._keepalive:
@@ -961,7 +1011,7 @@ class PowerPetDoorClient:
             diff = time.time() - self._last_send
             if diff < MINIMUM_TIME_BETWEEN_MSGS:
                 await asyncio.sleep(MINIMUM_TIME_BETWEEN_MSGS - diff)
-            _LOGGER.debug(str.format('TX > {0}', rawdata.decode('ascii')))
+            _LOGGER.debug(str.format("TX > {0}", rawdata.decode("ascii")))
             self._transport.write(rawdata)
             self._last_send = time.time()
 
@@ -974,16 +1024,16 @@ class PowerPetDoorClient:
                 await self.dequeue_data()
 
         except RuntimeError as err:
-            _LOGGER.error(str.format('Failed to write to the stream. ({0}) ', err))
+            _LOGGER.error(str.format("Failed to write to the stream. ({0}) ", err))
             self.disconnect()
 
     async def dequeue_data(self) -> None:
         if not self._transport:
-            _LOGGER.warning('Attempted to write to the stream without a connection active')
+            _LOGGER.warning("Attempted to write to the stream without a connection active")
             return
 
         if self._check_receipt:
-            _LOGGER.warning('Attempted to send data while another message is still outstanding')
+            _LOGGER.warning("Attempted to send data while another message is still outstanding")
             return
 
         """Raw data send- just make sure it's encoded properly and logged."""
@@ -1008,19 +1058,19 @@ class PowerPetDoorClient:
             rawdata = json.dumps(data).encode("ascii")
             await self._send_data(rawdata)
 
-        except queue.Empty as err:
-            _LOGGER.warning('Attempted to dequeue from an empty queue')
+        except queue.Empty:
+            _LOGGER.warning("Attempted to dequeue from an empty queue")
 
     def data_received(self, rawdata) -> None:
         """asyncio callback for any data recieved from the power pet door."""
-        if rawdata != '':
+        if rawdata != "":
             try:
-                data = rawdata.decode('ascii')
-                _LOGGER.debug(str.format('RX < {0}', data))
+                data = rawdata.decode("ascii")
+                _LOGGER.debug(str.format("RX < {0}", data))
 
                 self._buffer += data
             except:
-                _LOGGER.error('Received invalid message. Skipping.')
+                _LOGGER.error("Received invalid message. Skipping.")
                 return
 
             end = find_end(self._buffer)
@@ -1033,7 +1083,7 @@ class PowerPetDoorClient:
                     self.ensure_future(self.process_message(json.loads(block)))
 
                 except json.JSONDecodeError as err:
-                    _LOGGER.error(str.format('Failed to decode JSON block ({0}) ', err))
+                    _LOGGER.error(str.format("Failed to decode JSON block ({0}) ", err))
 
                 end = find_end(self._buffer)
 
@@ -1045,7 +1095,10 @@ class PowerPetDoorClient:
         future = None
         if FIELD_MSG_ID_RESPONSE in msg:
             self.replyMsgId = msg[FIELD_MSG_ID_RESPONSE]
-            if self.replyMsgId in self._outstanding and not self._outstanding[self.replyMsgId].cancelled():
+            if (
+                self.replyMsgId in self._outstanding
+                and not self._outstanding[self.replyMsgId].cancelled()
+            ):
                 future = self._outstanding[self.replyMsgId]
 
         if msg[FIELD_CMD] == self._last_command:
@@ -1069,7 +1122,7 @@ class PowerPetDoorClient:
         else:
             if future:
                 future.set_exception(Exception("Command Failed"))
-            _LOGGER.warning("Error reported: {}".format(json.dumps(msg)))
+            _LOGGER.warning(f"Error reported: {json.dumps(msg)}")
 
     def send_message(self, type: str, arg: str, notify: bool = False, **kwargs) -> None:
         """Send a message to the Power Pet Door.
@@ -1091,6 +1144,7 @@ class PowerPetDoorClient:
 
             def cleanup(arg: asyncio.Future) -> None:
                 del self._outstanding[msgId]
+
             rv.add_done_callback(cleanup)
 
         # Determine priority based on message type and command
@@ -1100,13 +1154,16 @@ class PowerPetDoorClient:
             priority = COMMAND_PRIORITIES.get(arg, PRIORITY_LOW)
 
         self.msgId += 1
-        self.enqueue_data({ type: arg, FIELD_MSG_ID: msgId, FIELD_DIRECTION: PHONE_TO_DOOR, **kwargs }, priority=priority)
+        self.enqueue_data(
+            {type: arg, FIELD_MSG_ID: msgId, FIELD_DIRECTION: PHONE_TO_DOOR, **kwargs},
+            priority=priority,
+        )
         return rv
 
     @property
     def available(self) -> bool:
         """Whether the client is connected and available."""
-        return (self._transport and not self._transport.is_closing())
+        return self._transport and not self._transport.is_closing()
 
     @property
     def host(self) -> str:

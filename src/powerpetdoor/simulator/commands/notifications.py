@@ -5,7 +5,7 @@
 
 """Notification settings commands."""
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from .base import ArgSpec, CommandResult, command, subcommand
 
@@ -27,9 +27,7 @@ class NotifyCommandsMixin:
         ("low_battery", "low_battery", "Notify on low battery", ["low_bat", "lowbat"]),
     ]
 
-    def _set_notify(
-        self, attr: str, name: str, value: Optional[bool]
-    ) -> CommandResult:
+    def _set_notify(self, attr: str, name: str, value: bool | None) -> CommandResult:
         """Toggle or set a notification attribute.
 
         Args:
@@ -79,7 +77,7 @@ class NotifyCommandsMixin:
             )
         ],
     )
-    def notify_inside_on(self, value: Optional[bool] = None) -> CommandResult:
+    def notify_inside_on(self, value: bool | None = None) -> CommandResult:
         """Toggle or set inside sensor on notification."""
         return self._set_notify("sensor_on_indoor", "inside_on", value)
 
@@ -97,7 +95,7 @@ class NotifyCommandsMixin:
             )
         ],
     )
-    def notify_inside_off(self, value: Optional[bool] = None) -> CommandResult:
+    def notify_inside_off(self, value: bool | None = None) -> CommandResult:
         """Toggle or set inside sensor off notification."""
         return self._set_notify("sensor_off_indoor", "inside_off", value)
 
@@ -115,7 +113,7 @@ class NotifyCommandsMixin:
             )
         ],
     )
-    def notify_outside_on(self, value: Optional[bool] = None) -> CommandResult:
+    def notify_outside_on(self, value: bool | None = None) -> CommandResult:
         """Toggle or set outside sensor on notification."""
         return self._set_notify("sensor_on_outdoor", "outside_on", value)
 
@@ -133,7 +131,7 @@ class NotifyCommandsMixin:
             )
         ],
     )
-    def notify_outside_off(self, value: Optional[bool] = None) -> CommandResult:
+    def notify_outside_off(self, value: bool | None = None) -> CommandResult:
         """Toggle or set outside sensor off notification."""
         return self._set_notify("sensor_off_outdoor", "outside_off", value)
 
@@ -151,6 +149,6 @@ class NotifyCommandsMixin:
             )
         ],
     )
-    def notify_low_battery(self, value: Optional[bool] = None) -> CommandResult:
+    def notify_low_battery(self, value: bool | None = None) -> CommandResult:
         """Toggle or set low battery notification."""
         return self._set_notify("low_battery", "low_battery", value)

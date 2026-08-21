@@ -12,6 +12,7 @@ IMPORTANT: All file I/O is done during async_init_timezone_cache() which
 uses asyncio.to_thread for non-blocking execution. After initialization,
 all lookups are from in-memory caches with no blocking I/O.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -34,11 +35,11 @@ def _extract_posix_from_tzif(iana_timezone: str) -> str | None:
     try:
         import importlib.resources
 
-        parts = iana_timezone.split('/')
+        parts = iana_timezone.split("/")
 
-        package = 'tzdata.zoneinfo'
+        package = "tzdata.zoneinfo"
         if len(parts) > 1:
-            package = f'tzdata.zoneinfo.{".".join(parts[:-1])}'
+            package = f"tzdata.zoneinfo.{'.'.join(parts[:-1])}"
             resource_name = parts[-1]
         else:
             resource_name = parts[0]
@@ -46,17 +47,17 @@ def _extract_posix_from_tzif(iana_timezone: str) -> str | None:
         with importlib.resources.as_file(
             importlib.resources.files(package).joinpath(resource_name)
         ) as path:
-            with open(path, 'rb') as f:
+            with open(path, "rb") as f:
                 content = f.read()
 
-        if content[:4] != b'TZif':
+        if content[:4] != b"TZif":
             return None
 
-        last_newline = content.rfind(b'\n')
+        last_newline = content.rfind(b"\n")
         if last_newline > 0:
-            second_last_newline = content.rfind(b'\n', 0, last_newline)
+            second_last_newline = content.rfind(b"\n", 0, last_newline)
             if second_last_newline >= 0:
-                posix_tz = content[second_last_newline + 1:last_newline].decode('ascii')
+                posix_tz = content[second_last_newline + 1 : last_newline].decode("ascii")
                 if posix_tz:
                     return posix_tz
 
@@ -89,7 +90,7 @@ def _build_timezone_caches() -> None:
     _LOGGER.debug(
         "Timezone cache initialized: %d timezones, %d POSIX mappings",
         len(_iana_timezones),
-        len(_iana_to_posix)
+        len(_iana_to_posix),
     )
 
 
@@ -161,36 +162,37 @@ def parse_posix_tz_string(posix_tz: str) -> dict | None:
         return None
 
     result = {
-        'raw': posix_tz,
-        'std_abbrev': None,
-        'std_offset': None,
-        'dst_abbrev': None,
-        'dst_offset': None,
-        'dst_start': None,
-        'dst_end': None,
+        "raw": posix_tz,
+        "std_abbrev": None,
+        "std_offset": None,
+        "dst_abbrev": None,
+        "dst_offset": None,
+        "dst_start": None,
+        "dst_end": None,
     }
 
     try:
-        if ',' in posix_tz:
-            tz_part, rules = posix_tz.split(',', 1)
-            rule_parts = rules.split(',')
+        if "," in posix_tz:
+            tz_part, rules = posix_tz.split(",", 1)
+            rule_parts = rules.split(",")
             if len(rule_parts) >= 2:
-                result['dst_start'] = rule_parts[0]
-                result['dst_end'] = rule_parts[1]
+                result["dst_start"] = rule_parts[0]
+                result["dst_end"] = rule_parts[1]
         else:
             tz_part = posix_tz
 
         import re
+
         match = re.match(
-            r'^([A-Za-z]+)(-?\d+(?::\d+(?::\d+)?)?)'
-            r'(?:([A-Za-z]+)(-?\d+(?::\d+(?::\d+)?)?)?)?',
-            tz_part
+            r"^([A-Za-z]+)(-?\d+(?::\d+(?::\d+)?)?)"
+            r"(?:([A-Za-z]+)(-?\d+(?::\d+(?::\d+)?)?)?)?",
+            tz_part,
         )
         if match:
-            result['std_abbrev'] = match.group(1)
-            result['std_offset'] = match.group(2)
-            result['dst_abbrev'] = match.group(3)
-            result['dst_offset'] = match.group(4)
+            result["std_abbrev"] = match.group(1)
+            result["std_offset"] = match.group(2)
+            result["dst_abbrev"] = match.group(3)
+            result["dst_offset"] = match.group(4)
 
         return result
 

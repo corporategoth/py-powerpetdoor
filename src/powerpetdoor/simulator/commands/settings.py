@@ -6,10 +6,10 @@
 """Settings management commands."""
 
 import random
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
-from .base import ArgSpec, CommandResult, SubcommandInfo, command, subcommand
 from ...tz_utils import get_available_timezones
+from .base import ArgSpec, CommandResult, SubcommandInfo, command, subcommand
 
 
 def _timezone_completer() -> list[tuple[str, str]]:
@@ -19,6 +19,7 @@ def _timezone_completer() -> list[tuple[str, str]]:
         return []
     # Return timezone names with empty descriptions (too many for descriptions)
     return [(tz, "") for tz in timezones]
+
 
 if TYPE_CHECKING:
     from ..server import DoorSimulator
@@ -30,8 +31,12 @@ class SettingsCommandsMixin:
     simulator: "DoorSimulator"
 
     def _toggle_bool(
-        self, attr: str, name: str, value: Optional[bool], fmt: str = "ON|OFF",
-        broadcast_func: Optional[str] = None
+        self,
+        attr: str,
+        name: str,
+        value: bool | None,
+        fmt: str = "ON|OFF",
+        broadcast_func: str | None = None,
     ) -> CommandResult:
         """Toggle or set a boolean state attribute.
 
@@ -83,16 +88,18 @@ class SettingsCommandsMixin:
         ],
         subcommands=[SubcommandInfo("toggle", ["t"], "Toggle safety lock")],
     )
-    def safety(self, value: Optional[bool] = None) -> CommandResult:
+    def safety(self, value: bool | None = None) -> CommandResult:
         """Toggle or set safety lock."""
-        return self._toggle_bool("safety_lock", "Safety lock", value,
-                                 broadcast_func="broadcast_safety_lock")
+        return self._toggle_bool(
+            "safety_lock", "Safety lock", value, broadcast_func="broadcast_safety_lock"
+        )
 
     @subcommand("safety", "toggle", ["t"], "Toggle safety lock")
     def safety_toggle(self) -> CommandResult:
         """Toggle safety lock."""
-        return self._toggle_bool("safety_lock", "Safety lock", None,
-                                 broadcast_func="broadcast_safety_lock")
+        return self._toggle_bool(
+            "safety_lock", "Safety lock", None, broadcast_func="broadcast_safety_lock"
+        )
 
     @command(
         "lockout",
@@ -109,16 +116,18 @@ class SettingsCommandsMixin:
         ],
         subcommands=[SubcommandInfo("toggle", ["t"], "Toggle command lockout")],
     )
-    def lockout(self, value: Optional[bool] = None) -> CommandResult:
+    def lockout(self, value: bool | None = None) -> CommandResult:
         """Toggle or set command lockout."""
-        return self._toggle_bool("cmd_lockout", "Command lockout", value,
-                                 broadcast_func="broadcast_cmd_lockout")
+        return self._toggle_bool(
+            "cmd_lockout", "Command lockout", value, broadcast_func="broadcast_cmd_lockout"
+        )
 
     @subcommand("lockout", "toggle", ["t"], "Toggle command lockout")
     def lockout_toggle(self) -> CommandResult:
         """Toggle command lockout."""
-        return self._toggle_bool("cmd_lockout", "Command lockout", None,
-                                 broadcast_func="broadcast_cmd_lockout")
+        return self._toggle_bool(
+            "cmd_lockout", "Command lockout", None, broadcast_func="broadcast_cmd_lockout"
+        )
 
     @command(
         "autoretract",
@@ -135,16 +144,18 @@ class SettingsCommandsMixin:
         ],
         subcommands=[SubcommandInfo("toggle", ["t"], "Toggle auto-retract")],
     )
-    def autoretract(self, value: Optional[bool] = None) -> CommandResult:
+    def autoretract(self, value: bool | None = None) -> CommandResult:
         """Toggle or set auto-retract."""
-        return self._toggle_bool("autoretract", "Auto-retract", value,
-                                 broadcast_func="broadcast_autoretract")
+        return self._toggle_bool(
+            "autoretract", "Auto-retract", value, broadcast_func="broadcast_autoretract"
+        )
 
     @subcommand("autoretract", "toggle", ["t"], "Toggle auto-retract")
     def autoretract_toggle(self) -> CommandResult:
         """Toggle auto-retract."""
-        return self._toggle_bool("autoretract", "Auto-retract", None,
-                                 broadcast_func="broadcast_autoretract")
+        return self._toggle_bool(
+            "autoretract", "Auto-retract", None, broadcast_func="broadcast_autoretract"
+        )
 
     @command(
         "holdtime",
@@ -184,7 +195,7 @@ class SettingsCommandsMixin:
             )
         ],
     )
-    def battery(self, percent: Optional[int] = None) -> CommandResult:
+    def battery(self, percent: int | None = None) -> CommandResult:
         """Set battery level."""
         if percent is None:
             percent = random.randint(10, 100)
@@ -245,7 +256,7 @@ class SettingsCommandsMixin:
         ],
         subcommands=[SubcommandInfo("toggle", ["t"], "Toggle battery presence")],
     )
-    def battery_present(self, value: Optional[bool] = None) -> CommandResult:
+    def battery_present(self, value: bool | None = None) -> CommandResult:
         """Toggle or set battery presence."""
         if value is None:
             present = not self.simulator.state.battery_present
@@ -278,7 +289,7 @@ class SettingsCommandsMixin:
             )
         ],
     )
-    def charge_rate(self, rate: Optional[float] = None) -> CommandResult:
+    def charge_rate(self, rate: float | None = None) -> CommandResult:
         """Set battery charge rate in percent per minute."""
         if rate is not None:
             self.simulator.set_charge_rate(rate)
@@ -304,7 +315,7 @@ class SettingsCommandsMixin:
             )
         ],
     )
-    def discharge_rate(self, rate: Optional[float] = None) -> CommandResult:
+    def discharge_rate(self, rate: float | None = None) -> CommandResult:
         """Set battery discharge rate in percent per minute."""
         if rate is not None:
             self.simulator.set_discharge_rate(rate)
@@ -330,7 +341,7 @@ class SettingsCommandsMixin:
             )
         ],
     )
-    def timezone(self, tz: Optional[str] = None) -> CommandResult:
+    def timezone(self, tz: str | None = None) -> CommandResult:
         """Set or show timezone.
 
         Accepts either:
@@ -339,9 +350,9 @@ class SettingsCommandsMixin:
         """
         from ...tz_utils import (
             get_available_timezones,
-            parse_posix_tz_string,
             get_posix_tz_string,
             is_cache_initialized,
+            parse_posix_tz_string,
         )
 
         if tz is None:
@@ -380,5 +391,5 @@ class SettingsCommandsMixin:
         return CommandResult(
             False,
             f"Invalid timezone: {tz}. Use IANA name (e.g., 'America/New_York') "
-            "or POSIX string (e.g., 'EST5EDT,M3.2.0,M11.1.0')"
+            "or POSIX string (e.g., 'EST5EDT,M3.2.0,M11.1.0')",
         )

@@ -4,33 +4,34 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for simulator server module (server.py)."""
+
 from __future__ import annotations
 
 import asyncio
 
 import pytest
 
-from powerpetdoor.simulator import (
-    DoorSimulator,
-    DoorSimulatorState,
-    Schedule,
-    DoorTimingConfig,
-    BatteryConfig,
-)
 from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
-    DOOR_STATE_RISING,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
+    DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
-    DOOR_STATE_CLOSING_TOP_OPEN,
-    DOOR_STATE_CLOSING_MID_OPEN,
 )
-
+from powerpetdoor.simulator import (
+    BatteryConfig,
+    DoorSimulator,
+    DoorSimulatorState,
+    DoorTimingConfig,
+    Schedule,
+)
 
 # ============================================================================
 # Test Fixtures
 # ============================================================================
+
 
 @pytest.fixture
 def timing_config():
@@ -58,6 +59,7 @@ async def simulator(timing_config):
 # ============================================================================
 # DoorSimulator Server Tests
 # ============================================================================
+
 
 class TestDoorSimulator:
     """Tests for DoorSimulator server."""
@@ -188,6 +190,7 @@ class TestDoorSimulator:
 # Door Operation Sequence Tests
 # ============================================================================
 
+
 class TestDoorOperationSequences:
     """Tests for complete door operation sequences."""
 
@@ -245,6 +248,7 @@ class TestDoorOperationSequences:
 # ============================================================================
 # Battery Simulation Tests
 # ============================================================================
+
 
 class TestBatterySimulation:
     """Tests for battery simulation methods."""
@@ -402,6 +406,7 @@ class TestBatterySimulation:
 # Client Connection Management Tests
 # ============================================================================
 
+
 class TestClientConnectionManagement:
     """Tests for client connect/disconnect and protocols list management."""
 
@@ -474,6 +479,7 @@ class TestClientConnectionManagement:
 # Broadcast Tests
 # ============================================================================
 
+
 class TestBroadcastFunctions:
     """Tests for broadcast functions that send updates to connected clients."""
 
@@ -496,6 +502,7 @@ class TestBroadcastFunctions:
         try:
             data = await asyncio.wait_for(reader.read(1024), timeout=1.0)
             import json
+
             msg = json.loads(data.decode("ascii"))
 
             # Should contain hold time in centiseconds (500)
@@ -521,6 +528,7 @@ class TestBroadcastFunctions:
 
         # Both clients should receive the broadcast
         import json
+
         for reader, writer in clients:
             try:
                 data = await asyncio.wait_for(reader.read(1024), timeout=1.0)
@@ -547,6 +555,7 @@ class TestBroadcastFunctions:
 
         # Read the broadcast message
         import json
+
         try:
             data = await asyncio.wait_for(reader.read(1024), timeout=1.0)
             msg = json.loads(data.decode("ascii"))

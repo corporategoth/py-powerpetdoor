@@ -4,17 +4,14 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for the obstruction_test built-in script."""
+
 from __future__ import annotations
 
 import pytest
 
-from powerpetdoor.simulator.scripting import get_builtin_script, YAML_AVAILABLE
+from powerpetdoor.simulator.scripting import YAML_AVAILABLE, get_builtin_script
 
-
-requires_yaml = pytest.mark.skipif(
-    not YAML_AVAILABLE,
-    reason="PyYAML not installed"
-)
+requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
 
 
 @requires_yaml
@@ -73,6 +70,7 @@ class TestObstructionTestMessages:
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         status_updates = message_capture.find_status_updates()
@@ -81,34 +79,32 @@ class TestObstructionTestMessages:
     @pytest.mark.asyncio
     async def test_status_shows_door_opening(self, runner, simulator, message_capture):
         """Should see door open before obstruction is triggered."""
-        from powerpetdoor.const import DOOR_STATE_RISING, DOOR_STATE_HOLDING
+        from powerpetdoor.const import DOOR_STATE_HOLDING, DOOR_STATE_RISING
 
         script = get_builtin_script("obstruction_test")
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         statuses = message_capture.get_status_sequence()
-        has_open = any(
-            s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING)
-            for s in statuses
-        )
+        has_open = any(s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING) for s in statuses)
         assert has_open, f"Should see door open states: {statuses}"
 
     @pytest.mark.asyncio
     async def test_door_retracts_on_obstruction(self, runner, simulator, message_capture):
         """After obstruction, door should retract (go back to open states)."""
         from powerpetdoor.const import (
-            DOOR_STATE_CLOSING_TOP_OPEN,
-            DOOR_STATE_SLOWING,
             DOOR_STATE_HOLDING,
+            DOOR_STATE_SLOWING,
         )
 
         script = get_builtin_script("obstruction_test")
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         statuses = message_capture.get_status_sequence()

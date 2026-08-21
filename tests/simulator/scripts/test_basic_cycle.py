@@ -4,22 +4,19 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for the basic_cycle built-in script."""
+
 from __future__ import annotations
 
 import pytest
 
-from powerpetdoor.simulator.scripting import get_builtin_script, YAML_AVAILABLE
 from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
-    DOOR_STATE_RISING,
     DOOR_STATE_HOLDING,
+    DOOR_STATE_RISING,
 )
+from powerpetdoor.simulator.scripting import YAML_AVAILABLE, get_builtin_script
 
-
-requires_yaml = pytest.mark.skipif(
-    not YAML_AVAILABLE,
-    reason="PyYAML not installed"
-)
+requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
 
 
 @requires_yaml
@@ -76,29 +73,26 @@ class TestBasicCycleMessages:
 
         # Give time for messages to be collected
         import asyncio
+
         await asyncio.sleep(0.1)
 
         status_updates = message_capture.find_status_updates()
         assert len(status_updates) > 0, "Should receive status update messages"
 
     @pytest.mark.asyncio
-    async def test_status_sequence_includes_open_close(
-        self, runner, simulator, message_capture
-    ):
+    async def test_status_sequence_includes_open_close(self, runner, simulator, message_capture):
         """Status updates should show door opening and closing."""
         script = get_builtin_script("basic_cycle")
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         statuses = message_capture.get_status_sequence()
 
         # Should see door rising or holding (open states)
-        has_open = any(
-            s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING)
-            for s in statuses
-        )
+        has_open = any(s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING) for s in statuses)
         assert has_open, f"Should see open state in sequence: {statuses}"
 
         # Should end with door closed
@@ -106,14 +100,13 @@ class TestBasicCycleMessages:
             assert statuses[-1] == DOOR_STATE_CLOSED, "Should end closed"
 
     @pytest.mark.asyncio
-    async def test_multiple_status_messages_during_cycle(
-        self, runner, simulator, message_capture
-    ):
+    async def test_multiple_status_messages_during_cycle(self, runner, simulator, message_capture):
         """Should receive multiple status updates as door goes through cycle."""
         script = get_builtin_script("basic_cycle")
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         status_updates = message_capture.find_status_updates()

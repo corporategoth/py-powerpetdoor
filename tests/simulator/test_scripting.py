@@ -4,45 +4,39 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for simulator scripting module (scripting.py)."""
+
 from __future__ import annotations
 
 import asyncio
-import json
 
 import pytest
 
+from powerpetdoor.const import (
+    DOOR_STATE_CLOSED,
+)
 from powerpetdoor.simulator import (
     DoorSimulator,
     DoorSimulatorState,
     DoorTimingConfig,
 )
 from powerpetdoor.simulator.scripting import (
+    YAML_AVAILABLE,
     Script,
-    ScriptStep,
-    ScriptRunner,
     ScriptError,
-    AssertionFailed,
+    ScriptRunner,
+    ScriptStep,
     get_builtin_script,
     list_builtin_scripts,
-    YAML_AVAILABLE,
 )
-from powerpetdoor.const import (
-    DOOR_STATE_CLOSED,
-    DOOR_STATE_HOLDING,
-    DOOR_STATE_KEEPUP,
-)
-
 
 # Skip marker for tests that require PyYAML
-requires_yaml = pytest.mark.skipif(
-    not YAML_AVAILABLE,
-    reason="PyYAML not installed"
-)
+requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
 
 
 # ============================================================================
 # Test Fixtures
 # ============================================================================
+
 
 @pytest.fixture
 def fast_timing():
@@ -77,6 +71,7 @@ async def runner(simulator):
 # ScriptStep Tests
 # ============================================================================
 
+
 class TestScriptStep:
     """Tests for ScriptStep dataclass."""
 
@@ -101,6 +96,7 @@ class TestScriptStep:
 # ============================================================================
 # Script Tests
 # ============================================================================
+
 
 class TestScript:
     """Tests for Script class."""
@@ -187,17 +183,21 @@ steps:
 # ScriptRunner Tests
 # ============================================================================
 
+
 class TestScriptRunner:
     """Tests for ScriptRunner class."""
 
     @pytest.mark.asyncio
     async def test_run_simple_script(self, runner, simulator):
         """Run a simple script successfully."""
-        script = Script.from_simple_commands([
-            "log Starting test",
-            "set hold_time 1",
-            "assert door_status DOOR_CLOSED",
-        ], name="Simple Test")
+        script = Script.from_simple_commands(
+            [
+                "log Starting test",
+                "set hold_time 1",
+                "assert door_status DOOR_CLOSED",
+            ],
+            name="Simple Test",
+        )
 
         result = await runner.run(script, verbose=False)
         assert result is True
@@ -205,10 +205,12 @@ class TestScriptRunner:
     @pytest.mark.asyncio
     async def test_trigger_sensor_action(self, runner, simulator):
         """trigger_sensor action should work."""
-        script = Script.from_simple_commands([
-            "trigger inside",
-            "wait 0.2",
-        ])
+        script = Script.from_simple_commands(
+            [
+                "trigger inside",
+                "wait 0.2",
+            ]
+        )
         await runner.run(script, verbose=False)
         # Door should be opening or open
         assert simulator.state.door_status != DOOR_STATE_CLOSED
@@ -216,10 +218,12 @@ class TestScriptRunner:
     @pytest.mark.asyncio
     async def test_set_action(self, runner, simulator):
         """set action should change state."""
-        script = Script.from_simple_commands([
-            "set battery 42",
-            "set hold_time 15",
-        ])
+        script = Script.from_simple_commands(
+            [
+                "set battery 42",
+                "set hold_time 15",
+            ]
+        )
         await runner.run(script, verbose=False)
         assert simulator.state.battery_percent == 42
         assert simulator.state.hold_time == 15
@@ -253,10 +257,12 @@ class TestScriptRunner:
         """wait_for should wait until condition is true."""
         # Trigger door open, then wait for it to close
         simulator.state.hold_time = 1
-        script = Script.from_simple_commands([
-            "trigger inside",
-            "wait_for door_open 5",
-        ])
+        script = Script.from_simple_commands(
+            [
+                "trigger inside",
+                "wait_for door_open 5",
+            ]
+        )
         result = await runner.run(script, verbose=False)
         assert result is True
 
@@ -264,9 +270,11 @@ class TestScriptRunner:
     async def test_wait_for_timeout(self, runner, simulator):
         """wait_for should timeout if condition never becomes true."""
         # Don't trigger door, but wait for it to open
-        script = Script.from_simple_commands([
-            "wait_for door_open 0.5",  # Short timeout
-        ])
+        script = Script.from_simple_commands(
+            [
+                "wait_for door_open 0.5",  # Short timeout
+            ]
+        )
         result = await runner.run(script, verbose=False)
         assert result is False
 
@@ -274,12 +282,14 @@ class TestScriptRunner:
     async def test_stop_script(self, runner, simulator):
         """stop() should stop a running script."""
         # Use multiple steps since stop is checked at the start of each step
-        script = Script.from_simple_commands([
-            "wait 0.1",
-            "wait 0.1",
-            "wait 0.1",
-            "wait 10",  # Long wait that should be skipped
-        ])
+        script = Script.from_simple_commands(
+            [
+                "wait 0.1",
+                "wait 0.1",
+                "wait 0.1",
+                "wait 10",  # Long wait that should be skipped
+            ]
+        )
 
         async def run_and_stop():
             task = asyncio.create_task(runner.run(script, verbose=False))
@@ -304,6 +314,7 @@ class TestScriptRunner:
 # ============================================================================
 # Built-in Script Infrastructure Tests
 # ============================================================================
+
 
 @requires_yaml
 class TestBuiltinScriptInfrastructure:

@@ -8,6 +8,7 @@
 These tests verify end-to-end communication between the client and simulator,
 ensuring commands are handled correctly and callbacks are triggered appropriately.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -16,46 +17,42 @@ from typing import Any
 import pytest
 
 from powerpetdoor import PowerPetDoorClient
+from powerpetdoor.const import (
+    CMD_CLOSE,
+    CMD_DISABLE_INSIDE,
+    CMD_ENABLE_INSIDE,
+    CMD_GET_DOOR_BATTERY,
+    CMD_GET_DOOR_STATUS,
+    CMD_GET_HOLD_TIME,
+    CMD_GET_HW_INFO,
+    CMD_GET_POWER,
+    CMD_GET_SENSORS,
+    CMD_GET_SETTINGS,
+    CMD_OPEN,
+    CMD_POWER_OFF,
+    CMD_POWER_ON,
+    CMD_SET_HOLD_TIME,
+    COMMAND,
+    CONFIG,
+    DOOR_STATE_CLOSED,
+    DOOR_STATE_HOLDING,
+    DOOR_STATE_KEEPUP,
+    DOOR_STATE_RISING,
+    FIELD_INSIDE,
+    FIELD_OUTSIDE,
+    FIELD_POWER,
+)
 from powerpetdoor.simulator import (
     DoorSimulator,
     DoorSimulatorState,
     DoorTimingConfig,
     Schedule,
 )
-from powerpetdoor.const import (
-    CONFIG,
-    CMD_GET_DOOR_STATUS,
-    CMD_GET_SETTINGS,
-    CMD_GET_POWER,
-    CMD_GET_SENSORS,
-    CMD_GET_AUTO,
-    CMD_GET_AUTORETRACT,
-    CMD_GET_HOLD_TIME,
-    CMD_GET_DOOR_BATTERY,
-    CMD_GET_HW_INFO,
-    CMD_OPEN,
-    CMD_CLOSE,
-    CMD_POWER_ON,
-    CMD_POWER_OFF,
-    CMD_ENABLE_INSIDE,
-    CMD_DISABLE_INSIDE,
-    CMD_ENABLE_OUTSIDE,
-    CMD_DISABLE_OUTSIDE,
-    CMD_SET_HOLD_TIME,
-    COMMAND,
-    DOOR_STATE_CLOSED,
-    DOOR_STATE_RISING,
-    DOOR_STATE_HOLDING,
-    DOOR_STATE_KEEPUP,
-    FIELD_INSIDE,
-    FIELD_OUTSIDE,
-    FIELD_POWER,
-)
-
 
 # ============================================================================
 # Test Fixtures
 # ============================================================================
+
 
 @pytest.fixture
 def fast_timing():
@@ -139,7 +136,7 @@ class CallbackTracker:
         try:
             await asyncio.wait_for(self.events[name].wait(), timeout=timeout)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False
 
     def get_calls(self, name: str) -> list[Any]:
@@ -163,6 +160,7 @@ def tracker():
 # Connection Tests
 # ============================================================================
 
+
 class TestClientConnection:
     """Test client connection to simulator."""
 
@@ -183,6 +181,7 @@ class TestClientConnection:
 # ============================================================================
 # Query Command Tests
 # ============================================================================
+
 
 class TestQueryCommands:
     """Test query commands from client to simulator."""
@@ -255,6 +254,7 @@ class TestQueryCommands:
 # Control Command Tests
 # ============================================================================
 
+
 class TestControlCommands:
     """Test control commands from client to simulator."""
 
@@ -276,8 +276,9 @@ class TestControlCommands:
 
         # Door should be in an open state
         statuses = [c[0] for c in calls]
-        assert any(s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP)
-                   for s in statuses)
+        assert any(
+            s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP) for s in statuses
+        )
 
     @pytest.mark.asyncio
     async def test_close_door(self, client, simulator, tracker):
@@ -346,7 +347,10 @@ class TestControlCommands:
     async def test_set_hold_time(self, client, simulator):
         """SET_HOLD_TIME should update hold time (centiseconds in protocol)."""
         future = client.send_message(
-            CONFIG, CMD_SET_HOLD_TIME, notify=True, holdTime=1500  # 15 seconds
+            CONFIG,
+            CMD_SET_HOLD_TIME,
+            notify=True,
+            holdTime=1500,  # 15 seconds
         )
         result = await asyncio.wait_for(future, timeout=2.0)
 
@@ -358,6 +362,7 @@ class TestControlCommands:
 # ============================================================================
 # Callback/Listener Tests
 # ============================================================================
+
 
 class TestClientCallbacks:
     """Test client callback system with simulator."""
@@ -507,6 +512,7 @@ class TestClientCallbacks:
 # Full Door Cycle Tests
 # ============================================================================
 
+
 class TestDoorCycles:
     """Test full door operation cycles."""
 
@@ -567,6 +573,7 @@ class TestDoorCycles:
 # Error Handling Tests
 # ============================================================================
 
+
 class TestErrorHandling:
     """Test error handling between client and simulator."""
 
@@ -598,6 +605,7 @@ class TestErrorHandling:
 # ============================================================================
 # Schedule Callback Tests
 # ============================================================================
+
 
 class TestScheduleCallbacks:
     """Test schedule callback system with simulator."""

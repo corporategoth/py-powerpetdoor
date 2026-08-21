@@ -11,7 +11,7 @@ and can be used by both the interactive CLI and the control client.
 
 import logging
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ class History:
                 # Execute resolved_cmd, show prefix
     """
 
-    def __init__(self, history_file: Optional[str | Path] = None):
+    def __init__(self, history_file: str | Path | None = None):
         """Initialize history manager.
 
         Args:
@@ -213,7 +213,7 @@ class History:
         except Exception as e:
             return f"Error reading history: {e}"
 
-    def resolve_recall(self, command_str: str) -> Union[tuple[str, str], tuple[None, str], None]:
+    def resolve_recall(self, command_str: str) -> tuple[str, str] | tuple[None, str] | None:
         """Resolve history recall commands like !!, !n, !-n.
 
         Args:
@@ -274,7 +274,7 @@ class History:
         except ValueError:
             return None  # Not a history recall pattern
 
-    def execute_command(self, arg: Optional[str] = None) -> str:
+    def execute_command(self, arg: str | None = None) -> str:
         """Execute the history command with optional argument.
 
         This handles the 'history' command itself (show/clear history).

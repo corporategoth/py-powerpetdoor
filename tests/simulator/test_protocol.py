@@ -4,6 +4,7 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for simulator protocol module (protocol.py)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -12,47 +13,47 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from powerpetdoor.simulator import (
-    DoorSimulatorProtocol,
-    DoorSimulatorState,
-    DoorTimingConfig,
-    CommandRegistry,
-)
 from powerpetdoor.const import (
+    CMD_CLOSE,
+    CMD_DELETE_SCHEDULE,
+    CMD_DISABLE_INSIDE,
+    CMD_ENABLE_INSIDE,
+    CMD_GET_DOOR_BATTERY,
+    CMD_GET_DOOR_STATUS,
+    CMD_GET_HOLD_TIME,
+    CMD_GET_HW_INFO,
+    CMD_GET_POWER,
+    CMD_GET_SCHEDULE,
+    CMD_GET_SENSORS,
+    CMD_GET_SETTINGS,
+    CMD_OPEN,
+    CMD_POWER_OFF,
+    CMD_POWER_ON,
+    CMD_SET_HOLD_TIME,
+    CMD_SET_SCHEDULE,
+    CONFIG,
+    FIELD_BATTERY_PERCENT,
+    FIELD_DOOR_STATUS,
+    FIELD_HOLD_OPEN_TIME,
+    FIELD_HOLD_TIME,
+    FIELD_INDEX,
+    FIELD_SCHEDULE,
+    FIELD_SETTINGS,
     FIELD_SUCCESS,
     PING,
     PONG,
-    CONFIG,
-    CMD_GET_SETTINGS,
-    CMD_GET_DOOR_STATUS,
-    CMD_GET_SENSORS,
-    CMD_GET_POWER,
-    CMD_GET_HW_INFO,
-    CMD_GET_DOOR_BATTERY,
-    CMD_GET_HOLD_TIME,
-    CMD_OPEN,
-    CMD_CLOSE,
-    CMD_POWER_ON,
-    CMD_POWER_OFF,
-    CMD_ENABLE_INSIDE,
-    CMD_DISABLE_INSIDE,
-    CMD_SET_HOLD_TIME,
-    FIELD_DOOR_STATUS,
-    FIELD_HOLD_TIME,
-    FIELD_HOLD_OPEN_TIME,
-    FIELD_SETTINGS,
-    FIELD_BATTERY_PERCENT,
-    FIELD_INDEX,
-    FIELD_SCHEDULE,
-    CMD_GET_SCHEDULE,
-    CMD_SET_SCHEDULE,
-    CMD_DELETE_SCHEDULE,
 )
-
+from powerpetdoor.simulator import (
+    CommandRegistry,
+    DoorSimulatorProtocol,
+    DoorSimulatorState,
+    DoorTimingConfig,
+)
 
 # ============================================================================
 # Test Fixtures
 # ============================================================================
+
 
 @pytest.fixture
 def timing_config():
@@ -94,6 +95,7 @@ def protocol(state, mock_transport):
 # CommandRegistry Tests
 # ============================================================================
 
+
 class TestCommandRegistry:
     """Tests for CommandRegistry."""
 
@@ -132,6 +134,7 @@ class TestCommandRegistry:
 # ============================================================================
 # DoorSimulatorProtocol Tests
 # ============================================================================
+
 
 class TestDoorSimulatorProtocol:
     """Tests for DoorSimulatorProtocol."""
@@ -235,11 +238,13 @@ class TestDoorSimulatorProtocol:
     @pytest.mark.asyncio
     async def test_set_hold_time(self, protocol, mock_transport, state):
         """Should handle SET_HOLD_TIME command (centiseconds)."""
-        msg = json.dumps({
-            CONFIG: CMD_SET_HOLD_TIME,
-            FIELD_HOLD_TIME: 3000,  # 30 seconds in centiseconds
-            "msgId": 1
-        }).encode("ascii")
+        msg = json.dumps(
+            {
+                CONFIG: CMD_SET_HOLD_TIME,
+                FIELD_HOLD_TIME: 3000,  # 30 seconds in centiseconds
+                "msgId": 1,
+            }
+        ).encode("ascii")
         protocol.data_received(msg)
         await asyncio.sleep(0.05)
         # State stores seconds, protocol uses centiseconds
@@ -283,11 +288,9 @@ class TestDoorSimulatorProtocol:
             "outStartTime": {"hour": 6, "min": 0},
             "outEndTime": {"hour": 22, "min": 0},
         }
-        msg = json.dumps({
-            CONFIG: CMD_SET_SCHEDULE,
-            FIELD_SCHEDULE: schedule_data,
-            "msgId": 1
-        }).encode("ascii")
+        msg = json.dumps(
+            {CONFIG: CMD_SET_SCHEDULE, FIELD_SCHEDULE: schedule_data, "msgId": 1}
+        ).encode("ascii")
         protocol.data_received(msg)
         await asyncio.sleep(0.05)
         assert 0 in state.schedules
@@ -322,8 +325,8 @@ class TestDoorSimulatorProtocol:
 
     def test_find_json_end_not_object(self, protocol):
         """Should return None if not starting with {."""
-        assert protocol._find_json_end('') is None
-        assert protocol._find_json_end('[1,2,3]') is None
+        assert protocol._find_json_end("") is None
+        assert protocol._find_json_end("[1,2,3]") is None
 
     @pytest.mark.asyncio
     async def test_buffered_messages(self, protocol, mock_transport):
@@ -342,6 +345,7 @@ class TestDoorSimulatorProtocol:
 # ============================================================================
 # Connection Lifecycle Tests
 # ============================================================================
+
 
 class TestConnectionLifecycle:
     """Tests for connection and disconnection handling."""
@@ -387,6 +391,7 @@ class TestConnectionLifecycle:
 # Protocol Value Conversion Tests
 # ============================================================================
 
+
 class TestHoldTimeCentiseconds:
     """Tests for hold time centiseconds <-> seconds conversion.
 
@@ -413,11 +418,9 @@ class TestHoldTimeCentiseconds:
     async def test_set_hold_time_converts_to_seconds(self, protocol, mock_transport, state):
         """SET_HOLD_TIME should convert centiseconds to seconds in state."""
         # Send 1500 centiseconds (15 seconds)
-        msg = json.dumps({
-            CONFIG: CMD_SET_HOLD_TIME,
-            FIELD_HOLD_TIME: 1500,
-            "msgId": 1
-        }).encode("ascii")
+        msg = json.dumps({CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: 1500, "msgId": 1}).encode(
+            "ascii"
+        )
         protocol.data_received(msg)
         await asyncio.sleep(0.05)
 
@@ -427,11 +430,9 @@ class TestHoldTimeCentiseconds:
     @pytest.mark.asyncio
     async def test_set_hold_time_response_is_centiseconds(self, protocol, mock_transport, state):
         """SET_HOLD_TIME response should echo back centiseconds."""
-        msg = json.dumps({
-            CONFIG: CMD_SET_HOLD_TIME,
-            FIELD_HOLD_TIME: 2500,
-            "msgId": 1
-        }).encode("ascii")
+        msg = json.dumps({CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: 2500, "msgId": 1}).encode(
+            "ascii"
+        )
         protocol.data_received(msg)
         await asyncio.sleep(0.05)
 
@@ -458,11 +459,9 @@ class TestHoldTimeCentiseconds:
     async def test_hold_time_round_trip(self, protocol, mock_transport, state):
         """Setting then getting hold time should preserve the value."""
         # Set to 4200 centiseconds (42 seconds)
-        msg = json.dumps({
-            CONFIG: CMD_SET_HOLD_TIME,
-            FIELD_HOLD_TIME: 4200,
-            "msgId": 1
-        }).encode("ascii")
+        msg = json.dumps({CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: 4200, "msgId": 1}).encode(
+            "ascii"
+        )
         protocol.data_received(msg)
         await asyncio.sleep(0.05)
 
@@ -478,11 +477,9 @@ class TestHoldTimeCentiseconds:
     async def test_hold_time_fractional_seconds(self, protocol, mock_transport, state):
         """Should handle fractional second values correctly."""
         # 50 centiseconds = 0.5 seconds
-        msg = json.dumps({
-            CONFIG: CMD_SET_HOLD_TIME,
-            FIELD_HOLD_TIME: 50,
-            "msgId": 1
-        }).encode("ascii")
+        msg = json.dumps({CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: 50, "msgId": 1}).encode(
+            "ascii"
+        )
         protocol.data_received(msg)
         await asyncio.sleep(0.05)
 

@@ -4,40 +4,40 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for Power Pet Door schedule logic."""
+
 from __future__ import annotations
 
-from datetime import time
 from copy import deepcopy
 
 import pytest
 
 from powerpetdoor import (
+    compress_schedule,
+    compute_schedule_diff,
+    schedule_entry_content_key,
+    schedule_template,
+    validate_schedule_entry,
     week_0_mon_to_sun,
     week_0_sun_to_mon,
-    validate_schedule_entry,
-    compress_schedule,
-    schedule_entry_content_key,
-    compute_schedule_diff,
-    schedule_template,
 )
 from powerpetdoor.const import (
-    FIELD_INDEX,
     FIELD_DAYSOFWEEK,
-    FIELD_INSIDE,
-    FIELD_OUTSIDE,
     FIELD_ENABLED,
-    FIELD_INSIDE_PREFIX,
-    FIELD_OUTSIDE_PREFIX,
-    FIELD_START_TIME_SUFFIX,
     FIELD_END_TIME_SUFFIX,
     FIELD_HOUR,
+    FIELD_INDEX,
+    FIELD_INSIDE,
+    FIELD_INSIDE_PREFIX,
     FIELD_MINUTE,
+    FIELD_OUTSIDE,
+    FIELD_OUTSIDE_PREFIX,
+    FIELD_START_TIME_SUFFIX,
 )
-
 
 # ============================================================================
 # Helper Functions Tests
 # ============================================================================
+
 
 class TestWeekdayConversion:
     """Tests for weekday conversion functions."""
@@ -75,6 +75,7 @@ class TestWeekdayConversion:
 # ============================================================================
 # Schedule Validation Tests
 # ============================================================================
+
 
 class TestValidateScheduleEntry:
     """Tests for schedule entry validation."""
@@ -160,12 +161,21 @@ class TestValidateScheduleEntry:
 # Schedule Compression Tests
 # ============================================================================
 
+
 class TestCompressSchedule:
     """Tests for schedule compression algorithm."""
 
-    def create_schedule_entry(self, index, days, inside=False, outside=False,
-                              in_start=(0, 0), in_end=(0, 0),
-                              out_start=(0, 0), out_end=(0, 0)):
+    def create_schedule_entry(
+        self,
+        index,
+        days,
+        inside=False,
+        outside=False,
+        in_start=(0, 0),
+        in_end=(0, 0),
+        out_start=(0, 0),
+        out_end=(0, 0),
+    ):
         """Helper to create schedule entries."""
         return {
             FIELD_INDEX: index,
@@ -174,16 +184,20 @@ class TestCompressSchedule:
             FIELD_OUTSIDE: outside,
             FIELD_ENABLED: True,
             FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX: {
-                FIELD_HOUR: in_start[0], FIELD_MINUTE: in_start[1]
+                FIELD_HOUR: in_start[0],
+                FIELD_MINUTE: in_start[1],
             },
             FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX: {
-                FIELD_HOUR: in_end[0], FIELD_MINUTE: in_end[1]
+                FIELD_HOUR: in_end[0],
+                FIELD_MINUTE: in_end[1],
             },
             FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX: {
-                FIELD_HOUR: out_start[0], FIELD_MINUTE: out_start[1]
+                FIELD_HOUR: out_start[0],
+                FIELD_MINUTE: out_start[1],
             },
             FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX: {
-                FIELD_HOUR: out_end[0], FIELD_MINUTE: out_end[1]
+                FIELD_HOUR: out_end[0],
+                FIELD_MINUTE: out_end[1],
             },
         }
 
@@ -195,8 +209,7 @@ class TestCompressSchedule:
     def test_compress_single_entry(self):
         """Test compressing single entry preserves it."""
         entry = self.create_schedule_entry(
-            0, [1, 1, 1, 1, 1, 0, 0],
-            inside=True, in_start=(6, 0), in_end=(20, 0)
+            0, [1, 1, 1, 1, 1, 0, 0], inside=True, in_start=(6, 0), in_end=(20, 0)
         )
         result = compress_schedule([entry])
         assert len(result) == 1
@@ -207,12 +220,18 @@ class TestCompressSchedule:
         """Test combining entries with same time on different days."""
         entries = [
             self.create_schedule_entry(
-                0, [1, 0, 0, 0, 0, 0, 0],  # Sunday only
-                inside=True, in_start=(8, 0), in_end=(17, 0)
+                0,
+                [1, 0, 0, 0, 0, 0, 0],  # Sunday only
+                inside=True,
+                in_start=(8, 0),
+                in_end=(17, 0),
             ),
             self.create_schedule_entry(
-                1, [0, 1, 0, 0, 0, 0, 0],  # Monday only
-                inside=True, in_start=(8, 0), in_end=(17, 0)
+                1,
+                [0, 1, 0, 0, 0, 0, 0],  # Monday only
+                inside=True,
+                in_start=(8, 0),
+                in_end=(17, 0),
             ),
         ]
         result = compress_schedule(entries)
@@ -223,12 +242,18 @@ class TestCompressSchedule:
         """Test merging overlapping time periods on same day."""
         entries = [
             self.create_schedule_entry(
-                0, [1, 0, 0, 0, 0, 0, 0],  # Sunday
-                inside=True, in_start=(6, 0), in_end=(12, 0)
+                0,
+                [1, 0, 0, 0, 0, 0, 0],  # Sunday
+                inside=True,
+                in_start=(6, 0),
+                in_end=(12, 0),
             ),
             self.create_schedule_entry(
-                1, [1, 0, 0, 0, 0, 0, 0],  # Sunday (overlapping)
-                inside=True, in_start=(10, 0), in_end=(18, 0)
+                1,
+                [1, 0, 0, 0, 0, 0, 0],  # Sunday (overlapping)
+                inside=True,
+                in_start=(10, 0),
+                in_end=(18, 0),
             ),
         ]
         result = compress_schedule(entries)
@@ -243,12 +268,18 @@ class TestCompressSchedule:
         """Test non-overlapping times stay separate."""
         entries = [
             self.create_schedule_entry(
-                0, [1, 0, 0, 0, 0, 0, 0],  # Sunday
-                inside=True, in_start=(6, 0), in_end=(10, 0)
+                0,
+                [1, 0, 0, 0, 0, 0, 0],  # Sunday
+                inside=True,
+                in_start=(6, 0),
+                in_end=(10, 0),
             ),
             self.create_schedule_entry(
-                1, [1, 0, 0, 0, 0, 0, 0],  # Sunday
-                inside=True, in_start=(14, 0), in_end=(18, 0)
+                1,
+                [1, 0, 0, 0, 0, 0, 0],  # Sunday
+                inside=True,
+                in_start=(14, 0),
+                in_end=(18, 0),
             ),
         ]
         result = compress_schedule(entries)
@@ -258,12 +289,10 @@ class TestCompressSchedule:
         """Test combining inside and outside entries with same time/days."""
         entries = [
             self.create_schedule_entry(
-                0, [1, 1, 0, 0, 0, 0, 0],
-                inside=True, in_start=(8, 0), in_end=(17, 0)
+                0, [1, 1, 0, 0, 0, 0, 0], inside=True, in_start=(8, 0), in_end=(17, 0)
             ),
             self.create_schedule_entry(
-                1, [1, 1, 0, 0, 0, 0, 0],
-                outside=True, out_start=(8, 0), out_end=(17, 0)
+                1, [1, 1, 0, 0, 0, 0, 0], outside=True, out_start=(8, 0), out_end=(17, 0)
             ),
         ]
         result = compress_schedule(entries)
@@ -275,8 +304,11 @@ class TestCompressSchedule:
         """Test times are swapped if end < start."""
         entries = [
             self.create_schedule_entry(
-                0, [1, 0, 0, 0, 0, 0, 0],
-                inside=True, in_start=(18, 0), in_end=(6, 0)  # Inverted
+                0,
+                [1, 0, 0, 0, 0, 0, 0],
+                inside=True,
+                in_start=(18, 0),
+                in_end=(6, 0),  # Inverted
             ),
         ]
         result = compress_schedule(entries)
@@ -290,12 +322,10 @@ class TestCompressSchedule:
         """Test compressed entries have sequential indices."""
         entries = [
             self.create_schedule_entry(
-                5, [1, 0, 0, 0, 0, 0, 0],
-                inside=True, in_start=(6, 0), in_end=(10, 0)
+                5, [1, 0, 0, 0, 0, 0, 0], inside=True, in_start=(6, 0), in_end=(10, 0)
             ),
             self.create_schedule_entry(
-                10, [0, 1, 0, 0, 0, 0, 0],
-                inside=True, in_start=(14, 0), in_end=(18, 0)
+                10, [0, 1, 0, 0, 0, 0, 0], inside=True, in_start=(14, 0), in_end=(18, 0)
             ),
         ]
         result = compress_schedule(entries)
@@ -306,6 +336,7 @@ class TestCompressSchedule:
 # ============================================================================
 # Schedule Content Key Tests
 # ============================================================================
+
 
 class TestScheduleEntryContentKey:
     """Tests for schedule entry content key generation."""
@@ -377,6 +408,7 @@ class TestScheduleEntryContentKey:
 # Schedule Diff Tests
 # ============================================================================
 
+
 class TestComputeScheduleDiff:
     """Tests for schedule diff computation."""
 
@@ -388,7 +420,10 @@ class TestComputeScheduleDiff:
             FIELD_INSIDE: inside,
             FIELD_OUTSIDE: False,
             FIELD_ENABLED: True,
-            FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX: {FIELD_HOUR: start_hour, FIELD_MINUTE: 0},
+            FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX: {
+                FIELD_HOUR: start_hour,
+                FIELD_MINUTE: 0,
+            },
             FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX: {FIELD_HOUR: end_hour, FIELD_MINUTE: 0},
             FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX: {FIELD_HOUR: 0, FIELD_MINUTE: 0},
             FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX: {FIELD_HOUR: 0, FIELD_MINUTE: 0},
@@ -483,6 +518,7 @@ class TestComputeScheduleDiff:
 # ============================================================================
 # Schedule Template Tests
 # ============================================================================
+
 
 class TestScheduleTemplate:
     """Tests for schedule template."""

@@ -12,24 +12,26 @@ and controlling the door simulator.
 import asyncio
 import logging
 import sys
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
-from .commands import CommandHandler
-from .server import DoorSimulator
 from ..tz_utils import async_init_timezone_cache
+from .commands import CommandHandler
+from .prompt_common import (
+    CLI_HISTORY_FILE as HISTORY_FILE,
+)
 
 # Import shared prompt_toolkit components
 from .prompt_common import (
     PROMPT_TOOLKIT_AVAILABLE,
-    CLI_HISTORY_FILE as HISTORY_FILE,
     InteractiveSession,
 )
+from .server import DoorSimulator
 
 if PROMPT_TOOLKIT_AVAILABLE:
     from prompt_toolkit.patch_stdout import patch_stdout
 
 if TYPE_CHECKING:
-    from .scripting import ScriptRunner
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +47,7 @@ class InteractivePrompt:
     def __init__(self, prompt: str = "$ "):
         self.prompt = prompt
         self._enabled = False
-        self._handler: Optional[logging.Handler] = None
+        self._handler: logging.Handler | None = None
         self._saved_handlers: list[logging.Handler] = []
 
     def enable(self):
@@ -62,9 +64,7 @@ class InteractivePrompt:
 
         # Install a custom handler that clears line before output
         self._handler = _PromptLoggingHandler(self)
-        self._handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-        )
+        self._handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         root_logger.addHandler(self._handler)
         self.show()
 
@@ -120,6 +120,7 @@ class _PromptLoggingHandler(logging.Handler):
         except Exception:
             self.handleError(record)
 
+
 # Default control port offset from simulator port
 CONTROL_PORT_OFFSET = 1
 
@@ -127,17 +128,17 @@ CONTROL_PORT_OFFSET = 1
 async def run_simulator(
     host: str = "0.0.0.0",
     port: int = 3000,
-    scripts: Optional[list[str]] = None,
+    scripts: list[str] | None = None,
     loop_scripts: bool = False,
     script_delay: float = 0,
     oneshot: bool = False,
     daemon: bool = False,
-    run_for: Optional[float] = None,
+    run_for: float | None = None,
     wait_for_client: bool = False,
-    control_port: Optional[int] = None,
-    history_file: Optional[str] = None,
-    firmware: Optional[tuple[int, int, int]] = None,
-    hardware: Optional[tuple[str, str]] = None,
+    control_port: int | None = None,
+    history_file: str | None = None,
+    firmware: tuple[int, int, int] | None = None,
+    hardware: tuple[str, str] | None = None,
 ):
     """Run the Power Pet Door simulator.
 
@@ -182,7 +183,7 @@ async def run_simulator(
 
     # Holder for interactive session (set later if in interactive mode)
     # Used by callbacks to invalidate prompt on connect/disconnect
-    session_holder: list[Optional[InteractiveSession]] = [None]
+    session_holder: list[InteractiveSession | None] = [None]
 
     def on_client_connect():
         """Called when a client connects - invalidate prompt to update color."""
@@ -266,9 +267,7 @@ async def run_simulator(
                 except Exception:
                     self.handleError(record)
 
-        async def handle_control_client(
-            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-        ):
+        async def handle_control_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
             """Handle a control connection."""
             addr = writer.get_extra_info("peername")
             logger.info(f"Control connection from {addr}")
@@ -284,7 +283,7 @@ async def run_simulator(
 
                     result = await cmd_handler.execute(cmd)
                     # Escape newlines for protocol (ctl will unescape)
-                    escaped_msg = result.message.replace('\\', '\\\\').replace('\n', '\\n')
+                    escaped_msg = result.message.replace("\\", "\\\\").replace("\n", "\\n")
                     if result.success:
                         writer.write(f"OK: {escaped_msg}\n".encode())
                     else:
@@ -302,9 +301,7 @@ async def run_simulator(
                 await writer.wait_closed()
                 logger.info(f"Control connection closed from {addr}")
 
-        control_server = await asyncio.start_server(
-            handle_control_client, host, control_port
-        )
+        control_server = await asyncio.start_server(handle_control_client, host, control_port)
         logger.info(f"Control server listening on {host}:{control_port}")
 
         # Install log handler to broadcast to control clients
@@ -319,10 +316,8 @@ async def run_simulator(
         while not stop_event.is_set():
             try:
                 try:
-                    script_ref = await asyncio.wait_for(
-                        script_queue.get(), timeout=0.5
-                    )
-                except asyncio.TimeoutError:
+                    script_ref = await asyncio.wait_for(script_queue.get(), timeout=0.5)
+                except TimeoutError:
                     continue
 
                 try:
@@ -339,6 +334,7 @@ async def run_simulator(
 
     # Run startup scripts if specified
     if scripts:
+
         async def run_startup_scripts():
             all_success = True
             run_count = 0
@@ -411,14 +407,15 @@ async def run_simulator(
 
     # Set up interactive input if applicable
     stdin_available = False
-    prompt: Optional[InteractivePrompt] = None
-    input_task: Optional[asyncio.Task] = None
+    prompt: InteractivePrompt | None = None
+    input_task: asyncio.Task | None = None
     stdout_ctx = None  # prompt_toolkit patch_stdout context
 
     if interactive:
         try:
             if sys.stdin and sys.stdin.fileno() >= 0:
                 import os
+
                 os.fstat(sys.stdin.fileno())
                 stdin_available = True
         except (OSError, ValueError, AttributeError):
@@ -526,6 +523,7 @@ async def run_simulator(
 
     # Handle run_for timeout
     if run_for:
+
         async def timeout_shutdown():
             await asyncio.sleep(run_for)
             logger.info(f"Run time ({run_for}s) elapsed, shutting down")
@@ -575,78 +573,65 @@ def main():
     import argparse
     import sys
 
-    parser = argparse.ArgumentParser(
-        description="Power Pet Door Simulator - Fake door for testing"
+    parser = argparse.ArgumentParser(description="Power Pet Door Simulator - Fake door for testing")
+    parser.add_argument(
+        "--host", "-H", default="0.0.0.0", help="Address to bind (default: 0.0.0.0)"
     )
     parser.add_argument(
-        "--host", "-H",
-        default="0.0.0.0",
-        help="Address to bind (default: 0.0.0.0)"
+        "--port", "-p", type=int, default=3000, help="Port to listen on (default: 3000)"
     )
+    parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logging")
     parser.add_argument(
-        "--port", "-p",
-        type=int,
-        default=3000,
-        help="Port to listen on (default: 3000)"
-    )
-    parser.add_argument(
-        "--debug", "-d",
-        action="store_true",
-        help="Enable debug logging"
-    )
-    parser.add_argument(
-        "--script", "-s",
+        "--script",
+        "-s",
         action="append",
         dest="scripts",
         metavar="SCRIPT",
         help="Run a script (built-in name or file path, auto-detected). "
-             "Can be specified multiple times to run scripts in sequence. "
-             "Implies non-interactive mode."
+        "Can be specified multiple times to run scripts in sequence. "
+        "Implies non-interactive mode.",
     )
-    parser.add_argument(
-        "--loop",
-        action="store_true",
-        help="Run scripts continuously in a loop"
-    )
+    parser.add_argument("--loop", action="store_true", help="Run scripts continuously in a loop")
     parser.add_argument(
         "--script-delay",
         type=float,
         default=0,
         metavar="SECONDS",
-        help="Delay between scripts and loop iterations (default: 0)"
+        help="Delay between scripts and loop iterations (default: 0)",
     )
     parser.add_argument(
         "--oneshot",
         action="store_true",
-        help="Exit after scripts complete (useful for CI/CD). Takes precedence over --run-for."
+        help="Exit after scripts complete (useful for CI/CD). Takes precedence over --run-for.",
     )
     parser.add_argument(
-        "--wait-for-client", "-w",
+        "--wait-for-client",
+        "-w",
         action="store_true",
         help="Wait for a client to connect before starting scripts. "
-             "Scripts stop if client disconnects."
+        "Scripts stop if client disconnects.",
     )
     parser.add_argument(
-        "--list-scripts", "-l",
-        action="store_true",
-        help="List available built-in scripts and exit"
+        "--list-scripts", "-l", action="store_true", help="List available built-in scripts and exit"
     )
     parser.add_argument(
-        "--daemon", "-D",
+        "--daemon",
+        "-D",
         nargs="?",
         type=int,
         const=-1,  # Sentinel: use default (port+1)
         default=None,
         metavar="CONTROL_PORT",
         help="Run in daemon mode (no interactive input, no scripts). "
-             "Optionally specify control port (default: PORT+1). "
-             "Mutually exclusive with --script."
+        "Optionally specify control port (default: PORT+1). "
+        "Mutually exclusive with --script.",
     )
     parser.add_argument(
-        "--run-for", "-r",
+        "--run-for",
+        "-r",
         type=float,
         metavar="SECONDS",
-        help="Maximum run time in seconds (--oneshot can exit earlier)"
+        help="Maximum run time in seconds (--oneshot can exit earlier)",
     )
     # Only add history argument if prompt_toolkit is available
     if PROMPT_TOOLKIT_AVAILABLE:
@@ -654,17 +639,18 @@ def main():
             "--history",
             metavar="FILE",
             default=str(HISTORY_FILE),
-            help=f"History file path, or 'none' to disable (default: {HISTORY_FILE})"
+            help=f"History file path, or 'none' to disable (default: {HISTORY_FILE})",
         )
     parser.add_argument(
-        "--firmware", "-f",
+        "--firmware",
+        "-f",
         metavar="VERSION",
-        help="Firmware version to report (e.g., '1.2.3', default: 1.2.3)"
+        help="Firmware version to report (e.g., '1.2.3', default: 1.2.3)",
     )
     parser.add_argument(
         "--hardware",
         metavar="VERSION",
-        help="Hardware version to report (e.g., '1.1' for 'ver 1 rev 1', default: 1.1)"
+        help="Hardware version to report (e.g., '1.1' for 'ver 1 rev 1', default: 1.1)",
     )
 
     args = parser.parse_args()
@@ -681,6 +667,7 @@ def main():
     # List scripts and exit
     if args.list_scripts:
         from .scripting import list_builtin_scripts
+
         print("Available built-in scripts:")
         for name, desc in list_builtin_scripts():
             print(f"  {name}: {desc}")
@@ -719,21 +706,23 @@ def main():
         hardware = (parts[0], parts[1])
 
     try:
-        result = asyncio.run(run_simulator(
-            host=args.host,
-            port=args.port,
-            scripts=args.scripts,
-            loop_scripts=args.loop,
-            script_delay=args.script_delay,
-            oneshot=args.oneshot,
-            daemon=daemon,
-            run_for=args.run_for,
-            wait_for_client=args.wait_for_client,
-            control_port=control_port,
-            history_file=args.history,
-            firmware=firmware,
-            hardware=hardware,
-        ))
+        result = asyncio.run(
+            run_simulator(
+                host=args.host,
+                port=args.port,
+                scripts=args.scripts,
+                loop_scripts=args.loop,
+                script_delay=args.script_delay,
+                oneshot=args.oneshot,
+                daemon=daemon,
+                run_for=args.run_for,
+                wait_for_client=args.wait_for_client,
+                control_port=control_port,
+                history_file=args.history,
+                firmware=firmware,
+                hardware=hardware,
+            )
+        )
 
         # Exit with appropriate code for CI/CD
         if args.oneshot and result is not None:

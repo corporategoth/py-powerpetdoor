@@ -7,7 +7,7 @@
 
 import logging
 import sys
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from .base import ArgSpec, CommandResult, command
 
@@ -38,7 +38,7 @@ class ControlCommandsMixin:
             )
         ],
     )
-    def debug(self, state: Optional[bool] = None) -> CommandResult:
+    def debug(self, state: bool | None = None) -> CommandResult:
         """Enable or disable debug logging.
 
         When enabled, shows detailed debug messages including protocol traffic.
@@ -50,9 +50,7 @@ class ControlCommandsMixin:
         if state is None:
             # Show current state
             is_debug = current_level <= logging.DEBUG
-            return CommandResult(
-                True, f"Debug logging: {'on' if is_debug else 'off'}"
-            )
+            return CommandResult(True, f"Debug logging: {'on' if is_debug else 'off'}")
 
         if state:
             root_logger.setLevel(logging.DEBUG)
@@ -61,7 +59,14 @@ class ControlCommandsMixin:
             root_logger.setLevel(logging.INFO)
             return CommandResult(True, "Debug logging disabled")
 
-    @command("exit", ["q", "quit"], "Exit the control client", category="control", interactive_only=True, local_only=True)
+    @command(
+        "exit",
+        ["q", "quit"],
+        "Exit the control client",
+        category="control",
+        interactive_only=True,
+        local_only=True,
+    )
     def exit_ctl(self) -> CommandResult:
         """Exit the control client (ctl).
 
@@ -72,7 +77,14 @@ class ControlCommandsMixin:
         # This is a placeholder - ctl intercepts exit locally
         return CommandResult(True, "Exit is handled locally by the control client")
 
-    @command("clear", ["cls"], "Clear the screen", category="control", interactive_only=True, local_only=True)
+    @command(
+        "clear",
+        ["cls"],
+        "Clear the screen",
+        category="control",
+        interactive_only=True,
+        local_only=True,
+    )
     def clear(self) -> CommandResult:
         """Clear the terminal screen."""
         # Use __stdout__ to bypass prompt_toolkit's patch_stdout

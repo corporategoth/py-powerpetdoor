@@ -44,9 +44,7 @@ class DoorCommandsMixin:
         """
         self.simulator.activate_sensor("inside", duration)
         if duration == 0:
-            state = (
-                "activated" if self.simulator.state.inside_sensor_active else "deactivated"
-            )
+            state = "activated" if self.simulator.state.inside_sensor_active else "deactivated"
             return CommandResult(True, f"Inside sensor {state} (toggle)")
         return CommandResult(True, f"Inside sensor activated for {duration}s")
 
@@ -75,11 +73,7 @@ class DoorCommandsMixin:
         """
         self.simulator.activate_sensor("outside", duration)
         if duration == 0:
-            state = (
-                "activated"
-                if self.simulator.state.outside_sensor_active
-                else "deactivated"
-            )
+            state = "activated" if self.simulator.state.outside_sensor_active else "deactivated"
             return CommandResult(True, f"Outside sensor {state} (toggle)")
         return CommandResult(True, f"Outside sensor activated for {duration}s")
 
@@ -95,9 +89,7 @@ class DoorCommandsMixin:
         asyncio.create_task(self.simulator.open_door(hold=True))
         return CommandResult(True, "Opening and holding")
 
-    @command(
-        "cycle", ["y"], "Full door cycle (like pressing door button)", category="door"
-    )
+    @command("cycle", ["y"], "Full door cycle (like pressing door button)", category="door")
     def cycle(self) -> CommandResult:
         """Run a full door cycle - open, hold, close.
 

@@ -11,35 +11,35 @@ This module contains all the state-related dataclasses used by the simulator.
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from ..tz_utils import get_posix_tz_string, is_cache_initialized
 from ..const import (
     DOOR_STATE_CLOSED,
-    FIELD_INDEX,
-    FIELD_ENABLED,
-    FIELD_DAYSOFWEEK,
-    FIELD_INSIDE_PREFIX,
-    FIELD_OUTSIDE_PREFIX,
-    FIELD_START_TIME_SUFFIX,
-    FIELD_END_TIME_SUFFIX,
-    FIELD_HOUR,
-    FIELD_MINUTE,
-    FIELD_POWER,
-    FIELD_INSIDE,
-    FIELD_OUTSIDE,
     FIELD_AUTO,
-    FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
-    FIELD_CMD_LOCKOUT,
     FIELD_AUTORETRACT,
-    FIELD_TZ,
+    FIELD_CMD_LOCKOUT,
+    FIELD_DAYSOFWEEK,
+    FIELD_ENABLED,
+    FIELD_END_TIME_SUFFIX,
     FIELD_HOLD_OPEN_TIME,
+    FIELD_HOUR,
+    FIELD_INDEX,
+    FIELD_INSIDE,
+    FIELD_INSIDE_PREFIX,
+    FIELD_LOW_BATTERY_NOTIFICATIONS,
+    FIELD_MINUTE,
+    FIELD_OUTSIDE,
+    FIELD_OUTSIDE_PREFIX,
+    FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
+    FIELD_POWER,
+    FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
     FIELD_SENSOR_TRIGGER_VOLTAGE,
     FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
-    FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
-    FIELD_LOW_BATTERY_NOTIFICATIONS,
+    FIELD_START_TIME_SUFFIX,
+    FIELD_TZ,
 )
+from ..tz_utils import get_posix_tz_string, is_cache_initialized
 
 # Note: FIELD_INSIDE and FIELD_OUTSIDE are used both as:
 # 1. Settings fields for sensor enable/disable (string "0"/"1")
@@ -133,10 +133,12 @@ class Schedule:
         else:
             # Default empty times for inside
             result[f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {
-                FIELD_HOUR: 0, FIELD_MINUTE: 0,
+                FIELD_HOUR: 0,
+                FIELD_MINUTE: 0,
             }
             result[f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {
-                FIELD_HOUR: 0, FIELD_MINUTE: 0,
+                FIELD_HOUR: 0,
+                FIELD_MINUTE: 0,
             }
 
         if self.outside:
@@ -151,10 +153,12 @@ class Schedule:
         else:
             # Default empty times for outside
             result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {
-                FIELD_HOUR: 0, FIELD_MINUTE: 0,
+                FIELD_HOUR: 0,
+                FIELD_MINUTE: 0,
             }
             result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {
-                FIELD_HOUR: 0, FIELD_MINUTE: 0,
+                FIELD_HOUR: 0,
+                FIELD_MINUTE: 0,
             }
 
         return result
@@ -184,7 +188,9 @@ class Schedule:
 
         return cls(
             index=data.get(FIELD_INDEX, 0),
-            enabled=data.get(FIELD_ENABLED, "1") == "1" if isinstance(data.get(FIELD_ENABLED), str) else bool(data.get(FIELD_ENABLED, True)),
+            enabled=data.get(FIELD_ENABLED, "1") == "1"
+            if isinstance(data.get(FIELD_ENABLED), str)
+            else bool(data.get(FIELD_ENABLED, True)),
             days_of_week=days,
             inside=inside,
             outside=outside,
@@ -391,10 +397,12 @@ class DoorSimulatorState:
         # Check if any schedule allows this sensor at the current time
         try:
             import zoneinfo
+
             tz = zoneinfo.ZoneInfo(self.timezone)
         except Exception:
             # Fallback to UTC if timezone is invalid
             import zoneinfo
+
             tz = zoneinfo.ZoneInfo("UTC")
 
         now = datetime.now(tz)

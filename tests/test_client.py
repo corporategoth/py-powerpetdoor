@@ -4,43 +4,38 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for PowerPetDoorClient."""
+
 from __future__ import annotations
 
 import asyncio
-import json
-import queue
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from powerpetdoor import (
-    PowerPetDoorClient,
     PrioritizedMessage,
     find_end,
     make_bool,
 )
 from powerpetdoor.const import (
-    PING,
-    PONG,
-    CONFIG,
-    COMMAND,
-    FIELD_SUCCESS,
-    CMD_OPEN,
     CMD_CLOSE,
     CMD_GET_DOOR_STATUS,
     CMD_GET_SETTINGS,
-    CMD_GET_SCHEDULE_LIST,
+    CMD_OPEN,
+    COMMAND,
+    CONFIG,
+    FIELD_SUCCESS,
+    PING,
     PRIORITY_CRITICAL,
     PRIORITY_HIGH,
     PRIORITY_LOW,
-    PRIORITY_MEDIUM,
 )
-
 
 # ============================================================================
 # Helper Function Tests
 # ============================================================================
+
 
 class TestFindEnd:
     """Tests for the find_end JSON boundary detection function."""
@@ -122,6 +117,7 @@ class TestMakeBool:
 # PrioritizedMessage Tests
 # ============================================================================
 
+
 class TestPrioritizedMessage:
     """Tests for the PrioritizedMessage dataclass."""
 
@@ -158,6 +154,7 @@ class TestPrioritizedMessage:
 # ============================================================================
 # Client Connection Tests
 # ============================================================================
+
 
 class TestClientConnection:
     """Tests for client connection management."""
@@ -223,7 +220,7 @@ class TestClientConnection:
         """Start clears the shutdown flag."""
         disconnected_client._shutdown = True
 
-        with patch.object(disconnected_client, 'connect', new_callable=AsyncMock):
+        with patch.object(disconnected_client, "connect", new_callable=AsyncMock):
             disconnected_client.start()
 
         assert disconnected_client._shutdown is False
@@ -232,6 +229,7 @@ class TestClientConnection:
 # ============================================================================
 # Message Queue Tests
 # ============================================================================
+
 
 class TestMessageQueue:
     """Tests for the priority message queue."""
@@ -296,6 +294,7 @@ class TestMessageQueue:
 # ============================================================================
 # Send Message Tests
 # ============================================================================
+
 
 class TestSendMessage:
     """Tests for the send_message method."""
@@ -364,6 +363,7 @@ class TestSendMessage:
 # Data Received Tests
 # ============================================================================
 
+
 class TestDataReceived:
     """Tests for data_received and message processing."""
 
@@ -383,7 +383,7 @@ class TestDataReceived:
 
         # Send partial JSON
         partial = '{"incomplete": '
-        client.data_received(partial.encode('ascii'))
+        client.data_received(partial.encode("ascii"))
 
         assert client._buffer == partial
 
@@ -392,8 +392,10 @@ class TestDataReceived:
         client, _, _ = mock_client
 
         # Send two complete JSON objects
-        data = '{"success": "true", "CMD": "A", "msgId": 1}{"success": "true", "CMD": "B", "msgId": 2}'
-        client.data_received(data.encode('ascii'))
+        data = (
+            '{"success": "true", "CMD": "A", "msgId": 1}{"success": "true", "CMD": "B", "msgId": 2}'
+        )
+        client.data_received(data.encode("ascii"))
 
         # Buffer should be empty after processing both
         assert client._buffer == ""
@@ -403,17 +405,18 @@ class TestDataReceived:
         client, _, _ = mock_client
 
         # Send partial
-        client.data_received('{"key": '.encode('ascii'))
+        client.data_received('{"key": '.encode("ascii"))
         assert client._buffer != ""
 
         # Complete it
-        client.data_received('"value"}'.encode('ascii'))
+        client.data_received('"value"}'.encode("ascii"))
         assert client._buffer == ""
 
 
 # ============================================================================
 # Listener System Tests
 # ============================================================================
+
 
 class TestListenerSystem:
     """Tests for the listener callback system."""
@@ -451,12 +454,9 @@ class TestListenerSystem:
         client.add_listener(name="test", door_status_update=callback)
 
         # Simulate door status response
-        device.send_response_sync({
-            FIELD_SUCCESS: "true",
-            "CMD": "DOOR_STATUS",
-            "door_status": "DOOR_CLOSED",
-            "msgId": 1
-        })
+        device.send_response_sync(
+            {FIELD_SUCCESS: "true", "CMD": "DOOR_STATUS", "door_status": "DOOR_CLOSED", "msgId": 1}
+        )
 
         # Allow the event loop to process pending tasks
         await asyncio.sleep(0.01)
@@ -469,11 +469,7 @@ class TestListenerSystem:
         on_connect = make_async_callback("connect")
         on_disconnect = make_async_callback("disconnect")
 
-        client.add_handlers(
-            name="test",
-            on_connect=on_connect,
-            on_disconnect=on_disconnect
-        )
+        client.add_handlers(name="test", on_connect=on_connect, on_disconnect=on_disconnect)
 
         assert "test" in client.on_connect
         assert "test" in client.on_disconnect
@@ -482,6 +478,7 @@ class TestListenerSystem:
 # ============================================================================
 # Keepalive Tests
 # ============================================================================
+
 
 class TestKeepalive:
     """Tests for the PING/PONG keepalive mechanism."""
@@ -534,6 +531,7 @@ class TestKeepalive:
 # Connection Lost Tests
 # ============================================================================
 
+
 class TestConnectionLost:
     """Tests for connection_lost handling."""
 
@@ -552,8 +550,8 @@ class TestConnectionLost:
         client, _, _ = mock_client
         client._shutdown = False
 
-        with patch.object(client, 'reconnect', new_callable=AsyncMock) as mock_reconnect:
-            with patch.object(client, 'ensure_future') as mock_ensure:
+        with patch.object(client, "reconnect", new_callable=AsyncMock) as mock_reconnect:
+            with patch.object(client, "ensure_future") as mock_ensure:
                 client.connection_lost(None)
                 # Should schedule reconnect
                 assert mock_ensure.called
@@ -563,18 +561,19 @@ class TestConnectionLost:
         client, _, _ = mock_client
         client._shutdown = True
 
-        with patch.object(client, 'reconnect', new_callable=AsyncMock) as mock_reconnect:
-            with patch.object(client, 'ensure_future') as mock_ensure:
+        with patch.object(client, "reconnect", new_callable=AsyncMock) as mock_reconnect:
+            with patch.object(client, "ensure_future") as mock_ensure:
                 client.connection_lost(None)
                 # Should NOT schedule reconnect
                 # Check that ensure_future wasn't called with reconnect
                 for call in mock_ensure.call_args_list:
-                    assert 'reconnect' not in str(call)
+                    assert "reconnect" not in str(call)
 
 
 # ============================================================================
 # Outstanding Message Tracking Tests
 # ============================================================================
+
 
 class TestOutstandingMessages:
     """Tests for tracking outstanding (notify=True) messages."""
@@ -596,12 +595,14 @@ class TestOutstandingMessages:
         future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
 
         # Send response (use msgID with capital D to match what the client expects)
-        device.send_response_sync({
-            FIELD_SUCCESS: "true",
-            "CMD": "GET_SETTINGS",
-            "msgID": msg_id,
-            "settings": {"power_state": True}
-        })
+        device.send_response_sync(
+            {
+                FIELD_SUCCESS: "true",
+                "CMD": "GET_SETTINGS",
+                "msgID": msg_id,
+                "settings": {"power_state": True},
+            }
+        )
 
         # Allow the event loop to process pending tasks
         await asyncio.sleep(0.01)

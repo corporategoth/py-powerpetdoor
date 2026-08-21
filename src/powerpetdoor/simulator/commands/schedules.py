@@ -7,7 +7,7 @@
 
 from typing import TYPE_CHECKING, Optional
 
-from .base import ArgSpec, CommandResult, DAY_NAMES, command, subcommand
+from .base import DAY_NAMES, ArgSpec, CommandResult, command, subcommand
 
 if TYPE_CHECKING:
     from ..server import DoorSimulator
@@ -52,10 +52,7 @@ class ScheduleCommandsMixin:
         else:
             sensor = "none"
 
-        return (
-            f"  #{schedule.index}: {sensor} sensor, {days}, "
-            f"{time_start}-{time_end} ({status})"
-        )
+        return f"  #{schedule.index}: {sensor} sensor, {days}, {time_start}-{time_end} ({status})"
 
     @command("schedule", ["sched"], "Manage schedules", category="schedules")
     def schedule(self) -> CommandResult:
@@ -146,9 +143,7 @@ class ScheduleCommandsMixin:
             f"{self._format_time(start_h, start_m)}-{self._format_time(end_h, end_m)}",
         )
 
-    def _get_schedule(
-        self, idx: int
-    ) -> tuple[Optional["Schedule"], Optional[CommandResult]]:
+    def _get_schedule(self, idx: int) -> tuple[Optional["Schedule"], CommandResult | None]:
         """Get a schedule by index, returning error if not found."""
         if idx not in self.simulator.state.schedules:
             return None, CommandResult(False, f"Schedule #{idx} not found")
@@ -288,9 +283,7 @@ class ScheduleCommandsMixin:
             ),
         ],
     )
-    def schedule_time(
-        self, index: int, time: tuple[int, int, int, int]
-    ) -> CommandResult:
+    def schedule_time(self, index: int, time: tuple[int, int, int, int]) -> CommandResult:
         """Set the time window for a schedule."""
         sched, err = self._get_schedule(index)
         if err:

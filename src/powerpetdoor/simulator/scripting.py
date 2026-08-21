@@ -48,10 +48,11 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 try:
     import yaml
+
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
@@ -72,11 +73,13 @@ logger = logging.getLogger(__name__)
 
 class ScriptError(Exception):
     """Error during script execution."""
+
     pass
 
 
 class AssertionFailed(ScriptError):
     """Assertion in script failed."""
+
     pass
 
 
@@ -102,10 +105,10 @@ class Script:
     name: str
     steps: list[ScriptStep]
     description: str = ""
-    source_file: Optional[str] = None
+    source_file: str | None = None
 
     @classmethod
-    def from_yaml(cls, content: str, source_file: Optional[str] = None) -> "Script":
+    def from_yaml(cls, content: str, source_file: str | None = None) -> "Script":
         """Parse a script from YAML content."""
         if not YAML_AVAILABLE:
             raise ScriptError("PyYAML is required for script support: pip install pyyaml")
@@ -328,7 +331,7 @@ class ScriptRunner:
                 index=index,
                 enabled=enabled,
                 days_of_week=[1, 1, 1, 1, 1, 1, 1],  # All days
-                inside=True,   # Allow inside sensor
+                inside=True,  # Allow inside sensor
                 outside=True,  # Allow outside sensor
                 start_hour=0,
                 start_min=0,
@@ -499,9 +502,7 @@ class ScriptRunner:
         actual_normalized = actual.upper() if condition == "door_status" else actual.lower()
 
         if actual_normalized != expected_normalized:
-            raise AssertionFailed(
-                f"{condition}: expected '{expected}', got '{actual}'"
-            )
+            raise AssertionFailed(f"{condition}: expected '{expected}', got '{actual}'")
 
 
 # Directory containing built-in script files

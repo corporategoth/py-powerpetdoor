@@ -4,31 +4,31 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for simulator commands module (commands.py)."""
+
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 
+from powerpetdoor.const import (
+    DOOR_STATE_CLOSED,
+    DOOR_STATE_HOLDING,
+    DOOR_STATE_RISING,
+)
 from powerpetdoor.simulator import (
     DoorSimulator,
     DoorSimulatorState,
     DoorTimingConfig,
-    BatteryConfig,
 )
-from powerpetdoor.simulator.commands import CommandHandler, CommandResult
+from powerpetdoor.simulator.commands import CommandHandler
 from powerpetdoor.simulator.scripting import ScriptRunner
-from powerpetdoor.const import (
-    DOOR_STATE_CLOSED,
-    DOOR_STATE_RISING,
-    DOOR_STATE_HOLDING,
-)
-
 
 # ============================================================================
 # Test Fixtures
 # ============================================================================
+
 
 @pytest.fixture
 def timing_config():
@@ -69,6 +69,7 @@ def command_handler(simulator):
 # ============================================================================
 # Notification Command Tests
 # ============================================================================
+
 
 class TestNotifyCommand:
     """Tests for the notify command."""
@@ -161,6 +162,7 @@ class TestNotifyCommand:
 # Cycle Command Tests
 # ============================================================================
 
+
 class TestCycleCommand:
     """Tests for the cycle command."""
 
@@ -211,6 +213,7 @@ class TestCycleCommand:
 # ============================================================================
 # Battery Command Tests
 # ============================================================================
+
 
 class TestBatteryCommands:
     """Tests for battery-related commands."""
@@ -313,6 +316,7 @@ class TestBatteryCommands:
 # Close Command Alias Tests
 # ============================================================================
 
+
 class TestAliases:
     """Tests for command aliases."""
 
@@ -345,6 +349,7 @@ class TestAliases:
 # ============================================================================
 # Broadcast Command Tests
 # ============================================================================
+
 
 class TestBroadcastCommand:
     """Tests for the broadcast command."""
@@ -415,6 +420,7 @@ class TestBroadcastCommand:
 # Status Command Client Count Tests
 # ============================================================================
 
+
 class TestStatusClientCount:
     """Tests for client count in status command."""
 
@@ -473,6 +479,7 @@ class TestStatusClientCount:
 # ============================================================================
 # Interactive-Only Command Tests
 # ============================================================================
+
 
 class TestInteractiveOnlyCommands:
     """Tests for interactive-only commands."""
@@ -557,6 +564,7 @@ class TestInteractiveOnlyCommands:
 # ============================================================================
 # Empty Message Result Tests
 # ============================================================================
+
 
 class TestEmptyMessageResults:
     """Tests for commands that return empty messages."""

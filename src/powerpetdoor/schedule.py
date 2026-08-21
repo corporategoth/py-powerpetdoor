@@ -11,22 +11,22 @@ schedules, including validation, compression, and diffing.
 
 from __future__ import annotations
 
-from datetime import time
-from copy import deepcopy
 import logging
+from copy import deepcopy
+from datetime import time
 
 from .const import (
-    FIELD_INDEX,
     FIELD_DAYSOFWEEK,
-    FIELD_INSIDE,
-    FIELD_OUTSIDE,
     FIELD_ENABLED,
-    FIELD_INSIDE_PREFIX,
-    FIELD_OUTSIDE_PREFIX,
-    FIELD_START_TIME_SUFFIX,
     FIELD_END_TIME_SUFFIX,
     FIELD_HOUR,
+    FIELD_INDEX,
+    FIELD_INSIDE,
+    FIELD_INSIDE_PREFIX,
     FIELD_MINUTE,
+    FIELD_OUTSIDE,
+    FIELD_OUTSIDE_PREFIX,
+    FIELD_START_TIME_SUFFIX,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -77,7 +77,9 @@ def validate_schedule_entry(sched: dict) -> bool:
 
         # Validate daysOfWeek is a list of 7 elements
         if not isinstance(sched[FIELD_DAYSOFWEEK], list) or len(sched[FIELD_DAYSOFWEEK]) != 7:
-            _LOGGER.debug("Schedule entry has invalid daysOfWeek format: %s", sched[FIELD_DAYSOFWEEK])
+            _LOGGER.debug(
+                "Schedule entry has invalid daysOfWeek format: %s", sched[FIELD_DAYSOFWEEK]
+            )
             return False
 
         # Validate time fields if inside or outside is enabled
@@ -88,7 +90,9 @@ def validate_schedule_entry(sched: dict) -> bool:
                 _LOGGER.debug("Schedule entry missing inside time fields: %s", sched)
                 return False
             if FIELD_HOUR not in sched[in_start_key] or FIELD_MINUTE not in sched[in_start_key]:
-                _LOGGER.debug("Schedule entry has invalid inside start time: %s", sched[in_start_key])
+                _LOGGER.debug(
+                    "Schedule entry has invalid inside start time: %s", sched[in_start_key]
+                )
                 return False
             if FIELD_HOUR not in sched[in_end_key] or FIELD_MINUTE not in sched[in_end_key]:
                 _LOGGER.debug("Schedule entry has invalid inside end time: %s", sched[in_end_key])
@@ -101,7 +105,9 @@ def validate_schedule_entry(sched: dict) -> bool:
                 _LOGGER.debug("Schedule entry missing outside time fields: %s", sched)
                 return False
             if FIELD_HOUR not in sched[out_start_key] or FIELD_MINUTE not in sched[out_start_key]:
-                _LOGGER.debug("Schedule entry has invalid outside start time: %s", sched[out_start_key])
+                _LOGGER.debug(
+                    "Schedule entry has invalid outside start time: %s", sched[out_start_key]
+                )
                 return False
             if FIELD_HOUR not in sched[out_end_key] or FIELD_MINUTE not in sched[out_end_key]:
                 _LOGGER.debug("Schedule entry has invalid outside end time: %s", sched[out_end_key])
@@ -148,16 +154,24 @@ def compress_schedule(schedule: list[dict]) -> list[dict]:
 
     # Step 1 .. expand
     for sched in schedule:
-        in_start = time(sched[FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_HOUR],
-                        sched[FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_MINUTE])
-        in_end = time(sched[FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_HOUR],
-                      sched[FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_MINUTE])
+        in_start = time(
+            sched[FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_HOUR],
+            sched[FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_MINUTE],
+        )
+        in_end = time(
+            sched[FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_HOUR],
+            sched[FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_MINUTE],
+        )
         if in_end < in_start:
             in_start, in_end = in_end, in_start
-        out_start = time(sched[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_HOUR],
-                         sched[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_MINUTE])
-        out_end = time(sched[FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_HOUR],
-                       sched[FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_MINUTE])
+        out_start = time(
+            sched[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_HOUR],
+            sched[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_MINUTE],
+        )
+        out_end = time(
+            sched[FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_HOUR],
+            sched[FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_MINUTE],
+        )
         if out_end < out_start:
             out_start, out_end = out_end, out_start
 
@@ -175,7 +189,7 @@ def compress_schedule(schedule: list[dict]) -> list[dict]:
         for daysched in xsched.values():
             daysched.sort(key=lambda d: d["start"])
 
-            i=0
+            i = 0
             while i < len(daysched) - 1:
                 if daysched[i]["end"] >= daysched[i + 1]["start"]:
                     if daysched[i]["end"] < daysched[i + 1]["end"]:
@@ -202,7 +216,7 @@ def compress_schedule(schedule: list[dict]) -> list[dict]:
                     ent = {
                         "start": sched["start"],
                         "end": sched["end"],
-                        FIELD_DAYSOFWEEK: [0, 0, 0, 0, 0, 0, 0]
+                        FIELD_DAYSOFWEEK: [0, 0, 0, 0, 0, 0, 0],
                     }
                     ent[FIELD_DAYSOFWEEK][day] = 1
                     out.append(ent)
@@ -227,9 +241,11 @@ def compress_schedule(schedule: list[dict]) -> list[dict]:
     for sched in split_sched[FIELD_OUTSIDE]:
         found = False
         for ent in final_sched:
-            if (ent["start"] == sched["start"] and
-                    ent["end"] == sched["end"] and
-                    ent[FIELD_DAYSOFWEEK] == sched[FIELD_DAYSOFWEEK]):
+            if (
+                ent["start"] == sched["start"]
+                and ent["end"] == sched["end"]
+                and ent[FIELD_DAYSOFWEEK] == sched[FIELD_DAYSOFWEEK]
+            ):
                 ent[FIELD_OUTSIDE] = True
                 found = True
                 break
@@ -259,7 +275,9 @@ def compress_schedule(schedule: list[dict]) -> list[dict]:
         if sched[FIELD_OUTSIDE]:
             ent[FIELD_OUTSIDE] = True
             ent[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_HOUR] = sched["start"].hour
-            ent[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_MINUTE] = sched["start"].minute
+            ent[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_MINUTE] = sched[
+                "start"
+            ].minute
             ent[FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_HOUR] = sched["end"].hour
             ent[FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_MINUTE] = sched["end"].minute
         out.append(ent)
@@ -281,39 +299,51 @@ def schedule_entry_content_key(entry: dict) -> tuple:
         Tuple that can be used as a dict key for comparison
     """
     # Extract time values
-    in_start = (entry.get(FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX, {}).get(FIELD_HOUR, 0),
-                entry.get(FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX, {}).get(FIELD_MINUTE, 0))
-    in_end = (entry.get(FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX, {}).get(FIELD_HOUR, 0),
-              entry.get(FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX, {}).get(FIELD_MINUTE, 0))
-    out_start = (entry.get(FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX, {}).get(FIELD_HOUR, 0),
-                 entry.get(FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX, {}).get(FIELD_MINUTE, 0))
-    out_end = (entry.get(FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX, {}).get(FIELD_HOUR, 0),
-               entry.get(FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX, {}).get(FIELD_MINUTE, 0))
+    in_start = (
+        entry.get(FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX, {}).get(FIELD_HOUR, 0),
+        entry.get(FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX, {}).get(FIELD_MINUTE, 0),
+    )
+    in_end = (
+        entry.get(FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX, {}).get(FIELD_HOUR, 0),
+        entry.get(FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX, {}).get(FIELD_MINUTE, 0),
+    )
+    out_start = (
+        entry.get(FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX, {}).get(FIELD_HOUR, 0),
+        entry.get(FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX, {}).get(FIELD_MINUTE, 0),
+    )
+    out_end = (
+        entry.get(FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX, {}).get(FIELD_HOUR, 0),
+        entry.get(FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX, {}).get(FIELD_MINUTE, 0),
+    )
 
     # Normalize enabled to boolean - door returns '1'/'0' strings, we use True/False
     enabled = entry.get(FIELD_ENABLED, True)
     if isinstance(enabled, str):
-        enabled = enabled == '1'
+        enabled = enabled == "1"
 
     # Normalize inside/outside to boolean in case they come as strings
     inside = entry.get(FIELD_INSIDE, False)
     if isinstance(inside, str):
-        inside = inside == '1'
+        inside = inside == "1"
     outside = entry.get(FIELD_OUTSIDE, False)
     if isinstance(outside, str):
-        outside = outside == '1'
+        outside = outside == "1"
 
     return (
         tuple(entry.get(FIELD_DAYSOFWEEK, [0] * 7)),
         inside,
         outside,
         enabled,
-        in_start, in_end,
-        out_start, out_end,
+        in_start,
+        in_end,
+        out_start,
+        out_end,
     )
 
 
-def compute_schedule_diff(current_schedule: list[dict], new_schedule: list[dict]) -> tuple[list[int], list[dict]]:
+def compute_schedule_diff(
+    current_schedule: list[dict], new_schedule: list[dict]
+) -> tuple[list[int], list[dict]]:
     """Compare current and new schedules to determine what needs to change.
 
     This function optimizes schedule updates by:
@@ -366,13 +396,17 @@ def compute_schedule_diff(current_schedule: list[dict], new_schedule: list[dict]
         else:
             # Need a new index - find the lowest unused index
             new_index = 0
-            used_indices = matched_indices | set(reusable_indices[:i]) | {e.get(FIELD_INDEX) for e in entries_to_set[:i]}
+            used_indices = (
+                matched_indices
+                | set(reusable_indices[:i])
+                | {e.get(FIELD_INDEX) for e in entries_to_set[:i]}
+            )
             while new_index in used_indices or new_index in current_indices:
                 new_index += 1
             entry[FIELD_INDEX] = new_index
 
     # Delete any leftover reusable indices we didn't use
     if len(entries_to_set) < len(reusable_indices):
-        entries_to_delete = reusable_indices[len(entries_to_set):]
+        entries_to_delete = reusable_indices[len(entries_to_set) :]
 
     return (entries_to_delete, entries_to_set)

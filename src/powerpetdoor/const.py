@@ -154,20 +154,18 @@ FIELD_RESET_REASON = "resetReason"
 
 # Message priorities (lower = higher priority)
 PRIORITY_CRITICAL = 0  # Keepalive (PING/PONG)
-PRIORITY_HIGH = 1      # Door commands (OPEN, CLOSE)
-PRIORITY_MEDIUM = 2    # Settings changes (ENABLE/DISABLE)
-PRIORITY_LOW = 3       # Status requests, schedules
+PRIORITY_HIGH = 1  # Door commands (OPEN, CLOSE)
+PRIORITY_MEDIUM = 2  # Settings changes (ENABLE/DISABLE)
+PRIORITY_LOW = 3  # Status requests, schedules
 
 # Command priority mapping
 COMMAND_PRIORITIES = {
     # Critical - Keepalive
     PONG: PRIORITY_CRITICAL,
-
     # High - Door commands
     CMD_OPEN: PRIORITY_HIGH,
     CMD_CLOSE: PRIORITY_HIGH,
     CMD_OPEN_AND_HOLD: PRIORITY_HIGH,
-
     # Medium - Settings changes
     CMD_ENABLE_INSIDE: PRIORITY_MEDIUM,
     CMD_DISABLE_INSIDE: PRIORITY_MEDIUM,
@@ -188,7 +186,6 @@ COMMAND_PRIORITIES = {
     CMD_SET_TIMEZONE: PRIORITY_MEDIUM,
     CMD_SET_SENSOR_TRIGGER_VOLTAGE: PRIORITY_MEDIUM,
     CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE: PRIORITY_MEDIUM,
-
     # Low - Status requests and schedules (default for anything not listed)
     CMD_GET_DOOR_STATUS: PRIORITY_LOW,
     CMD_GET_SETTINGS: PRIORITY_LOW,

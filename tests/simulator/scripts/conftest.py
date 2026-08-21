@@ -4,6 +4,7 @@
 # https://opensource.org/licenses/MIT
 
 """Shared fixtures for built-in script tests."""
+
 from __future__ import annotations
 
 import asyncio
@@ -12,13 +13,13 @@ from typing import Any
 
 import pytest
 
+from powerpetdoor.const import FIELD_DOOR_STATUS
 from powerpetdoor.simulator import (
     DoorSimulator,
     DoorSimulatorState,
     DoorTimingConfig,
 )
 from powerpetdoor.simulator.scripting import ScriptRunner
-from powerpetdoor.const import FIELD_DOOR_STATUS
 
 
 class MessageCapture:
@@ -60,15 +61,15 @@ class MessageCapture:
         messages = []
         pos = 0
         while pos < len(data):
-            if data[pos] != '{':
+            if data[pos] != "{":
                 pos += 1
                 continue
             depth = 0
             end = pos
             for i, c in enumerate(data[pos:], pos):
-                if c == '{':
+                if c == "{":
                     depth += 1
-                elif c == '}':
+                elif c == "}":
                     depth -= 1
                     if depth == 0:
                         end = i + 1

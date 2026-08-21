@@ -11,58 +11,62 @@ for simulating a Power Pet Door device.
 
 import asyncio
 import logging
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from ..const import (
-    DOOR_STATE_CLOSED,
-    DOOR_STATE_RISING,
-    DOOR_STATE_HOLDING,
-    DOOR_STATE_KEEPUP,
-    DOOR_STATE_SLOWING,
-    DOOR_STATE_CLOSING_TOP_OPEN,
-    DOOR_STATE_CLOSING_MID_OPEN,
-    CMD_POWER_ON,
-    CMD_POWER_OFF,
-    CMD_ENABLE_AUTO,
+    CMD_DELETE_SCHEDULE,
     CMD_DISABLE_AUTO,
-    CMD_ENABLE_INSIDE,
-    CMD_DISABLE_INSIDE,
-    CMD_ENABLE_OUTSIDE,
-    CMD_DISABLE_OUTSIDE,
-    CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
-    CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
-    CMD_ENABLE_CMD_LOCKOUT,
-    CMD_DISABLE_CMD_LOCKOUT,
-    CMD_ENABLE_AUTORETRACT,
     CMD_DISABLE_AUTORETRACT,
-    CMD_SET_HOLD_TIME,
-    CMD_SET_TIMEZONE,
-    CMD_SET_NOTIFICATIONS,
+    CMD_DISABLE_CMD_LOCKOUT,
+    CMD_DISABLE_INSIDE,
+    CMD_DISABLE_OUTSIDE,
+    CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
+    CMD_ENABLE_AUTO,
+    CMD_ENABLE_AUTORETRACT,
+    CMD_ENABLE_CMD_LOCKOUT,
+    CMD_ENABLE_INSIDE,
+    CMD_ENABLE_OUTSIDE,
+    CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
     CMD_GET_DOOR_BATTERY,
     CMD_GET_DOOR_OPEN_STATS,
     CMD_GET_HW_INFO,
     CMD_GET_NOTIFICATIONS,
     CMD_GET_SCHEDULE_LIST,
-    CMD_SET_SCHEDULE,
-    CMD_DELETE_SCHEDULE,
     CMD_GET_SETTINGS,
-    NOTIFY_LOW_BATTERY,
+    CMD_POWER_OFF,
+    CMD_POWER_ON,
+    CMD_SET_HOLD_TIME,
+    CMD_SET_NOTIFICATIONS,
+    CMD_SET_SCHEDULE,
+    CMD_SET_TIMEZONE,
+    DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    DOOR_STATE_CLOSING_TOP_OPEN,
+    DOOR_STATE_HOLDING,
+    DOOR_STATE_KEEPUP,
+    DOOR_STATE_RISING,
+    DOOR_STATE_SLOWING,
     DOOR_TO_PHONE,
+    FIELD_AC_PRESENT,
     FIELD_AUTO,
     FIELD_AUTORETRACT,
     FIELD_BATTERY_PERCENT,
     FIELD_BATTERY_PRESENT,
-    FIELD_AC_PRESENT,
     FIELD_CMD,
     FIELD_CMD_LOCKOUT,
     FIELD_DIRECTION,
+    FIELD_FW_MAJOR,
+    FIELD_FW_MINOR,
+    FIELD_FW_PATCH,
     FIELD_FWINFO,
     FIELD_HOLD_TIME,
+    FIELD_HW_REVISION,
+    FIELD_HW_VERSION,
+    FIELD_INDEX,
     FIELD_INSIDE,
     FIELD_NOTIFICATIONS,
     FIELD_OUTSIDE,
     FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
-    FIELD_INDEX,
     FIELD_POWER,
     FIELD_SCHEDULE,
     FIELD_SCHEDULES,
@@ -71,17 +75,12 @@ from ..const import (
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
     FIELD_TZ,
-    FIELD_HW_VERSION,
-    FIELD_HW_REVISION,
-    FIELD_FW_MAJOR,
-    FIELD_FW_MINOR,
-    FIELD_FW_PATCH,
+    NOTIFY_LOW_BATTERY,
     SUCCESS_TRUE,
 )
-
 from ..tz_utils import get_posix_tz_string, is_cache_initialized
-from .state import DoorSimulatorState, Schedule, BatteryConfig
 from .protocol import DoorSimulatorProtocol
+from .state import DoorSimulatorState, Schedule
 
 logger = logging.getLogger(__name__)
 
@@ -113,16 +112,16 @@ class DoorSimulator:
         self,
         host: str = "0.0.0.0",
         port: int = 3000,
-        state: Optional[DoorSimulatorState] = None,
-        on_connect: Optional[Callable[[], None]] = None,
-        on_disconnect: Optional[Callable[[], None]] = None,
+        state: DoorSimulatorState | None = None,
+        on_connect: Callable[[], None] | None = None,
+        on_disconnect: Callable[[], None] | None = None,
     ):
         self.host = host
         self.port = port
         self.state = state or DoorSimulatorState()
-        self.server: Optional[asyncio.Server] = None
+        self.server: asyncio.Server | None = None
         self.protocols: list[DoorSimulatorProtocol] = []
-        self._battery_task: Optional[asyncio.Task] = None
+        self._battery_task: asyncio.Task | None = None
         self._running = False
         self._on_connect = on_connect
         self._on_disconnect = on_disconnect
@@ -248,81 +247,99 @@ class DoorSimulator:
         # Report 0% if battery is not present
         percent = self.state.battery_percent if self.state.battery_present else 0
         for protocol in self.protocols:
-            protocol._send({
-                "CMD": CMD_GET_DOOR_BATTERY,
-                FIELD_BATTERY_PERCENT: percent,
-                FIELD_BATTERY_PRESENT: "1" if self.state.battery_present else "0",
-                FIELD_AC_PRESENT: "1" if self.state.ac_present else "0",
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    "CMD": CMD_GET_DOOR_BATTERY,
+                    FIELD_BATTERY_PERCENT: percent,
+                    FIELD_BATTERY_PRESENT: "1" if self.state.battery_present else "0",
+                    FIELD_AC_PRESENT: "1" if self.state.ac_present else "0",
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def _send_low_battery_notification(self):
         """Send low battery notification to connected clients."""
         if self.state.low_battery:
             for protocol in self.protocols:
-                protocol._send({
-                    "CMD": NOTIFY_LOW_BATTERY,
-                    FIELD_BATTERY_PERCENT: self.state.battery_percent,
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                })
+                protocol._send(
+                    {
+                        "CMD": NOTIFY_LOW_BATTERY,
+                        FIELD_BATTERY_PERCENT: self.state.battery_percent,
+                        FIELD_SUCCESS: SUCCESS_TRUE,
+                        FIELD_DIRECTION: DOOR_TO_PHONE,
+                    }
+                )
             logger.info(f"Simulator: Low battery notification ({self.state.battery_percent}%)")
 
     def broadcast_settings(self):
         """Broadcast settings to all connected clients."""
         for protocol in self.protocols:
-            protocol._send({
-                FIELD_CMD: CMD_GET_SETTINGS,
-                FIELD_SETTINGS: self.state.get_settings(),
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    FIELD_CMD: CMD_GET_SETTINGS,
+                    FIELD_SETTINGS: self.state.get_settings(),
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_safety_lock(self, enabled: bool):
         """Broadcast safety lock setting change to all connected clients."""
-        cmd = CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK if enabled else CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK
+        cmd = (
+            CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK
+            if enabled
+            else CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK
+        )
         for protocol in self.protocols:
-            protocol._send({
-                FIELD_CMD: cmd,
-                FIELD_SETTINGS: {FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: "1" if enabled else "0"},
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    FIELD_CMD: cmd,
+                    FIELD_SETTINGS: {FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: "1" if enabled else "0"},
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_cmd_lockout(self, enabled: bool):
         """Broadcast command lockout setting change to all connected clients."""
         cmd = CMD_ENABLE_CMD_LOCKOUT if enabled else CMD_DISABLE_CMD_LOCKOUT
         for protocol in self.protocols:
-            protocol._send({
-                FIELD_CMD: cmd,
-                FIELD_SETTINGS: {FIELD_CMD_LOCKOUT: "1" if enabled else "0"},
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    FIELD_CMD: cmd,
+                    FIELD_SETTINGS: {FIELD_CMD_LOCKOUT: "1" if enabled else "0"},
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_autoretract(self, enabled: bool):
         """Broadcast autoretract setting change to all connected clients."""
         cmd = CMD_ENABLE_AUTORETRACT if enabled else CMD_DISABLE_AUTORETRACT
         for protocol in self.protocols:
-            protocol._send({
-                FIELD_CMD: cmd,
-                FIELD_SETTINGS: {FIELD_AUTORETRACT: "1" if enabled else "0"},
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    FIELD_CMD: cmd,
+                    FIELD_SETTINGS: {FIELD_AUTORETRACT: "1" if enabled else "0"},
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_hold_time(self):
         """Broadcast hold time setting change to all connected clients."""
         # Convert seconds to centiseconds for protocol
         hold_time_cs = int(self.state.hold_time * 100)
         for protocol in self.protocols:
-            protocol._send({
-                FIELD_CMD: CMD_SET_HOLD_TIME,
-                FIELD_HOLD_TIME: hold_time_cs,
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    FIELD_CMD: CMD_SET_HOLD_TIME,
+                    FIELD_HOLD_TIME: hold_time_cs,
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_timezone(self):
         """Broadcast timezone setting change to all connected clients."""
@@ -333,133 +350,157 @@ class DoorSimulator:
             if posix_tz:
                 tz_value = posix_tz
         for protocol in self.protocols:
-            protocol._send({
-                FIELD_CMD: CMD_SET_TIMEZONE,
-                FIELD_TZ: tz_value,
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    FIELD_CMD: CMD_SET_TIMEZONE,
+                    FIELD_TZ: tz_value,
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_notification_settings(self):
         """Broadcast notification settings change to all connected clients."""
         for protocol in self.protocols:
-            protocol._send({
-                FIELD_CMD: CMD_SET_NOTIFICATIONS,
-                FIELD_NOTIFICATIONS: self.state.get_notifications(),
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    FIELD_CMD: CMD_SET_NOTIFICATIONS,
+                    FIELD_NOTIFICATIONS: self.state.get_notifications(),
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_power(self, enabled: bool):
         """Broadcast power setting change to all connected clients."""
         cmd = CMD_POWER_ON if enabled else CMD_POWER_OFF
         for protocol in self.protocols:
-            protocol._send({
-                FIELD_CMD: cmd,
-                FIELD_POWER: "1" if enabled else "0",
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    FIELD_CMD: cmd,
+                    FIELD_POWER: "1" if enabled else "0",
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_auto(self, enabled: bool):
         """Broadcast auto/timers setting change to all connected clients."""
         cmd = CMD_ENABLE_AUTO if enabled else CMD_DISABLE_AUTO
         for protocol in self.protocols:
-            protocol._send({
-                FIELD_CMD: cmd,
-                FIELD_AUTO: "1" if enabled else "0",
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    FIELD_CMD: cmd,
+                    FIELD_AUTO: "1" if enabled else "0",
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_inside_sensor(self, enabled: bool):
         """Broadcast inside sensor enable/disable to all connected clients."""
         cmd = CMD_ENABLE_INSIDE if enabled else CMD_DISABLE_INSIDE
         for protocol in self.protocols:
-            protocol._send({
-                FIELD_CMD: cmd,
-                FIELD_INSIDE: "1" if enabled else "0",
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    FIELD_CMD: cmd,
+                    FIELD_INSIDE: "1" if enabled else "0",
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_outside_sensor(self, enabled: bool):
         """Broadcast outside sensor enable/disable to all connected clients."""
         cmd = CMD_ENABLE_OUTSIDE if enabled else CMD_DISABLE_OUTSIDE
         for protocol in self.protocols:
-            protocol._send({
-                FIELD_CMD: cmd,
-                FIELD_OUTSIDE: "1" if enabled else "0",
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    FIELD_CMD: cmd,
+                    FIELD_OUTSIDE: "1" if enabled else "0",
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_hardware_info(self):
         """Broadcast hardware/firmware info to all connected clients."""
         for protocol in self.protocols:
-            protocol._send({
-                "CMD": CMD_GET_HW_INFO,
-                FIELD_FWINFO: {
-                    FIELD_FW_MAJOR: self.state.fw_major,
-                    FIELD_FW_MINOR: self.state.fw_minor,
-                    FIELD_FW_PATCH: self.state.fw_patch,
-                    FIELD_HW_VERSION: self.state.hw_ver,
-                    FIELD_HW_REVISION: self.state.hw_rev,
-                },
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    "CMD": CMD_GET_HW_INFO,
+                    FIELD_FWINFO: {
+                        FIELD_FW_MAJOR: self.state.fw_major,
+                        FIELD_FW_MINOR: self.state.fw_minor,
+                        FIELD_FW_PATCH: self.state.fw_patch,
+                        FIELD_HW_VERSION: self.state.hw_ver,
+                        FIELD_HW_REVISION: self.state.hw_rev,
+                    },
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_stats(self):
         """Broadcast door open statistics to all connected clients."""
         for protocol in self.protocols:
-            protocol._send({
-                "CMD": CMD_GET_DOOR_OPEN_STATS,
-                FIELD_TOTAL_OPEN_CYCLES: self.state.total_open_cycles,
-                FIELD_TOTAL_AUTO_RETRACTS: self.state.total_auto_retracts,
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    "CMD": CMD_GET_DOOR_OPEN_STATS,
+                    FIELD_TOTAL_OPEN_CYCLES: self.state.total_open_cycles,
+                    FIELD_TOTAL_AUTO_RETRACTS: self.state.total_auto_retracts,
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_schedules(self):
         """Broadcast schedule list to all connected clients."""
         for protocol in self.protocols:
-            protocol._send({
-                "CMD": CMD_GET_SCHEDULE_LIST,
-                FIELD_SCHEDULES: self.state.get_schedule_list(),
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    "CMD": CMD_GET_SCHEDULE_LIST,
+                    FIELD_SCHEDULES: self.state.get_schedule_list(),
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_schedule(self, schedule: Schedule):
         """Broadcast a single schedule add/update to all connected clients."""
         for protocol in self.protocols:
-            protocol._send({
-                "CMD": CMD_SET_SCHEDULE,
-                FIELD_SCHEDULE: schedule.to_dict(),
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    "CMD": CMD_SET_SCHEDULE,
+                    FIELD_SCHEDULE: schedule.to_dict(),
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_schedule_delete(self, index: int):
         """Broadcast a schedule deletion to all connected clients."""
         for protocol in self.protocols:
-            protocol._send({
-                "CMD": CMD_DELETE_SCHEDULE,
-                FIELD_INDEX: index,
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    "CMD": CMD_DELETE_SCHEDULE,
+                    FIELD_INDEX: index,
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_notifications(self):
         """Broadcast notification settings to all connected clients."""
         for protocol in self.protocols:
-            protocol._send({
-                "CMD": CMD_GET_NOTIFICATIONS,
-                FIELD_NOTIFICATIONS: self.state.get_notifications(),
-                FIELD_SUCCESS: SUCCESS_TRUE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-            })
+            protocol._send(
+                {
+                    "CMD": CMD_GET_NOTIFICATIONS,
+                    FIELD_NOTIFICATIONS: self.state.get_notifications(),
+                    FIELD_SUCCESS: SUCCESS_TRUE,
+                    FIELD_DIRECTION: DOOR_TO_PHONE,
+                }
+            )
 
     def broadcast_all(self):
         """Broadcast all state information to all connected clients."""

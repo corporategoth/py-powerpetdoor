@@ -10,8 +10,8 @@ used by all command handlers.
 """
 
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
 
 @dataclass
@@ -20,7 +20,7 @@ class CommandResult:
 
     success: bool
     message: str
-    data: Optional[dict] = None
+    data: dict | None = None
 
 
 @dataclass
@@ -47,11 +47,11 @@ class ArgSpec:
     arg_type: str  # "string", "int", "float", "bool_toggle", "choice", "time_range", "days"
     required: bool = True
     default: any = None
-    choices: Optional[list[str]] = None  # For "choice" type
+    choices: list[str] | None = None  # For "choice" type
     description: str = ""
-    min_value: Optional[float] = None  # For int/float types
-    max_value: Optional[float] = None  # For int/float types
-    completer: Optional[Callable[..., list[tuple[str, str]]]] = None
+    min_value: float | None = None  # For int/float types
+    max_value: float | None = None  # For int/float types
+    completer: Callable[..., list[tuple[str, str]]] | None = None
 
     def generate_usage(self) -> str:
         """Generate usage string for this argument."""
@@ -77,7 +77,7 @@ _BOOL_TRUE = ("on", "true", "1", "yes")
 _BOOL_FALSE = ("off", "false", "0", "no")
 
 
-def parse_arg(value: str, spec: ArgSpec) -> tuple[any, Optional[str]]:
+def parse_arg(value: str, spec: ArgSpec) -> tuple[any, str | None]:
     """Parse and validate an argument value.
 
     Returns:
@@ -201,8 +201,8 @@ class SubcommandInfo:
     name: str
     aliases: list[str] = field(default_factory=list)
     description: str = ""
-    usage: Optional[str] = None
-    handler: Optional[Callable] = None
+    usage: str | None = None
+    handler: Callable | None = None
     args: list[ArgSpec] = field(default_factory=list)  # Argument specifications
     # Nested subcommand registry: maps name and aliases to SubcommandInfo
     subcommands: dict[str, "SubcommandInfo"] = field(default_factory=dict)
@@ -284,9 +284,7 @@ def get_canonical_command(line: str) -> str | None:
         modified = True
 
     # Recursively resolve subcommand aliases
-    def resolve_subcommands(
-        subcommand_registry: dict[str, SubcommandInfo], part_idx: int
-    ) -> bool:
+    def resolve_subcommands(subcommand_registry: dict[str, SubcommandInfo], part_idx: int) -> bool:
         """Resolve subcommand at part_idx and recurse into nested subcommands."""
         nonlocal modified
 
@@ -321,12 +319,12 @@ def _generate_usage(info: SubcommandInfo) -> str:
 
 def command(
     name: str,
-    aliases: Optional[list[str]] = None,
+    aliases: list[str] | None = None,
     description: str = "",
-    usage: Optional[str] = None,
+    usage: str | None = None,
     category: str = "misc",
-    subcommands: Optional[list[SubcommandInfo]] = None,
-    args: Optional[list[ArgSpec]] = None,
+    subcommands: list[SubcommandInfo] | None = None,
+    args: list[ArgSpec] | None = None,
     interactive_only: bool = False,
     local_only: bool = False,
 ):
@@ -345,9 +343,7 @@ def command(
     """
 
     def decorator(func: Callable) -> Callable:
-        subcommand_registry = (
-            _build_subcommand_registry(subcommands) if subcommands else {}
-        )
+        subcommand_registry = _build_subcommand_registry(subcommands) if subcommands else {}
 
         info = CommandInfo(
             name=name,
@@ -384,10 +380,10 @@ def command(
 def subcommand(
     parent_path: str | list[str],
     name: str,
-    aliases: Optional[list[str]] = None,
+    aliases: list[str] | None = None,
     description: str = "",
-    usage: Optional[str] = None,
-    args: Optional[list[ArgSpec]] = None,
+    usage: str | None = None,
+    args: list[ArgSpec] | None = None,
 ):
     """Decorator to register a method as a subcommand handler.
 

@@ -4,33 +4,32 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for PowerPetDoor facade class."""
+
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import pytest
 
 from powerpetdoor import (
-    PowerPetDoor,
+    BatteryInfo,
     DoorStatus,
     NotificationSettings,
-    BatteryInfo,
+    PowerPetDoor,
     Schedule,
     ScheduleTime,
+)
+from powerpetdoor.const import (
+    DOOR_STATE_CLOSED,
+    DOOR_STATE_HOLDING,
+    DOOR_STATE_KEEPUP,
+    DOOR_STATE_RISING,
 )
 from powerpetdoor.simulator import (
     DoorSimulator,
     DoorSimulatorState,
     DoorTimingConfig,
 )
-from powerpetdoor.const import (
-    DOOR_STATE_CLOSED,
-    DOOR_STATE_RISING,
-    DOOR_STATE_HOLDING,
-    DOOR_STATE_KEEPUP,
-)
-
 
 # ============================================================================
 # Test Fixtures
@@ -130,9 +129,7 @@ class TestNotificationSettings:
 
     def test_custom_values(self):
         """Custom values should be stored correctly."""
-        settings = NotificationSettings(
-            inside_on=True, outside_off=True, low_battery=True
-        )
+        settings = NotificationSettings(inside_on=True, outside_off=True, low_battery=True)
         assert settings.inside_on is True
         assert settings.inside_off is False
         assert settings.outside_on is False

@@ -4,18 +4,15 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for the full_test_suite built-in script."""
+
 from __future__ import annotations
 
 import pytest
 
-from powerpetdoor.simulator.scripting import get_builtin_script, YAML_AVAILABLE
 from powerpetdoor.const import DOOR_STATE_CLOSED
+from powerpetdoor.simulator.scripting import YAML_AVAILABLE, get_builtin_script
 
-
-requires_yaml = pytest.mark.skipif(
-    not YAML_AVAILABLE,
-    reason="PyYAML not installed"
-)
+requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
 
 
 @requires_yaml
@@ -31,11 +28,7 @@ class TestFullTestSuite:
         """Script should have all expected test sections."""
         script = get_builtin_script("full_test_suite")
         # Check for log messages that indicate test sections
-        log_messages = [
-            s.params.get("message", "")
-            for s in script.steps
-            if s.action == "log"
-        ]
+        log_messages = [s.params.get("message", "") for s in script.steps if s.action == "log"]
         log_text = " ".join(log_messages)
 
         # Should have all major test sections
@@ -80,6 +73,7 @@ class TestFullTestSuiteMessages:
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         status_updates = message_capture.find_status_updates()
@@ -91,12 +85,13 @@ class TestFullTestSuiteMessages:
     @pytest.mark.asyncio
     async def test_status_sequence_has_variety(self, runner, simulator, message_capture):
         """Should see multiple different door states during test."""
-        from powerpetdoor.const import DOOR_STATE_RISING, DOOR_STATE_HOLDING
+        from powerpetdoor.const import DOOR_STATE_HOLDING, DOOR_STATE_RISING
 
         script = get_builtin_script("full_test_suite")
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         statuses = message_capture.get_status_sequence()
@@ -107,8 +102,5 @@ class TestFullTestSuiteMessages:
             f"Should see multiple status types, got: {unique_statuses}"
         )
         # Verify we saw open states
-        has_open = any(
-            s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING)
-            for s in statuses
-        )
+        has_open = any(s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING) for s in statuses)
         assert has_open, f"Should see open states in sequence: {statuses}"

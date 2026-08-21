@@ -4,18 +4,15 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for the power_lockout_test built-in script."""
+
 from __future__ import annotations
 
 import pytest
 
-from powerpetdoor.simulator.scripting import get_builtin_script, YAML_AVAILABLE
 from powerpetdoor.const import DOOR_STATE_CLOSED
+from powerpetdoor.simulator.scripting import YAML_AVAILABLE, get_builtin_script
 
-
-requires_yaml = pytest.mark.skipif(
-    not YAML_AVAILABLE,
-    reason="PyYAML not installed"
-)
+requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
 
 
 @requires_yaml
@@ -32,10 +29,7 @@ class TestPowerLockoutTest:
         script = get_builtin_script("power_lockout_test")
 
         # Find set actions for power and cmd_lockout
-        set_actions = [
-            s for s in script.steps
-            if s.action == "set"
-        ]
+        set_actions = [s for s in script.steps if s.action == "set"]
         names_set = [s.params.get("name", "") for s in set_actions]
 
         assert "power" in names_set
@@ -77,6 +71,7 @@ class TestPowerLockoutTestMessages:
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         # May or may not have status updates depending on script design
@@ -86,20 +81,16 @@ class TestPowerLockoutTestMessages:
     @pytest.mark.asyncio
     async def test_door_stays_closed_with_power_off(self, runner, simulator, message_capture):
         """Door should not open when power is off."""
-        from powerpetdoor.const import DOOR_STATE_RISING, DOOR_STATE_HOLDING
+        from powerpetdoor.const import DOOR_STATE_HOLDING, DOOR_STATE_RISING
 
         script = get_builtin_script("power_lockout_test")
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         statuses = message_capture.get_status_sequence()
         # Door should remain closed - no rising/holding states
-        has_open = any(
-            s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING)
-            for s in statuses
-        )
-        assert not has_open, (
-            f"Door should NOT open during power lockout test: {statuses}"
-        )
+        has_open = any(s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING) for s in statuses)
+        assert not has_open, f"Door should NOT open during power lockout test: {statuses}"

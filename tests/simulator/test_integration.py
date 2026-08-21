@@ -4,6 +4,7 @@
 # https://opensource.org/licenses/MIT
 
 """Integration tests for simulator - verifies correct message sending."""
+
 from __future__ import annotations
 
 import asyncio
@@ -12,31 +13,30 @@ from typing import Any
 
 import pytest
 
+from powerpetdoor.const import (
+    CMD_CLOSE,
+    CMD_GET_DOOR_STATUS,
+    CMD_OPEN,
+    CONFIG,
+    DOOR_STATE_CLOSED,
+    DOOR_STATE_HOLDING,
+    DOOR_STATE_KEEPUP,
+    DOOR_STATE_RISING,
+    FIELD_DOOR_STATUS,
+    FIELD_SUCCESS,
+    PING,
+    PONG,
+)
 from powerpetdoor.simulator import (
     DoorSimulator,
     DoorSimulatorState,
     DoorTimingConfig,
 )
-from powerpetdoor.const import (
-    PING,
-    PONG,
-    CONFIG,
-    CMD_GET_DOOR_STATUS,
-    CMD_OPEN,
-    CMD_CLOSE,
-    FIELD_SUCCESS,
-    FIELD_DOOR_STATUS,
-    DOOR_STATE_CLOSED,
-    DOOR_STATE_RISING,
-    DOOR_STATE_HOLDING,
-    DOOR_STATE_KEEPUP,
-    DOOR_STATE_SLOWING,
-)
-
 
 # ============================================================================
 # Test Fixtures
 # ============================================================================
+
 
 @pytest.fixture
 def timing_config():
@@ -79,22 +79,16 @@ class MessageCapture:
         """Receive all available messages within timeout."""
         messages = []
         try:
-            data = await asyncio.wait_for(
-                self.reader.read(8192),
-                timeout=timeout
-            )
+            data = await asyncio.wait_for(self.reader.read(8192), timeout=timeout)
             if data:
                 messages.extend(self._parse_messages(data.decode("ascii")))
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         self.messages.extend(messages)
         return messages
 
     async def receive_until(
-        self,
-        predicate: callable,
-        timeout: float = 5.0,
-        poll_interval: float = 0.1
+        self, predicate: callable, timeout: float = 5.0, poll_interval: float = 0.1
     ) -> list[dict[str, Any]]:
         """Receive messages until predicate returns True for any message."""
         start = asyncio.get_event_loop().time()
@@ -102,10 +96,7 @@ class MessageCapture:
 
         while asyncio.get_event_loop().time() - start < timeout:
             try:
-                data = await asyncio.wait_for(
-                    self.reader.read(4096),
-                    timeout=poll_interval
-                )
+                data = await asyncio.wait_for(self.reader.read(4096), timeout=poll_interval)
                 if data:
                     new_msgs = self._parse_messages(data.decode("ascii"))
                     messages.extend(new_msgs)
@@ -113,7 +104,7 @@ class MessageCapture:
                     for msg in new_msgs:
                         if predicate(msg):
                             return messages
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
         return messages
@@ -123,15 +114,15 @@ class MessageCapture:
         messages = []
         pos = 0
         while pos < len(data):
-            if data[pos] != '{':
+            if data[pos] != "{":
                 pos += 1
                 continue
             depth = 0
             end = pos
             for i, c in enumerate(data[pos:], pos):
-                if c == '{':
+                if c == "{":
                     depth += 1
-                elif c == '}':
+                elif c == "}":
                     depth -= 1
                     if depth == 0:
                         end = i + 1
@@ -153,10 +144,7 @@ class MessageCapture:
 
     def find_status_updates(self) -> list[dict[str, Any]]:
         """Find all door status update messages."""
-        return [
-            msg for msg in self.messages
-            if FIELD_DOOR_STATUS in msg
-        ]
+        return [msg for msg in self.messages if FIELD_DOOR_STATUS in msg]
 
     async def close(self):
         """Close the connection."""
@@ -177,6 +165,7 @@ async def capture(simulator) -> MessageCapture:
 # ============================================================================
 # Basic Protocol Tests
 # ============================================================================
+
 
 class TestBasicProtocol:
     """Test basic protocol message handling."""
@@ -209,6 +198,7 @@ class TestBasicProtocol:
 # Door Operation Message Tests
 # ============================================================================
 
+
 class TestDoorOperationMessages:
     """Test messages sent during door operations."""
 
@@ -220,8 +210,11 @@ class TestDoorOperationMessages:
 
         # Wait for door to start rising
         await capture.receive_until(
-            lambda m: m.get(FIELD_DOOR_STATUS) in (DOOR_STATE_RISING, DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP),
-            timeout=2.0
+            lambda m: (
+                m.get(FIELD_DOOR_STATUS)
+                in (DOOR_STATE_RISING, DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP)
+            ),
+            timeout=2.0,
         )
 
         # Receive any remaining messages (command response might arrive after status)
@@ -252,8 +245,7 @@ class TestDoorOperationMessages:
 
         # Wait for close response and status updates
         messages = await capture.receive_until(
-            lambda m: m.get(FIELD_DOOR_STATUS) == DOOR_STATE_CLOSED,
-            timeout=3.0
+            lambda m: m.get(FIELD_DOOR_STATUS) == DOOR_STATE_CLOSED, timeout=3.0
         )
 
         # Should have received close response
@@ -270,7 +262,7 @@ class TestDoorOperationMessages:
         # Wait for door to start opening
         messages = await capture.receive_until(
             lambda m: m.get(FIELD_DOOR_STATUS) in (DOOR_STATE_RISING, DOOR_STATE_HOLDING),
-            timeout=2.0
+            timeout=2.0,
         )
 
         # Should have received status updates with door opening
@@ -278,10 +270,7 @@ class TestDoorOperationMessages:
         assert len(status_updates) > 0
 
         # At least one should show door not closed
-        door_opening = any(
-            msg[FIELD_DOOR_STATUS] != DOOR_STATE_CLOSED
-            for msg in status_updates
-        )
+        door_opening = any(msg[FIELD_DOOR_STATUS] != DOOR_STATE_CLOSED for msg in status_updates)
         assert door_opening, "Should see door status change from closed"
 
     @pytest.mark.asyncio
@@ -294,12 +283,9 @@ class TestDoorOperationMessages:
         await capture.receive_until(
             lambda m: (
                 m.get(FIELD_DOOR_STATUS) == DOOR_STATE_CLOSED
-                and any(
-                    msg.get(FIELD_DOOR_STATUS) != DOOR_STATE_CLOSED
-                    for msg in capture.messages
-                )
+                and any(msg.get(FIELD_DOOR_STATUS) != DOOR_STATE_CLOSED for msg in capture.messages)
             ),
-            timeout=5.0
+            timeout=5.0,
         )
 
         status_updates = capture.find_status_updates()
@@ -313,6 +299,7 @@ class TestDoorOperationMessages:
 # ============================================================================
 # Multi-Client Tests
 # ============================================================================
+
 
 class TestMultiClient:
     """Test simulator behavior with multiple clients."""
@@ -335,14 +322,18 @@ class TestMultiClient:
 
             # Both clients should receive status updates
             msgs1 = await cap1.receive_until(
-                lambda m: m.get(FIELD_DOOR_STATUS) == DOOR_STATE_RISING
-                or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_HOLDING,
-                timeout=2.0
+                lambda m: (
+                    m.get(FIELD_DOOR_STATUS) == DOOR_STATE_RISING
+                    or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_HOLDING
+                ),
+                timeout=2.0,
             )
             msgs2 = await cap2.receive_until(
-                lambda m: m.get(FIELD_DOOR_STATUS) == DOOR_STATE_RISING
-                or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_HOLDING,
-                timeout=2.0
+                lambda m: (
+                    m.get(FIELD_DOOR_STATUS) == DOOR_STATE_RISING
+                    or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_HOLDING
+                ),
+                timeout=2.0,
             )
 
             # Both should have received status updates
@@ -372,18 +363,19 @@ class TestMultiClient:
             # The command response and status update may arrive in any order
             await cap1.receive_until(
                 lambda m: (
-                    cap1.find_message(CMD_OPEN) is not None
-                    and len(cap1.find_status_updates()) > 0
+                    cap1.find_message(CMD_OPEN) is not None and len(cap1.find_status_updates()) > 0
                 ),
-                timeout=2.0
+                timeout=2.0,
             )
 
             # Wait for status update on client 2
             await cap2.receive_until(
-                lambda m: m.get(FIELD_DOOR_STATUS) == DOOR_STATE_RISING
-                or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_HOLDING
-                or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_KEEPUP,
-                timeout=2.0
+                lambda m: (
+                    m.get(FIELD_DOOR_STATUS) == DOOR_STATE_RISING
+                    or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_HOLDING
+                    or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_KEEPUP
+                ),
+                timeout=2.0,
             )
 
             # Client 1 should have OPEN response

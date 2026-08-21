@@ -4,16 +4,17 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for timezone utilities module."""
+
 from __future__ import annotations
 
 import pytest
 
 import powerpetdoor.tz_utils as tz_utils
 
-
 # ============================================================================
 # Test Fixtures
 # ============================================================================
+
 
 @pytest.fixture(scope="module", autouse=True)
 def init_cache():
@@ -53,6 +54,7 @@ def reset_cache():
 # Cache Initialization Tests
 # ============================================================================
 
+
 class TestCacheInitialization:
     """Tests for cache initialization functions."""
 
@@ -88,6 +90,7 @@ class TestCacheInitialization:
 # ============================================================================
 # Get Available Timezones Tests
 # ============================================================================
+
 
 class TestGetAvailableTimezones:
     """Tests for get_available_timezones function."""
@@ -125,6 +128,7 @@ class TestGetAvailableTimezones:
 # ============================================================================
 # IANA to POSIX Conversion Tests
 # ============================================================================
+
 
 class TestGetPosixTzString:
     """Tests for get_posix_tz_string function."""
@@ -186,6 +190,7 @@ class TestGetPosixTzString:
 # POSIX to IANA Reverse Lookup Tests
 # ============================================================================
 
+
 class TestFindIanaForPosix:
     """Tests for find_iana_for_posix function."""
 
@@ -237,6 +242,7 @@ class TestFindIanaForPosix:
 # ============================================================================
 # POSIX String Parsing Tests
 # ============================================================================
+
 
 class TestParsePosixTzString:
     """Tests for parse_posix_tz_string function."""
@@ -321,6 +327,7 @@ class TestParsePosixTzString:
 # ============================================================================
 # Integration Tests
 # ============================================================================
+
 
 class TestIntegration:
     """Integration tests for timezone utilities."""

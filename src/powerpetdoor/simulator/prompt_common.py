@@ -9,17 +9,18 @@ This module provides syntax highlighting, tab completion, styling, and
 the InteractiveSession class for the simulator command-line interfaces.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
-from .commands.base import get_command_registry, get_canonical_command
-from .commands.history import History
+from .commands.base import get_canonical_command, get_command_registry
 
 # Import CommandHandler to ensure all command modules are loaded and their
 # @command/@subcommand decorators populate the registry. This is needed for
 # ctl.py which otherwise only imports a subset of command mixins.
 from .commands.handler import CommandHandler  # noqa: F401
+from .commands.history import History
 
 # Try to import prompt_toolkit for enhanced interactive features
 try:
@@ -231,12 +232,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                             tokens.append(("", word))
                     else:
                         # Arguments after command path
-                        if (
-                            word.replace(".", "")
-                            .replace("-", "")
-                            .replace(":", "")
-                            .isdigit()
-                        ):
+                        if word.replace(".", "").replace("-", "").replace(":", "").isdigit():
                             tokens.append(("class:number", word))
                         elif word.lower() in _OPTIONS:
                             tokens.append(("class:option", word))
@@ -344,6 +340,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                 try:
                     # Try calling with prefix first (for path-aware completers)
                     import inspect
+
                     sig = inspect.signature(arg.completer)
                     if len(sig.parameters) > 0:
                         return arg.completer(prefix)
@@ -451,8 +448,8 @@ class InteractiveSession:
 
     def __init__(
         self,
-        history_file: Optional[str] = None,
-        get_prompt: Optional[Callable[[], Any]] = None,
+        history_file: str | None = None,
+        get_prompt: Callable[[], Any] | None = None,
         prompt_text: str = "> ",
     ):
         """Initialize the interactive session.
@@ -466,7 +463,7 @@ class InteractiveSession:
         self._prompt_text = prompt_text
         self._get_prompt = get_prompt
         self._session = None
-        self._history: Optional[History] = None
+        self._history: History | None = None
 
         if PROMPT_TOOLKIT_AVAILABLE:
             from prompt_toolkit import PromptSession
@@ -489,8 +486,8 @@ class InteractiveSession:
         cls,
         host: str,
         port: int,
-        history_file: Optional[str] = None,
-        is_connected: Optional[Callable[[], bool]] = None,
+        history_file: str | None = None,
+        is_connected: Callable[[], bool] | None = None,
     ) -> "InteractiveSession":
         """Create an InteractiveSession with standard prompt formatting.
 
@@ -528,7 +525,7 @@ class InteractiveSession:
         return PROMPT_TOOLKIT_AVAILABLE and self._session is not None
 
     @property
-    def history(self) -> Optional[History]:
+    def history(self) -> History | None:
         """Get the History object, or None if not available."""
         return self._history
 
@@ -550,7 +547,7 @@ class InteractiveSession:
             if app.is_running:
                 app._redraw()
 
-    def resolve_history_recall(self, line: str) -> tuple[str, bool, Optional[str]]:
+    def resolve_history_recall(self, line: str) -> tuple[str, bool, str | None]:
         """Resolve history recall commands (!!, !n, !-n).
 
         Args:
@@ -625,7 +622,7 @@ class InteractiveSession:
             return f">>> {input_line.original} -> {input_line.resolved}\n>>> {message}"
         return f">>> {message}"
 
-    async def prompt_async(self) -> Optional[str]:
+    async def prompt_async(self) -> str | None:
         """Get input from the user asynchronously.
 
         Returns:
@@ -645,7 +642,7 @@ class InteractiveSession:
 
     async def input_loop(
         self,
-        stop_check: Optional[Callable[[], bool]] = None,
+        stop_check: Callable[[], bool] | None = None,
     ):
         """Async generator that yields processed input lines.
 

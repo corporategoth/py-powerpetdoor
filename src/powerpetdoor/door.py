@@ -24,18 +24,18 @@ Example usage:
         await door.set_hold_time(15)
         await door.disconnect()
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any
 
 from .client import PowerPetDoorClient
 from .const import (
-    COMMAND,
-    CONFIG,
     # Commands
     CMD_CLOSE,
     CMD_DELETE_SCHEDULE,
@@ -67,6 +67,8 @@ from .const import (
     CMD_SET_NOTIFICATIONS,
     CMD_SET_SCHEDULE,
     CMD_SET_TIMEZONE,
+    COMMAND,
+    CONFIG,
     # Door states
     DOOR_STATE_CLOSED,
     DOOR_STATE_CLOSING_MID_OPEN,
@@ -86,7 +88,12 @@ from .const import (
     FIELD_DAYSOFWEEK,
     FIELD_ENABLED,
     FIELD_END_TIME_SUFFIX,
+    FIELD_FW_MAJOR,
+    FIELD_FW_MINOR,
+    FIELD_FW_PATCH,
     FIELD_HOUR,
+    FIELD_HW_REVISION,
+    FIELD_HW_VERSION,
     FIELD_INDEX,
     FIELD_INSIDE,
     FIELD_INSIDE_PREFIX,
@@ -104,11 +111,6 @@ from .const import (
     FIELD_START_TIME_SUFFIX,
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
-    FIELD_FW_MAJOR,
-    FIELD_FW_MINOR,
-    FIELD_FW_PATCH,
-    FIELD_HW_VERSION,
-    FIELD_HW_REVISION,
 )
 
 logger = logging.getLogger(__name__)
@@ -127,7 +129,7 @@ class DoorStatus(Enum):
     CLOSING_MID_OPEN = DOOR_STATE_CLOSING_MID_OPEN
 
     @classmethod
-    def from_string(cls, value: str) -> "DoorStatus":
+    def from_string(cls, value: str) -> DoorStatus:
         """Convert a string status to enum."""
         for status in cls:
             if status.value == value:
@@ -177,7 +179,7 @@ class ScheduleTime:
         return {FIELD_HOUR: self.hour, FIELD_MINUTE: self.minute}
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ScheduleTime":
+    def from_dict(cls, data: dict[str, Any]) -> ScheduleTime:
         """Create from protocol dict."""
         return cls(hour=data.get(FIELD_HOUR, 0), minute=data.get(FIELD_MINUTE, 0))
 
@@ -199,7 +201,9 @@ class Schedule:
     index: int = 0
     enabled: bool = True
     # List of 7 booleans [Sun, Mon, Tue, Wed, Thu, Fri, Sat] where True=active
-    days_of_week: list[bool] = field(default_factory=lambda: [True, True, True, True, True, True, True])
+    days_of_week: list[bool] = field(
+        default_factory=lambda: [True, True, True, True, True, True, True]
+    )
     # Which sensor this entry is for
     inside: bool = False
     outside: bool = False
@@ -224,20 +228,32 @@ class Schedule:
             result[f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = self.start.to_dict()
             result[f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = self.end.to_dict()
         else:
-            result[f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {FIELD_HOUR: 0, FIELD_MINUTE: 0}
-            result[f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {FIELD_HOUR: 0, FIELD_MINUTE: 0}
+            result[f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {
+                FIELD_HOUR: 0,
+                FIELD_MINUTE: 0,
+            }
+            result[f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {
+                FIELD_HOUR: 0,
+                FIELD_MINUTE: 0,
+            }
 
         if self.outside:
             result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = self.start.to_dict()
             result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = self.end.to_dict()
         else:
-            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {FIELD_HOUR: 0, FIELD_MINUTE: 0}
-            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {FIELD_HOUR: 0, FIELD_MINUTE: 0}
+            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {
+                FIELD_HOUR: 0,
+                FIELD_MINUTE: 0,
+            }
+            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {
+                FIELD_HOUR: 0,
+                FIELD_MINUTE: 0,
+            }
 
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Schedule":
+    def from_dict(cls, data: dict[str, Any]) -> Schedule:
         """Create from protocol dict."""
         inside = data.get(FIELD_INSIDE, False)
         outside = data.get(FIELD_OUTSIDE, False)
@@ -315,7 +331,7 @@ class PowerPetDoor:
         keepalive: float = 30.0,
         timeout: float = 10.0,
         reconnect: float = 5.0,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ):
         """Initialize PowerPetDoor.
 
@@ -355,14 +371,14 @@ class PowerPetDoor:
         self._total_auto_retracts: int = 0
         self._notifications = NotificationSettings()
         self._schedules: list[Schedule] = []
-        self._latency: Optional[float] = None
+        self._latency: float | None = None
 
         # User callbacks
         self._status_callbacks: list[Callable[[DoorStatus], None]] = []
         self._settings_callbacks: list[Callable[[dict[str, Any]], None]] = []
         self._connect_callbacks: list[Callable[[], None]] = []
         self._disconnect_callbacks: list[Callable[[], None]] = []
-        self._schedule_callbacks: list[Callable[[list["Schedule"]], None]] = []
+        self._schedule_callbacks: list[Callable[[list[Schedule]], None]] = []
 
     # =========================================================================
     # Connection
@@ -394,7 +410,7 @@ class PowerPetDoor:
         return self._client.effective_timeout
 
     @property
-    def latency(self) -> Optional[float]:
+    def latency(self) -> float | None:
         """Network latency to the door in seconds.
 
         This is determined from the round-trip time of ping/pong messages.
@@ -547,9 +563,7 @@ class PowerPetDoor:
         """Whether the inside sensor is enabled."""
         return self._inside_sensor
 
-    async def set_inside_sensor(
-        self, enabled: bool, *, timeout: Optional[float] = None
-    ) -> None:
+    async def set_inside_sensor(self, enabled: bool, *, timeout: float | None = None) -> None:
         """Enable or disable the inside sensor.
 
         Args:
@@ -567,9 +581,7 @@ class PowerPetDoor:
         """Whether the outside sensor is enabled."""
         return self._outside_sensor
 
-    async def set_outside_sensor(
-        self, enabled: bool, *, timeout: Optional[float] = None
-    ) -> None:
+    async def set_outside_sensor(self, enabled: bool, *, timeout: float | None = None) -> None:
         """Enable or disable the outside sensor.
 
         Args:
@@ -591,9 +603,7 @@ class PowerPetDoor:
         """Whether the door is powered on."""
         return self._power
 
-    async def set_power(
-        self, enabled: bool, *, timeout: Optional[float] = None
-    ) -> None:
+    async def set_power(self, enabled: bool, *, timeout: float | None = None) -> None:
         """Turn door power on or off.
 
         Args:
@@ -615,9 +625,7 @@ class PowerPetDoor:
         """Whether automatic scheduling is enabled."""
         return self._auto
 
-    async def set_auto(
-        self, enabled: bool, *, timeout: Optional[float] = None
-    ) -> None:
+    async def set_auto(self, enabled: bool, *, timeout: float | None = None) -> None:
         """Enable or disable automatic scheduling.
 
         Args:
@@ -639,9 +647,7 @@ class PowerPetDoor:
         """Whether outside sensor safety lock is enabled."""
         return self._safety_lock
 
-    async def set_safety_lock(
-        self, enabled: bool, *, timeout: Optional[float] = None
-    ) -> None:
+    async def set_safety_lock(self, enabled: bool, *, timeout: float | None = None) -> None:
         """Enable or disable outside sensor safety lock.
 
         Args:
@@ -663,9 +669,7 @@ class PowerPetDoor:
         """Whether auto-retract on obstruction is enabled."""
         return self._autoretract
 
-    async def set_autoretract(
-        self, enabled: bool, *, timeout: Optional[float] = None
-    ) -> None:
+    async def set_autoretract(self, enabled: bool, *, timeout: float | None = None) -> None:
         """Enable or disable auto-retract on obstruction.
 
         Args:
@@ -687,7 +691,7 @@ class PowerPetDoor:
         return self._pet_proximity_keep_open
 
     async def set_pet_proximity_keep_open(
-        self, enabled: bool, *, timeout: Optional[float] = None
+        self, enabled: bool, *, timeout: float | None = None
     ) -> None:
         """Enable or disable keeping door open when pet is in proximity.
 
@@ -714,9 +718,7 @@ class PowerPetDoor:
         """Time in seconds the door stays open after sensor trigger."""
         return self._hold_time
 
-    async def set_hold_time(
-        self, seconds: float, *, timeout: Optional[float] = None
-    ) -> None:
+    async def set_hold_time(self, seconds: float, *, timeout: float | None = None) -> None:
         """Set the hold-open time in seconds.
 
         Args:
@@ -737,9 +739,7 @@ class PowerPetDoor:
         """The door's timezone (POSIX format)."""
         return self._timezone
 
-    async def set_timezone(
-        self, tz: str, *, timeout: Optional[float] = None
-    ) -> None:
+    async def set_timezone(self, tz: str, *, timeout: float | None = None) -> None:
         """Set the door's timezone.
 
         Args:
@@ -831,12 +831,12 @@ class PowerPetDoor:
     async def set_notifications(
         self,
         *,
-        inside_on: Optional[bool] = None,
-        inside_off: Optional[bool] = None,
-        outside_on: Optional[bool] = None,
-        outside_off: Optional[bool] = None,
-        low_battery: Optional[bool] = None,
-        timeout: Optional[float] = None,
+        inside_on: bool | None = None,
+        inside_off: bool | None = None,
+        outside_on: bool | None = None,
+        outside_off: bool | None = None,
+        low_battery: bool | None = None,
+        timeout: float | None = None,
     ) -> None:
         """Update notification settings.
 
@@ -855,24 +855,16 @@ class PowerPetDoor:
                 inside_on if inside_on is not None else self._notifications.inside_on
             ),
             FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: (
-                inside_off
-                if inside_off is not None
-                else self._notifications.inside_off
+                inside_off if inside_off is not None else self._notifications.inside_off
             ),
             FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: (
-                outside_on
-                if outside_on is not None
-                else self._notifications.outside_on
+                outside_on if outside_on is not None else self._notifications.outside_on
             ),
             FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: (
-                outside_off
-                if outside_off is not None
-                else self._notifications.outside_off
+                outside_off if outside_off is not None else self._notifications.outside_off
             ),
             FIELD_LOW_BATTERY_NOTIFICATIONS: (
-                low_battery
-                if low_battery is not None
-                else self._notifications.low_battery
+                low_battery if low_battery is not None else self._notifications.low_battery
             ),
         }
         await asyncio.wait_for(
@@ -889,9 +881,7 @@ class PowerPetDoor:
         """Current list of schedules."""
         return self._schedules.copy()
 
-    async def get_schedule(
-        self, index: int, *, timeout: Optional[float] = None
-    ) -> Schedule:
+    async def get_schedule(self, index: int, *, timeout: float | None = None) -> Schedule:
         """Fetch a specific schedule by index.
 
         Args:
@@ -904,9 +894,7 @@ class PowerPetDoor:
         )
         return Schedule.from_dict(result)
 
-    async def set_schedule(
-        self, schedule: Schedule, *, timeout: Optional[float] = None
-    ) -> None:
+    async def set_schedule(self, schedule: Schedule, *, timeout: float | None = None) -> None:
         """Create or update a schedule.
 
         Args:
@@ -920,9 +908,7 @@ class PowerPetDoor:
             timeout=timeout if timeout is not None else self.default_timeout,
         )
 
-    async def delete_schedule(
-        self, index: int, *, timeout: Optional[float] = None
-    ) -> None:
+    async def delete_schedule(self, index: int, *, timeout: float | None = None) -> None:
         """Delete a schedule by index.
 
         Args:
@@ -934,9 +920,7 @@ class PowerPetDoor:
             timeout=timeout if timeout is not None else self.default_timeout,
         )
 
-    async def refresh_schedules(
-        self, *, timeout: Optional[float] = None
-    ) -> list[Schedule]:
+    async def refresh_schedules(self, *, timeout: float | None = None) -> list[Schedule]:
         """Refresh and return the schedule list.
 
         This performs a two-step fetch matching the real device behavior:
@@ -970,7 +954,7 @@ class PowerPetDoor:
                 )
                 if result:
                     schedules.append(Schedule.from_dict(result))
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("Timeout fetching schedule %d", idx)
             except Exception:
                 logger.exception("Error fetching schedule %d", idx)
@@ -998,7 +982,7 @@ class PowerPetDoor:
         """Register a callback for when the door disconnects."""
         self._disconnect_callbacks.append(callback)
 
-    def on_schedule_change(self, callback: Callable[[list["Schedule"]], None]) -> None:
+    def on_schedule_change(self, callback: Callable[[list[Schedule]], None]) -> None:
         """Register a callback for schedule changes.
 
         The callback receives the updated list of schedules whenever
@@ -1010,7 +994,7 @@ class PowerPetDoor:
     # Refresh
     # =========================================================================
 
-    async def refresh(self, *, timeout: Optional[float] = None) -> None:
+    async def refresh(self, *, timeout: float | None = None) -> None:
         """Refresh all cached state from the door.
 
         Args:
@@ -1025,9 +1009,7 @@ class PowerPetDoor:
             return_exceptions=True,
         )
 
-    async def refresh_status(
-        self, *, timeout: Optional[float] = None
-    ) -> DoorStatus:
+    async def refresh_status(self, *, timeout: float | None = None) -> DoorStatus:
         """Refresh and return the door status.
 
         Args:
@@ -1040,7 +1022,7 @@ class PowerPetDoor:
         self._status = DoorStatus.from_string(result)
         return self._status
 
-    async def refresh_settings(self, *, timeout: Optional[float] = None) -> None:
+    async def refresh_settings(self, *, timeout: float | None = None) -> None:
         """Refresh all settings from the door.
 
         Args:
@@ -1061,9 +1043,7 @@ class PowerPetDoor:
             return_exceptions=True,
         )
 
-    async def refresh_battery(
-        self, *, timeout: Optional[float] = None
-    ) -> BatteryInfo:
+    async def refresh_battery(self, *, timeout: float | None = None) -> BatteryInfo:
         """Refresh and return battery info.
 
         Args:
@@ -1075,7 +1055,7 @@ class PowerPetDoor:
         )
         return self._battery
 
-    async def refresh_stats(self, *, timeout: Optional[float] = None) -> None:
+    async def refresh_stats(self, *, timeout: float | None = None) -> None:
         """Refresh door statistics.
 
         Args:
@@ -1086,9 +1066,7 @@ class PowerPetDoor:
             timeout=timeout if timeout is not None else self.default_timeout,
         )
 
-    async def refresh_hardware_info(
-        self, *, timeout: Optional[float] = None
-    ) -> dict[str, Any]:
+    async def refresh_hardware_info(self, *, timeout: float | None = None) -> dict[str, Any]:
         """Refresh and return hardware info.
 
         Args:

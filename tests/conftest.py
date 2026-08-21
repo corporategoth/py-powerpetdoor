@@ -4,27 +4,24 @@
 # https://opensource.org/licenses/MIT
 
 """Pytest configuration and fixtures for Power Pet Door tests."""
+
 from __future__ import annotations
 
 import asyncio
 import json
-import time
-from typing import Any, Callable
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from powerpetdoor import PowerPetDoorClient
 from powerpetdoor.const import (
-    PING,
-    PONG,
     FIELD_SUCCESS,
+    PONG,
 )
-
 
 # ============================================================================
 # Mock Transport and Protocol
 # ============================================================================
+
 
 class MockTransport:
     """Mock asyncio transport for network simulation."""
@@ -51,7 +48,7 @@ class MockTransport:
         messages = []
         for data in self.written_data:
             try:
-                messages.append(json.loads(data.decode('ascii')))
+                messages.append(json.loads(data.decode("ascii")))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
         return messages
@@ -78,41 +75,30 @@ class MockDeviceProtocol:
         """Simulate device sending a response."""
         if self._response_delay > 0:
             await asyncio.sleep(self._response_delay)
-        json_data = json.dumps(response).encode('ascii')
+        json_data = json.dumps(response).encode("ascii")
         self.client.data_received(json_data)
 
     def send_response_sync(self, response: dict) -> None:
         """Synchronously send a response (for non-async contexts)."""
-        json_data = json.dumps(response).encode('ascii')
+        json_data = json.dumps(response).encode("ascii")
         self.client.data_received(json_data)
 
     def respond_to_ping(self, msg_id: int, ping_value: str) -> None:
         """Send PONG response to a PING."""
-        self.send_response_sync({
-            FIELD_SUCCESS: "true",
-            "CMD": PONG,
-            PONG: ping_value,
-            "msgId": msg_id
-        })
+        self.send_response_sync(
+            {FIELD_SUCCESS: "true", "CMD": PONG, PONG: ping_value, "msgId": msg_id}
+        )
 
     def respond_success(self, msg_id: int, cmd: str, **extra) -> None:
         """Send a generic success response."""
-        response = {
-            FIELD_SUCCESS: "true",
-            "CMD": cmd,
-            "msgId": msg_id,
-            **extra
-        }
+        response = {FIELD_SUCCESS: "true", "CMD": cmd, "msgId": msg_id, **extra}
         self.send_response_sync(response)
 
     def respond_failure(self, msg_id: int, cmd: str, error: str = "error") -> None:
         """Send a generic failure response."""
-        self.send_response_sync({
-            FIELD_SUCCESS: "false",
-            "CMD": cmd,
-            "msgId": msg_id,
-            "error": error
-        })
+        self.send_response_sync(
+            {FIELD_SUCCESS: "false", "CMD": cmd, "msgId": msg_id, "error": error}
+        )
 
 
 # ============================================================================
@@ -175,17 +161,13 @@ def create_mock_response(cmd: str, msg_id: int, **extra) -> dict:
     }
 
     base_response = responses.get(cmd, {"CMD": cmd})
-    return {
-        FIELD_SUCCESS: "true",
-        "msgId": msg_id,
-        **base_response,
-        **extra
-    }
+    return {FIELD_SUCCESS: "true", "msgId": msg_id, **base_response, **extra}
 
 
 # ============================================================================
 # Client Fixtures
 # ============================================================================
+
 
 @pytest.fixture
 def mock_transport() -> MockTransport:
@@ -206,7 +188,9 @@ def client_config() -> dict:
 
 
 @pytest.fixture
-async def mock_client(mock_transport, client_config) -> tuple[PowerPetDoorClient, MockTransport, MockDeviceProtocol]:
+async def mock_client(
+    mock_transport, client_config
+) -> tuple[PowerPetDoorClient, MockTransport, MockDeviceProtocol]:
     """Create a PowerPetDoorClient with mocked transport.
 
     Returns:
@@ -219,7 +203,7 @@ async def mock_client(mock_transport, client_config) -> tuple[PowerPetDoorClient
         timeout=client_config["timeout"],
         reconnect=client_config["reconnect"],
         keepalive=client_config["keepalive"],
-        loop=loop
+        loop=loop,
     )
 
     # Simulate connection established
@@ -235,14 +219,18 @@ async def mock_client(mock_transport, client_config) -> tuple[PowerPetDoorClient
     client.stop()
 
     # Cancel any remaining tasks created by this client
-    if hasattr(client, '_keepalive') and client._keepalive and not client._keepalive.done():
+    if hasattr(client, "_keepalive") and client._keepalive and not client._keepalive.done():
         client._keepalive.cancel()
         try:
             await client._keepalive
         except asyncio.CancelledError:
             pass
 
-    if hasattr(client, '_check_receipt') and client._check_receipt and not client._check_receipt.done():
+    if (
+        hasattr(client, "_check_receipt")
+        and client._check_receipt
+        and not client._check_receipt.done()
+    ):
         client._check_receipt.cancel()
         try:
             await client._check_receipt
@@ -263,7 +251,7 @@ async def disconnected_client(client_config) -> PowerPetDoorClient:
         timeout=client_config["timeout"],
         reconnect=client_config["reconnect"],
         keepalive=client_config["keepalive"],
-        loop=loop
+        loop=loop,
     )
     return client
 
@@ -271,6 +259,7 @@ async def disconnected_client(client_config) -> PowerPetDoorClient:
 # ============================================================================
 # Utility Fixtures
 # ============================================================================
+
 
 @pytest.fixture
 def callback_tracker() -> dict[str, list]:
@@ -284,20 +273,26 @@ def callback_tracker() -> dict[str, list]:
 @pytest.fixture
 def make_callback(callback_tracker):
     """Factory to create tracked callbacks."""
+
     def factory(name: str = "callback"):
         def callback(*args, **kwargs):
             callback_tracker["calls"].append(name)
             callback_tracker["args"].append((args, kwargs))
+
         return callback
+
     return factory
 
 
 @pytest.fixture
 def make_async_callback(callback_tracker):
     """Factory to create tracked async callbacks."""
+
     def factory(name: str = "async_callback"):
         async def callback(*args, **kwargs):
             callback_tracker["calls"].append(name)
             callback_tracker["args"].append((args, kwargs))
+
         return callback
+
     return factory

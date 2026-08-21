@@ -6,11 +6,12 @@
 """Script running commands."""
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING
 
-from .base import ArgSpec, CommandResult, command
 from ..scripting import script_completer
+from .base import ArgSpec, CommandResult, command
 
 if TYPE_CHECKING:
     from ..scripting import Script, ScriptRunner
@@ -20,7 +21,7 @@ class ScriptsCommandsMixin:
     """Mixin providing script running commands."""
 
     script_runner: "ScriptRunner"
-    script_queue: Optional[asyncio.Queue]
+    script_queue: asyncio.Queue | None
     _Script: type["Script"]
     _get_builtin_script: Callable[[str], "Script"]
     _list_builtin_scripts: Callable[[], list[tuple[str, str]]]

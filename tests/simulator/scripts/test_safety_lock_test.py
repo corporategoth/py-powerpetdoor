@@ -4,17 +4,14 @@
 # https://opensource.org/licenses/MIT
 
 """Tests for the safety_lock_test built-in script."""
+
 from __future__ import annotations
 
 import pytest
 
-from powerpetdoor.simulator.scripting import get_builtin_script, YAML_AVAILABLE
+from powerpetdoor.simulator.scripting import YAML_AVAILABLE, get_builtin_script
 
-
-requires_yaml = pytest.mark.skipif(
-    not YAML_AVAILABLE,
-    reason="PyYAML not installed"
-)
+requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
 
 
 @requires_yaml
@@ -32,8 +29,7 @@ class TestSafetyLockTest:
 
         # Find trigger_sensor actions
         triggers = [
-            s for s in script.steps
-            if s.action == "trigger_sensor" or s.action == "trigger"
+            s for s in script.steps if s.action == "trigger_sensor" or s.action == "trigger"
         ]
         sensors = [s.params.get("sensor", "") for s in triggers]
 
@@ -64,8 +60,10 @@ class TestSafetyLockTest:
         # Outside sensor should NOT open door
         simulator.trigger_sensor("outside")
         import asyncio
+
         await asyncio.sleep(0.3)
         from powerpetdoor.const import DOOR_STATE_CLOSED
+
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
         # Inside sensor SHOULD open door
@@ -88,6 +86,7 @@ class TestSafetyLockTestMessages:
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         status_updates = message_capture.find_status_updates()
@@ -96,18 +95,16 @@ class TestSafetyLockTestMessages:
     @pytest.mark.asyncio
     async def test_inside_sensor_opens_door(self, runner, simulator, message_capture):
         """Inside sensor should open door even with safety lock enabled."""
-        from powerpetdoor.const import DOOR_STATE_RISING, DOOR_STATE_HOLDING
+        from powerpetdoor.const import DOOR_STATE_HOLDING, DOOR_STATE_RISING
 
         script = get_builtin_script("safety_lock_test")
         await runner.run(script, verbose=False)
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         statuses = message_capture.get_status_sequence()
         # Inside sensor should trigger door opening
-        has_open = any(
-            s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING)
-            for s in statuses
-        )
+        has_open = any(s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING) for s in statuses)
         assert has_open, f"Inside sensor should open door: {statuses}"
