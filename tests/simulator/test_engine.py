@@ -207,6 +207,26 @@ class TestOpenClose:
         ]
 
     @pytest.mark.asyncio
+    async def test_close_noop_when_already_closing(self, engine, state):
+        """close() is a no-op while the door is already closing."""
+        engine.open(hold=True)
+        await engine.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+        assert engine.close() is True
+        assert state.door_status == DOOR_STATE_CLOSING_TOP_OPEN
+
+        assert engine.close() is False  # already closing -> no-op
+        assert state.door_status == DOOR_STATE_CLOSING_TOP_OPEN
+        await engine.wait_for_status(DOOR_STATE_CLOSED, timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_run_started_in_terminal_state_exits(self, engine, state):
+        """A sequence started from a terminal state performs no motion."""
+        assert state.door_status == DOOR_STATE_CLOSED
+        await asyncio.wait_for(engine._run(), timeout=1.0)
+        assert state.door_status == DOOR_STATE_CLOSED
+        assert state.total_open_cycles == 0
+
+    @pytest.mark.asyncio
     async def test_close_reverses_rising_to_closing_mid(self, engine, state):
         """close() while RISING reverses position-consistently to CLOSING_MID."""
         engine.open()
@@ -382,6 +402,23 @@ class TestAutoRetract:
         await engine.wait_for_status(DOOR_STATE_CLOSED, timeout=5.0)
 
     @pytest.mark.asyncio
+    async def test_outside_sensor_during_close_causes_retract(self, engine, state):
+        """An outside trigger during closing activates it (inside cleared)."""
+        state.inside_sensor_active = True  # must be displaced by the outside trigger
+        engine.open(hold=True)
+        await engine.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+        state.inside_sensor_active = False
+        engine.close()
+        assert state.door_status == DOOR_STATE_CLOSING_TOP_OPEN
+
+        engine.trigger_sensor("outside")
+        assert state.outside_sensor_active is True
+        assert state.inside_sensor_active is False
+
+        await engine.wait_for_status(DOOR_STATE_CLOSED, timeout=5.0)
+        assert state.total_auto_retracts == 1
+
+    @pytest.mark.asyncio
     async def test_no_retract_when_autoretract_disabled(self, engine, state):
         """With autoretract off, a blocking sensor does not reverse the door."""
         state.autoretract = False
@@ -420,6 +457,13 @@ class TestTriggerSensorGuards:
         assert state.door_status == DOOR_STATE_CLOSED
 
     @pytest.mark.asyncio
+    async def test_disabled_outside_sensor_ignores_trigger(self, engine, state):
+        """No door motion when the outside sensor is disabled."""
+        state.outside = False
+        engine.trigger_sensor("outside")
+        assert state.door_status == DOOR_STATE_CLOSED
+
+    @pytest.mark.asyncio
     async def test_safety_lock_ignores_outside_trigger(self, engine, state):
         """Safety lock blocks the outside sensor only."""
         state.safety_lock = True
@@ -430,6 +474,27 @@ class TestTriggerSensorGuards:
         assert state.door_status == DOOR_STATE_RISING
 
     @pytest.mark.asyncio
+    async def test_out_of_schedule_trigger_is_ignored(self, engine, state):
+        """With timers on, a trigger outside every schedule window is ignored."""
+        from powerpetdoor.simulator import Schedule
+
+        state.auto = True
+        # A zero-length window never allows the sensor
+        state.schedules[0] = Schedule(
+            index=0,
+            enabled=True,
+            days_of_week=[1, 1, 1, 1, 1, 1, 1],
+            inside=True,
+            start_hour=0,
+            start_min=0,
+            end_hour=0,
+            end_min=0,
+        )
+        engine.trigger_sensor("inside")
+        assert state.door_status == DOOR_STATE_CLOSED
+        assert engine._task is None
+
+    @pytest.mark.asyncio
     async def test_trigger_notifies_and_opens_when_closed(self, engine, state):
         """A trigger from CLOSED emits a notification and opens the door."""
         notifications: list[tuple[str, str]] = []
@@ -438,6 +503,21 @@ class TestTriggerSensorGuards:
         engine.trigger_sensor("outside")
         assert state.door_status == DOOR_STATE_RISING
         assert notifications == [("outside", SENSOR_STATE_ON)]
+
+    @pytest.mark.asyncio
+    async def test_raising_notify_callback_does_not_block_door(self, engine, state, caplog):
+        """A crashing notification callback is logged; the door still opens."""
+        import logging
+
+        def bad_notify(sensor: str, sensor_state: str) -> None:
+            raise RuntimeError("notify down")
+
+        engine.notify_sensor = bad_notify
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.simulator.engine"):
+            engine.trigger_sensor("inside")
+
+        assert state.door_status == DOOR_STATE_RISING
+        assert "sensor notification callback failed" in caplog.text
 
 
 class TestActivateSensor:
@@ -470,11 +550,128 @@ class TestActivateSensor:
         assert state.inside_sensor_active is False
 
     @pytest.mark.asyncio
+    async def test_outside_duration_deactivates_after_expiry(self, engine, state):
+        """A timed outside activation auto-deactivates after the duration."""
+        state.power = False
+        engine.activate_sensor("outside", 0.02)
+        assert state.outside_sensor_active is True
+
+        assert len(engine._aux_tasks) == 1
+        await asyncio.gather(*engine._aux_tasks)
+        assert state.outside_sensor_active is False
+
+    @pytest.mark.asyncio
+    async def test_activation_with_door_open_does_not_retrigger(self, engine, state):
+        """Activating a sensor while the door is up starts no new cycle."""
+        engine.open(hold=True)
+        await engine.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+
+        engine.activate_sensor("inside", 0)
+        assert state.inside_sensor_active is True
+        assert state.door_status == DOOR_STATE_KEEPUP
+
+    @pytest.mark.asyncio
+    async def test_expiry_after_manual_clear_is_a_noop(self, engine, state):
+        """The deactivation timer does nothing if the sensor was cleared."""
+        state.power = False
+        engine.activate_sensor("inside", 0.02)
+        state.inside_sensor_active = False  # cleared out-of-band before expiry
+
+        await asyncio.gather(*engine._aux_tasks)
+        assert state.inside_sensor_active is False
+        assert state.outside_sensor_active is False
+
+    @pytest.mark.asyncio
+    async def test_unknown_sensor_name_changes_nothing(self, engine, state):
+        """An unrecognized sensor name leaves both flags untouched."""
+        engine.activate_sensor("bogus", 0)
+        assert state.inside_sensor_active is False
+        assert state.outside_sensor_active is False
+        assert state.door_status == DOOR_STATE_CLOSED
+
+    @pytest.mark.asyncio
     async def test_activation_triggers_door_cycle_when_closed(self, engine, state):
         """Activating an enabled sensor with the door closed opens the door."""
         engine.activate_sensor("inside", 0)
         assert state.door_status == DOOR_STATE_RISING
         await engine.wait_for_status(DOOR_STATE_HOLDING, timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_outside_activation_triggers_door_cycle_when_closed(self, engine, state):
+        """An enabled, unlocked outside sensor also opens the closed door."""
+        engine.activate_sensor("outside", 0)
+        assert state.door_status == DOOR_STATE_RISING
+        await engine.wait_for_status(DOOR_STATE_HOLDING, timeout=2.0)
+
+
+class TestSimulateObstruction:
+    """simulate_obstruction state-dependent behavior."""
+
+    @pytest.mark.asyncio
+    async def test_obstruction_while_closed_sets_sensor(self, engine, state):
+        """From CLOSED, the obstruction arms the inside sensor."""
+        engine.simulate_obstruction()
+        assert state.inside_sensor_active is True
+        assert state.outside_sensor_active is False
+        assert state.door_status == DOOR_STATE_CLOSED
+
+    @pytest.mark.asyncio
+    async def test_obstruction_while_opening_blocks_later_close(self, engine, state):
+        """From RISING, the obstruction keeps the door open at the top."""
+        engine.open()
+        assert state.door_status == DOOR_STATE_RISING
+        engine.simulate_obstruction()
+
+        await engine.wait_for_status(DOOR_STATE_HOLDING, timeout=2.0)
+        # Well past hold time the door is still blocked open
+        await asyncio.sleep(float(state.hold_time) * 4)
+        assert state.door_status == DOOR_STATE_HOLDING
+
+        state.inside_sensor_active = False
+        engine.notify_sensors_changed()
+        await engine.wait_for_status(DOOR_STATE_CLOSED, timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_obstruction_while_holding_blocks_close(self, engine, state):
+        """From HOLDING, the obstruction prevents the close."""
+        engine.open()
+        await engine.wait_for_status(DOOR_STATE_HOLDING, timeout=2.0)
+        engine.simulate_obstruction()
+
+        await asyncio.sleep(float(state.hold_time) * 4)
+        assert state.door_status == DOOR_STATE_HOLDING
+
+        state.inside_sensor_active = False
+        engine.notify_sensors_changed()
+        await engine.wait_for_status(DOOR_STATE_CLOSED, timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_obstruction_while_closing_triggers_retract(self, engine, state):
+        """From CLOSING, the obstruction causes an auto-retract."""
+        engine.open(hold=True)
+        await engine.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+        engine.close()
+        assert state.door_status == DOOR_STATE_CLOSING_TOP_OPEN
+
+        engine.simulate_obstruction()
+        await engine.wait_for_status(DOOR_STATE_HOLDING, timeout=2.0)
+        assert state.total_auto_retracts == 1
+        await engine.wait_for_status(DOOR_STATE_CLOSED, timeout=5.0)
+
+    @pytest.mark.asyncio
+    async def test_obstruction_with_unexpected_status_still_sets_sensor(
+        self, engine, state, caplog
+    ):
+        """An unrecognized door status still arms the sensor (logged fallback)."""
+        import logging
+
+        state.door_status = "DOOR_UNKNOWN_STATE"
+        with caplog.at_level(logging.INFO, logger="powerpetdoor.simulator.engine"):
+            engine.simulate_obstruction()
+
+        assert state.inside_sensor_active is True
+        assert "door status: DOOR_UNKNOWN_STATE" in caplog.text
+        state.door_status = DOOR_STATE_CLOSED  # restore for teardown
 
 
 class TestLifecycle:
@@ -514,3 +711,17 @@ class TestLifecycle:
         engine.cancel_nowait()
         await asyncio.gather(task, return_exceptions=True)
         assert task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_stop_leaves_already_resolved_waiter_intact(self, state):
+        """stop() does not cancel a waiter whose status already arrived."""
+        engine = DoorMotionEngine(state)
+        waiter = asyncio.ensure_future(engine.wait_for_status(DOOR_STATE_RISING))
+        await asyncio.sleep(0)  # subscribe
+
+        # Resolve the waiter without starting a sequence task, so it is
+        # still registered (and already done) when stop() sweeps waiters.
+        engine._set_status(DOOR_STATE_RISING)
+        await engine.stop()
+
+        assert await waiter == DOOR_STATE_RISING

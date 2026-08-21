@@ -137,12 +137,32 @@ class TestValidateScheduleEntry:
         del valid_schedule_entry[FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_HOUR]
         assert validate_schedule_entry(valid_schedule_entry) is False
 
+    def test_inside_end_time_missing_minute_fails(self, valid_schedule_entry):
+        """An inside end time without its minute field fails validation."""
+        valid_schedule_entry[FIELD_INSIDE] = True
+        del valid_schedule_entry[FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_MINUTE]
+        assert validate_schedule_entry(valid_schedule_entry) is False
+
     def test_outside_entry_validates_outside_times(self, valid_schedule_entry):
         """Test outside entry validates outside time fields."""
         valid_schedule_entry[FIELD_INSIDE] = False
         valid_schedule_entry[FIELD_OUTSIDE] = True
         # Missing outside start time
         del valid_schedule_entry[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX]
+        assert validate_schedule_entry(valid_schedule_entry) is False
+
+    def test_outside_start_time_missing_hour_fails(self, valid_schedule_entry):
+        """An outside start time without its hour field fails validation."""
+        valid_schedule_entry[FIELD_INSIDE] = False
+        valid_schedule_entry[FIELD_OUTSIDE] = True
+        del valid_schedule_entry[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_HOUR]
+        assert validate_schedule_entry(valid_schedule_entry) is False
+
+    def test_outside_end_time_missing_minute_fails(self, valid_schedule_entry):
+        """An outside end time without its minute field fails validation."""
+        valid_schedule_entry[FIELD_INSIDE] = False
+        valid_schedule_entry[FIELD_OUTSIDE] = True
+        del valid_schedule_entry[FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_MINUTE]
         assert validate_schedule_entry(valid_schedule_entry) is False
 
     def test_disabled_entry_skips_time_validation(self):
@@ -370,6 +390,17 @@ class TestCompressScheduleEdgeCases:
         with pytest.raises(ValueError, match="not a dict"):
             compress_schedule(["not-a-schedule"])
 
+    def test_entry_with_flags_but_no_time_dicts_raises(self):
+        """Both flags present but no time sub-dicts names the missing key (T7)."""
+        entry = {
+            FIELD_DAYSOFWEEK: [1, 1, 1, 1, 1, 1, 1],
+            FIELD_INSIDE: True,
+            FIELD_OUTSIDE: False,
+        }
+
+        with pytest.raises(ValueError, match="missing time field"):
+            compress_schedule([entry])
+
     def test_error_identifies_entry_position(self):
         """The ValueError names the offending entry's position (T7)."""
         good = self.create_schedule_entry(0, [1] * 7, inside=True, in_start=(6, 0), in_end=(10, 0))
@@ -448,6 +479,59 @@ class TestCompressScheduleEdgeCases:
 
         assert result == []
 
+    def test_compress_outside_only_entry(self):
+        """An outside-only entry keeps outside times and zeroes inside times."""
+        entry = self.create_schedule_entry(
+            0, [0, 1, 1, 1, 1, 1, 0], outside=True, out_start=(9, 30), out_end=(18, 15)
+        )
+
+        result = compress_schedule([entry])
+
+        assert len(result) == 1
+        assert result[0][FIELD_INSIDE] is False
+        assert result[0][FIELD_OUTSIDE] is True
+        out_start_key = FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX
+        out_end_key = FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX
+        in_start_key = FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX
+        assert result[0][out_start_key] == {FIELD_HOUR: 9, FIELD_MINUTE: 30}
+        assert result[0][out_end_key] == {FIELD_HOUR: 18, FIELD_MINUTE: 15}
+        assert result[0][in_start_key] == {FIELD_HOUR: 0, FIELD_MINUTE: 0}
+
+    def test_compress_swaps_inverted_outside_times(self):
+        """Inverted outside times are normalized (start <= end)."""
+        entry = self.create_schedule_entry(
+            0, [1, 0, 0, 0, 0, 0, 0], outside=True, out_start=(18, 0), out_end=(6, 0)
+        )
+
+        result = compress_schedule([entry])
+
+        assert len(result) == 1
+        out_start_key = FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX
+        out_end_key = FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX
+        assert result[0][out_start_key] == {FIELD_HOUR: 6, FIELD_MINUTE: 0}
+        assert result[0][out_end_key] == {FIELD_HOUR: 18, FIELD_MINUTE: 0}
+
+    def test_compress_keeps_mismatched_inside_outside_separate(self):
+        """Inside and outside windows that differ stay separate entries."""
+        entries = [
+            self.create_schedule_entry(
+                0, [1, 0, 0, 0, 0, 0, 0], inside=True, in_start=(6, 0), in_end=(10, 0)
+            ),
+            self.create_schedule_entry(
+                1, [1, 0, 0, 0, 0, 0, 0], outside=True, out_start=(14, 0), out_end=(18, 0)
+            ),
+        ]
+
+        result = compress_schedule(entries)
+
+        assert len(result) == 2
+        inside_entries = [e for e in result if e[FIELD_INSIDE]]
+        outside_entries = [e for e in result if e[FIELD_OUTSIDE]]
+        assert len(inside_entries) == 1
+        assert len(outside_entries) == 1
+        assert inside_entries[0][FIELD_OUTSIDE] is False
+        assert outside_entries[0][FIELD_INSIDE] is False
+
 
 # ============================================================================
 # Schedule Content Key Tests
@@ -518,6 +602,31 @@ class TestScheduleEntryContentKey:
         # Should not raise, uses defaults
         key = schedule_entry_content_key(entry)
         assert key is not None
+
+    def test_string_flags_normalize_to_booleans(self):
+        """Door-style '1'/'0' strings for enabled/inside/outside match bools."""
+        bool_entry = {
+            FIELD_DAYSOFWEEK: [1, 1, 0, 0, 0, 0, 0],
+            FIELD_INSIDE: True,
+            FIELD_OUTSIDE: False,
+            FIELD_ENABLED: True,
+        }
+        string_entry = {
+            FIELD_DAYSOFWEEK: [1, 1, 0, 0, 0, 0, 0],
+            FIELD_INSIDE: "1",
+            FIELD_OUTSIDE: "0",
+            FIELD_ENABLED: "1",
+        }
+
+        assert schedule_entry_content_key(string_entry) == schedule_entry_content_key(bool_entry)
+
+    def test_string_disabled_flag_differs_from_enabled(self):
+        """enabled '0' normalizes to False and changes the key."""
+        enabled = {FIELD_DAYSOFWEEK: [1] * 7, FIELD_INSIDE: True, FIELD_ENABLED: "1"}
+        disabled = {FIELD_DAYSOFWEEK: [1] * 7, FIELD_INSIDE: True, FIELD_ENABLED: "0"}
+
+        assert schedule_entry_content_key(enabled) != schedule_entry_content_key(disabled)
+        assert schedule_entry_content_key(disabled)[3] is False
 
 
 # ============================================================================
@@ -629,6 +738,22 @@ class TestComputeScheduleDiff:
         assert len(to_set) == 1
         assert to_set[0].get("index") == 0
         assert set(to_delete) == {1, 2}  # Monday and Tuesday's indices deleted
+
+    def test_new_entry_skips_indices_still_in_use(self):
+        """A brand-new entry gets the lowest index not already occupied."""
+        current = [self.create_entry(0, [1, 0, 0, 0, 0, 0, 0])]  # Sunday, kept
+        new = [
+            self.create_entry(0, [1, 0, 0, 0, 0, 0, 0]),  # Sunday: matched at index 0
+            self.create_entry(1, [0, 1, 0, 0, 0, 0, 0]),  # Monday: brand new
+        ]
+
+        to_delete, to_set = compute_schedule_diff(current, new)
+
+        assert to_delete == []
+        assert len(to_set) == 1
+        # Index 0 is still occupied by the matched Sunday entry, so the new
+        # Monday entry must skip past it to index 1.
+        assert to_set[0][FIELD_INDEX] == 1
 
     def test_diff_does_not_mutate_inputs(self):
         """compute_schedule_diff must not modify either input list (L13)."""

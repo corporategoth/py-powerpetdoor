@@ -13,10 +13,7 @@ import json
 import pytest
 
 from powerpetdoor import PowerPetDoorClient
-from powerpetdoor.const import (
-    FIELD_SUCCESS,
-    PONG,
-)
+from powerpetdoor.const import FIELD_SUCCESS
 
 # ============================================================================
 # Mock Transport and Protocol
@@ -68,100 +65,16 @@ class MockDeviceProtocol:
 
     def __init__(self, client: PowerPetDoorClient):
         self.client = client
-        self._auto_respond = True
-        self._response_delay = 0.0
-
-    async def send_response(self, response: dict) -> None:
-        """Simulate device sending a response."""
-        if self._response_delay > 0:
-            await asyncio.sleep(self._response_delay)
-        json_data = json.dumps(response).encode("ascii")
-        self.client.data_received(json_data)
 
     def send_response_sync(self, response: dict) -> None:
         """Synchronously send a response (for non-async contexts)."""
         json_data = json.dumps(response).encode("ascii")
         self.client.data_received(json_data)
 
-    def respond_to_ping(self, msg_id: int, ping_value: str) -> None:
-        """Send PONG response to a PING."""
-        self.send_response_sync(
-            {FIELD_SUCCESS: "true", "CMD": PONG, PONG: ping_value, "msgId": msg_id}
-        )
-
     def respond_success(self, msg_id: int, cmd: str, **extra) -> None:
-        """Send a generic success response."""
-        response = {FIELD_SUCCESS: "true", "CMD": cmd, "msgId": msg_id, **extra}
+        """Send a generic success response (msgID: the response casing)."""
+        response = {FIELD_SUCCESS: "true", "CMD": cmd, "msgID": msg_id, **extra}
         self.send_response_sync(response)
-
-    def respond_failure(self, msg_id: int, cmd: str, error: str = "error") -> None:
-        """Send a generic failure response."""
-        self.send_response_sync(
-            {FIELD_SUCCESS: "false", "CMD": cmd, "msgId": msg_id, "error": error}
-        )
-
-
-# ============================================================================
-# Mock Device Responses
-# ============================================================================
-
-MOCK_DOOR_STATUS = {
-    "door_status": "DOOR_CLOSED",
-}
-
-MOCK_SETTINGS = {
-    "inside": True,
-    "outside": True,
-    "auto": False,
-    "power": True,
-}
-
-MOCK_SENSORS = {
-    "inside_active": True,
-    "outside_active": True,
-    "auto_active": False,
-}
-
-MOCK_DOOR_BATTERY = {
-    "batteryPercent": 85,
-    "isDischarging": False,
-    "isCharging": True,
-}
-
-MOCK_HARDWARE = {
-    "hwVersion": "1.0",
-    "fwVersion": "2.5.0",
-}
-
-MOCK_SCHEDULE_LIST = [0, 1, 2]
-
-MOCK_SCHEDULE_ENTRY = {
-    "index": 0,
-    "daysOfWeek": [1, 1, 1, 1, 1, 0, 0],  # Mon-Fri
-    "inside": True,
-    "outside": False,
-    "enabled": True,
-    "in_start_time": {"hour": 6, "min": 0},
-    "in_end_time": {"hour": 20, "min": 0},
-    "out_start_time": {"hour": 0, "min": 0},
-    "out_end_time": {"hour": 0, "min": 0},
-}
-
-
-def create_mock_response(cmd: str, msg_id: int, **extra) -> dict:
-    """Factory function to create mock device responses."""
-    responses = {
-        "DOOR_STATUS": {**MOCK_DOOR_STATUS, "CMD": "DOOR_STATUS"},
-        "GET_SETTINGS": {**MOCK_SETTINGS, "CMD": "GET_SETTINGS"},
-        "GET_SENSORS": {**MOCK_SENSORS, "CMD": "GET_SENSORS"},
-        "DOOR_BATTERY": {**MOCK_DOOR_BATTERY, "CMD": "DOOR_BATTERY"},
-        "GET_HW_INFO": {**MOCK_HARDWARE, "CMD": "GET_HW_INFO"},
-        "GET_SCHEDULE_LIST": {"schedules": MOCK_SCHEDULE_LIST, "CMD": "GET_SCHEDULE_LIST"},
-        "GET_SCHEDULE": {**MOCK_SCHEDULE_ENTRY, "CMD": "GET_SCHEDULE"},
-    }
-
-    base_response = responses.get(cmd, {"CMD": cmd})
-    return {FIELD_SUCCESS: "true", "msgId": msg_id, **base_response, **extra}
 
 
 # ============================================================================

@@ -287,12 +287,11 @@ class CommandHandler(
             # Handle implicit help/? subcommand
             if subcmd in ("help", "?"):
                 # If we have args, show arg help instead of subcommand help
+                # (the loop condition guarantees info.subcommands is non-empty)
                 if info.args:
                     help_text = self._get_arg_help(info, cmd_path)
-                elif info.subcommands:
-                    help_text = self._get_subcommand_help(info, cmd_path)
                 else:
-                    help_text = f"{' '.join(cmd_path)}: {info.description or 'No help available.'}"
+                    help_text = self._get_subcommand_help(info, cmd_path)
                 return CommandResult(True, help_text)
 
             if subcmd in info.subcommands:

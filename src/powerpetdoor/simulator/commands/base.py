@@ -12,6 +12,7 @@ used by all command handlers.
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -21,6 +22,56 @@ class CommandResult:
     success: bool
     message: str
     data: dict | None = None
+
+
+class BoolToggleCommandMixin:
+    """Shared toggle-or-set helper for boolean state commands.
+
+    Inherited by both ButtonCommandsMixin and SettingsCommandsMixin so the
+    toggle/set/broadcast behavior is implemented exactly once (DRY).
+    """
+
+    simulator: Any  # DoorSimulator (loose annotation avoids a circular import)
+
+    def _toggle_bool(
+        self,
+        attr: str,
+        name: str,
+        value: bool | None,
+        fmt: str = "ON|OFF",
+        broadcast_func: str | None = None,
+    ) -> "CommandResult":
+        """Toggle or set a boolean state attribute.
+
+        Args:
+            attr: The attribute name on the state object
+            name: Display name for the setting
+            value: True/False to set, None to toggle
+            fmt: Format string for display ("ON|OFF" or "enabled|disabled")
+            broadcast_func: Name of specific broadcast method to call on simulator
+                           (e.g., "broadcast_safety_lock"). If None, no broadcast.
+        """
+        s = self.simulator.state
+        if value is None:
+            current = getattr(s, attr)
+            setattr(s, attr, not current)
+            new_val = not current
+        else:
+            setattr(s, attr, value)
+            new_val = value
+
+        if fmt == "enabled|disabled":
+            state = "enabled" if new_val else "disabled"
+        else:
+            state = "ON" if new_val else "OFF"
+
+        # Broadcast specific setting change to connected PPD clients
+        if broadcast_func:
+            func = getattr(self.simulator, broadcast_func, None)
+            if func:
+                func(new_val)
+
+        return CommandResult(True, f"{name}: {state}")
 
 
 @dataclass
@@ -124,7 +175,7 @@ def parse_arg(value: str, spec: ArgSpec) -> tuple[any, str | None]:
 
     elif spec.arg_type == "choice":
         v = value.lower()
-        if spec.choices and v in [c.lower() for c in spec.choices]:
+        if spec.choices:
             # Return the original case from choices
             for c in spec.choices:
                 if c.lower() == v:

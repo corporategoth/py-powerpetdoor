@@ -117,6 +117,20 @@ class TestSchedule:
         assert "out_start_time" in result
         assert "out_end_time" in result
 
+    def test_to_dict_outside_sensor(self):
+        """An outside-only entry zeroes the inside times and fills out*."""
+        schedule = Schedule(
+            index=2, outside=True, start_hour=7, start_min=30, end_hour=19, end_min=15
+        )
+        result = schedule.to_dict()
+        assert result["outside"] is True
+        assert result["inside"] is False
+        assert result["out_start_time"] == {"hour": 7, "min": 30}
+        assert result["out_end_time"] == {"hour": 19, "min": 15}
+        # Inside times default to zero for a non-inside entry
+        assert result["in_start_time"] == {"hour": 0, "min": 0}
+        assert result["in_end_time"] == {"hour": 0, "min": 0}
+
     def test_from_dict(self):
         """Should create from protocol dict format."""
         data = {
@@ -140,6 +154,31 @@ class TestSchedule:
         assert schedule.start_min == 0
         assert schedule.end_hour == 18
         assert schedule.end_min == 30
+
+    def test_from_dict_outside_sensor_times(self):
+        """An outside-sensor entry reads its times from the out* fields."""
+        data = {
+            "index": 4,
+            "enabled": "1",
+            "daysOfWeek": [1, 1, 1, 1, 1, 1, 1],
+            "inside": False,
+            "outside": True,
+            "in_start_time": {"hour": 0, "min": 0},
+            "in_end_time": {"hour": 0, "min": 0},
+            "out_start_time": {"hour": 7, "min": 15},
+            "out_end_time": {"hour": 19, "min": 45},
+        }
+        schedule = Schedule.from_dict(data)
+        assert schedule.outside is True
+        assert schedule.inside is False
+        assert (schedule.start_hour, schedule.start_min) == (7, 15)
+        assert (schedule.end_hour, schedule.end_min) == (19, 45)
+
+    def test_from_dict_no_sensor_uses_defaults(self):
+        """An entry for neither sensor falls back to the default window."""
+        schedule = Schedule.from_dict({"index": 5, "inside": False, "outside": False})
+        assert (schedule.start_hour, schedule.start_min) == (6, 0)
+        assert (schedule.end_hour, schedule.end_min) == (22, 0)
 
     def test_from_dict_legacy_bitmask(self):
         """Should handle legacy bitmask format for days_of_week."""
@@ -236,6 +275,22 @@ class TestSchedule:
         # Inside sensor should NOT be allowed (this entry is for outside only)
         assert schedule.is_sensor_allowed("inside", 12, 0, 0) is False
 
+    def test_is_sensor_allowed_inactive_day(self):
+        """The right sensor at the right time is still blocked on an off day."""
+        # Protocol day order: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]; Monday off
+        schedule = Schedule(
+            index=0,
+            enabled=True,
+            days_of_week=[1, 0, 1, 1, 1, 1, 1],
+            inside=True,
+            start_hour=8,
+            end_hour=20,
+        )
+        # 10:00 within the window, but Monday (Python weekday 0) is inactive
+        assert schedule.is_sensor_allowed("inside", 10, 0, 0) is False
+        # The same time on Tuesday is allowed
+        assert schedule.is_sensor_allowed("inside", 10, 0, 1) is True
+
     def test_is_sensor_allowed_crosses_midnight(self):
         """Should handle schedules that cross midnight."""
         schedule = Schedule(
@@ -309,6 +364,31 @@ class TestDoorSimulatorState:
         assert settings[FIELD_INSIDE] == "0"
         assert settings[FIELD_AUTO] == "1"
         assert FIELD_TZ in settings
+
+    def test_get_settings_converts_timezone_to_posix(self):
+        """With the tz cache ready, settings carry the POSIX rule."""
+        from powerpetdoor import tz_utils
+
+        tz_utils.init_timezone_cache_sync()
+        state = DoorSimulatorState(timezone="America/New_York")
+        assert state.get_settings()[FIELD_TZ] == "EST5EDT,M3.2.0,M11.1.0"
+
+    def test_get_settings_keeps_raw_timezone_when_cache_uninitialized(self, monkeypatch):
+        """Without the tz cache, the raw stored value is reported."""
+        from powerpetdoor.simulator import state as state_module
+
+        monkeypatch.setattr(state_module, "is_cache_initialized", lambda: False)
+        state = DoorSimulatorState(timezone="America/New_York")
+        assert state.get_settings()[FIELD_TZ] == "America/New_York"
+
+    def test_get_settings_keeps_raw_timezone_when_unconvertible(self, monkeypatch):
+        """An unconvertible zone keeps the raw stored value."""
+        from powerpetdoor.simulator import state as state_module
+
+        monkeypatch.setattr(state_module, "is_cache_initialized", lambda: True)
+        monkeypatch.setattr(state_module, "get_posix_tz_string", lambda tz: None)
+        state = DoorSimulatorState(timezone="America/New_York")
+        assert state.get_settings()[FIELD_TZ] == "America/New_York"
 
     def test_get_notifications(self):
         """get_notifications should return notification settings."""
@@ -504,6 +584,19 @@ class TestGetTzinfo:
         assert january.utcoffset() == timedelta(hours=-5)
         july = datetime(2026, 7, 15, 12, 0, tzinfo=tzinfo)
         assert july.utcoffset() == timedelta(hours=-4)
+
+    def test_stale_posix_mapping_falls_back_to_utc(self, monkeypatch, caplog):
+        """A POSIX value mapping to a nonexistent IANA zone falls back to UTC."""
+        import logging
+
+        from powerpetdoor.simulator import state as state_module
+
+        # The cache maps the POSIX rule to a zone tzdata cannot resolve
+        monkeypatch.setattr(state_module, "find_iana_for_posix", lambda posix: "Not/A_Zone")
+        state = DoorSimulatorState(timezone="XXX-1YYY,M3.2.0,M11.1.0")
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.state"):
+            assert state.get_tzinfo().key == "UTC"
+        assert "falling back to UTC" in caplog.text
 
     def test_unresolvable_timezone_falls_back_to_utc_with_single_warning(self, caplog):
         """Unknown values fall back to UTC and warn exactly once per value."""

@@ -8,12 +8,22 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import os
+import socket
 import sys
 
 import pytest
 
-from powerpetdoor.simulator import ctl
+from powerpetdoor.simulator import cli, ctl
+from powerpetdoor.simulator.commands.base import (
+    ArgSpec,
+    CommandInfo,
+    SubcommandInfo,
+    get_command_registry,
+)
+from powerpetdoor.simulator.commands.history import History
+from powerpetdoor.simulator.commands.info import InfoCommandsMixin
 from powerpetdoor.simulator.ctl import LocalCommandHandler
 
 # ============================================================================
@@ -157,7 +167,103 @@ class TestSendCommand:
         await server.wait_closed()
         success, msg = await send_command_async(port, "status")
         assert success is False
-        assert "Connection refused" in msg
+        assert msg == f"Connection refused to 127.0.0.1:{port}"
+
+    @pytest.mark.asyncio
+    async def test_error_response_is_parsed(self):
+        server, port = await start_fake_daemon(make_line_responder(b"ERROR: bad thing\n"))
+        try:
+            success, msg = await send_command_async(port, "status")
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert success is False
+        assert msg == "ERROR: bad thing"
+
+    @pytest.mark.asyncio
+    async def test_connection_closed_without_any_response(self):
+        """A daemon that reads the command and closes without replying must
+        produce an explanatory message."""
+
+        async def read_then_close(reader, writer):
+            await reader.readline()
+            writer.close()
+
+        server, port = await start_fake_daemon(read_then_close)
+        try:
+            success, msg = await send_command_async(port, "status")
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert success is False
+        assert msg == f"Connection closed without response from 127.0.0.1:{port}"
+
+    def test_connect_timeout_message(self, monkeypatch):
+        """A TCP connect timeout gets its own explicit message."""
+
+        def timeout_connect(self, addr):
+            raise TimeoutError
+
+        monkeypatch.setattr(socket.socket, "connect", timeout_connect)
+        success, msg = ctl.send_command("127.0.0.1", 12345, "status", 0.5)
+        assert success is False
+        assert msg == "Connection timed out to 127.0.0.1:12345"
+
+    def test_unexpected_connect_error_message(self):
+        """Non-timeout, non-refused failures fall into the generic branch."""
+        # Port 70000 is out of range: connect() raises OverflowError
+        success, msg = ctl.send_command("127.0.0.1", 70000, "status", 0.5)
+        assert success is False
+        assert msg.startswith("Error: ")
+        assert "0-65535" in msg
+
+
+# ============================================================================
+# check_connection
+# ============================================================================
+
+
+class TestCheckConnection:
+    """Tests for the pre-session connectivity probe."""
+
+    @pytest.mark.asyncio
+    async def test_listening_daemon_reports_connected(self):
+        async def accept_only(reader, writer):
+            await reader.read()
+            writer.close()
+
+        server, port = await start_fake_daemon(accept_only)
+        try:
+            connected, error = ctl.check_connection("127.0.0.1", port, timeout=2.0)
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert connected is True
+        assert error == ""
+
+    @pytest.mark.asyncio
+    async def test_refused_reports_not_running(self):
+        server, port = await start_fake_daemon(make_line_responder(b""))
+        server.close()
+        await server.wait_closed()
+        connected, error = ctl.check_connection("127.0.0.1", port, timeout=2.0)
+        assert connected is False
+        assert error == f"Connection refused - simulator not running on 127.0.0.1:{port}"
+
+    def test_timeout_reports_timed_out(self, monkeypatch):
+        def timeout_connect(self, addr):
+            raise TimeoutError
+
+        monkeypatch.setattr(socket.socket, "connect", timeout_connect)
+        connected, error = ctl.check_connection("127.0.0.1", 12345, timeout=0.5)
+        assert connected is False
+        assert error == "Connection timed out to 127.0.0.1:12345"
+
+    def test_unexpected_error_reported(self):
+        connected, error = ctl.check_connection("127.0.0.1", 70000, timeout=0.5)
+        assert connected is False
+        assert error.startswith("Connection error: ")
+        assert "0-65535" in error
 
 
 # ============================================================================
@@ -206,7 +312,167 @@ class TestLocalCommandHandler:
         handler = LocalCommandHandler(history=None)
         result = handler.execute("definitely_not_a_command")
         assert result.success is False
-        assert "Unknown command" in result.message
+        assert result.message == "Unknown command: definitely_not_a_command"
+
+    def test_empty_line_is_not_local(self):
+        handler = LocalCommandHandler(history=None)
+        assert handler.is_local_command("") is False
+
+    def test_unknown_command_is_not_local(self):
+        handler = LocalCommandHandler(history=None)
+        assert handler.is_local_command("frobnicate") is False
+
+    def test_execute_blank_line(self):
+        handler = LocalCommandHandler(history=None)
+        result = handler.execute("   ")
+        assert result.success is False
+        assert result.message == "Empty command"
+
+
+# ============================================================================
+# LocalCommandHandler registry-based dispatch paths
+# ============================================================================
+
+
+@pytest.fixture
+def registry_command():
+    """Inject synthetic commands into the registry, removed on teardown.
+
+    init_command_sets() is forced first so the cached highlighting sets never
+    include the synthetic names.
+    """
+    from powerpetdoor.simulator.prompt_common import init_command_sets
+
+    init_command_sets()
+    registry = get_command_registry()
+    added: list[str] = []
+
+    def add(name: str, **kwargs) -> CommandInfo:
+        info = CommandInfo(name=name, **kwargs)
+        registry[name] = info
+        added.append(name)
+        return info
+
+    yield add
+    for name in added:
+        registry.pop(name, None)
+
+
+class TestLocalCommandDispatch:
+    """Tests for execute()'s registry traversal and help generation."""
+
+    def test_subcommand_help_generated(self):
+        """'<cmd> help' on a subcommand-bearing command lists subcommands."""
+        handler = LocalCommandHandler(history=None)
+        result = handler.execute("broadcast help")
+        assert result.success is True
+        lines = result.message.split("\n")
+        assert lines[0] == "broadcast subcommands:"
+        assert "  status - Broadcast door status" in lines
+
+    def test_arg_help_generated_during_traversal(self):
+        """'<cmd> help' on a command with args AND subcommands shows arg help."""
+        handler = LocalCommandHandler(history=None)
+        result = handler.execute("auto help")
+        assert result.success is True
+        assert result.message.startswith("auto [on|off]")
+        assert "Arguments:" in result.message
+
+    def test_traversal_into_subcommand_handler_error(self):
+        """A handler exception is reported, not raised (broadcast needs a
+        simulator, which ctl does not have)."""
+        handler = LocalCommandHandler(history=None)
+        result = handler.execute("broadcast status")
+        assert result.success is False
+        assert result.message == "Error: 'NoneType' object has no attribute 'protocols'"
+
+    def test_unknown_subcommand_lists_alternatives(self):
+        handler = LocalCommandHandler(history=None)
+        result = handler.execute("broadcast bogus")
+        assert result.success is False
+        assert result.message == (
+            "Unknown broadcast subcommand: bogus\n"
+            "Available: all, battery, hwinfo, notifications, schedules, settings, stats, status"
+        )
+
+    def test_subcommand_without_handler_falls_through_to_parent(self, registry_command):
+        """A registered subcommand with no handler is treated as an argument
+        of the parent command."""
+        registry_command(
+            "loctest_nohandler_sub",
+            handler=InfoCommandsMixin.help,
+            subcommands={"sub": SubcommandInfo(name="sub", handler=None)},
+        )
+        handler = LocalCommandHandler(history=None)
+        result = handler.execute("loctest_nohandler_sub sub")
+        assert result.success is False
+        assert result.message == "Unexpected argument(s): sub\nUsage: loctest_nohandler_sub"
+
+    def test_args_stop_subcommand_traversal(self, registry_command):
+        """A word that is not a subcommand parses as an argument when the
+        command accepts arguments."""
+        registry_command(
+            "loctest_args",
+            handler=InfoCommandsMixin.history,
+            args=[ArgSpec("action", "string", required=False, choices=["clear"])],
+            subcommands={"sub": SubcommandInfo(name="sub", handler=InfoCommandsMixin.help)},
+        )
+        handler = LocalCommandHandler(history=History("none"))
+        result = handler.execute("loctest_args zap")
+        assert result.success is False
+        assert result.message == "Invalid argument: zap. Use 'clear' or a number."
+
+    def test_traversal_into_subcommand_with_handler_succeeds(self, registry_command):
+        registry_command(
+            "loctest_deep",
+            handler=InfoCommandsMixin.history,
+            subcommands={"sub": SubcommandInfo(name="sub", handler=InfoCommandsMixin.help)},
+        )
+        handler = LocalCommandHandler(history=None)
+        result = handler.execute("loctest_deep sub")
+        assert result.success is True
+        assert result.message.startswith("Commands:")
+
+    def test_command_without_handler_reports_no_handler(self, registry_command):
+        registry_command("loctest_nohandler", handler=None)
+        handler = LocalCommandHandler(history=None)
+        result = handler.execute("loctest_nohandler")
+        assert result.success is False
+        assert result.message == "No handler for: loctest_nohandler"
+
+    def test_arg_command_help_request(self):
+        handler = LocalCommandHandler(history=None)
+        result = handler.execute("history help")
+        assert result.success is True
+        assert result.message.startswith("history [action]")
+        assert "Arguments:" in result.message
+
+    def test_arg_parse_error_includes_usage(self):
+        handler = LocalCommandHandler(history=None)
+        result = handler.execute("debug frob")
+        assert result.success is False
+        assert result.message == "'frob' is not valid. Use on/off\nUsage: debug [on|off]"
+
+    def test_extra_args_rejected_for_arg_command(self):
+        handler = LocalCommandHandler(history=None)
+        result = handler.execute("history 1 2")
+        assert result.success is False
+        assert result.message == "Unexpected argument(s): 2\nUsage: history [action]"
+
+    def test_arg_command_executes_with_history(self):
+        history = History("none")
+        history.prompt_toolkit_history.append_string("status")
+        history.prompt_toolkit_history.append_string("help")
+        handler = LocalCommandHandler(history=history)
+        result = handler.execute("history")
+        assert result.success is True
+        assert result.message == "History (2 of 2 commands):\n      1  status\n      2  help"
+
+    def test_help_on_no_arg_command_shows_description(self):
+        handler = LocalCommandHandler(history=None)
+        result = handler.execute("help help")
+        assert result.success is True
+        assert result.message == "help: Show available commands"
 
 
 # ============================================================================
@@ -262,7 +528,7 @@ class TestInteractiveModePipedStdin:
         assert command_seen.is_set()
         out = capsys.readouterr().out
         assert ">>> door fine" in out
-        assert "Simulator disconnected" in out
+        assert ">>> Simulator disconnected." in out
         # No prompt_toolkit non-TTY warning / garbled output
         assert "Input is not a terminal" not in out
 
@@ -293,7 +559,7 @@ class TestCtlMain:
         assert exc_info.value.code == 0
         assert calls["command"] == "status"
 
-    def test_one_shot_failure_exit_code(self, monkeypatch):
+    def test_one_shot_failure_exit_code(self, monkeypatch, capsys):
         def fake_send(host, port, command, timeout):
             return False, "ERROR: nope"
 
@@ -303,3 +569,200 @@ class TestCtlMain:
         with pytest.raises(SystemExit) as exc_info:
             ctl.main()
         assert exc_info.value.code == 1
+        assert "ERROR: nope" in capsys.readouterr().out
+
+    def test_no_arguments_prints_help_and_exits_1(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator-ctl"])
+        with pytest.raises(SystemExit) as exc_info:
+            ctl.main()
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert "usage:" in out
+        assert "Control a running Power Pet Door simulator" in out
+
+    def test_interactive_dispatch_defaults(self, monkeypatch):
+        """-i runs the interactive loop; door port defaults to port - 1."""
+        calls = {}
+
+        async def fake_interactive(host, port, door_port, timeout, history_file):
+            calls["args"] = (host, port, door_port, timeout, history_file)
+
+        monkeypatch.setattr(ctl, "interactive_mode_async", fake_interactive)
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator-ctl", "-i", "--port", "4001"])
+        ctl.main()
+        assert calls["args"] == ("127.0.0.1", 4001, 4000, 5.0, str(ctl.HISTORY_FILE))
+
+    def test_interactive_dispatch_explicit_door_port(self, monkeypatch):
+        calls = {}
+
+        async def fake_interactive(host, port, door_port, timeout, history_file):
+            calls["args"] = (host, port, door_port, timeout, history_file)
+
+        monkeypatch.setattr(ctl, "interactive_mode_async", fake_interactive)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["ppd-simulator-ctl", "-i", "-d", "1234", "-t", "2.5", "--history", "none"],
+        )
+        ctl.main()
+        assert calls["args"] == ("127.0.0.1", 3001, 1234, 2.5, "none")
+
+    def test_one_shot_keyboard_interrupt_exits_130(self, monkeypatch, capsys):
+        """Ctrl-C during a one-shot command must exit 130, not traceback."""
+
+        def interrupted_send(host, port, command, timeout):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(ctl, "send_command", interrupted_send)
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator-ctl", "status"])
+        with pytest.raises(SystemExit) as exc_info:
+            ctl.main()
+        assert exc_info.value.code == 130
+        assert "Interrupted." in capsys.readouterr().out
+
+    def test_interactive_keyboard_interrupt_exits_130(self, monkeypatch, capsys):
+        """Ctrl-C during interactive startup must exit 130, not traceback."""
+
+        async def interrupted_interactive(host, port, door_port, timeout, history_file):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(ctl, "interactive_mode_async", interrupted_interactive)
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator-ctl", "-i"])
+        with pytest.raises(SystemExit) as exc_info:
+            ctl.main()
+        assert exc_info.value.code == 130
+        assert "Interrupted." in capsys.readouterr().out
+
+
+# ============================================================================
+# Module import without prompt_toolkit
+# ============================================================================
+
+
+class TestModuleWithoutPromptToolkit:
+    """The module must import cleanly when prompt_toolkit is unavailable."""
+
+    def test_reload_without_prompt_toolkit(self):
+        from powerpetdoor.simulator import prompt_common
+
+        original = prompt_common.PROMPT_TOOLKIT_AVAILABLE
+        try:
+            prompt_common.PROMPT_TOOLKIT_AVAILABLE = False
+            reloaded = importlib.reload(ctl)
+            assert reloaded.PROMPT_TOOLKIT_AVAILABLE is False
+            # Local commands still work without the toolkit
+            result = reloaded.LocalCommandHandler(history=None).execute("exit")
+            assert result.exit_ctl is True
+        finally:
+            prompt_common.PROMPT_TOOLKIT_AVAILABLE = original
+            importlib.reload(ctl)
+
+
+# ============================================================================
+# _basic_readline (plain-input fallback primitive)
+# ============================================================================
+
+
+@pytest.fixture
+def pipe_stdin(monkeypatch):
+    """Replace sys.stdin with the read end of a pipe; yields the write fd."""
+    read_fd, write_fd = os.pipe()
+    stdin_file = os.fdopen(read_fd, "r")
+    monkeypatch.setattr(sys, "stdin", stdin_file)
+    yield write_fd
+    try:
+        os.close(write_fd)
+    except OSError:
+        pass
+    stdin_file.close()
+
+
+class TestBasicReadline:
+    """Tests for the non-blocking stdin reader."""
+
+    @pytest.mark.asyncio
+    async def test_returns_line_and_writes_prompt(self, pipe_stdin, capsys):
+        fut = ctl._basic_readline("PROMPT> ")
+        os.write(pipe_stdin, b"hello\n")
+        line = await asyncio.wait_for(fut, 5)
+        assert line == "hello\n"
+        assert "PROMPT> " in capsys.readouterr().out
+
+    @pytest.mark.asyncio
+    async def test_eof_returns_none(self, pipe_stdin, capsys):
+        fut = ctl._basic_readline("> ")
+        os.close(pipe_stdin)
+        line = await asyncio.wait_for(fut, 5)
+        assert line is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_does_not_consume_pending_input(self, pipe_stdin):
+        """A cancelled prompt must leave buffered stdin data untouched and
+        must not try to resolve the cancelled future."""
+        loop = asyncio.get_running_loop()
+        callback_errors: list[dict] = []
+        old_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, ctx: callback_errors.append(ctx))
+        try:
+            fut = ctl._basic_readline("> ")
+            os.write(pipe_stdin, b"later\n")
+            # One loop pass: the readability callback is scheduled, then we
+            # cancel before it runs (same batch)
+            await asyncio.sleep(0)
+            fut.cancel()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert fut.cancelled() is True
+            # No InvalidStateError from setting a result on a cancelled future
+            assert callback_errors == []
+            # The pending line was NOT consumed by the cancelled reader
+            assert sys.stdin.readline() == "later\n"
+        finally:
+            loop.set_exception_handler(old_handler)
+
+
+# ============================================================================
+# One-shot end-to-end against a real daemon
+# ============================================================================
+
+
+class TestOneShotEndToEnd:
+    """send_command against the real daemon control channel."""
+
+    @pytest.mark.asyncio
+    async def test_one_shot_roundtrip_and_shutdown(self):
+        ready = asyncio.Event()
+        ports: dict[str, int] = {}
+
+        def on_ready(door_port, control_port):
+            ports["door"] = door_port
+            ports["control"] = control_port
+            ready.set()
+
+        task = asyncio.create_task(
+            cli.run_simulator(
+                host="127.0.0.1",
+                port=0,
+                daemon=True,
+                control_port=0,
+                control_host="127.0.0.1",
+                on_ready=on_ready,
+            )
+        )
+        await asyncio.wait_for(ready.wait(), 10)
+        try:
+            ok, msg = await send_command_async(ports["control"], "status", timeout=5)
+            assert ok is True
+            assert msg.startswith("OK: ")
+            # Multi-line status arrives escaped on the wire and is unescaped
+            assert "\n" in msg
+            assert "Door:" in msg
+
+            ok, msg = await send_command_async(ports["control"], "definitely_bogus", timeout=5)
+            assert ok is False
+            assert msg == "ERROR: Unknown command: definitely_bogus. Type 'help' for commands."
+        finally:
+            ok, msg = await send_command_async(ports["control"], "shutdown", timeout=5)
+            await asyncio.wait_for(task, 10)
+        assert ok is True
+        assert msg == "OK: Shutting down..."

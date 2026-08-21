@@ -117,7 +117,7 @@ class Schedule:
 
     def to_dict(self) -> dict:
         """Convert to protocol dict format."""
-        result = {
+        result: dict = {
             FIELD_INDEX: self.index,
             FIELD_ENABLED: "1" if self.enabled else "0",
             FIELD_DAYSOFWEEK: self.days_of_week.copy(),

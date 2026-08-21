@@ -61,6 +61,8 @@ if TYPE_CHECKING:
 
 from ..const import (
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
@@ -94,6 +96,7 @@ _STATUS_WAIT_CONDITIONS: dict[str, tuple[str, ...]] = {
     "door_rising": (DOOR_STATE_RISING,),
     "door_holding": (DOOR_STATE_HOLDING,),
     "door_keepup": (DOOR_STATE_KEEPUP,),
+    "door_closing": (DOOR_STATE_CLOSING_TOP_OPEN, DOOR_STATE_CLOSING_MID_OPEN),
 }
 
 
@@ -127,7 +130,10 @@ class Script:
         if not YAML_AVAILABLE:
             raise ScriptError("PyYAML is required for script support: pip install pyyaml")
 
-        data = yaml.safe_load(content)
+        try:
+            data = yaml.safe_load(content)
+        except yaml.YAMLError as err:
+            raise ScriptError(f"Invalid script YAML: {err}") from err
         if not isinstance(data, dict):
             raise ScriptError("Script must be a YAML dictionary")
 
@@ -160,8 +166,15 @@ class Script:
 
     @classmethod
     def from_file(cls, path: Path) -> "Script":
-        """Load a script from a YAML file."""
-        content = path.read_text()
+        """Load a script from a YAML file.
+
+        Raises ScriptError for unreadable files and invalid YAML alike, so
+        callers only need to handle one error type for loader failures.
+        """
+        try:
+            content = path.read_text()
+        except OSError as err:
+            raise ScriptError(f"Cannot read script file '{path}': {err}") from err
         return cls.from_yaml(content, source_file=str(path))
 
     @classmethod
@@ -183,7 +196,7 @@ class Script:
                 continue
 
             action = parts[0]
-            params = {}
+            params: dict = {}
 
             if action == "trigger":
                 params["sensor"] = parts[1] if len(parts) > 1 else "inside"
@@ -435,6 +448,11 @@ class ScriptRunner:
             return state.door_status == DOOR_STATE_HOLDING
         elif condition == "door_keepup":
             return state.door_status == DOOR_STATE_KEEPUP
+        elif condition == "door_closing":
+            return state.door_status in (
+                DOOR_STATE_CLOSING_TOP_OPEN,
+                DOOR_STATE_CLOSING_MID_OPEN,
+            )
         elif condition == "power_on":
             return state.power
         elif condition == "power_off":

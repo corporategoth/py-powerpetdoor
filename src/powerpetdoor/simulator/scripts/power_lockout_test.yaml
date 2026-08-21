@@ -6,10 +6,9 @@ steps:
   - action: set
     name: power
     value: "off"
+  # An ignored trigger leaves the door closed immediately (no wait needed)
   - action: trigger_sensor
     sensor: inside
-  - action: wait
-    seconds: 0.5
   - action: assert
     condition: door_status
     equals: DOOR_CLOSED
@@ -25,8 +24,6 @@ steps:
     value: "on"
   - action: trigger_sensor
     sensor: inside
-  - action: wait
-    seconds: 0.5
   - action: assert
     condition: door_status
     equals: DOOR_CLOSED

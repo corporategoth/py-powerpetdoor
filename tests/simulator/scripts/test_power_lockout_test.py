@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from powerpetdoor.const import DOOR_STATE_CLOSED
+from powerpetdoor.const import CMD_GET_DOOR_OPEN_STATS, DOOR_STATE_CLOSED
 from powerpetdoor.simulator.scripting import YAML_AVAILABLE, get_builtin_script
 
 requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
@@ -22,75 +22,46 @@ class TestPowerLockoutTest:
     def test_script_exists(self):
         """The power_lockout_test script should exist and be loadable."""
         script = get_builtin_script("power_lockout_test")
-        assert "power" in script.name.lower() or "lockout" in script.name.lower()
+        assert script.name == "Power and Lockout Test"
 
     def test_script_tests_both_conditions(self):
         """Script should test both power off and command lockout."""
         script = get_builtin_script("power_lockout_test")
-
-        # Find set actions for power and cmd_lockout
         set_actions = [s for s in script.steps if s.action == "set"]
         names_set = [s.params.get("name", "") for s in set_actions]
 
         assert "power" in names_set
         assert "cmd_lockout" in names_set
 
-    @pytest.mark.asyncio
-    async def test_script_runs_successfully(self, runner, simulator):
-        """The power lockout test should complete without errors."""
-        script = get_builtin_script("power_lockout_test")
-        result = await runner.run(script, verbose=False)
+    async def test_script_passes_without_door_motion(self, runner, simulator):
+        """The script passes; the door never moved and settings are restored."""
+        result = await runner.run(get_builtin_script("power_lockout_test"), verbose=False)
+
         assert result is True
-
-    @pytest.mark.asyncio
-    async def test_door_stays_closed_throughout(self, runner, simulator):
-        """Door should stay closed when power off or lockout enabled."""
-        script = get_builtin_script("power_lockout_test")
-        await runner.run(script, verbose=False)
-        # Door should end up closed (never opened during test)
         assert simulator.state.door_status == DOOR_STATE_CLOSED
-
-    @pytest.mark.asyncio
-    async def test_settings_restored_after_test(self, runner, simulator):
-        """Power and lockout should be restored after test."""
-        script = get_builtin_script("power_lockout_test")
-        await runner.run(script, verbose=False)
-        # Script should restore these settings
+        assert simulator.state.total_open_cycles == 0
+        # Script restores the settings it toggled
         assert simulator.state.power is True
         assert simulator.state.cmd_lockout is False
 
 
 @requires_yaml
 class TestPowerLockoutTestMessages:
-    """Test messages generated during power_lockout_test script execution."""
+    """Broadcasts observed by a connected client during power_lockout_test."""
 
-    @pytest.mark.asyncio
-    async def test_generates_messages(self, runner, simulator, message_capture):
-        """Power lockout test should generate messages."""
-        script = get_builtin_script("power_lockout_test")
-        await runner.run(script, verbose=False)
+    async def test_no_status_broadcasts(self, runner, simulator, message_capture):
+        """Blocked triggers must not broadcast any door status change.
 
-        import asyncio
+        A stats broadcast after the script acts as a sentinel: once it
+        arrives, any (unexpected) earlier status broadcast would already
+        have been captured.
+        """
+        result = await runner.run(get_builtin_script("power_lockout_test"), verbose=False)
+        assert result is True
 
-        await asyncio.sleep(0.1)
+        simulator.broadcast_stats()
+        await message_capture.wait_for(
+            lambda msgs: any(m.get("CMD") == CMD_GET_DOOR_OPEN_STATS for m in msgs)
+        )
 
-        # May or may not have status updates depending on script design
-        # but should at least have some messages from stat requests
-        assert len(message_capture.messages) >= 0  # Always true, but captures any messages
-
-    @pytest.mark.asyncio
-    async def test_door_stays_closed_with_power_off(self, runner, simulator, message_capture):
-        """Door should not open when power is off."""
-        from powerpetdoor.const import DOOR_STATE_HOLDING, DOOR_STATE_RISING
-
-        script = get_builtin_script("power_lockout_test")
-        await runner.run(script, verbose=False)
-
-        import asyncio
-
-        await asyncio.sleep(0.1)
-
-        statuses = message_capture.get_status_sequence()
-        # Door should remain closed - no rising/holding states
-        has_open = any(s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING) for s in statuses)
-        assert not has_open, f"Door should NOT open during power lockout test: {statuses}"
+        assert message_capture.get_status_sequence() == []

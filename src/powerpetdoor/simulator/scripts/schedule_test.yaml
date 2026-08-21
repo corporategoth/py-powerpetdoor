@@ -9,8 +9,6 @@ steps:
     value: "1"
   - action: trigger_sensor
     sensor: inside
-  - action: wait
-    seconds: 0.2
   - action: wait_for
     condition: door_open
     timeout: 5
@@ -28,8 +26,6 @@ steps:
     index: 1
   - action: trigger_sensor
     sensor: inside
-  - action: wait
-    seconds: 0.2
   - action: wait_for
     condition: door_open
     timeout: 5

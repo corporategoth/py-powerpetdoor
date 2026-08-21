@@ -1,19 +1,19 @@
 name: "Pet Presence Hold Extension"
-description: "Tests that pet in doorway extends hold time"
+description: "Tests that pet in doorway keeps the door open past its hold time"
 steps:
   - action: set
     name: hold_time
-    value: "2"
+    value: "1"
   - action: trigger_sensor
     sensor: inside
   - action: wait_for
     condition: door_holding
     timeout: 5
-  - action: wait
-    seconds: 1.5
   - action: pet_presence
   - action: log
-    message: "Pet detected - hold timer should reset"
+    message: "Pet detected - door must stay open"
+  # Genuine time passage: wait past the 1s hold time to prove the pet
+  # presence is what keeps the door open.
   - action: wait
     seconds: 1.5
   - action: assert

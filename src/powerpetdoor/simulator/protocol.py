@@ -141,11 +141,12 @@ logger = logging.getLogger(__name__)
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
-def sanitize_log_text(text: str) -> str:
+def sanitize_log_text(text: object) -> str:
     """Neutralize terminal control characters in untrusted text.
 
-    Replaces C0 controls (except tab and newline), DEL, and C1 controls with
-    their visible ``\\xNN`` escape so network-derived data is safe to log.
+    Accepts any value (network-derived fields are not guaranteed to be
+    strings) and replaces C0 controls (except tab and newline), DEL, and C1
+    controls with their visible ``\\xNN`` escape so the result is safe to log.
     """
     return _CONTROL_CHAR_RE.sub(lambda m: f"\\x{ord(m.group()):02x}", str(text))
 
@@ -241,7 +242,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             notify_sensor=self._send_sensor_notification,
         )
 
-    def connection_made(self, transport: asyncio.Transport):
+    def connection_made(self, transport):
         peername = transport.get_extra_info("peername")
         logger.info("Simulator: Client connected from %s", peername)
         self.transport = transport

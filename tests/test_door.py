@@ -20,6 +20,7 @@ from powerpetdoor import (
     ScheduleTime,
 )
 from powerpetdoor.const import (
+    CMD_GET_SCHEDULE_LIST,
     DOOR_STATE_CLOSED,
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
@@ -235,7 +236,9 @@ class TestSchedule:
         schedule = Schedule()
         assert schedule.index == 0
         assert schedule.enabled is True
-        assert schedule.days_of_week == [1, 1, 1, 1, 1, 1, 1]  # All days
+        # All days, as real booleans - True == 1 would mask an int regression (L2)
+        assert schedule.days_of_week == [True, True, True, True, True, True, True]
+        assert all(isinstance(day, bool) for day in schedule.days_of_week)
         assert schedule.inside is False
         assert schedule.outside is False
         assert schedule.start.hour == 6
@@ -263,6 +266,57 @@ class TestSchedule:
         assert restored.start.hour == original.start.hour
         assert restored.end.minute == original.end.minute
 
+    def test_to_dict_days_are_wire_ints(self):
+        """The wire protocol carries literal 1/0 ints, never bools (L2)."""
+        schedule = Schedule(days_of_week=[True, False, True, False, True, False, True], inside=True)
+
+        d = schedule.to_dict()
+
+        assert d["daysOfWeek"] == [1, 0, 1, 0, 1, 0, 1]
+        assert all(isinstance(day, int) and not isinstance(day, bool) for day in d["daysOfWeek"])
+
+    def test_to_dict_outside_only_zeroes_inside_times(self):
+        """An outside-only schedule zeroes the inside time fields."""
+        schedule = Schedule(
+            index=1,
+            inside=False,
+            outside=True,
+            start=ScheduleTime(hour=9, minute=15),
+            end=ScheduleTime(hour=17, minute=45),
+        )
+
+        d = schedule.to_dict()
+
+        assert d["outside"] is True
+        assert d["out_start_time"] == {"hour": 9, "min": 15}
+        assert d["out_end_time"] == {"hour": 17, "min": 45}
+        assert d["in_start_time"] == {"hour": 0, "min": 0}
+        assert d["in_end_time"] == {"hour": 0, "min": 0}
+
+    def test_from_dict_days_are_bools(self):
+        """Wire 1/0 lists are converted to real booleans (L2)."""
+        restored = Schedule.from_dict({"daysOfWeek": [1, 0, 1, 0, 1, 0, 1], "inside": True})
+
+        assert restored.days_of_week == [True, False, True, False, True, False, True]
+        assert all(isinstance(day, bool) for day in restored.days_of_week)
+
+    def test_from_dict_legacy_bitmask(self):
+        """A legacy int bitmask (bit 0 = Sunday) converts to booleans."""
+        # 0b0111110 = 62: Monday through Friday
+        restored = Schedule.from_dict({"daysOfWeek": 62, "inside": True})
+
+        assert restored.days_of_week == [False, True, True, True, True, True, False]
+        assert all(isinstance(day, bool) for day in restored.days_of_week)
+
+    def test_from_dict_no_sensor_defaults_midnight(self):
+        """With neither sensor flagged, times default to midnight."""
+        restored = Schedule.from_dict({})
+
+        assert restored.inside is False
+        assert restored.outside is False
+        assert (restored.start.hour, restored.start.minute) == (0, 0)
+        assert (restored.end.hour, restored.end.minute) == (0, 0)
+
 
 # ============================================================================
 # Connection Tests
@@ -272,13 +326,11 @@ class TestSchedule:
 class TestPowerPetDoorConnection:
     """Test PowerPetDoor connection handling."""
 
-    @pytest.mark.asyncio
     async def test_connects_to_simulator(self, door, simulator):
         """Door should successfully connect to simulator."""
         assert door.connected
         assert len(simulator.protocols) == 1
 
-    @pytest.mark.asyncio
     async def test_host_port_properties(self, door, simulator):
         """Door should report correct host and port."""
         port = simulator.server.sockets[0].getsockname()[1]
@@ -294,7 +346,6 @@ class TestPowerPetDoorConnection:
 class TestPowerPetDoorStatus:
     """Test door status properties."""
 
-    @pytest.mark.asyncio
     async def test_initial_status_closed(self, door):
         """Door should start in closed state."""
         assert door.status == DoorStatus.CLOSED
@@ -302,7 +353,6 @@ class TestPowerPetDoorStatus:
         assert door.is_open is False
         assert door.position == 0
 
-    @pytest.mark.asyncio
     async def test_status_after_open(self, door, simulator):
         """After open() the door reaches the stable HOLDING state."""
         await door.open()
@@ -322,7 +372,6 @@ class TestPowerPetDoorStatus:
 class TestPowerPetDoorControl:
     """Test door control methods."""
 
-    @pytest.mark.asyncio
     async def test_open_door(self, door, simulator):
         """open() should open the door to the stable HOLDING state."""
         await door.open()
@@ -331,7 +380,6 @@ class TestPowerPetDoorControl:
 
         assert door.is_open
 
-    @pytest.mark.asyncio
     async def test_open_and_hold(self, door, simulator):
         """open_and_hold() should keep door open."""
         await door.open_and_hold()
@@ -340,7 +388,6 @@ class TestPowerPetDoorControl:
 
         assert door.status == DoorStatus.KEEPUP
 
-    @pytest.mark.asyncio
     async def test_close_door(self, door, simulator):
         """close() should close the door."""
         # First open (KEEPUP is the stable held-open state)
@@ -353,7 +400,6 @@ class TestPowerPetDoorControl:
         await wait_for_door_status(door, DoorStatus.CLOSED)
         assert door.is_closed
 
-    @pytest.mark.asyncio
     async def test_toggle_opens_when_closed(self, door, simulator):
         """toggle() should open when door is closed."""
         assert door.is_closed
@@ -363,7 +409,6 @@ class TestPowerPetDoorControl:
         await wait_for_door_status(door, DoorStatus.HOLDING)
         assert door.is_open
 
-    @pytest.mark.asyncio
     async def test_toggle_closes_when_open(self, door, simulator):
         """toggle() should close when door is open."""
         await simulator.open_door(hold=True)
@@ -376,7 +421,6 @@ class TestPowerPetDoorControl:
         await wait_for_door_status(door, DoorStatus.CLOSED)
         assert door.is_closed
 
-    @pytest.mark.asyncio
     async def test_cycle_opens_door(self, door, simulator):
         """cycle() should open the door (and it auto-closes after hold_time)."""
         assert door.is_closed
@@ -395,12 +439,10 @@ class TestPowerPetDoorControl:
 class TestPowerPetDoorSensors:
     """Test sensor control."""
 
-    @pytest.mark.asyncio
     async def test_inside_sensor_initial(self, door):
         """Inside sensor should start enabled."""
         assert door.inside_sensor is True
 
-    @pytest.mark.asyncio
     async def test_disable_inside_sensor(self, door, simulator):
         """set_inside_sensor(False) should disable sensor."""
         await door.set_inside_sensor(False)
@@ -408,7 +450,6 @@ class TestPowerPetDoorSensors:
         assert door.inside_sensor is False
         assert simulator.state.inside is False
 
-    @pytest.mark.asyncio
     async def test_enable_inside_sensor(self, door, simulator):
         """set_inside_sensor(True) should enable sensor."""
         simulator.state.inside = False
@@ -418,7 +459,6 @@ class TestPowerPetDoorSensors:
         assert door.inside_sensor is True
         assert simulator.state.inside is True
 
-    @pytest.mark.asyncio
     async def test_outside_sensor(self, door, simulator):
         """Outside sensor should be controllable."""
         await door.set_outside_sensor(False)
@@ -436,12 +476,10 @@ class TestPowerPetDoorSensors:
 class TestPowerPetDoorPower:
     """Test power control."""
 
-    @pytest.mark.asyncio
     async def test_power_initial(self, door):
         """Power should start on."""
         assert door.power is True
 
-    @pytest.mark.asyncio
     async def test_power_off(self, door, simulator):
         """set_power(False) should turn off power."""
         await door.set_power(False)
@@ -449,7 +487,6 @@ class TestPowerPetDoorPower:
         assert door.power is False
         assert simulator.state.power is False
 
-    @pytest.mark.asyncio
     async def test_power_on(self, door, simulator):
         """set_power(True) should turn on power."""
         simulator.state.power = False
@@ -468,12 +505,10 @@ class TestPowerPetDoorPower:
 class TestPowerPetDoorAuto:
     """Test auto/schedule mode."""
 
-    @pytest.mark.asyncio
     async def test_auto_initial(self, door):
         """Auto should reflect simulator default (enabled)."""
         assert door.auto is True
 
-    @pytest.mark.asyncio
     async def test_enable_auto(self, door, simulator):
         """set_auto(True) should enable auto mode."""
         await door.set_auto(True)
@@ -481,7 +516,6 @@ class TestPowerPetDoorAuto:
         assert door.auto is True
         assert simulator.state.auto is True
 
-    @pytest.mark.asyncio
     async def test_disable_auto(self, door, simulator):
         """set_auto(False) should disable auto mode."""
         simulator.state.auto = True
@@ -500,7 +534,6 @@ class TestPowerPetDoorAuto:
 class TestPowerPetDoorSafety:
     """Test safety features."""
 
-    @pytest.mark.asyncio
     async def test_safety_lock(self, door, simulator):
         """Safety lock should be controllable."""
         await door.set_safety_lock(True)
@@ -509,7 +542,6 @@ class TestPowerPetDoorSafety:
         await door.set_safety_lock(False)
         assert door.safety_lock is False
 
-    @pytest.mark.asyncio
     async def test_autoretract(self, door, simulator):
         """Autoretract should be controllable."""
         await door.set_autoretract(False)
@@ -527,7 +559,6 @@ class TestPowerPetDoorSafety:
 class TestPowerPetDoorConfig:
     """Test configuration properties."""
 
-    @pytest.mark.asyncio
     async def test_hold_time_get(self, door, simulator):
         """hold_time reflects the device value exactly, in seconds."""
         # Simulator stores seconds; the wire carries centiseconds (1500),
@@ -537,7 +568,6 @@ class TestPowerPetDoorConfig:
 
         assert door.hold_time == 15.0
 
-    @pytest.mark.asyncio
     async def test_hold_time_set(self, door, simulator):
         """set_hold_time should update hold time."""
         await door.set_hold_time(20.0)
@@ -554,7 +584,6 @@ class TestPowerPetDoorConfig:
 class TestPowerPetDoorBattery:
     """Test battery properties."""
 
-    @pytest.mark.asyncio
     async def test_battery_initial(self, door):
         """Battery info should have values from simulator."""
         # Simulator defaults to 100% battery
@@ -562,7 +591,6 @@ class TestPowerPetDoorBattery:
         assert door.battery_present is True
         assert door.ac_present is True
 
-    @pytest.mark.asyncio
     async def test_battery_info_object(self, door):
         """battery property should return BatteryInfo."""
         info = door.battery
@@ -578,7 +606,6 @@ class TestPowerPetDoorBattery:
 class TestPowerPetDoorCallbacks:
     """Test callback registration."""
 
-    @pytest.mark.asyncio
     async def test_status_change_callback(self, door, simulator):
         """on_status_change receives every transition of the open sequence."""
         statuses = []
@@ -590,7 +617,6 @@ class TestPowerPetDoorCallbacks:
 
         assert statuses == [DoorStatus.RISING, DoorStatus.SLOWING, DoorStatus.HOLDING]
 
-    @pytest.mark.asyncio
     async def test_multiple_callbacks(self, door, simulator):
         """Multiple callbacks all receive the same transitions."""
         calls1 = []
@@ -614,7 +640,6 @@ class TestPowerPetDoorCallbacks:
 class TestPowerPetDoorRefresh:
     """Test refresh methods."""
 
-    @pytest.mark.asyncio
     async def test_refresh_status(self, door, simulator):
         """refresh_status should update status from door."""
         # Change simulator state directly
@@ -625,7 +650,6 @@ class TestPowerPetDoorRefresh:
         assert status == DoorStatus.HOLDING
         assert door.status == DoorStatus.HOLDING
 
-    @pytest.mark.asyncio
     async def test_refresh_all(self, door, simulator):
         """refresh should update every cached aspect from the simulator."""
         simulator.state.door_status = DOOR_STATE_HOLDING
@@ -831,7 +855,6 @@ def _sim_schedule(index, days, start=(7, 30), end=(21, 15), inside=True, outside
 class TestDoorSchedules:
     """door.py schedule methods against the simulator (H10)."""
 
-    @pytest.mark.asyncio
     async def test_refresh_schedules_two_step_fetch(self, door, simulator):
         """refresh_schedules fetches the list then each schedule."""
         simulator.state.schedules[0] = _sim_schedule(0, [0, 1, 1, 1, 1, 1, 0])
@@ -853,7 +876,6 @@ class TestDoorSchedules:
         assert schedules[1].end.hour == 17
         assert [s.index for s in door.schedules] == [0, 2]
 
-    @pytest.mark.asyncio
     async def test_refresh_schedules_empty(self, door, simulator):
         """No schedules on the device returns [] and clears the cache."""
         door._schedules = [Schedule(index=5)]
@@ -863,7 +885,6 @@ class TestDoorSchedules:
         assert schedules == []
         assert door.schedules == []
 
-    @pytest.mark.asyncio
     async def test_get_schedule_by_index(self, door, simulator):
         """get_schedule fetches a single schedule."""
         simulator.state.schedules[1] = _sim_schedule(1, [1, 1, 1, 1, 1, 1, 1])
@@ -874,7 +895,6 @@ class TestDoorSchedules:
         assert schedule.inside is True
         assert schedule.start.hour == 7
 
-    @pytest.mark.asyncio
     async def test_get_schedule_unknown_index_raises(self, door, simulator):
         """get_schedule on a missing index raises CommandError."""
         from powerpetdoor import CommandError
@@ -884,7 +904,6 @@ class TestDoorSchedules:
 
         assert excinfo.value.reason == "Schedule not found"
 
-    @pytest.mark.asyncio
     async def test_set_schedule_roundtrip(self, door, simulator):
         """set_schedule stores the schedule on the device and in the cache."""
         schedule = Schedule(
@@ -907,7 +926,6 @@ class TestDoorSchedules:
         assert stored.end_min == 45
         assert [s.index for s in door.schedules] == [3]
 
-    @pytest.mark.asyncio
     async def test_delete_schedule_removes(self, door, simulator):
         """delete_schedule removes it from the device and the cache."""
         simulator.state.schedules[0] = _sim_schedule(0, [1] * 7)
@@ -919,7 +937,6 @@ class TestDoorSchedules:
         assert 0 not in simulator.state.schedules
         assert door.schedules == []
 
-    @pytest.mark.asyncio
     async def test_on_schedule_change_fired_on_set_and_delete(self, door, simulator):
         """Schedule callbacks fire with the updated list on set and delete."""
         snapshots = []
@@ -941,7 +958,6 @@ class TestDoorSchedules:
 class TestSetNotifications:
     """set_notifications merge semantics and wire format (H10)."""
 
-    @pytest.mark.asyncio
     async def test_partial_update_preserves_others(self, door):
         """Unspecified settings are sent with their cached values."""
         from powerpetdoor.const import (
@@ -983,7 +999,6 @@ class TestSetNotifications:
 class TestDoorLatency:
     """Latency tracking from ping/pong (H10)."""
 
-    @pytest.mark.asyncio
     async def test_latency_set_by_ping(self):
         """_on_ping converts milliseconds to seconds."""
         door = PowerPetDoor("127.0.0.1")
@@ -993,7 +1008,6 @@ class TestDoorLatency:
 
         assert door.latency == 0.05
 
-    @pytest.mark.asyncio
     async def test_latency_cleared_on_disconnect(self):
         """Disconnection resets latency to None."""
         door = PowerPetDoor("127.0.0.1")
@@ -1007,35 +1021,29 @@ class TestDoorLatency:
 class TestVersionFormatting:
     """firmware_version / hardware_version string formatting (H10)."""
 
-    @pytest.mark.asyncio
     async def test_firmware_version_populated(self):
         door = PowerPetDoor("127.0.0.1")
         door._hw_info = {"fw_maj": 1, "fw_min": 2, "fw_pat": 3}
         assert door.firmware_version == "1.2.3"
 
-    @pytest.mark.asyncio
     async def test_firmware_version_empty(self):
         door = PowerPetDoor("127.0.0.1")
         assert door.firmware_version == ""
 
-    @pytest.mark.asyncio
     async def test_firmware_version_partial_defaults_zero(self):
         door = PowerPetDoor("127.0.0.1")
         door._hw_info = {"fw_maj": 2}
         assert door.firmware_version == "2.0.0"
 
-    @pytest.mark.asyncio
     async def test_hardware_version_populated(self):
         door = PowerPetDoor("127.0.0.1")
         door._hw_info = {"ver": "1", "rev": "2"}
         assert door.hardware_version == "1 rev 2"
 
-    @pytest.mark.asyncio
     async def test_hardware_version_empty_dict(self):
         door = PowerPetDoor("127.0.0.1")
         assert door.hardware_version == ""
 
-    @pytest.mark.asyncio
     async def test_hardware_version_no_ver_fields(self):
         door = PowerPetDoor("127.0.0.1")
         door._hw_info = {"fw_maj": 1}
@@ -1045,7 +1053,6 @@ class TestVersionFormatting:
 class TestToggleWhileClosing:
     """toggle() is a no-op while the door is closing (H10)."""
 
-    @pytest.mark.asyncio
     async def test_toggle_noop_while_closing(self):
         from unittest.mock import AsyncMock, patch
 
@@ -1065,7 +1072,6 @@ class TestToggleWhileClosing:
 class TestStatusCallbackIsolation:
     """A raising status callback must not break the others (H10)."""
 
-    @pytest.mark.asyncio
     async def test_status_callback_exception_does_not_break_others(self):
         door = PowerPetDoor("127.0.0.1")
         calls = []
@@ -1085,7 +1091,6 @@ class TestStatusCallbackIsolation:
 class TestPositionMap:
     """position maps every status to an exact percentage (H10)."""
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("status", "expected"),
         [
@@ -1104,3 +1109,301 @@ class TestPositionMap:
         door = PowerPetDoor("127.0.0.1")
         door._status = status
         assert door.position == expected
+
+
+# ============================================================================
+# Device-Backed Property Tests (H10)
+# ============================================================================
+
+
+class TestDoorDeviceProperties:
+    """Config/stats/notification surfaces against the simulator."""
+
+    async def test_pet_proximity_keep_open_roundtrip(self, door, simulator):
+        """Keep-open maps to the inverted cmd_lockout protocol flag."""
+        # Simulator default: cmd_lockout False -> keep-open enabled.
+        assert door.pet_proximity_keep_open is True
+
+        await door.set_pet_proximity_keep_open(False)
+        assert simulator.state.cmd_lockout is True
+        assert door.pet_proximity_keep_open is False
+
+        await door.set_pet_proximity_keep_open(True)
+        assert simulator.state.cmd_lockout is False
+        assert door.pet_proximity_keep_open is True
+
+    async def test_timezone_set_and_cached(self, door, simulator):
+        """set_timezone stores on the device and updates the cached property."""
+        await door.set_timezone("PST8PDT,M3.2.0,M11.1.0")
+
+        assert simulator.state.timezone == "PST8PDT,M3.2.0,M11.1.0"
+        assert door.timezone == "PST8PDT,M3.2.0,M11.1.0"
+
+    async def test_stats_properties_after_refresh(self, door, simulator):
+        """refresh_stats updates both counters from the device."""
+        simulator.state.total_open_cycles = 11
+        simulator.state.total_auto_retracts = 3
+
+        await door.refresh_stats()
+
+        assert door.total_open_cycles == 11
+        assert door.total_auto_retracts == 3
+
+    async def test_notifications_reflect_device_state(self, door, simulator):
+        """Notification settings are cached from the device on refresh."""
+        simulator.state.sensor_on_indoor = True
+        simulator.state.low_battery = True
+        simulator.state.sensor_off_outdoor = False
+
+        await door.refresh_settings()
+
+        notifications = door.notifications
+        assert isinstance(notifications, NotificationSettings)
+        assert notifications.inside_on is True
+        assert notifications.low_battery is True
+        assert notifications.outside_off is False
+
+    async def test_hardware_info_returns_copy(self, door):
+        """Mutating the returned hardware info must not touch the cache."""
+        info = door.hardware_info
+        assert info  # Populated by the initial refresh
+
+        info.clear()
+
+        assert door.hardware_info  # Internal cache untouched
+        assert door.firmware_version != ""
+
+
+# ============================================================================
+# Unit-Level Edge Tests (fake client sends)
+# ============================================================================
+
+
+class TestDoorUnitEdges:
+    """Defensive branches driven with controlled client responses."""
+
+    async def test_delete_schedule_without_echo_prunes_cache(self):
+        """Firmware that omits the deleted index still prunes the cache."""
+        door = PowerPetDoor("127.0.0.1")
+        door._schedules = [Schedule(index=2, inside=True)]
+        snapshots = []
+        door.on_schedule_change(lambda schedules: snapshots.append([s.index for s in schedules]))
+
+        def fake_send(msg_type, cmd, notify=False, **kwargs):
+            future = asyncio.get_running_loop().create_future()
+            future.set_result(None)  # Ack without the echoed index
+            return future
+
+        door._client.send_message = fake_send
+
+        await door.delete_schedule(2)
+
+        assert door.schedules == []
+        assert snapshots == [[]]
+
+    async def test_refresh_schedules_survives_per_index_failures(self):
+        """Timeouts, errors, and empty payloads are skipped, not fatal."""
+        door = PowerPetDoor("127.0.0.1")
+
+        def fake_send(msg_type, cmd, notify=False, **kwargs):
+            future = asyncio.get_running_loop().create_future()
+            if cmd == CMD_GET_SCHEDULE_LIST:
+                future.set_result([0, 1, 2])
+            elif kwargs["index"] == 0:
+                pass  # Never resolves -> per-index TimeoutError branch
+            elif kwargs["index"] == 1:
+                future.set_exception(RuntimeError("device glitch"))
+            else:
+                future.set_result({})  # Falsy payload -> skipped
+            return future
+
+        door._client.send_message = fake_send
+
+        schedules = await door.refresh_schedules(timeout=0.05)
+
+        assert schedules == []
+        assert door.schedules == []
+
+    async def test_refresh_hardware_info_keeps_cache_on_empty_result(self):
+        """An empty hw-info payload leaves the cached info in place."""
+        door = PowerPetDoor("127.0.0.1")
+        door._hw_info = {"fw_maj": 9}
+
+        def fake_send(msg_type, cmd, notify=False, **kwargs):
+            future = asyncio.get_running_loop().create_future()
+            future.set_result({})
+            return future
+
+        door._client.send_message = fake_send
+
+        result = await door.refresh_hardware_info()
+
+        assert result == {"fw_maj": 9}
+        assert door.firmware_version == "9.0.0"
+
+
+# ============================================================================
+# Callback Registration and Isolation Tests (H10)
+# ============================================================================
+
+
+class TestDoorCallbackRegistration:
+    """on_* registration methods fire and isolate exceptions."""
+
+    async def test_settings_callbacks_fire_and_isolate(self):
+        door = PowerPetDoor("127.0.0.1")
+        calls = []
+
+        def bad_callback(settings):
+            calls.append("bad")
+            raise RuntimeError("callback bug")
+
+        door.on_settings_change(bad_callback)
+        door.on_settings_change(lambda settings: calls.append(("good", settings)))
+
+        payload = {FIELD_POWER: "1"}
+        door._on_settings(payload)
+
+        assert calls == ["bad", ("good", payload)]
+        assert door.power is True
+
+    async def test_connect_callbacks_fire_and_isolate(self):
+        door = PowerPetDoor("127.0.0.1")
+        calls = []
+
+        def bad_callback():
+            calls.append("bad")
+            raise RuntimeError("callback bug")
+
+        door.on_connect(bad_callback)
+        door.on_connect(lambda: calls.append("good"))
+
+        await door._on_connect()
+
+        assert calls == ["bad", "good"]
+        assert door._connected_event.is_set()
+
+    async def test_disconnect_callbacks_fire_and_isolate(self):
+        door = PowerPetDoor("127.0.0.1")
+        calls = []
+
+        def bad_callback():
+            calls.append("bad")
+            raise RuntimeError("callback bug")
+
+        door.on_disconnect(bad_callback)
+        door.on_disconnect(lambda: calls.append("good"))
+
+        await door._on_disconnect()
+
+        assert calls == ["bad", "good"]
+        assert not door._connected_event.is_set()
+
+    async def test_reconnect_refresh_failure_is_contained(self):
+        """A failing post-reconnect refresh() still notifies connect callbacks."""
+        door = PowerPetDoor("127.0.0.1")
+        door._initialized = True
+        refresh_calls = []
+
+        async def failing_refresh(**kwargs):
+            refresh_calls.append(1)
+            raise RuntimeError("device gone")
+
+        door.refresh = failing_refresh
+        connected = []
+        door.on_connect(lambda: connected.append("connect"))
+
+        await door._on_connect()
+
+        assert refresh_calls == [1]
+        assert connected == ["connect"]
+
+
+# ============================================================================
+# Listener None-Value Guard Tests (D4)
+# ============================================================================
+
+
+class TestListenerNoneGuards:
+    """An unrecognized wire value (None) must never clobber cached state."""
+
+    @pytest.mark.parametrize(
+        ("method", "attr"),
+        [
+            ("_on_power_update", "_power"),
+            ("_on_inside_update", "_inside_sensor"),
+            ("_on_outside_update", "_outside_sensor"),
+            ("_on_auto_update", "_auto"),
+            ("_on_safety_lock_update", "_safety_lock"),
+            ("_on_autoretract_update", "_autoretract"),
+            ("_on_cmd_lockout_update", "_pet_proximity_keep_open"),
+        ],
+    )
+    async def test_sensor_none_value_leaves_cache(self, method, attr):
+        door = PowerPetDoor("127.0.0.1")
+        before = getattr(door, attr)
+
+        getattr(door, method)("field", None)
+
+        assert getattr(door, attr) is before
+
+    @pytest.mark.parametrize(
+        ("method", "attr"),
+        [
+            ("_on_notify_inside_on", "inside_on"),
+            ("_on_notify_inside_off", "inside_off"),
+            ("_on_notify_outside_on", "outside_on"),
+            ("_on_notify_outside_off", "outside_off"),
+            ("_on_notify_low_battery", "low_battery"),
+        ],
+    )
+    async def test_notification_none_value_leaves_cache(self, method, attr):
+        door = PowerPetDoor("127.0.0.1")
+        assert getattr(door._notifications, attr) is False
+
+        getattr(door, method)("field", None)
+        assert getattr(door._notifications, attr) is False
+
+        getattr(door, method)("field", True)
+        assert getattr(door._notifications, attr) is True
+
+
+# ============================================================================
+# Schedule Cache Maintenance Tests (H10)
+# ============================================================================
+
+
+class TestScheduleCacheMaintenance:
+    """_on_schedule_update/_delete maintain the cache and notify callbacks."""
+
+    async def test_schedule_update_replaces_existing_entry(self):
+        door = PowerPetDoor("127.0.0.1")
+        door._on_schedule_update(
+            Schedule(index=1, inside=True, start=ScheduleTime(hour=6, minute=0)).to_dict()
+        )
+        assert [s.index for s in door.schedules] == [1]
+
+        door._on_schedule_update(
+            Schedule(index=1, inside=True, start=ScheduleTime(hour=7, minute=30)).to_dict()
+        )
+
+        assert len(door.schedules) == 1
+        assert door.schedules[0].start.hour == 7
+        assert door.schedules[0].start.minute == 30
+
+    async def test_schedule_callback_exception_isolated(self):
+        door = PowerPetDoor("127.0.0.1")
+        calls = []
+
+        def bad_callback(schedules):
+            calls.append("bad")
+            raise RuntimeError("callback bug")
+
+        door.on_schedule_change(bad_callback)
+        door.on_schedule_change(
+            lambda schedules: calls.append(("good", [s.index for s in schedules]))
+        )
+
+        door._on_schedule_update(Schedule(index=0, inside=True).to_dict())
+
+        assert calls == ["bad", ("good", [0])]

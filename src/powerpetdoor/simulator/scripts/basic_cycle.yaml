@@ -6,11 +6,10 @@ steps:
     equals: DOOR_CLOSED
   - action: set
     name: hold_time
-    value: "2"
+    value: "1"
   - action: trigger_sensor
     sensor: inside
-  - action: wait
-    seconds: 0.5
+  # trigger_sensor starts the door rising synchronously
   - action: assert
     condition: door_status
     equals: DOOR_RISING

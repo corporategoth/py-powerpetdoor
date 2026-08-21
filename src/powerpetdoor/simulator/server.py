@@ -130,7 +130,9 @@ class DoorSimulator:
             notify_sensor=self._broadcast_sensor_notification,
         )
         self._battery_task: asyncio.Task | None = None
-        self._tasks: set[asyncio.Task] = set()
+        # Fractional battery percent accumulated between integer steps, so
+        # rates below 1%/interval still charge/discharge correctly.
+        self._battery_carry = 0.0
         self._running = False
         self._on_connect = on_connect
         self._on_disconnect = on_disconnect
@@ -183,14 +185,6 @@ class DoorSimulator:
         # Stop the door-motion engine (cancels and awaits its tasks)
         await self.engine.stop()
 
-        # Cancel and await any tracked fire-and-forget tasks
-        tasks = [task for task in self._tasks if not task.done()]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._tasks.clear()
-
         # Close all client connections and await their tasks
         for protocol in list(self.protocols):
             await protocol.aclose()
@@ -200,13 +194,6 @@ class DoorSimulator:
             self.server.close()
             await self.server.wait_closed()
             logger.info("Door simulator stopped")
-
-    def _track_task(self, coro) -> asyncio.Task:
-        """Create a tracked task so stop() can cancel and await it."""
-        task = asyncio.create_task(coro)
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        return task
 
     # =========================================================================
     # Deterministic status hooks (delegated to the engine)
@@ -236,56 +223,72 @@ class DoorSimulator:
         """Background task that simulates battery charge/discharge over time."""
         while self._running:
             try:
-                config = self.state.battery_config
-                await asyncio.sleep(config.update_interval)
+                await asyncio.sleep(self.state.battery_config.update_interval)
 
                 if not self._running:
                     break
 
-                # Only simulate if battery is present
-                if not self.state.battery_present:
-                    continue
-
-                old_percent = self.state.battery_percent
-
-                if self.state.ac_present and config.charge_rate > 0:
-                    # Charging: increase battery level
-                    # Rate is per minute, interval is in seconds
-                    delta = config.charge_rate * (config.update_interval / 60.0)
-                    new_percent = min(100, self.state.battery_percent + delta)
-                    if new_percent != self.state.battery_percent:
-                        self.state.battery_percent = int(new_percent)
-                        logger.debug(
-                            "Battery charging: %s%% -> %s%%",
-                            old_percent,
-                            self.state.battery_percent,
-                        )
-                        self._broadcast_battery_status()
-
-                elif not self.state.ac_present and config.discharge_rate > 0:
-                    # Discharging: decrease battery level
-                    delta = config.discharge_rate * (config.update_interval / 60.0)
-                    new_percent = max(0, self.state.battery_percent - delta)
-                    if int(new_percent) != self.state.battery_percent:
-                        self.state.battery_percent = int(new_percent)
-                        logger.debug(
-                            "Battery discharging: %s%% -> %s%%",
-                            old_percent,
-                            self.state.battery_percent,
-                        )
-                        self._broadcast_battery_status()
-
-                        # Check for low battery notification
-                        if (
-                            old_percent > LOW_BATTERY_THRESHOLD
-                            and self.state.battery_percent <= LOW_BATTERY_THRESHOLD
-                        ):
-                            self._send_low_battery_notification()
+                self._battery_tick()
 
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.exception("Error in battery simulation")
+
+    def _battery_tick(self):
+        """Apply one battery charge/discharge step.
+
+        Called once per ``update_interval`` by the simulation loop; exposed
+        separately so tests can drive it deterministically. Fractional
+        percent deltas accumulate in ``_battery_carry`` until a whole
+        percent is reached, so rates below 1%/interval work correctly.
+        """
+        state = self.state
+        config = state.battery_config
+
+        # Only simulate if battery is present
+        if not state.battery_present:
+            return
+
+        if state.ac_present and config.charge_rate > 0:
+            # Charging: increase battery level (rate is per minute)
+            delta = config.charge_rate * (config.update_interval / 60.0)
+        elif not state.ac_present and config.discharge_rate > 0:
+            # Discharging: decrease battery level
+            delta = -config.discharge_rate * (config.update_interval / 60.0)
+        else:
+            return
+
+        self._battery_carry += delta
+        step = int(self._battery_carry)  # whole percent, truncated toward zero
+        if step == 0:
+            return
+        self._battery_carry -= step
+
+        old_percent = state.battery_percent
+        new_percent = max(0, min(100, old_percent + step))
+        if new_percent == old_percent:
+            # Pinned at the cap/floor: drop the remainder so it cannot
+            # offset a later direction change.
+            self._battery_carry = 0.0
+            return
+
+        state.battery_percent = new_percent
+        logger.debug(
+            "Battery %s: %s%% -> %s%%",
+            "charging" if step > 0 else "discharging",
+            old_percent,
+            new_percent,
+        )
+        self._broadcast_battery_status()
+
+        # Check for low battery notification (discharge crossing the threshold)
+        if (
+            step < 0
+            and old_percent > LOW_BATTERY_THRESHOLD
+            and new_percent <= LOW_BATTERY_THRESHOLD
+        ):
+            self._send_low_battery_notification()
 
     def _broadcast_battery_status(self):
         """Broadcast battery status to all connected clients."""

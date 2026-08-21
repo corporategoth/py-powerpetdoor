@@ -7,56 +7,23 @@
 
 from typing import TYPE_CHECKING
 
-from .base import ArgSpec, CommandResult, SubcommandInfo, command, subcommand
+from .base import (
+    ArgSpec,
+    BoolToggleCommandMixin,
+    CommandResult,
+    SubcommandInfo,
+    command,
+    subcommand,
+)
 
 if TYPE_CHECKING:
     from ..server import DoorSimulator
 
 
-class ButtonCommandsMixin:
+class ButtonCommandsMixin(BoolToggleCommandMixin):
     """Mixin providing physical button toggle commands."""
 
     simulator: "DoorSimulator"
-
-    def _toggle_bool(
-        self,
-        attr: str,
-        name: str,
-        value: bool | None,
-        fmt: str = "ON|OFF",
-        broadcast_func: str | None = None,
-    ) -> CommandResult:
-        """Toggle or set a boolean state attribute.
-
-        Args:
-            attr: State attribute name
-            name: Display name for the setting
-            value: True/False to set, or None to toggle
-            fmt: Format for display - "ON|OFF" or "enabled|disabled"
-            broadcast_func: Name of specific broadcast method to call on simulator
-                           (e.g., "broadcast_power"). If None, no broadcast.
-        """
-        s = self.simulator.state
-        if value is None:
-            current = getattr(s, attr)
-            setattr(s, attr, not current)
-            new_val = not current
-        else:
-            setattr(s, attr, value)
-            new_val = value
-
-        if fmt == "enabled|disabled":
-            state = "enabled" if new_val else "disabled"
-        else:
-            state = "ON" if new_val else "OFF"
-
-        # Broadcast specific setting change to connected PPD clients
-        if broadcast_func:
-            func = getattr(self.simulator, broadcast_func, None)
-            if func:
-                func(new_val)
-
-        return CommandResult(True, f"{name}: {state}")
 
     @command(
         "power",

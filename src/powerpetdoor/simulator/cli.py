@@ -35,7 +35,10 @@ if PROMPT_TOOLKIT_AVAILABLE:
     from prompt_toolkit.patch_stdout import patch_stdout
 
 if TYPE_CHECKING:
-    pass
+    from typing import TextIO
+
+    from .scripting import ScriptRunner
+    from .state import DoorSimulatorState
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +94,7 @@ class InteractivePrompt:
         self._enabled = False
 
         root_logger = logging.getLogger()
-        if self._handler:
+        if self._handler:  # pragma: no branch (defensive: enable() always installs a handler)
             root_logger.removeHandler(self._handler)
             self._handler = None
 
@@ -294,6 +297,208 @@ class ControlChannel:
             logger.info(f"Control connection closed from {addr}")
 
 
+def _build_state(
+    firmware: tuple[int, int, int] | None,
+    hardware: tuple[str, str] | None,
+) -> "DoorSimulatorState | None":
+    """Build a simulator state for custom firmware/hardware versions.
+
+    Returns None when no override is requested (the simulator then uses its
+    default state).
+    """
+    from .state import DoorSimulatorState
+
+    if not (firmware or hardware):
+        return None
+    kwargs: dict[str, int | str] = {}
+    if firmware:
+        kwargs["fw_major"] = firmware[0]
+        kwargs["fw_minor"] = firmware[1]
+        kwargs["fw_patch"] = firmware[2]
+    if hardware:
+        kwargs["hw_ver"] = hardware[0]
+        kwargs["hw_rev"] = hardware[1]
+    return DoorSimulatorState(**kwargs)  # type: ignore[arg-type]
+
+
+async def _process_script_queue(
+    script_queue: "asyncio.Queue[str]",
+    stop_event: asyncio.Event,
+    cmd_handler: CommandHandler,
+    script_runner: "ScriptRunner",
+    poll_interval: float = 0.5,
+) -> None:
+    """Run scripts queued at runtime (via the ``run`` command) until stopped."""
+    while not stop_event.is_set():
+        try:
+            try:
+                script_ref = await asyncio.wait_for(script_queue.get(), timeout=poll_interval)
+            except TimeoutError:
+                continue
+
+            try:
+                script = cmd_handler.load_script(script_ref)
+                logger.info(f"Running queued script: {script.name}")
+                success = await script_runner.run(script)
+                logger.info(f"Script {'PASSED' if success else 'FAILED'}: {script.name}")
+            except Exception as e:
+                logger.error(f"Error running queued script: {e}")
+        except asyncio.CancelledError:
+            break
+
+
+async def _run_startup_scripts(
+    scripts: list[str],
+    *,
+    simulator: DoorSimulator,
+    cmd_handler: CommandHandler,
+    script_runner: "ScriptRunner",
+    stop_event: asyncio.Event,
+    script_result: list,
+    loop_scripts: bool,
+    script_delay: float,
+    oneshot: bool,
+    wait_for_client: bool,
+) -> None:
+    """Run the startup scripts requested on the command line.
+
+    Sets ``script_result[0]`` to the overall pass/fail result and, in oneshot
+    mode, sets ``stop_event`` once the scripts complete.
+    """
+    all_success = True
+    run_count = 0
+    try:
+        # Wait for client connection if requested
+        if wait_for_client:
+            print(">>> Waiting for client connection...")
+            while not simulator.protocols:
+                if stop_event.is_set():
+                    return
+                await asyncio.sleep(0.1)
+            print(">>> Client connected, starting scripts")
+
+        while True:
+            # Check for client disconnect if wait_for_client
+            if wait_for_client and not simulator.protocols:
+                print(">>> Client disconnected, stopping scripts")
+                break
+
+            run_count += 1
+            if loop_scripts:
+                print(f"\n>>> Script run #{run_count}")
+
+            for i, script_ref in enumerate(scripts):
+                # Check for disconnect before each script
+                if wait_for_client and not simulator.protocols:
+                    print(">>> Client disconnected, stopping scripts")
+                    break
+
+                # Add delay between scripts (not before first one)
+                if i > 0 and script_delay > 0:
+                    print(f">>> Waiting {script_delay}s before next script...")
+                    await asyncio.sleep(script_delay)
+
+                try:
+                    script = cmd_handler.load_script(script_ref)
+                    print(f"\n>>> Running script: {script.name}")
+                    success = await script_runner.run(script)
+                    if not success:
+                        all_success = False
+                        print(f">>> Script FAILED: {script.name}")
+                    else:
+                        print(f">>> Script PASSED: {script.name}")
+                except Exception as e:
+                    print(f"Error running script '{script_ref}': {e}")
+                    all_success = False
+            else:
+                # Loop completed without break (no disconnect)
+                if not loop_scripts:
+                    break
+
+                # Delay before next loop iteration
+                if script_delay > 0:
+                    print(f">>> Waiting {script_delay}s before next loop...")
+                    await asyncio.sleep(script_delay)
+                continue
+
+            # Inner loop was broken (disconnect), exit outer loop too
+            break
+
+    except asyncio.CancelledError:
+        pass
+    finally:
+        script_result[0] = all_success
+        if oneshot:
+            print(f"\n>>> All scripts {'PASSED' if all_success else 'FAILED'}")
+            stop_event.set()
+
+
+class _BasicStdinInput:
+    """Plain-input interactive fallback (no prompt_toolkit or non-TTY stdin).
+
+    Reads commands from stdin via the event loop's reader callback and
+    executes them, coordinating output with an :class:`InteractivePrompt`.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        prompt: InteractivePrompt,
+        cmd_handler: CommandHandler,
+        stop_event: asyncio.Event,
+        stdin: "TextIO | None" = None,
+    ):
+        self._loop = loop
+        self._prompt = prompt
+        self._cmd_handler = cmd_handler
+        self._stop_event = stop_event
+        self._stdin = stdin if stdin is not None else sys.stdin
+        self._reader_removed = False
+
+    def start(self) -> None:
+        """Enable the prompt and start reading stdin."""
+        self._prompt.enable()
+        self._loop.add_reader(self._stdin.fileno(), self.handle_input)
+
+    def stop(self) -> None:
+        """Remove the stdin reader (idempotent; safe if never added)."""
+        self._reader_removed = True
+        try:
+            self._loop.remove_reader(self._stdin.fileno())
+        except Exception:
+            pass  # Already removed
+
+    def handle_input(self) -> None:
+        """Reader callback: consume one line and schedule its execution."""
+        # Don't read if we're shutting down (prevents blocking)
+        if self._stop_event.is_set() or self._reader_removed:
+            return
+        try:
+            line = self._stdin.readline().strip()
+            if line:
+                asyncio.create_task(self.process_command(line))
+            else:
+                # Empty line (just Enter), re-show prompt
+                self._prompt.show()
+        except Exception as e:
+            self._prompt.output(f"Error: {e}")
+
+    async def process_command(self, line: str) -> None:
+        """Execute one command line and print its result."""
+        result = await self._cmd_handler.execute(line)
+        # Don't show prompt again after shutdown command
+        if self._stop_event.is_set():
+            self._prompt.clear_line()
+            if result.message:
+                print(f">>> {result.message}")
+            # Remove stdin reader immediately to avoid blocking shutdown
+            self.stop()
+        elif result.message:
+            self._prompt.output(f">>> {result.message}")
+        else:
+            self._prompt.show()
+
+
 async def run_simulator(
     host: str = "0.0.0.0",
     port: int = 3000,
@@ -342,23 +547,12 @@ async def run_simulator(
         Script result (True if all passed, False if any failed, None if no scripts)
     """
     from .scripting import ScriptRunner
-    from .state import DoorSimulatorState
 
     # Initialize timezone cache for IANA to POSIX conversion
     await async_init_timezone_cache()
 
     # Create state with optional firmware/hardware version
-    state = None
-    if firmware or hardware:
-        kwargs = {}
-        if firmware:
-            kwargs["fw_major"] = firmware[0]
-            kwargs["fw_minor"] = firmware[1]
-            kwargs["fw_patch"] = firmware[2]
-        if hardware:
-            kwargs["hw_ver"] = hardware[0]
-            kwargs["hw_rev"] = hardware[1]
-        state = DoorSimulatorState(**kwargs)
+    state = _build_state(firmware, hardware)
 
     # Holder for interactive session (set later if in interactive mode)
     # Used by callbacks to invalidate prompt on connect/disconnect
@@ -394,7 +588,7 @@ async def run_simulator(
     # The actual bound port (differs from `port` when an ephemeral port 0 was
     # requested, e.g. in tests)
     actual_port = port
-    if simulator.server and simulator.server.sockets:
+    if simulator.server and simulator.server.sockets:  # pragma: no branch (bound after start())
         actual_port = simulator.server.sockets[0].getsockname()[1]
 
     script_runner = ScriptRunner(simulator)
@@ -453,103 +647,31 @@ async def run_simulator(
         on_ready(actual_port, control_channel.bound_port if control_channel else None)
 
     # Process queued scripts in background
-    async def process_script_queue():
-        while not stop_event.is_set():
-            try:
-                try:
-                    script_ref = await asyncio.wait_for(script_queue.get(), timeout=0.5)
-                except TimeoutError:
-                    continue
-
-                try:
-                    script = cmd_handler.load_script(script_ref)
-                    logger.info(f"Running queued script: {script.name}")
-                    success = await script_runner.run(script)
-                    logger.info(f"Script {'PASSED' if success else 'FAILED'}: {script.name}")
-                except Exception as e:
-                    logger.error(f"Error running queued script: {e}")
-            except asyncio.CancelledError:
-                break
-
-    queue_task = asyncio.create_task(process_script_queue())
+    queue_task = asyncio.create_task(
+        _process_script_queue(script_queue, stop_event, cmd_handler, script_runner)
+    )
 
     # Run startup scripts if specified
     if scripts:
-
-        async def run_startup_scripts():
-            all_success = True
-            run_count = 0
-            try:
-                # Wait for client connection if requested
-                if wait_for_client:
-                    print(">>> Waiting for client connection...")
-                    while not simulator.protocols:
-                        if stop_event.is_set():
-                            return
-                        await asyncio.sleep(0.1)
-                    print(">>> Client connected, starting scripts")
-
-                while True:
-                    # Check for client disconnect if wait_for_client
-                    if wait_for_client and not simulator.protocols:
-                        print(">>> Client disconnected, stopping scripts")
-                        break
-
-                    run_count += 1
-                    if loop_scripts:
-                        print(f"\n>>> Script run #{run_count}")
-
-                    for i, script_ref in enumerate(scripts):
-                        # Check for disconnect before each script
-                        if wait_for_client and not simulator.protocols:
-                            print(">>> Client disconnected, stopping scripts")
-                            break
-
-                        # Add delay between scripts (not before first one)
-                        if i > 0 and script_delay > 0:
-                            print(f">>> Waiting {script_delay}s before next script...")
-                            await asyncio.sleep(script_delay)
-
-                        try:
-                            script = cmd_handler.load_script(script_ref)
-                            print(f"\n>>> Running script: {script.name}")
-                            success = await script_runner.run(script)
-                            if not success:
-                                all_success = False
-                                print(f">>> Script FAILED: {script.name}")
-                            else:
-                                print(f">>> Script PASSED: {script.name}")
-                        except Exception as e:
-                            print(f"Error running script '{script_ref}': {e}")
-                            all_success = False
-                    else:
-                        # Loop completed without break (no disconnect)
-                        if not loop_scripts:
-                            break
-
-                        # Delay before next loop iteration
-                        if script_delay > 0:
-                            print(f">>> Waiting {script_delay}s before next loop...")
-                            await asyncio.sleep(script_delay)
-                        continue
-
-                    # Inner loop was broken (disconnect), exit outer loop too
-                    break
-
-            except asyncio.CancelledError:
-                pass
-            finally:
-                script_result[0] = all_success
-                if oneshot:
-                    print(f"\n>>> All scripts {'PASSED' if all_success else 'FAILED'}")
-                    stop_event.set()
-
-        asyncio.create_task(run_startup_scripts())
+        asyncio.create_task(
+            _run_startup_scripts(
+                scripts,
+                simulator=simulator,
+                cmd_handler=cmd_handler,
+                script_runner=script_runner,
+                stop_event=stop_event,
+                script_result=script_result,
+                loop_scripts=loop_scripts,
+                script_delay=script_delay,
+                oneshot=oneshot,
+                wait_for_client=wait_for_client,
+            )
+        )
 
     # Set up interactive input if applicable
     stdin_available = False
-    used_stdin_reader = False  # True when the basic add_reader fallback is active
     prompt: InteractivePrompt | None = None
+    basic_input: _BasicStdinInput | None = None
     input_task: asyncio.Task | None = None
     stdout_ctx = None  # prompt_toolkit patch_stdout context
 
@@ -622,45 +744,9 @@ async def run_simulator(
                 input_task = asyncio.create_task(interactive_input_loop())
             else:
                 # Fallback to basic input with InteractivePrompt
-                used_stdin_reader = True
-                prompt_text = f"{host}:{actual_port}> "
-                prompt = InteractivePrompt(prompt_text)
-                reader_removed = [False]  # Use list to allow mutation in nested function
-
-                def handle_input():
-                    # Don't read if we're shutting down (prevents blocking)
-                    if stop_event.is_set() or reader_removed[0]:
-                        return
-                    try:
-                        line = sys.stdin.readline().strip()
-                        if line:
-                            asyncio.create_task(process_interactive_command(line))
-                        else:
-                            # Empty line (just Enter), re-show prompt
-                            prompt.show()
-                    except Exception as e:
-                        prompt.output(f"Error: {e}")
-
-                async def process_interactive_command(line: str):
-                    result = await cmd_handler.execute(line)
-                    # Don't show prompt again after shutdown command
-                    if stop_event.is_set():
-                        prompt.clear_line()
-                        if result.message:
-                            print(f">>> {result.message}")
-                        # Remove stdin reader immediately to avoid blocking shutdown
-                        reader_removed[0] = True
-                        try:
-                            loop.remove_reader(sys.stdin.fileno())
-                        except Exception:
-                            pass
-                    elif result.message:
-                        prompt.output(f">>> {result.message}")
-                    else:
-                        prompt.show()
-
-                prompt.enable()
-                loop.add_reader(sys.stdin.fileno(), handle_input)
+                prompt = InteractivePrompt(f"{host}:{actual_port}> ")
+                basic_input = _BasicStdinInput(loop, prompt, cmd_handler, stop_event)
+                basic_input.start()
         else:
             logger.warning("stdin not available, running in daemon mode")
 
@@ -691,11 +777,8 @@ async def run_simulator(
             stdout_ctx.__exit__(None, None, None)
         if prompt:
             prompt.disable()
-        if used_stdin_reader:
-            try:
-                loop.remove_reader(sys.stdin.fileno())
-            except Exception:
-                pass  # Already removed
+        if basic_input:
+            basic_input.stop()
         queue_task.cancel()
         try:
             await queue_task

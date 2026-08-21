@@ -169,16 +169,16 @@ class TestCycleCommand:
     @pytest.mark.asyncio
     async def test_cycle_starts_door_operation(self, command_handler):
         """cycle command should start a door cycle."""
-        state = command_handler.simulator.state
-        assert state.door_status == DOOR_STATE_CLOSED
+        sim = command_handler.simulator
+        assert sim.state.door_status == DOOR_STATE_CLOSED
 
         result = await command_handler.execute("cycle")
         assert result.success is True
         assert "Starting door cycle" in result.message
 
-        # Wait for door to start moving
-        await asyncio.sleep(0.1)
-        assert state.door_status != DOOR_STATE_CLOSED
+        # Wait deterministically for the door to start rising
+        status = await sim.wait_for_status(DOOR_STATE_RISING, timeout=5)
+        assert status == DOOR_STATE_RISING
 
     @pytest.mark.asyncio
     async def test_cycle_alias_y(self, command_handler):
@@ -190,24 +190,22 @@ class TestCycleCommand:
     @pytest.mark.asyncio
     async def test_cycle_full_sequence(self, command_handler):
         """cycle should complete a full open-hold-close sequence."""
-        state = command_handler.simulator.state
-        assert state.door_status == DOOR_STATE_CLOSED
+        sim = command_handler.simulator
+        assert sim.state.door_status == DOOR_STATE_CLOSED
+
+        states_seen = []
+        unsubscribe = sim.add_status_listener(states_seen.append)
 
         result = await command_handler.execute("cycle")
         assert result.success is True
 
-        # Track states seen during the cycle
-        states_seen = set()
-        for _ in range(50):
-            states_seen.add(state.door_status)
-            await asyncio.sleep(0.05)
-            # Check if we've seen a full cycle (back to closed after opening)
-            if DOOR_STATE_CLOSED in states_seen and len(states_seen) > 1:
-                if state.door_status == DOOR_STATE_CLOSED:
-                    break
+        await sim.wait_for_status(DOOR_STATE_HOLDING, timeout=5)
+        await sim.wait_for_status(DOOR_STATE_CLOSED, timeout=5)
+        unsubscribe()
 
-        # Should have seen at least rising or holding state
-        assert DOOR_STATE_RISING in states_seen or DOOR_STATE_HOLDING in states_seen
+        assert DOOR_STATE_RISING in states_seen
+        assert DOOR_STATE_HOLDING in states_seen
+        assert states_seen[-1] == DOOR_STATE_CLOSED
 
 
 # ============================================================================
@@ -323,13 +321,18 @@ class TestAliases:
     @pytest.mark.asyncio
     async def test_close_alias_c(self, command_handler):
         """'c' alias should work for close command."""
-        # First open the door
-        await command_handler.simulator.open_door(hold=True)
-        await asyncio.sleep(0.1)
+        from powerpetdoor.const import DOOR_STATE_KEEPUP
+
+        # First open the door and wait for it to be held open
+        sim = command_handler.simulator
+        await sim.open_door(hold=True)
+        await sim.wait_for_status(DOOR_STATE_KEEPUP, timeout=5)
 
         result = await command_handler.execute("c")
         assert result.success is True
         assert "Closing" in result.message
+        status = await sim.wait_for_status(DOOR_STATE_CLOSED, timeout=5)
+        assert status == DOOR_STATE_CLOSED
 
     @pytest.mark.asyncio
     async def test_cycle_alias_y(self, command_handler):
@@ -554,15 +557,16 @@ class TestInteractiveOnlyCommands:
         assert "clear (cls)" in result.message
 
     @pytest.mark.asyncio
-    async def test_set_interactive_mode(self, command_handler):
-        """set_interactive_mode should update the mode."""
-        assert command_handler._interactive_mode is False
-
+    async def test_interactive_mode_round_trip_changes_behavior(self, command_handler):
+        """Enabling then disabling interactive mode restores command hiding."""
         command_handler.set_interactive_mode(True)
-        assert command_handler._interactive_mode is True
+        result = await command_handler.execute("clear")
+        assert result.success is True
 
         command_handler.set_interactive_mode(False)
-        assert command_handler._interactive_mode is False
+        result = await command_handler.execute("clear")
+        assert result.success is False
+        assert "Unknown command" in result.message
 
 
 # ============================================================================
@@ -1001,18 +1005,9 @@ class TestEmptyMessageResults:
 
     @pytest.mark.asyncio
     async def test_clear_returns_empty_message(self, command_handler):
-        """clear command should return an empty message."""
+        """clear command should return an empty message (cli.py skips printing it)."""
         command_handler.set_interactive_mode(True)
 
         result = await command_handler.execute("clear")
         assert result.success is True
         assert result.message == ""
-
-    @pytest.mark.asyncio
-    async def test_empty_message_is_falsy(self, command_handler):
-        """Empty message should be falsy for conditional checks."""
-        command_handler.set_interactive_mode(True)
-
-        result = await command_handler.execute("clear")
-        # This is how cli.py checks whether to print
-        assert not result.message  # Empty string is falsy

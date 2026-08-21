@@ -135,14 +135,13 @@ class LocalCommandHandler(InfoCommandsMixin, ControlCommandsMixin):
         while part_idx < len(parts) and info.subcommands:
             subcmd = parts[part_idx].lower()
 
-            # Handle implicit help/? subcommand
+            # Handle implicit help/? subcommand (the loop condition guarantees
+            # info.subcommands is non-empty here)
             if subcmd in ("help", "?"):
                 if info.args:
                     help_text = self._get_arg_help(info, cmd_path)
-                elif info.subcommands:
-                    help_text = self._get_subcommand_help(info, cmd_path)
                 else:
-                    help_text = f"{' '.join(cmd_path)}: {info.description or 'No help available.'}"
+                    help_text = self._get_subcommand_help(info, cmd_path)
                 return LocalCommandResult(True, help_text)
 
             if subcmd in info.subcommands:
@@ -290,6 +289,36 @@ def check_connection(host: str, port: int, timeout: float = 2.0) -> tuple[bool, 
         return False, f"Connection error: {e}"
 
 
+def _basic_readline(prompt_text: str) -> "asyncio.Future[str | None]":
+    """Read one line from stdin without blocking the event loop.
+
+    Uses add_reader (not a thread) so a daemon shutdown can end the
+    session immediately instead of waiting for the user to press Enter.
+    """
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[str | None] = loop.create_future()
+    fd = sys.stdin.fileno()
+
+    def on_readable():
+        loop.remove_reader(fd)
+        if fut.cancelled():
+            return
+        line = sys.stdin.readline()
+        fut.set_result(line if line else None)
+
+    def cleanup(_fut):
+        try:
+            loop.remove_reader(fd)
+        except Exception:  # pragma: no cover (defensive: Linux selectors swallow errors for dead fds, so this cannot be triggered deterministically)
+            pass
+
+    sys.stdout.write(prompt_text)
+    sys.stdout.flush()
+    loop.add_reader(fd, on_readable)
+    fut.add_done_callback(cleanup)
+    return fut
+
+
 async def interactive_mode_async(
     host: str, port: int, door_port: int, timeout: float, history_file: str | None
 ):
@@ -342,7 +371,10 @@ async def interactive_mode_async(
         - OK:/ERROR: messages go to the response queue
         """
         try:
-            while not stop_event.is_set():
+            # Exits via break (disconnect or cancellation) or exception; the
+            # main loop only sets stop_event immediately before cancelling
+            # this task, so a stop_event-based loop condition is unreachable.
+            while True:
                 try:
                     line = await reader.readline()
                     if not line:
@@ -376,8 +408,6 @@ async def interactive_mode_async(
                         await response_queue.put((False, msg))
                 except asyncio.CancelledError:
                     break
-        except asyncio.CancelledError:
-            pass
         except Exception as e:
             if not stop_event.is_set():
                 print(f"\n>>> Connection error: {e}")
@@ -387,7 +417,7 @@ async def interactive_mode_async(
         """Send a command and wait for response from the queue."""
         try:
             # Clear any stale responses from the queue
-            while not response_queue.empty():
+            while True:
                 try:
                     response_queue.get_nowait()
                 except asyncio.QueueEmpty:
@@ -423,35 +453,6 @@ async def interactive_mode_async(
 
     prompt_text = f"{host}:{door_port}> "  # Fallback for non-prompt_toolkit
 
-    def _basic_readline() -> "asyncio.Future[str | None]":
-        """Read one line from stdin without blocking the event loop.
-
-        Uses add_reader (not a thread) so a daemon shutdown can end the
-        session immediately instead of waiting for the user to press Enter.
-        """
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future[str | None] = loop.create_future()
-        fd = sys.stdin.fileno()
-
-        def on_readable():
-            loop.remove_reader(fd)
-            if fut.cancelled():
-                return
-            line = sys.stdin.readline()
-            fut.set_result(line if line else None)
-
-        def cleanup(_fut):
-            try:
-                loop.remove_reader(fd)
-            except Exception:
-                pass
-
-        sys.stdout.write(prompt_text)
-        sys.stdout.flush()
-        loop.add_reader(fd, on_readable)
-        fut.add_done_callback(cleanup)
-        return fut
-
     try:
         while not stop_event.is_set():
             try:
@@ -461,7 +462,7 @@ async def interactive_mode_async(
                 else:
                     # Basic fallback - also raced against disconnect so the
                     # session ends as soon as the daemon goes away
-                    prompt_task = asyncio.ensure_future(_basic_readline())
+                    prompt_task = asyncio.ensure_future(_basic_readline(prompt_text))
                 stop_task = asyncio.create_task(wait_for_stop())
 
                 done, pending = await asyncio.wait(
@@ -487,7 +488,7 @@ async def interactive_mode_async(
                     # EOF
                     break
                 line = line.strip()
-            except EOFError:
+            except EOFError:  # pragma: no cover (defensive: both prompt paths signal EOF by returning None rather than raising)
                 break
             except KeyboardInterrupt:
                 continue
@@ -536,7 +537,7 @@ async def interactive_mode_async(
         reader_task.cancel()
         try:
             await reader_task
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # pragma: no cover (defensive: socket_reader swallows its own cancellation; only an outer cancel landing exactly on this await would raise)
             pass
         if stdout_ctx:
             stdout_ctx.__exit__(None, None, None)
@@ -614,16 +615,21 @@ Use the 'help' command to see available simulator commands.
     # Get history file (only used when prompt_toolkit drives the session)
     history_file = args.history if PROMPT_TOOLKIT_AVAILABLE else None
 
-    if args.interactive:
-        interactive_mode(args.host, args.port, door_port, args.timeout, history_file)
-    elif args.command:
-        command = " ".join(args.command)
-        success, response = send_command(args.host, args.port, command, args.timeout)
-        print(response)
-        sys.exit(0 if success else 1)
-    else:
-        parser.print_help()
-        sys.exit(1)
+    try:
+        if args.interactive:
+            interactive_mode(args.host, args.port, door_port, args.timeout, history_file)
+        elif args.command:
+            command = " ".join(args.command)
+            success, response = send_command(args.host, args.port, command, args.timeout)
+            print(response)
+            sys.exit(0 if success else 1)
+        else:
+            parser.print_help()
+            sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        # Interrupted runs must not report success (128 + SIGINT)
+        sys.exit(130)
 
 
 if __name__ == "__main__":

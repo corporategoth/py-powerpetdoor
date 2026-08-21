@@ -9,9 +9,31 @@ from __future__ import annotations
 
 import pytest
 
+from powerpetdoor.const import (
+    DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    DOOR_STATE_CLOSING_TOP_OPEN,
+    DOOR_STATE_HOLDING,
+    DOOR_STATE_RISING,
+    DOOR_STATE_SLOWING,
+)
 from powerpetdoor.simulator.scripting import YAML_AVAILABLE, get_builtin_script
 
 requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
+
+# Open, close attempt, obstruction retract (reverses from CLOSING_TOP back
+# through SLOWING to HOLDING), then the final undisturbed close.
+RETRACT_SEQUENCE = [
+    DOOR_STATE_RISING,
+    DOOR_STATE_SLOWING,
+    DOOR_STATE_HOLDING,
+    DOOR_STATE_CLOSING_TOP_OPEN,
+    DOOR_STATE_SLOWING,
+    DOOR_STATE_HOLDING,
+    DOOR_STATE_CLOSING_TOP_OPEN,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    DOOR_STATE_CLOSED,
+]
 
 
 @requires_yaml
@@ -21,7 +43,7 @@ class TestObstructionTest:
     def test_script_exists(self):
         """The obstruction_test script should exist and be loadable."""
         script = get_builtin_script("obstruction_test")
-        assert "obstruction" in script.name.lower() or "retract" in script.name.lower()
+        assert script.name == "Obstruction Auto-Retract Test"
 
     def test_script_has_obstruction_action(self):
         """Script should include obstruction action."""
@@ -32,98 +54,41 @@ class TestObstructionTest:
     def test_script_enables_autoretract(self):
         """Script should enable autoretract before testing."""
         script = get_builtin_script("obstruction_test")
-        # First few steps should set up autoretract
-        for step in script.steps[:3]:
-            if step.action == "set" and step.params.get("name") == "autoretract":
-                assert step.params.get("value") == "on"
-                break
+        assert script.steps[0].action == "set"
+        assert script.steps[0].params == {"name": "autoretract", "value": "on"}
 
-    @pytest.mark.asyncio
-    async def test_script_runs_successfully(self, runner, simulator):
-        """The obstruction test should complete without errors."""
+    def test_script_obstructs_during_close(self):
+        """The obstruction fires only after the door has started closing."""
         script = get_builtin_script("obstruction_test")
-        result = await runner.run(script, verbose=False)
+        actions = [s.action for s in script.steps]
+        obstruction_at = actions.index("obstruction")
+        closing_wait = script.steps[obstruction_at - 1]
+        assert closing_wait.action == "wait_for"
+        assert closing_wait.params["condition"] == "door_closing"
+
+    async def test_script_passes_with_one_retract(self, runner, simulator):
+        """The script passes, having auto-retracted exactly once."""
+        result = await runner.run(get_builtin_script("obstruction_test"), verbose=False)
+
         assert result is True
-
-    @pytest.mark.asyncio
-    async def test_autoretract_counter_increases(self, runner, simulator):
-        """Auto-retract counter should increase after obstruction."""
-        # Ensure autoretract is enabled
-        simulator.state.autoretract = True
-        initial_count = simulator.state.total_auto_retracts
-
-        script = get_builtin_script("obstruction_test")
-        await runner.run(script, verbose=False)
-
-        # The obstruction should have triggered an auto-retract
-        assert simulator.state.total_auto_retracts > initial_count
+        assert simulator.state.total_auto_retracts == 1
+        # The script ends as soon as the retract re-opens the door
+        assert simulator.state.door_status == DOOR_STATE_HOLDING
+        # The retract cleared the simulated obstruction
+        assert simulator.state.inside_sensor_active is False
 
 
 @requires_yaml
 class TestObstructionTestMessages:
-    """Test messages generated during obstruction_test script execution."""
+    """Broadcasts observed by a connected client during obstruction_test."""
 
-    @pytest.mark.asyncio
-    async def test_generates_status_updates(self, runner, simulator, message_capture):
-        """Obstruction test should generate status update messages."""
-        script = get_builtin_script("obstruction_test")
-        await runner.run(script, verbose=False)
+    async def test_broadcasts_exact_retract_sequence(self, runner, simulator, message_capture):
+        """The client sees the close attempt reverse, then the final close."""
+        result = await runner.run(get_builtin_script("obstruction_test"), verbose=False)
+        assert result is True
 
-        import asyncio
+        # Let the re-opened door finish its final close deterministically
+        await simulator.wait_for_status(DOOR_STATE_CLOSED, timeout=10.0)
 
-        await asyncio.sleep(0.1)
-
-        status_updates = message_capture.find_status_updates()
-        assert len(status_updates) > 0, "Should receive status update messages"
-
-    @pytest.mark.asyncio
-    async def test_status_shows_door_opening(self, runner, simulator, message_capture):
-        """Should see door open before obstruction is triggered."""
-        from powerpetdoor.const import DOOR_STATE_HOLDING, DOOR_STATE_RISING
-
-        script = get_builtin_script("obstruction_test")
-        await runner.run(script, verbose=False)
-
-        import asyncio
-
-        await asyncio.sleep(0.1)
-
-        statuses = message_capture.get_status_sequence()
-        has_open = any(s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING) for s in statuses)
-        assert has_open, f"Should see door open states: {statuses}"
-
-    @pytest.mark.asyncio
-    async def test_door_retracts_on_obstruction(self, runner, simulator, message_capture):
-        """After obstruction, door should retract (go back to open states)."""
-        from powerpetdoor.const import (
-            DOOR_STATE_HOLDING,
-            DOOR_STATE_SLOWING,
-        )
-
-        script = get_builtin_script("obstruction_test")
-        await runner.run(script, verbose=False)
-
-        import asyncio
-
-        await asyncio.sleep(0.1)
-
-        statuses = message_capture.get_status_sequence()
-
-        # With state-aware behavior, when retracting from CLOSING_TOP_OPEN (66%),
-        # the door reverses to SLOWING (same 66% position) rather than restarting
-        # from RISING (33%). This is the correct physical behavior.
-        # We should see:
-        # 1. Initial open: RISING -> SLOWING -> HOLDING
-        # 2. Start closing: CLOSING_TOP_OPEN
-        # 3. Obstruction retract: SLOWING -> HOLDING (reverses from same position)
-        slowing_count = sum(1 for s in statuses if s == DOOR_STATE_SLOWING)
-        holding_count = sum(1 for s in statuses if s == DOOR_STATE_HOLDING)
-
-        # Should see slowing at least twice: initial open + retract after obstruction
-        assert slowing_count >= 2, (
-            f"Expected at least 2 slowing states (open + retract), got {slowing_count}: {statuses}"
-        )
-        # Should see holding at least twice as well
-        assert holding_count >= 2, (
-            f"Expected at least 2 holding states, got {holding_count}: {statuses}"
-        )
+        sequence = await message_capture.wait_for_status_sequence(RETRACT_SEQUENCE)
+        assert sequence == RETRACT_SEQUENCE

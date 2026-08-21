@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import json
+import logging
+import threading
 import time
 from unittest.mock import AsyncMock, patch
 
@@ -20,16 +23,46 @@ from powerpetdoor import (
     find_end,
     make_bool,
 )
-from powerpetdoor.client import MAX_FAILED_MSG, MAX_FAILED_PINGS
+from powerpetdoor.client import MAX_FAILED_MSG, MAX_FAILED_PINGS, CommandError
 from powerpetdoor.const import (
+    CMD_CHECK_RESET_REASON,
     CMD_CLOSE,
+    CMD_DELETE_SCHEDULE,
+    CMD_GET_AUTO,
+    CMD_GET_AUTORETRACT,
+    CMD_GET_CMD_LOCKOUT,
+    CMD_GET_DOOR_OPEN_STATS,
     CMD_GET_DOOR_STATUS,
+    CMD_GET_HOLD_TIME,
+    CMD_GET_HW_INFO,
+    CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
+    CMD_GET_SCHEDULE,
+    CMD_GET_SENSOR_TRIGGER_VOLTAGE,
     CMD_GET_SETTINGS,
+    CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+    CMD_GET_TIMEZONE,
+    CMD_HAS_REMOTE_ID,
+    CMD_HAS_REMOTE_KEY,
     CMD_OPEN,
     COMMAND,
     CONFIG,
+    FIELD_AUTO,
+    FIELD_AUTORETRACT,
+    FIELD_CMD_LOCKOUT,
+    FIELD_INSIDE,
+    FIELD_LOW_BATTERY_NOTIFICATIONS,
+    FIELD_OUTSIDE,
+    FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
+    FIELD_POWER,
+    FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
     FIELD_SUCCESS,
+    FIELD_TOTAL_AUTO_RETRACTS,
+    FIELD_TOTAL_OPEN_CYCLES,
     PING,
+    PONG,
     PRIORITY_CRITICAL,
     PRIORITY_HIGH,
     PRIORITY_LOW,
@@ -543,10 +576,13 @@ class TestListenerSystem:
             {FIELD_SUCCESS: "true", "CMD": "DOOR_STATUS", "door_status": "DOOR_CLOSED", "msgId": 1}
         )
 
-        # Allow the event loop to process pending tasks
-        await asyncio.sleep(0.01)
+        # Deterministic: spin the loop until the dispatched task has run.
+        async with asyncio.timeout(1.0):
+            while not callback_tracker["calls"]:
+                await asyncio.sleep(0)
 
-        assert "door_status" in callback_tracker["calls"]
+        assert callback_tracker["calls"] == ["door_status"]
+        assert callback_tracker["args"] == [(("DOOR_CLOSED",), {})]
 
     def test_add_handlers_registers_callbacks(self, mock_client, make_async_callback):
         """add_handlers registers connection callbacks."""
@@ -933,11 +969,9 @@ class TestOutstandingMessages:
             }
         )
 
-        # Allow the event loop to process pending tasks
-        await asyncio.sleep(0.01)
-
-        # Future should be resolved with the settings payload and untracked
-        assert future.result() == {"power_state": True}
+        # Future resolves with the settings payload and is untracked.
+        result = await asyncio.wait_for(future, timeout=1.0)
+        assert result == {"power_state": True}
         assert msg_id not in client._outstanding
 
     async def test_disconnect_fails_outstanding_with_connection_error(self, mock_client):
@@ -1637,3 +1671,714 @@ class TestSensorListenerSignature:
         )
 
         assert calls == [(FIELD_TOTAL_OPEN_CYCLES, 42), (FIELD_TOTAL_AUTO_RETRACTS, 7)]
+
+
+# ============================================================================
+# Per-Field Listener Routing Tests
+# ============================================================================
+
+
+class TestPerFieldListenerRouting:
+    """Single-field listener dicts route only their own field's updates."""
+
+    async def test_sensor_subset_listeners_receive_only_their_field(self, mock_client):
+        """Per-field sensor listeners each fire once, for their field only."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        auto_calls: list = []
+        power_calls: list = []
+        client.add_listener(
+            "auto_only", sensor_update={FIELD_AUTO: lambda f, v: auto_calls.append((f, v))}
+        )
+        client.add_listener(
+            "power_only", sensor_update={FIELD_POWER: lambda f, v: power_calls.append((f, v))}
+        )
+
+        settings = {
+            FIELD_POWER: "1",
+            FIELD_INSIDE: "1",
+            FIELD_OUTSIDE: "0",
+            FIELD_AUTO: "0",
+            FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: "0",
+            FIELD_CMD_LOCKOUT: "0",
+            FIELD_AUTORETRACT: "1",
+        }
+        await client.process_message(
+            {"success": "true", "CMD": CMD_GET_SETTINGS, "settings": settings}
+        )
+
+        assert auto_calls == [(FIELD_AUTO, False)]
+        assert power_calls == [(FIELD_POWER, True)]
+
+    async def test_notifications_subset_listeners_receive_only_their_field(self, mock_client):
+        """Per-field notification listeners each fire once, for their field only."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        indoor_calls: list = []
+        battery_calls: list = []
+        client.add_listener(
+            "indoor_on_only",
+            notifications_update={
+                FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: lambda f, v: indoor_calls.append((f, v))
+            },
+        )
+        client.add_listener(
+            "battery_only",
+            notifications_update={
+                FIELD_LOW_BATTERY_NOTIFICATIONS: lambda f, v: battery_calls.append((f, v))
+            },
+        )
+
+        notifications = {
+            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: "1",
+            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: "0",
+            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: "0",
+            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: "1",
+            FIELD_LOW_BATTERY_NOTIFICATIONS: "0",
+        }
+        await client.process_message(
+            {"success": "true", "CMD": "GET_NOTIFICATIONS", "notifications": notifications}
+        )
+
+        assert indoor_calls == [(FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS, True)]
+        assert battery_calls == [(FIELD_LOW_BATTERY_NOTIFICATIONS, False)]
+
+    async def test_stats_subset_listeners_receive_only_their_field(self, mock_client):
+        """Per-field stats listeners each fire once, for their field only."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        cycle_calls: list = []
+        retract_calls: list = []
+        client.add_listener(
+            "cycles_only",
+            stats_update={FIELD_TOTAL_OPEN_CYCLES: lambda f, v: cycle_calls.append((f, v))},
+        )
+        client.add_listener(
+            "retracts_only",
+            stats_update={FIELD_TOTAL_AUTO_RETRACTS: lambda f, v: retract_calls.append((f, v))},
+        )
+
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": CMD_GET_DOOR_OPEN_STATS,
+                FIELD_TOTAL_OPEN_CYCLES: 10,
+                FIELD_TOTAL_AUTO_RETRACTS: 4,
+            }
+        )
+
+        assert cycle_calls == [(FIELD_TOTAL_OPEN_CYCLES, 10)]
+        assert retract_calls == [(FIELD_TOTAL_AUTO_RETRACTS, 4)]
+
+
+# ============================================================================
+# Response Handler Payload Tests
+# ============================================================================
+
+
+class TestResponseHandlerPayloads:
+    """Each specialized handler dispatches its payload and resolves futures."""
+
+    @staticmethod
+    def _pending(client, cmd, msg_type=CONFIG):
+        """Queue a notify command without sending it; return (msg_id, future)."""
+        client._can_dequeue = False
+        msg_id = client.msgId
+        future = client.send_message(msg_type, cmd, notify=True)
+        return msg_id, future
+
+    async def test_timezone_response_notifies_and_resolves(self, mock_client):
+        client, _, _ = mock_client
+        values: list = []
+        client.add_listener("t", timezone_update=values.append)
+        msg_id, future = self._pending(client, CMD_GET_TIMEZONE)
+
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": CMD_GET_TIMEZONE,
+                "msgID": msg_id,
+                "tz": "PST8PDT,M3.2.0,M11.1.0",
+            }
+        )
+
+        assert values == ["PST8PDT,M3.2.0,M11.1.0"]
+        assert future.result() == "PST8PDT,M3.2.0,M11.1.0"
+
+    async def test_sensor_trigger_voltage_response(self, mock_client):
+        client, _, _ = mock_client
+        values: list = []
+        client.add_listener("t", sensor_trigger_voltage_update=values.append)
+        msg_id, future = self._pending(client, CMD_GET_SENSOR_TRIGGER_VOLTAGE)
+
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": CMD_GET_SENSOR_TRIGGER_VOLTAGE,
+                "msgID": msg_id,
+                "sensorTriggerVoltage": 120,
+            }
+        )
+
+        assert values == [120]
+        assert future.result() == 120
+
+    async def test_sleep_sensor_trigger_voltage_response(self, mock_client):
+        client, _, _ = mock_client
+        values: list = []
+        client.add_listener("t", sleep_sensor_trigger_voltage_update=values.append)
+        msg_id, future = self._pending(client, CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE)
+
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+                "msgID": msg_id,
+                "sleepSensorTriggerVoltage": 80,
+            }
+        )
+
+        assert values == [80]
+        assert future.result() == 80
+
+    async def test_cmd_lockout_response_coerces_and_notifies(self, mock_client):
+        client, _, _ = mock_client
+        calls: list = []
+        client.add_listener(
+            "t", sensor_update={FIELD_CMD_LOCKOUT: lambda f, v: calls.append((f, v))}
+        )
+        msg_id, future = self._pending(client, CMD_GET_CMD_LOCKOUT)
+
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": CMD_GET_CMD_LOCKOUT,
+                "msgID": msg_id,
+                "settings": {FIELD_CMD_LOCKOUT: "1"},
+            }
+        )
+
+        assert calls == [(FIELD_CMD_LOCKOUT, True)]
+        assert future.result() is True
+
+    async def test_remote_id_response(self, mock_client):
+        client, _, _ = mock_client
+        values: list = []
+        client.add_listener("t", remote_id_update=values.append)
+        msg_id, future = self._pending(client, CMD_HAS_REMOTE_ID)
+
+        await client.process_message(
+            {"success": "true", "CMD": CMD_HAS_REMOTE_ID, "msgID": msg_id, "hasRemoteId": "1"}
+        )
+
+        assert values == [True]
+        assert future.result() is True
+
+    async def test_remote_key_response(self, mock_client):
+        client, _, _ = mock_client
+        values: list = []
+        client.add_listener("t", remote_key_update=values.append)
+        msg_id, future = self._pending(client, CMD_HAS_REMOTE_KEY)
+
+        await client.process_message(
+            {"success": "true", "CMD": CMD_HAS_REMOTE_KEY, "msgID": msg_id, "hasRemoteKey": "0"}
+        )
+
+        assert values == [False]
+        assert future.result() is False
+
+    async def test_reset_reason_response(self, mock_client):
+        client, _, _ = mock_client
+        values: list = []
+        client.add_listener("t", reset_reason_update=values.append)
+        msg_id, future = self._pending(client, CMD_CHECK_RESET_REASON)
+
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": CMD_CHECK_RESET_REASON,
+                "msgID": msg_id,
+                "resetReason": "WATCHDOG",
+            }
+        )
+
+        assert values == ["WATCHDOG"]
+        assert future.result() == "WATCHDOG"
+
+    async def test_delete_schedule_without_echoed_index(self, mock_client):
+        """Firmware that omits the deleted index still resolves the future."""
+        client, _, _ = mock_client
+        deleted: list = []
+        client.add_listener("t", schedule_delete=deleted.append)
+        msg_id, future = self._pending(client, CMD_DELETE_SCHEDULE)
+
+        await client.process_message(
+            {"success": "true", "CMD": CMD_DELETE_SCHEDULE, "msgID": msg_id}
+        )
+
+        assert future.result() is None
+        assert deleted == []
+
+    async def test_stats_response_without_listeners_still_resolves(self, mock_client):
+        """With no stats listeners the future still gets both values."""
+        client, _, _ = mock_client
+        msg_id, future = self._pending(client, CMD_GET_DOOR_OPEN_STATS)
+
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": CMD_GET_DOOR_OPEN_STATS,
+                "msgID": msg_id,
+                FIELD_TOTAL_OPEN_CYCLES: 42,
+                FIELD_TOTAL_AUTO_RETRACTS: 7,
+            }
+        )
+
+        assert future.result() == {FIELD_TOTAL_OPEN_CYCLES: 42, FIELD_TOTAL_AUTO_RETRACTS: 7}
+
+    async def test_settings_response_notifies_config_listeners(self, mock_client):
+        """tz/holdOpenTime/voltage values inside settings reach their listeners."""
+        client, _, _ = mock_client
+        tz_values: list = []
+        hold_values: list = []
+        voltage_values: list = []
+        sleep_values: list = []
+        client.add_listener(
+            "t",
+            timezone_update=tz_values.append,
+            hold_time_update=hold_values.append,
+            sensor_trigger_voltage_update=voltage_values.append,
+            sleep_sensor_trigger_voltage_update=sleep_values.append,
+        )
+        msg_id, future = self._pending(client, CMD_GET_SETTINGS)
+
+        settings = {
+            "tz": "EST5EDT,M3.2.0,M11.1.0",
+            "holdOpenTime": 500,
+            "sensorTriggerVoltage": 120,
+            "sleepSensorTriggerVoltage": 80,
+        }
+        await client.process_message(
+            {"success": "true", "CMD": CMD_GET_SETTINGS, "msgID": msg_id, "settings": settings}
+        )
+
+        assert tz_values == ["EST5EDT,M3.2.0,M11.1.0"]
+        assert hold_values == [500]
+        assert voltage_values == [120]
+        assert sleep_values == [80]
+        assert future.result() == settings
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            CMD_GET_AUTO,
+            CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
+            CMD_GET_CMD_LOCKOUT,
+            CMD_GET_AUTORETRACT,
+            CMD_GET_HW_INFO,
+            CMD_GET_TIMEZONE,
+            CMD_GET_HOLD_TIME,
+            CMD_GET_SENSOR_TRIGGER_VOLTAGE,
+            CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+            CMD_GET_SCHEDULE,
+            CMD_HAS_REMOTE_ID,
+            CMD_HAS_REMOTE_KEY,
+            CMD_CHECK_RESET_REASON,
+        ],
+    )
+    async def test_success_response_missing_payload_fails_future(self, mock_client, cmd):
+        """Every guarded handler fails its future typed when the payload is absent."""
+        client, _, _ = mock_client
+        msg_id, future = self._pending(client, cmd)
+
+        await client.process_message({"success": "true", "CMD": cmd, "msgID": msg_id})
+
+        err = future.exception()
+        assert isinstance(err, CommandError)
+        assert err.reason == "Response missing expected field"
+
+
+# ============================================================================
+# Keepalive / Receipt Edge Tests
+# ============================================================================
+
+
+class TestKeepaliveReceiptEdges:
+    """Timer bodies must be inert once their handle is cleared/cancelled."""
+
+    async def test_keepalive_noop_when_not_armed(self, mock_client):
+        """keepalive() does nothing when its task handle was cleared."""
+        client, _, _ = mock_client
+        client.cfg_keepalive = 0
+        client._keepalive = None
+        client._can_dequeue = False
+        client._last_ping = None
+
+        await client.keepalive()
+
+        assert client._last_ping is None
+        assert not client._queue
+
+    async def test_check_receipt_after_response_resets_and_dequeues(self, mock_client):
+        """A cleared receipt handle means answered: reset failures, no retransmit."""
+        client, transport, _ = mock_client
+        client.cfg_timeout = 0
+        client._failed_msg = 1
+        client._check_receipt = None
+        client._can_dequeue = False
+
+        await client.check_receipt(b'{"config": "GET_SETTINGS"}')
+
+        assert client._failed_msg == 0
+        assert transport.written_data == []  # No retransmit
+        assert client._can_dequeue is True  # Queue empty: gate reopened
+
+    async def test_send_data_without_transport_is_noop(self, disconnected_client, caplog):
+        """_send_data without a connection warns and drops the payload."""
+        client = disconnected_client
+
+        with caplog.at_level(logging.WARNING):
+            await client._send_data(b'{"config": "GET_SETTINGS"}')
+
+        assert "without a connection active" in caplog.text
+
+    async def test_fail_inflight_future_without_inflight_is_noop(self, mock_client):
+        """No in-flight msgId: other outstanding futures are left untouched."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+        client._inflight_msg_id = None
+
+        client._fail_inflight_future(TimeoutError("dropped"))
+
+        assert not future.done()
+        future.cancel()
+
+    async def test_fail_inflight_future_with_done_future_is_noop(self, mock_client):
+        """A future that already completed is never failed again."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        msg_id = client.msgId
+        future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+        future.set_result("done")
+        client._inflight_msg_id = msg_id
+
+        client._fail_inflight_future(TimeoutError("dropped"))
+
+        assert future.result() == "done"
+        assert client._inflight_msg_id is None
+
+
+# ============================================================================
+# Dequeue Edge Tests
+# ============================================================================
+
+
+class TestDequeueData:
+    """dequeue_data guards and command-type classification."""
+
+    async def test_dequeue_blocked_while_receipt_outstanding(self, mock_client, caplog):
+        """A pending receipt blocks dequeuing the next message."""
+        client, transport, _ = mock_client
+        client._can_dequeue = False
+        client._check_receipt = asyncio.get_running_loop().create_future()
+        heapq.heappush(
+            client._queue,
+            PrioritizedMessage(priority=PRIORITY_LOW, sequence=0, data={CONFIG: CMD_GET_SETTINGS}),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            await client.dequeue_data()
+
+        assert "another message is still outstanding" in caplog.text
+        assert len(client._queue) == 1
+        assert transport.written_data == []
+
+    async def test_dequeue_ping_expects_pong(self, mock_client):
+        """A dequeued PING sets the expected response command to PONG."""
+        client, transport, _ = mock_client
+        client._can_dequeue = False
+        client.send_message(PING, "12345")
+
+        await client.dequeue_data()
+
+        assert client._last_command == PONG
+        assert transport.get_last_message()[PING] == "12345"
+
+    async def test_dequeue_unknown_message_type_warns_and_sends(self, mock_client, caplog):
+        """A message with no COMMAND/CONFIG/PING key is sent with a warning."""
+        client, transport, _ = mock_client
+        client._can_dequeue = False
+        heapq.heappush(
+            client._queue,
+            PrioritizedMessage(priority=PRIORITY_LOW, sequence=0, data={"bogus": 1}),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            await client.dequeue_data()
+
+        assert "Sending unknown command type" in caplog.text
+        assert client._last_command is None
+        assert transport.get_last_message() == {"bogus": 1}
+
+
+# ============================================================================
+# Process Message Dequeue-Gate Tests
+# ============================================================================
+
+
+class TestProcessMessageGates:
+    """The ack/dequeue gate logic and no-future logging paths."""
+
+    async def test_matching_cmd_without_receipt_or_gate_defers(self, mock_client):
+        """cmd match with no receipt and a closed gate must not dequeue."""
+        client, _, _ = mock_client
+        calls = []
+
+        async def fake_dequeue():
+            calls.append("dequeue")
+
+        client.dequeue_data = fake_dequeue
+        client._last_command = CMD_GET_DOOR_STATUS
+        client._check_receipt = None
+        client._can_dequeue = False
+
+        await client.process_message(
+            {"success": "true", "CMD": CMD_GET_DOOR_STATUS, "door_status": "DOOR_CLOSED"}
+        )
+
+        assert calls == []
+
+    async def test_handler_exception_without_future_only_logs(self, mock_client, caplog):
+        """A handler crash with no paired future is logged, never raised."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+
+        with caplog.at_level(logging.ERROR):
+            await client.process_message({"success": "true", "CMD": CMD_GET_SETTINGS})
+
+        assert "Error handling GET_SETTINGS response" in caplog.text
+
+    async def test_failure_response_without_future_only_logs(self, mock_client, caplog):
+        """A device failure with no paired future is logged, never raised."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+
+        with caplog.at_level(logging.WARNING):
+            await client.process_message({"success": "false", "CMD": CMD_OPEN, "reason": "locked"})
+
+        assert "Error reported by device" in caplog.text
+
+
+# ============================================================================
+# Lifecycle Handler Dispatch Tests
+# ============================================================================
+
+
+class TestHandlerDispatch:
+    """_dispatch_handler isolates sync handler exceptions (D3)."""
+
+    async def test_sync_handler_exception_logged_not_raised(self, mock_client, caplog):
+        """A raising sync on_disconnect handler does not block the next one."""
+        client, _, _ = mock_client
+        good = asyncio.Event()
+
+        def bad_handler():
+            raise RuntimeError("handler bug")
+
+        client.add_handlers("bad", on_disconnect=bad_handler)
+        client.add_handlers("good", on_disconnect=good.set)
+
+        with caplog.at_level(logging.ERROR):
+            client.disconnect()
+
+        assert "Connection handler 'bad' raised" in caplog.text
+        assert good.is_set()
+
+
+# ============================================================================
+# Thread-Safety and Private-Loop Lifecycle Tests
+# ============================================================================
+
+
+class TestThreadsafeLifecycle:
+    """run_coroutine_threadsafe guards and the blocking start() path."""
+
+    def _make_client(self):
+        return PowerPetDoorClient(
+            host="127.0.0.1", port=3000, keepalive=0, timeout=1.0, reconnect=1.0
+        )
+
+    def test_run_coroutine_threadsafe_requires_started_client(self):
+        """Submitting before the client has a loop raises a clear error."""
+        client = self._make_client()
+
+        async def coro():
+            pass  # Never scheduled - submission must fail first
+
+        pending = coro()
+        with pytest.raises(RuntimeError, match="requires the client to be started first"):
+            client.run_coroutine_threadsafe(pending)
+        pending.close()
+
+    def test_stop_before_start_is_noop(self):
+        """stop() with no loop configured just records the shutdown."""
+        client = self._make_client()
+
+        client.stop()
+
+        assert client._shutdown is True
+
+    def test_disconnect_outside_loop_cancels_reconnect_task(self):
+        """disconnect() from a non-loop thread still cancels the reconnect."""
+        from types import SimpleNamespace
+
+        client = self._make_client()
+        cancelled = []
+        client._reconnect_task = SimpleNamespace(cancel=lambda: cancelled.append(True))
+
+        client.disconnect()
+
+        assert cancelled == [True]
+        assert client._reconnect_task is None
+
+    def test_start_creates_private_loop_and_stop_ends_it(self):
+        """The blocking start() path runs a private loop until stop()."""
+        client = self._make_client()
+        started = threading.Event()
+
+        async def fake_connect():
+            started.set()
+
+        client.connect = fake_connect
+
+        thread = threading.Thread(target=client.start, daemon=True)
+        thread.start()
+        try:
+            assert started.wait(5.0)
+            assert client._ownLoop is True
+
+            # Thread-safe submission runs on the private loop.
+            async def get_loop():
+                return asyncio.get_running_loop()
+
+            result = client.run_coroutine_threadsafe(get_loop()).result(timeout=5.0)
+            assert result is client._eventLoop
+        finally:
+            client.stop()
+            thread.join(5.0)
+
+        assert not thread.is_alive()
+        assert client._eventLoop.is_closed()
+
+
+# ============================================================================
+# Concurrency Tests (H7)
+# ============================================================================
+
+
+class TestConcurrency:
+    """Parallel commands, interleaved responses, disconnect mid-flight."""
+
+    @staticmethod
+    async def _next_written(transport, already: int) -> dict:
+        """Wait (bounded, event-loop driven) for the next written message."""
+        async with asyncio.timeout(5.0):
+            while len(transport.written_data) <= already:
+                await asyncio.sleep(0)
+        return json.loads(transport.written_data[already].decode("ascii"))
+
+    async def test_parallel_commands_resolve_their_own_futures(self, mock_client):
+        """Three concurrent notify commands each get their own response."""
+        client, transport, device = mock_client
+        payloads = {
+            CMD_GET_SETTINGS: {"settings": {"power_state": "1"}},
+            CMD_GET_DOOR_STATUS: {"door_status": "DOOR_CLOSED"},
+            CMD_GET_HOLD_TIME: {"holdTime": 500},
+        }
+        futures = {cmd: client.send_message(CONFIG, cmd, notify=True) for cmd in payloads}
+
+        async def serve():
+            for i in range(len(payloads)):
+                msg = await self._next_written(transport, i)
+                cmd = msg[CONFIG]
+                device.respond_success(msg["msgId"], cmd, **payloads[cmd])
+
+        await asyncio.gather(serve(), *futures.values())
+
+        assert futures[CMD_GET_SETTINGS].result() == {"power_state": "1"}
+        assert futures[CMD_GET_DOOR_STATUS].result() == "DOOR_CLOSED"
+        assert futures[CMD_GET_HOLD_TIME].result() == 500
+
+    async def test_out_of_order_responses_resolve_correct_futures(self, mock_client):
+        """Responses arriving out of order resolve exactly their own futures."""
+        client, _, _ = mock_client
+        client._can_dequeue = False  # Keep both commands queued (unsent)
+        settings_id = client.msgId
+        settings_future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+        status_id = client.msgId
+        status_future = client.send_message(CONFIG, CMD_GET_DOOR_STATUS, notify=True)
+
+        # The device answers the *second* command first.
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": CMD_GET_DOOR_STATUS,
+                "msgID": status_id,
+                "door_status": "DOOR_HOLDING",
+            }
+        )
+        assert status_future.result() == "DOOR_HOLDING"
+        assert not settings_future.done()
+
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": CMD_GET_SETTINGS,
+                "msgID": settings_id,
+                "settings": {"power_state": "0"},
+            }
+        )
+        assert settings_future.result() == {"power_state": "0"}
+
+    async def test_disconnect_during_inflight_fails_future_typed(self, mock_client):
+        """Disconnect while a command is on the wire fails it with ConnectionError."""
+        client, transport, _ = mock_client
+        future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+        await self._next_written(transport, 0)  # Message is on the wire
+        assert client._check_receipt is not None
+
+        client.disconnect()
+
+        with pytest.raises(ConnectionError):
+            await future
+        assert client._check_receipt is None
+
+    async def test_queued_while_disconnected_flush_in_priority_order(
+        self, disconnected_client, mock_transport
+    ):
+        """Commands queued while offline flush by priority once connected."""
+        client = disconnected_client
+        client.send_message(CONFIG, CMD_GET_SETTINGS)  # PRIORITY_LOW, enqueued first
+        client.send_message(COMMAND, CMD_OPEN)  # PRIORITY_HIGH
+        client.send_message(PING, "12345")  # PRIORITY_CRITICAL
+        assert len(client._queue) == 3
+
+        client.connection_made(mock_transport)
+        try:
+            for i in range(3):
+                msg = await self._next_written(mock_transport, i)
+                if PING in msg:
+                    reply = {"success": "true", "CMD": PONG, PONG: msg[PING]}
+                elif COMMAND in msg:
+                    reply = {"success": "true", "CMD": msg[COMMAND], "door_status": "DOOR_RISING"}
+                else:
+                    reply = {"success": "true", "CMD": msg[CONFIG], "settings": {}}
+                client.data_received(json.dumps(reply).encode("ascii"))
+
+            order = []
+            for msg in mock_transport.get_written_messages():
+                order.append(PING if PING in msg else msg.get(COMMAND) or msg.get(CONFIG))
+            assert order == [PING, CMD_OPEN, CMD_GET_SETTINGS]
+        finally:
+            client.disconnect()

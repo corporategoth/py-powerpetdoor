@@ -72,21 +72,18 @@ class TestCacheInitialization:
         tz_utils.init_timezone_cache_sync()
         assert tz_utils.is_cache_initialized() is True
 
-    @pytest.mark.asyncio
     async def test_async_init_works(self, reset_cache):
         """Async initialization should work correctly."""
         assert tz_utils.is_cache_initialized() is False
         await tz_utils.async_init_timezone_cache()
         assert tz_utils.is_cache_initialized() is True
 
-    @pytest.mark.asyncio
     async def test_async_init_is_idempotent(self):
         """Calling async init multiple times should be safe."""
         await tz_utils.async_init_timezone_cache()
         await tz_utils.async_init_timezone_cache()
         assert tz_utils.is_cache_initialized() is True
 
-    @pytest.mark.asyncio
     async def test_concurrent_async_init_builds_cache_once(self, reset_cache, monkeypatch):
         """Two concurrent initializers must run the tzdata scan once (L12)."""
         calls = []
@@ -109,6 +106,16 @@ class TestCacheInitialization:
     def test_cache_not_initialized_returns_false(self, reset_cache):
         """is_cache_initialized returns False when not initialized."""
         assert tz_utils.is_cache_initialized() is False
+
+    def test_zones_without_footers_are_skipped(self, reset_cache, monkeypatch):
+        """Zones whose TZif has no footer get no POSIX mapping, no crash."""
+        monkeypatch.setattr(tz_utils, "_extract_posix_from_tzif", lambda tz: None)
+
+        tz_utils.init_timezone_cache_sync()
+
+        assert tz_utils.is_cache_initialized() is True
+        assert tz_utils.get_available_timezones()  # Zone list still built
+        assert tz_utils.get_posix_tz_string("UTC") is None
 
 
 # ============================================================================
@@ -396,6 +403,59 @@ class TestParsePosixTzString:
         """Input with no parseable abbreviation returns None (M2 contract)."""
         assert tz_utils.parse_posix_tz_string("123") is None
         assert tz_utils.parse_posix_tz_string("!!!") is None
+
+    def test_parse_comma_with_single_rule_part_ignored(self):
+        """A DST rule section with only one part yields no start/end."""
+        result = tz_utils.parse_posix_tz_string("EST5EDT,M3.2.0")
+        assert result is not None
+        assert result["std_abbrev"] == "EST"
+        assert result["std_offset"] == "5"
+        assert result["dst_abbrev"] == "EDT"
+        assert result["dst_start"] is None
+        assert result["dst_end"] is None
+
+
+# ============================================================================
+# TZif Extraction Edge Cases
+# ============================================================================
+
+
+class TestExtractPosixFromTzif:
+    """Defensive branches of the raw TZif footer extractor."""
+
+    def test_non_tzif_resource_returns_none(self):
+        """A real resource that is not a TZif file returns None."""
+        # tzdata.zoneinfo/__init__.py exists but has no TZif magic.
+        assert tz_utils._extract_posix_from_tzif("__init__.py") is None
+
+    def test_missing_resource_returns_none(self):
+        """A nonexistent zone resource returns None instead of raising."""
+        assert tz_utils._extract_posix_from_tzif("No/Such/Zone") is None
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            b"TZif2-data-without-any-newline",  # No footer newlines at all
+            b"TZif2-data\n",  # Only the terminating newline
+            b"TZif2-data\n\n",  # Footer present but empty
+        ],
+        ids=["no-newline", "single-newline", "empty-footer"],
+    )
+    def test_tzif_without_usable_footer_returns_none(self, tmp_path, monkeypatch, content):
+        """A TZif file with no usable trailing footer returns None."""
+        import importlib.resources
+        from contextlib import contextmanager
+
+        fake = tmp_path / "Fakezone"
+        fake.write_bytes(content)
+
+        @contextmanager
+        def fake_as_file(ref):
+            yield fake
+
+        monkeypatch.setattr(importlib.resources, "as_file", fake_as_file)
+
+        assert tz_utils._extract_posix_from_tzif("UTC") is None
 
 
 # ============================================================================

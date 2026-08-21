@@ -9,12 +9,10 @@ from __future__ import annotations
 
 import pytest
 
-from powerpetdoor.const import (
-    DOOR_STATE_CLOSED,
-    DOOR_STATE_HOLDING,
-    DOOR_STATE_RISING,
-)
+from powerpetdoor.const import DOOR_STATE_CLOSED
 from powerpetdoor.simulator.scripting import YAML_AVAILABLE, get_builtin_script
+
+from .conftest import FULL_CYCLE
 
 requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
 
@@ -29,88 +27,35 @@ class TestBasicCycle:
         assert script.name == "Basic Door Cycle"
 
     def test_script_has_expected_steps(self):
-        """Script should have expected structure."""
+        """Script asserts closed, triggers the sensor, and waits on state."""
         script = get_builtin_script("basic_cycle")
-        assert len(script.steps) > 0
-        # Should start with assert door is closed
-        assert script.steps[0].action == "assert"
-        # Should include trigger_sensor
         actions = [s.action for s in script.steps]
+        # Starts by asserting the door is closed
+        assert script.steps[0].action == "assert"
+        assert script.steps[0].params == {"condition": "door_status", "equals": "DOOR_CLOSED"}
         assert "trigger_sensor" in actions
+        # Deterministic: synchronizes on door state, not wall-clock waits
+        assert "wait_for" in actions
+        assert "wait" not in actions
 
-    @pytest.mark.asyncio
-    async def test_script_runs_successfully(self, runner, simulator):
-        """The script should complete without errors."""
-        script = get_builtin_script("basic_cycle")
-        result = await runner.run(script, verbose=False)
+    async def test_script_passes_with_closed_end_state(self, runner, simulator):
+        """The script passes, completes one cycle, and leaves the door closed."""
+        result = await runner.run(get_builtin_script("basic_cycle"), verbose=False)
+
         assert result is True
-
-    @pytest.mark.asyncio
-    async def test_door_returns_to_closed(self, runner, simulator):
-        """After running, door should be closed."""
-        script = get_builtin_script("basic_cycle")
-        await runner.run(script, verbose=False)
         assert simulator.state.door_status == DOOR_STATE_CLOSED
-
-    @pytest.mark.asyncio
-    async def test_cycle_count_increases(self, runner, simulator):
-        """Running the script should increase open cycle count."""
-        initial_count = simulator.state.total_open_cycles
-        script = get_builtin_script("basic_cycle")
-        await runner.run(script, verbose=False)
-        assert simulator.state.total_open_cycles > initial_count
+        assert simulator.state.total_open_cycles == 1
+        assert simulator.state.hold_time == 1.0  # set by the script
 
 
 @requires_yaml
 class TestBasicCycleMessages:
-    """Test messages generated during basic_cycle script execution."""
+    """Broadcasts observed by a connected client during basic_cycle."""
 
-    @pytest.mark.asyncio
-    async def test_generates_status_updates(self, runner, simulator, message_capture):
-        """Script should generate door status update messages."""
-        script = get_builtin_script("basic_cycle")
-        await runner.run(script, verbose=False)
+    async def test_broadcasts_exact_full_cycle(self, runner, simulator, message_capture):
+        """A connected client sees exactly one full open/close sequence."""
+        result = await runner.run(get_builtin_script("basic_cycle"), verbose=False)
+        assert result is True
 
-        # Give time for messages to be collected
-        import asyncio
-
-        await asyncio.sleep(0.1)
-
-        status_updates = message_capture.find_status_updates()
-        assert len(status_updates) > 0, "Should receive status update messages"
-
-    @pytest.mark.asyncio
-    async def test_status_sequence_includes_open_close(self, runner, simulator, message_capture):
-        """Status updates should show door opening and closing."""
-        script = get_builtin_script("basic_cycle")
-        await runner.run(script, verbose=False)
-
-        import asyncio
-
-        await asyncio.sleep(0.1)
-
-        statuses = message_capture.get_status_sequence()
-
-        # Should see door rising or holding (open states)
-        has_open = any(s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING) for s in statuses)
-        assert has_open, f"Should see open state in sequence: {statuses}"
-
-        # Should end with door closed
-        if statuses:
-            assert statuses[-1] == DOOR_STATE_CLOSED, "Should end closed"
-
-    @pytest.mark.asyncio
-    async def test_multiple_status_messages_during_cycle(self, runner, simulator, message_capture):
-        """Should receive multiple status updates as door goes through cycle."""
-        script = get_builtin_script("basic_cycle")
-        await runner.run(script, verbose=False)
-
-        import asyncio
-
-        await asyncio.sleep(0.1)
-
-        status_updates = message_capture.find_status_updates()
-        # A full cycle should generate at least: rising, holding, closing stages
-        assert len(status_updates) >= 3, (
-            f"Expected at least 3 status updates for full cycle, got {len(status_updates)}"
-        )
+        sequence = await message_capture.wait_for_status_sequence(FULL_CYCLE)
+        assert sequence == FULL_CYCLE

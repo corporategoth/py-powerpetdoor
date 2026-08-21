@@ -98,20 +98,19 @@ async def client(simulator) -> PowerPetDoorClient:
     # Connect without blocking
     await client.connect()
 
-    # Wait for connection to be established on both sides
-    for _ in range(50):  # 5 seconds max
-        if client.available and len(simulator.protocols) > 0:
-            break
-        await asyncio.sleep(0.1)
+    # Wait for connection to be established on both sides (yield-driven,
+    # no wall-clock sleeps)
+    async with asyncio.timeout(5):
+        while not (client.available and simulator.protocols):
+            await asyncio.sleep(0)
 
     assert client.available, "Client failed to connect to simulator"
     assert len(simulator.protocols) > 0, "Simulator did not register the connection"
 
     yield client
 
-    # Cleanup
-    client._shutdown = True
-    client.disconnect()
+    # Cleanup via the public shutdown API (stops reconnects and disconnects)
+    client.shutdown()
 
 
 class CallbackTracker:
@@ -602,7 +601,11 @@ class TestNotificationEvents:
         # sensor_on_indoor defaults to disabled
         simulator.trigger_sensor("inside")
 
-        assert await tracker.wait_for("notify", timeout=0.3) is False
+        # Sentinel round-trip: the simulator writes messages in order, so by
+        # the time this reply arrives, any (unexpected) earlier notification
+        # would already have been dispatched to the listener.
+        future = client.send_message(CONFIG, CMD_GET_POWER, notify=True)
+        await asyncio.wait_for(future, timeout=2.0)
         assert tracker.get_calls("notify") == []
 
 
@@ -665,11 +668,17 @@ class TestErrorHandling:
         """Door commands should be blocked when power is off."""
         simulator.state.power = False
 
-        # Try to open door
-        client.send_message(COMMAND, CMD_OPEN)
-        await asyncio.sleep(0.5)
+        # Deterministic: wait for the simulator to receive the OPEN command,
+        # then for its handler task to finish - no wall-clock sleeps.
+        received = asyncio.Event()
+        protocol = simulator.protocols[0]
+        protocol.on_command = lambda cmd, msg: cmd == CMD_OPEN and received.set()
 
-        # Door should still be closed
+        client.send_message(COMMAND, CMD_OPEN)
+        await asyncio.wait_for(received.wait(), timeout=2.0)
+        await protocol.drain()
+
+        # The command was rejected: the door never moved
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
     @pytest.mark.asyncio
@@ -677,11 +686,8 @@ class TestErrorHandling:
         """Sensor trigger should be blocked when sensor is disabled."""
         simulator.state.inside = False
 
-        # Try to trigger inside sensor
+        # A blocked trigger is ignored synchronously - the door never moves
         simulator.trigger_sensor("inside")
-        await asyncio.sleep(0.5)
-
-        # Door should still be closed
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
 
