@@ -7,13 +7,16 @@
 
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 
 from powerpetdoor import (
     compress_schedule,
     compute_schedule_diff,
+    schedule,
     schedule_entry_content_key,
     schedule_template,
     validate_schedule_entry,
@@ -253,7 +256,9 @@ class TestCompressSchedule:
 
         assert len(entries) == 2
         for entry in entries:
-            assert_schedule_wire_types(entry)
+            # compress_schedule() builds payloads the library SENDS, so it
+            # is pinned to the client->device shape.
+            assert_schedule_wire_types(entry, enabled_type=bool)
 
     def create_schedule_entry(
         self,
@@ -688,13 +693,28 @@ class TestScheduleEntryContentKey:
         assert schedule_entry_content_key(entry1) != schedule_entry_content_key(entry2)
 
     def test_key_handles_missing_fields(self):
-        """Test key handles entries with missing optional fields."""
+        """Missing optional fields fall back to the documented defaults.
+
+        The key for a fixed literal entry is exactly knowable, so pin it
+        rather than asserting it is merely not None (round-6 L5).
+        """
         entry = {
             FIELD_DAYSOFWEEK: [1, 0, 0, 0, 0, 0, 0],
         }
-        # Should not raise, uses defaults
+
         key = schedule_entry_content_key(entry)
-        assert key is not None
+
+        # (days, inside, outside, enabled, in_start, in_end, out_start, out_end)
+        assert key == (
+            (True, False, False, False, False, False, False),
+            False,  # inside defaults off
+            False,  # outside defaults off
+            True,  # enabled defaults on
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+        )
 
     def test_string_flags_normalize_to_booleans(self):
         """Door-style '1'/'0' strings for enabled/inside/outside match bools."""
@@ -957,6 +977,47 @@ class TestComputeScheduleDiff:
         # Monday entry must skip past it to index 1.
         assert to_set[0][FIELD_INDEX] == 1
 
+    def test_two_brand_new_entries_get_distinct_indices(self):
+        """The second new entry must not reuse the first's fresh index.
+
+        Only the fuzz suite caught this: deleting the
+        ``{e[FIELD_INDEX] for e in entries_to_set[:i]}`` term from
+        ``used_indices`` survived ``pytest --ignore=tests/fuzz``, which is
+        exactly what CI's unit matrix runs and what CLAUDE.md's checklist
+        requires to stand alone. The existing coverage had only *one*
+        brand-new entry, so the rule was never exercised deterministically
+        (round-6 test-fanatic M1).
+        """
+        current = [self.create_entry(0, [1, 0, 0, 0, 0, 0, 0])]  # Sunday, kept
+        new = [
+            self.create_entry(0, [1, 0, 0, 0, 0, 0, 0]),  # Sunday: matched at 0
+            self.create_entry(5, [0, 1, 0, 0, 0, 0, 0]),  # Monday: brand new
+            self.create_entry(6, [0, 0, 1, 0, 0, 0, 0]),  # Tuesday: brand new
+        ]
+
+        to_delete, to_set = compute_schedule_diff(current, new)
+
+        assert to_delete == []
+        assert len(to_set) == 2
+        assigned = [entry[FIELD_INDEX] for entry in to_set]
+        # Two SET_SCHEDULE entries sharing one index means one silently
+        # overwrites the other on the device.
+        assert assigned == [1, 2]
+        assert len(set(assigned)) == len(assigned)
+
+    def test_three_brand_new_entries_onto_an_empty_device(self):
+        """The same rule with no matched entries to seed `used_indices`."""
+        new = [
+            self.create_entry(9, [1, 0, 0, 0, 0, 0, 0]),
+            self.create_entry(9, [0, 1, 0, 0, 0, 0, 0]),
+            self.create_entry(9, [0, 0, 1, 0, 0, 0, 0]),
+        ]
+
+        to_delete, to_set = compute_schedule_diff([], new)
+
+        assert to_delete == []
+        assert [entry[FIELD_INDEX] for entry in to_set] == [0, 1, 2]
+
     def test_diff_does_not_mutate_inputs(self):
         """compute_schedule_diff must not modify either input list (L13)."""
         current = [self.create_entry(0, [1, 0, 0, 0, 0, 0, 0], start_hour=8)]
@@ -1003,13 +1064,236 @@ class TestScheduleTemplate:
         assert schedule_template[FIELD_DAYSOFWEEK] == [0, 0, 0, 0, 0, 0, 0]
         assert schedule_template[FIELD_INSIDE] is False
         assert schedule_template[FIELD_OUTSIDE] is False
-        # The wire spelling docs/protocol.md gives, not a JSON boolean:
-        # every compress_schedule() result inherits this template (M1).
-        assert schedule_template[FIELD_ENABLED] == "1"
-        assert isinstance(schedule_template[FIELD_ENABLED], str)
+        # A JSON boolean: this template seeds payloads the library SENDS,
+        # and the JSON boolean is what has run against real hardware since
+        # v0.1.0. The simulator's device->client emitter uses "1"/"0"; the
+        # two directions are not required to agree.
+        assert schedule_template[FIELD_ENABLED] is True
 
     def test_template_time_defaults(self):
         """Test template time field defaults."""
         in_start = schedule_template[FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX]
         assert in_start[FIELD_HOUR] == 0
         assert in_start[FIELD_MINUTE] == 0
+
+
+# ============================================================================
+# Untrusted indices in compute_schedule_diff (round-6 backend L3)
+# ============================================================================
+
+
+class TestComputeScheduleDiffIndexValidation:
+    """`current_schedule` may be raw device dicts - the docstring says so.
+
+    Two ``cast(int, ...)`` calls told the type checker otherwise, and the
+    index was the one schedule field left in the tree without a coercer.
+    """
+
+    @staticmethod
+    def _entry(index, days, **kwargs):
+        entry = deepcopy(schedule_template)
+        entry[FIELD_INDEX] = index
+        entry[FIELD_DAYSOFWEEK] = days
+        entry[FIELD_INSIDE] = True
+        entry[FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX] = {FIELD_HOUR: 6, FIELD_MINUTE: 0}
+        entry[FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX] = {FIELD_HOUR: 22, FIELD_MINUTE: 0}
+        entry.update(kwargs)
+        return entry
+
+    @pytest.mark.parametrize(
+        "bad_index",
+        [None, [0], 999, -1, {"a": 1}, float("inf"), "nope"],
+        ids=repr,
+    )
+    def test_a_current_entry_with_an_unusable_index_is_skipped(self, bad_index, caplog):
+        """Previously: TypeError out of a public helper, or `"index": null`
+        silently emitted in a SET_SCHEDULE payload the device then refuses."""
+        current = [self._entry(bad_index, [1, 0, 0, 0, 0, 0, 0])]
+        new = [self._entry(0, [0, 1, 0, 0, 0, 0, 0])]
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.schedule"):
+            to_delete, to_set = compute_schedule_diff(current, new)
+
+        assert to_delete == []
+        assert len(to_set) == 1
+        assert to_set[0][FIELD_INDEX] == 0
+        assert isinstance(to_set[0][FIELD_INDEX], int)
+        assert len(caplog.records) == 1
+        assert (
+            caplog.records[0]
+            .getMessage()
+            .startswith("Ignoring a current schedule entry that has no usable index")
+        )
+
+    @pytest.mark.parametrize(("wire_index", "coerced"), [("0", 0), ("3", 3), (1.0, 1), (True, 1)])
+    def test_a_coercible_index_spelling_is_accepted_not_rejected(self, wire_index, coerced, caplog):
+        """Liberal in what we accept: the coercer is shared with the parsers.
+
+        A device that spells its index ``"3"`` still gets that slot reused,
+        rather than having the entry dropped.
+        """
+        current = [self._entry(wire_index, [1, 0, 0, 0, 0, 0, 0])]
+        new = [self._entry(0, [0, 1, 0, 0, 0, 0, 0])]
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.schedule"):
+            to_delete, to_set = compute_schedule_diff(current, new)
+
+        assert to_delete == []
+        assert to_set[0][FIELD_INDEX] == coerced
+        assert isinstance(to_set[0][FIELD_INDEX], int)
+        assert caplog.records == []
+
+    def test_a_mixed_index_list_no_longer_raises(self):
+        """`sorted(current_indices - matched)` raised TypeError on str+int."""
+        current = [
+            self._entry("bad", [1, 0, 0, 0, 0, 0, 0]),
+            self._entry(1, [0, 1, 0, 0, 0, 0, 0]),
+        ]
+        new = [self._entry(0, [0, 0, 1, 0, 0, 0, 0])]
+
+        to_delete, to_set = compute_schedule_diff(current, new)
+
+        # Only the usable index survives to be reused.
+        assert to_delete == []
+        assert [entry[FIELD_INDEX] for entry in to_set] == [1]
+
+    def test_no_emitted_entry_ever_carries_a_null_index(self):
+        current = [self._entry(None, [1, 0, 0, 0, 0, 0, 0])]
+        new = [
+            self._entry(None, [0, 1, 0, 0, 0, 0, 0]),
+            self._entry(None, [0, 0, 1, 0, 0, 0, 0]),
+        ]
+
+        _, to_set = compute_schedule_diff(current, new)
+
+        assert [entry[FIELD_INDEX] for entry in to_set] == [0, 1]
+        assert all(isinstance(entry[FIELD_INDEX], int) for entry in to_set)
+
+    def test_well_formed_indices_are_unaffected(self):
+        current = [self._entry(3, [1, 0, 0, 0, 0, 0, 0])]
+        new = [self._entry(9, [0, 1, 0, 0, 0, 0, 0])]
+
+        to_delete, to_set = compute_schedule_diff(current, new)
+
+        assert to_delete == []
+        assert to_set[0][FIELD_INDEX] == 3
+
+
+# ============================================================================
+# The serialization boundary (layer 2)
+# ============================================================================
+
+
+class TestScheduleWireFormat:
+    """Each field's wire spelling lives in exactly one, marked place.
+
+    A real device will settle these questions; flipping a field must then
+    be a one-line change here with no ripple into the Python API (layer 1)
+    or the parsers (layer 3).
+    """
+
+    def test_the_two_directions_differ_only_in_enabled(self):
+        to_device = schedule.SCHEDULE_WIRE_TO_DEVICE
+        from_device = schedule.SCHEDULE_WIRE_FROM_DEVICE
+
+        differing = [
+            name
+            for name in ("index", "enabled", "inside", "outside", "day", "hour", "minute")
+            if getattr(to_device, name) is not getattr(from_device, name)
+        ]
+        assert differing == ["enabled"]
+
+    def test_the_client_to_device_enabled_spelling_is_a_json_boolean(self):
+        """What has run against real Power Pet Doors since v0.1.0."""
+        assert schedule.SCHEDULE_WIRE_TO_DEVICE.enabled(True) is True
+        assert schedule.SCHEDULE_WIRE_TO_DEVICE.enabled(False) is False
+
+    def test_the_device_to_client_enabled_spelling_is_the_flag_string(self):
+        """What the device was observed to reply, and the simulator emits."""
+        assert schedule.SCHEDULE_WIRE_FROM_DEVICE.enabled(True) == "1"
+        assert schedule.SCHEDULE_WIRE_FROM_DEVICE.enabled(False) == "0"
+
+    def test_days_are_wire_ints_in_both_directions(self):
+        for fmt in (schedule.SCHEDULE_WIRE_TO_DEVICE, schedule.SCHEDULE_WIRE_FROM_DEVICE):
+            assert fmt.day(True) == 1
+            assert fmt.day(False) == 0
+            assert not isinstance(fmt.day(True), bool)
+
+    def test_flipping_one_field_changes_only_that_field(self):
+        """The property the layering exists for, exercised directly."""
+        flipped = replace(schedule.SCHEDULE_WIRE_TO_DEVICE, enabled=schedule.wire_flag_string)
+        kwargs = {
+            "index": 1,
+            "enabled": True,
+            "days_of_week": [True] * 7,
+            "inside": True,
+            "outside": False,
+            "start": (6, 0),
+            "end": (22, 0),
+        }
+
+        before = schedule.build_schedule_payload(schedule.SCHEDULE_WIRE_TO_DEVICE, **kwargs)
+        after = schedule.build_schedule_payload(flipped, **kwargs)
+
+        assert before[FIELD_ENABLED] is True
+        assert after[FIELD_ENABLED] == "1"
+        assert {k: v for k, v in before.items() if k != FIELD_ENABLED} == {
+            k: v for k, v in after.items() if k != FIELD_ENABLED
+        }
+
+    def test_the_unselected_sensor_window_is_zeroed_not_aliased(self):
+        """Each block must be its own dict; aliasing one would be a bug."""
+        payload = schedule.build_schedule_payload(
+            schedule.SCHEDULE_WIRE_TO_DEVICE,
+            index=0,
+            enabled=True,
+            days_of_week=[True] * 7,
+            inside=True,
+            outside=False,
+            start=(6, 30),
+            end=(22, 15),
+        )
+
+        assert payload[FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX] == {
+            FIELD_HOUR: 6,
+            FIELD_MINUTE: 30,
+        }
+        out_start = payload[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX]
+        out_end = payload[FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX]
+        assert out_start == {FIELD_HOUR: 0, FIELD_MINUTE: 0}
+        assert out_start is not out_end
+
+    def test_both_sensors_share_the_one_window(self):
+        payload = schedule.build_schedule_payload(
+            schedule.SCHEDULE_WIRE_TO_DEVICE,
+            index=0,
+            enabled=True,
+            days_of_week=[True] * 7,
+            inside=True,
+            outside=True,
+            start=(8, 0),
+            end=(9, 0),
+        )
+
+        assert payload[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX] == {
+            FIELD_HOUR: 8,
+            FIELD_MINUTE: 0,
+        }
+        assert payload[FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX] == {
+            FIELD_HOUR: 9,
+            FIELD_MINUTE: 0,
+        }
+
+    def test_both_emitters_go_through_the_boundary(self):
+        """No hand-spelled field is left in either to_dict()."""
+        from powerpetdoor.door import Schedule as LibrarySchedule
+        from powerpetdoor.simulator.state import Schedule as SimulatorSchedule
+
+        library = LibrarySchedule(index=2, enabled=False, inside=True).to_dict()
+        simulator = SimulatorSchedule(index=2, enabled=False, inside=True).to_dict()
+
+        assert library[FIELD_ENABLED] is False
+        assert simulator[FIELD_ENABLED] == "0"
+        assert {k: v for k, v in library.items() if k != FIELD_ENABLED} == {
+            k: v for k, v in simulator.items() if k != FIELD_ENABLED
+        }

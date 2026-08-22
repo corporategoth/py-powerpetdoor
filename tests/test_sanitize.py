@@ -81,14 +81,22 @@ class TestLibraryLogSinks:
     """The shipped library must not put raw device bytes into a log record."""
 
     def test_decode_failure_log_is_sanitized(self, mock_client, caplog):
-        """A brace-balanced but invalid frame is logged escaped, at ERROR."""
+        """A brace-balanced but invalid frame is logged escaped, at ERROR.
+
+        Two ERROR records: the throttle's running tally and, on the
+        occurrences the throttle reports, the sanitized detail.
+        """
         client, _, _ = mock_client
         with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
             client.data_received(b"{\x1b[2J\x1b[1;1H*** PWNED ***\x07}")
 
         records = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert len(records) == 1
-        message = records[0].getMessage()
+        assert len(records) == 2
+        assert (
+            records[0].getMessage()
+            == "Failed to decode 1 JSON frame(s) from device (26 bytes) on this connection"
+        )
+        message = records[1].getMessage()
         assert "\x1b" not in message
         assert "\x07" not in message
         assert "\\x1b[2J\\x1b[1;1H*** PWNED ***\\x07" in message
@@ -144,3 +152,38 @@ class TestLibraryLogSinks:
 
         assert "\x1b" not in caplog.text
         assert "\\x1b[2Jevil" in caplog.text
+
+
+class TestTruncation:
+    """Peer-chosen text is bounded before it reaches a log record."""
+
+    def test_a_short_value_is_untouched(self):
+        assert sanitize_text("{}", limit=200) == "{}"
+
+    def test_a_long_value_is_cut_and_marked(self):
+        """A frame is attacker-chosen and can run to the 64 KiB cap."""
+        result = sanitize_text("x" * 5000, limit=200)
+
+        assert result == "x" * 200 + "...(truncated)"
+        assert len(result) == 214
+
+    def test_truncation_happens_before_escaping(self):
+        """The regex must not be run over the whole 64 KiB either."""
+        result = sanitize_text("a" * 10 + "\x1b" * 10_000, limit=10)
+
+        assert result == "a" * 10 + "...(truncated)"
+        assert "\x1b" not in result
+
+    def test_control_characters_inside_the_kept_prefix_are_still_escaped(self):
+        result = sanitize_text("\x1b[2J" + "x" * 500, limit=8)
+
+        assert result.startswith("\\x1b[2Jxxxx")
+        assert result.endswith("...(truncated)")
+
+    def test_no_limit_keeps_the_previous_behaviour(self):
+        assert sanitize_text("x" * 5000) == "x" * 5000
+
+    def test_the_default_frame_limit_is_exported(self):
+        from powerpetdoor.sanitize import MAX_LOGGED_LENGTH
+
+        assert MAX_LOGGED_LENGTH == 200

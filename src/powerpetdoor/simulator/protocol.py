@@ -124,14 +124,20 @@ from ..const import (
     SUCCESS_FALSE,
     SUCCESS_TRUE,
 )
-from ..framing import EventThrottle, FrameScanner
-from ..sanitize import sanitize_text
+from ..framing import EventThrottle, FrameDispatcher, FrameScanner
+from ..sanitize import MAX_LOGGED_LENGTH, sanitize_text
 from ..schedule import MAX_SCHEDULE_INDEX
 from ..tz_utils import get_posix_tz_string, is_cache_initialized
 from .engine import DoorMotionEngine
 from .state import DoorSimulatorState, Schedule
 
 logger = logging.getLogger(__name__)
+
+#: Per-connection write-buffer ceiling, in bytes, above which a door client
+#: that is not reading its own responses is dropped. Mirrors the control
+#: channel's ``_ControlLogHandler.MAX_CLIENT_BACKLOG`` (round-6 security
+#: finding 1, secondary instance).
+MAX_WRITE_BACKLOG = 1024 * 1024
 
 #: Network-derived strings are stripped of terminal control characters before
 #: they reach any log, so a hostile peer cannot inject escape sequences into
@@ -315,7 +321,27 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             logging.WARNING,
             "Simulator: escaped non-ASCII bytes in %d received chunks (%d bytes total)",
         )
+        # Twins of the client's per-frame throttles. These fire once per
+        # *frame*, so they are limited by the peer's byte rate rather than
+        # its packet rate: 21,845 three-byte `{x}` frames fit in one 64 KiB
+        # write and used to buy x46 write amplification, sustained for 17 s
+        # after the attacker disconnected (round-6 security finding 2).
+        self._bad_frames = EventThrottle(
+            logger,
+            logging.WARNING,
+            "Simulator: %d JSON parse error(s) (%d bytes) on this connection",
+        )
+        self._unknown_commands = EventThrottle(
+            logger,
+            logging.WARNING,
+            "Simulator: %d unknown command(s) (%d bytes) on this connection",
+        )
         self._tasks: set[asyncio.Task] = set()
+        # One task per framed message, created synchronously per read, was
+        # unbounded: 256 KiB of `{}` admitted 131,072 live tasks / ~145 MB,
+        # linear in connections, with no connection cap (round-6 security
+        # finding 1).
+        self._dispatcher = FrameDispatcher(self._dispatch_frame)
         self._owns_engine = engine is None
         self.engine = engine or DoorMotionEngine(
             state,
@@ -338,7 +364,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         # End of this connection's framing state: report the counters'
         # suppressed tail rather than dropping it.
         self._non_ascii.flush()
+        self._bad_frames.flush()
+        self._unknown_commands.flush()
         self._scanner.reset()
+        self._dispatcher.reset()
         for task in list(self._tasks):
             task.cancel()
         if self._owns_engine:
@@ -364,11 +393,18 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         Deterministic synchronization hook for tests: after feeding data via
         :meth:`data_received`, ``await protocol.drain()`` guarantees every
         received message has been fully handled (responses written).
+        Dispatch is bounded, so this also drains whatever the dispatcher is
+        still holding back.
         """
         while True:
             pending = [task for task in self._tasks if not task.done()]
             if not pending:
-                return
+                if not self._dispatcher.backlog:
+                    return
+                # Handlers finished but frames are still queued; the
+                # dispatcher starts them from a done-callback, so yield.
+                await asyncio.sleep(0)
+                continue
             await asyncio.gather(*pending, return_exceptions=True)
 
     def data_received(self, data: bytes):
@@ -393,13 +429,28 @@ class DoorSimulatorProtocol(asyncio.Protocol):
                 self.transport.close()
             return
 
-        for frame in frames:
-            try:
-                msg = json.loads(frame)
-            except json.JSONDecodeError as err:
-                logger.warning("Simulator: JSON parse error: %s", err)
-                continue
-            self._create_task(self._handle_message(msg))
+        # Bounded dispatch, twin of the client's (round-6 security finding 1).
+        self._dispatcher.submit(frames, self.transport)
+
+    def _dispatch_frame(self, frame: str) -> asyncio.Task | None:
+        """Decode one framed message and start its handler.
+
+        Returns:
+            The handler task, or None if the frame was not usable JSON.
+        """
+        try:
+            msg = json.loads(frame)
+        except json.JSONDecodeError as err:
+            # Throttled twin of the client's site: one unparseable frame is
+            # three bytes and used to buy a whole WARNING record.
+            if self._bad_frames.record(len(frame)):
+                logger.warning(
+                    "Simulator: JSON parse error: %s (frame: %s)",
+                    err,
+                    sanitize_log_text(frame, MAX_LOGGED_LENGTH),
+                )
+            return None
+        return self._create_task(self._handle_message(msg))
 
     def _create_task(self, coro) -> asyncio.Task:
         """Create a tracked task so it can be drained/cancelled later."""
@@ -413,13 +464,38 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         if not task.cancelled() and task.exception() is not None:
             logger.error("Simulator: message handler task failed", exc_info=task.exception())
 
+    def _report_unknown_command(self, cmd: object) -> None:
+        """Log an unknown command, throttled (round-6 security finding 2)."""
+        rendered = sanitize_log_text(cmd, MAX_LOGGED_LENGTH)
+        if self._unknown_commands.record(len(rendered)):
+            logger.warning("Simulator: Unknown command: %s", rendered)
+
     def _send(self, msg: dict):
-        """Send a message to the client."""
+        """Send a message to the client.
+
+        A peer that issues valid commands and never reads the answers made
+        the daemon buffer them without bound - 1.5 MB of requests bought
+        36 MB of daemon heap, held for as long as the socket stayed open.
+        The control channel got a write-buffer ceiling in round 5; this is
+        the same ceiling on the door transport (round-6 security finding 1,
+        secondary instance). A door client that is not reading its own
+        responses is dropped, exactly like one that overflows the framing
+        cap.
+        """
         data = json.dumps(msg).encode("ascii")
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Simulator TX: %s", sanitize_log_text(str(msg)))
-        if self.transport:
-            self.transport.write(data)
+        if not self.transport:
+            return
+        if self.transport.get_write_buffer_size() > MAX_WRITE_BACKLOG:
+            logger.error(
+                "Simulator: client is not reading its responses (%d bytes buffered); "
+                "dropping the connection",
+                self.transport.get_write_buffer_size(),
+            )
+            self.transport.close()
+            return
+        self.transport.write(data)
 
     def _check_command_allowed(self, cmd: str) -> tuple[bool, str]:
         """Check if a command is allowed given current state.
@@ -465,7 +541,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         # Non-string commands cannot match any handler; answer the error
         # envelope without touching the (string-keyed) registry.
         if not isinstance(cmd, str):
-            logger.warning("Simulator: Unknown command: %s", sanitize_log_text(cmd))
+            self._report_unknown_command(cmd)
             response[FIELD_SUCCESS] = SUCCESS_FALSE
             response[FIELD_REASON] = "Unknown command"
             self._send(response)
@@ -485,7 +561,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         # Look up and execute handler
         handler = CommandRegistry.get(cmd)
         if handler is None:
-            logger.warning("Simulator: Unknown command: %s", sanitize_log_text(cmd))
+            self._report_unknown_command(cmd)
             response[FIELD_SUCCESS] = SUCCESS_FALSE
             response[FIELD_REASON] = "Unknown command"
             self._send(response)

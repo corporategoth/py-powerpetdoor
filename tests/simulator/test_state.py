@@ -24,7 +24,7 @@ from powerpetdoor.simulator import (
     DoorTimingConfig,
     Schedule,
 )
-from tests.conftest import GOLDEN_SCHEDULE_WIRE, assert_schedule_wire_types
+from tests.conftest import GOLDEN_SCHEDULE_WIRE_FROM_DEVICE, assert_schedule_wire_types
 
 # ============================================================================
 # DoorTimingConfig Tests
@@ -108,12 +108,15 @@ class TestSchedule:
         assert schedule.start_hour == 6
         assert schedule.end_hour == 22
 
-    def test_to_dict_matches_the_documented_wire_shape(self):
-        """The simulator emitter matches docs/protocol.md exactly (M1).
+    def test_to_dict_matches_the_device_to_client_wire_shape(self):
+        """The simulator emitter pins the shape the DEVICE replies with.
 
-        Twin of the library-side golden test: both emitters are compared
-        against the same payload, so a divergence in *any* field fails on
-        whichever side moved.
+        Counterpart of the library-side golden test. Every field but
+        ``enabled`` is compared against the same payload, so a divergence
+        anywhere else fails on whichever side moved; ``enabled`` differs
+        because this is the device->client direction (``"1"``, as observed)
+        while the library's emitter is client->device (a JSON boolean, as
+        shipped since v0.1.0). Do not unify them.
         """
         schedule = Schedule(
             index=3,
@@ -129,8 +132,8 @@ class TestSchedule:
 
         payload = schedule.to_dict()
 
-        assert payload == GOLDEN_SCHEDULE_WIRE
-        assert_schedule_wire_types(payload)
+        assert payload == GOLDEN_SCHEDULE_WIRE_FROM_DEVICE
+        assert_schedule_wire_types(payload, enabled_type=str)
 
     def test_to_dict(self):
         """Should convert to protocol dict format."""

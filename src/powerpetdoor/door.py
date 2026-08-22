@@ -112,8 +112,11 @@ from .const import (
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
 )
+from .sanitize import MAX_LOGGED_LENGTH, sanitize_text
 from .schedule import (
     MAX_SCHEDULE_INDEX,
+    SCHEDULE_WIRE_TO_DEVICE,
+    build_schedule_payload,
     coerce_schedule_days,
     coerce_schedule_flag,
     coerce_schedule_int,
@@ -242,60 +245,31 @@ class Schedule:
     end: ScheduleTime = field(default_factory=lambda: ScheduleTime(22, 0))
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to protocol dict format.
+        """Serialize for the wire, client-to-device.
 
-        Wire types follow docs/protocol.md "Schedule Format" exactly, which
-        is also what the simulator's :meth:`Schedule.to_dict` emits:
-        ``index`` int, ``enabled`` the string ``"1"``/``"0"``,
-        ``daysOfWeek`` a list of 7 ints, ``inside``/``outside`` JSON bools,
-        and the four time objects ``{hour, min}`` ints.
+        This builds the ``SET_SCHEDULE`` payload the library **sends**, so
+        every field's spelling comes from
+        :data:`~powerpetdoor.schedule.SCHEDULE_WIRE_TO_DEVICE` — the single
+        marked place those choices live. Notably ``enabled`` goes out as a
+        JSON boolean, *not* the ``"1"``/``"0"`` string the simulator
+        replies with: the simulator emits the *device->client* direction,
+        so the two are not twins and are not required to agree.
 
-        ``enabled`` used to go out as a JSON boolean - the one field where
-        the library's emitter disagreed with both the documented protocol
-        and the simulator, and the field that decides whether an
-        access-control entry is live (M1). Every reader in this tree takes
-        both spellings (``coerce_schedule_flag`` and
-        ``schedule_entry_content_key`` both go through ``make_bool``), so
-        nothing downstream changes.
+        Parsers on both sides stay liberal regardless
+        (``coerce_schedule_flag`` and ``schedule_entry_content_key`` both
+        go through ``make_bool``), so ``true``/``"1"``/``1`` are read
+        identically whichever direction they arrive from.
         """
-        # Protocol uses 1/0 for days, convert from booleans
-        days_as_int = [1 if d else 0 for d in self.days_of_week]
-        result: dict[str, Any] = {
-            FIELD_INDEX: self.index,
-            FIELD_ENABLED: "1" if self.enabled else "0",
-            FIELD_DAYSOFWEEK: days_as_int,
-            FIELD_INSIDE: self.inside,
-            FIELD_OUTSIDE: self.outside,
-        }
-
-        # Set time fields for the appropriate sensor(s)
-        if self.inside:
-            result[f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = self.start.to_dict()
-            result[f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = self.end.to_dict()
-        else:
-            result[f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {
-                FIELD_HOUR: 0,
-                FIELD_MINUTE: 0,
-            }
-            result[f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {
-                FIELD_HOUR: 0,
-                FIELD_MINUTE: 0,
-            }
-
-        if self.outside:
-            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = self.start.to_dict()
-            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = self.end.to_dict()
-        else:
-            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {
-                FIELD_HOUR: 0,
-                FIELD_MINUTE: 0,
-            }
-            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {
-                FIELD_HOUR: 0,
-                FIELD_MINUTE: 0,
-            }
-
-        return result
+        return build_schedule_payload(
+            SCHEDULE_WIRE_TO_DEVICE,
+            index=self.index,
+            enabled=self.enabled,
+            days_of_week=self.days_of_week,
+            inside=self.inside,
+            outside=self.outside,
+            start=(self.start.hour, self.start.minute),
+            end=(self.end.hour, self.end.minute),
+        )
 
     @classmethod
     def from_dict(cls, data: object) -> Schedule:
@@ -1062,6 +1036,19 @@ class PowerPetDoor:
             self._schedules = []
             return []
 
+        # `indices` comes straight off the wire. Iterating it unchecked
+        # raised a bare TypeError out of this documented coroutine for any
+        # scalar, and quietly fanned out one GET_SCHEDULE *per character*
+        # for a string - 200 sequential round trips against a device that
+        # rate-limits between messages (round-6 backend L2).
+        if not isinstance(indices, list):
+            logger.warning(
+                "Device sent a non-list schedule index list: %s",
+                sanitize_text(indices, MAX_LOGGED_LENGTH),
+            )
+            self._schedules = []
+            return []
+
         # Step 2: Fetch each schedule individually
         schedules = []
         for idx in indices:
@@ -1075,9 +1062,12 @@ class PowerPetDoor:
                 if result:
                     schedules.append(Schedule.from_dict(result))
             except TimeoutError:
-                logger.warning("Timeout fetching schedule %d", idx)
+                # %s, not %d: the index is only an int if the device says
+                # so, and a string index turned this warning into a
+                # logging-internal formatting error on stderr (L2).
+                logger.warning("Timeout fetching schedule %s", sanitize_text(idx))
             except Exception:
-                logger.exception("Error fetching schedule %d", idx)
+                logger.exception("Error fetching schedule %s", sanitize_text(idx))
 
         # Sorted for the same reason _on_schedule_update sorts: the public
         # `schedules` property must not be ordered by whichever code path
@@ -1224,8 +1214,16 @@ class PowerPetDoor:
             self._client.send_message(CONFIG, CMD_GET_HW_INFO, notify=True),
             timeout=timeout if timeout is not None else self.default_timeout,
         )
-        if result:
+        if isinstance(result, dict) and result:
             self._hw_info = result
+        elif result:
+            # The client stays liberal and resolves the future with
+            # whatever the device sent; the facade must not cache a value
+            # its three public properties would then choke on (M1).
+            logger.warning(
+                "Ignoring non-mapping hardware info: %s",
+                sanitize_text(result, MAX_LOGGED_LENGTH),
+            )
         return self._hw_info.copy()
 
     # =========================================================================
@@ -1323,6 +1321,23 @@ class PowerPetDoor:
         self._timezone = value
 
     def _on_hw_info_update(self, data: dict[str, Any]) -> None:
+        """Cache the device's hardware info.
+
+        Guarded because this is the only device payload the facade
+        *retains*: a scalar cached here poisons three documented public
+        properties (``firmware_version``, ``hardware_version``,
+        ``hardware_info`` all raise ``AttributeError``) with nothing in the
+        log tying the failure to the frame that caused it, and it heals
+        only on the next well-formed reply (round-6 backend M1). The client
+        already shields this listener, so the guard is defence in depth
+        against a third-party client subclass calling it directly.
+        """
+        if not isinstance(data, dict):
+            logger.warning(
+                "Ignoring non-mapping hardware info: %s",
+                sanitize_text(data, MAX_LOGGED_LENGTH),
+            )
+            return
         self._hw_info = data
 
     # Stats and notification listeners are invoked by the client as

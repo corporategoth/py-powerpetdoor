@@ -22,12 +22,10 @@ from ..const import (
     FIELD_ENABLED,
     FIELD_END_TIME_SUFFIX,
     FIELD_HOLD_OPEN_TIME,
-    FIELD_HOUR,
     FIELD_INDEX,
     FIELD_INSIDE,
     FIELD_INSIDE_PREFIX,
     FIELD_LOW_BATTERY_NOTIFICATIONS,
-    FIELD_MINUTE,
     FIELD_OUTSIDE,
     FIELD_OUTSIDE_PREFIX,
     FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
@@ -43,6 +41,8 @@ from ..const import (
 )
 from ..schedule import (
     MAX_SCHEDULE_INDEX,
+    SCHEDULE_WIRE_FROM_DEVICE,
+    build_schedule_payload,
     coerce_schedule_days,
     coerce_schedule_flag,
     coerce_schedule_int,
@@ -117,10 +117,11 @@ class Schedule:
 
     index: int
     enabled: bool = True
-    # List of exactly 7 truthy/falsy values [Sun, Mon, Tue, Wed, Thu, Fri,
-    # Sat]. from_dict() normalizes wire data to booleans; to_dict() always
-    # writes 1/0 back onto the wire.
-    days_of_week: list = field(default_factory=lambda: [1, 1, 1, 1, 1, 1, 1])
+    #: Exactly 7 booleans, ``[Sun, Mon, Tue, Wed, Thu, Fri, Sat]``. Strict
+    #: Python types in memory: the 1/0 wire spelling is applied once, at
+    #: the serialization boundary, and ``from_dict`` normalizes incoming
+    #: wire data back to booleans.
+    days_of_week: list[bool] = field(default_factory=lambda: [True] * 7)
     # Which sensor this entry is for
     inside: bool = False
     outside: bool = False
@@ -131,57 +132,25 @@ class Schedule:
     end_min: int = 0
 
     def to_dict(self) -> dict:
-        """Convert to protocol dict format."""
-        result: dict = {
-            FIELD_INDEX: self.index,
-            FIELD_ENABLED: "1" if self.enabled else "0",
-            # The wire carries 1/0, whatever the in-memory representation.
-            FIELD_DAYSOFWEEK: [1 if day else 0 for day in self.days_of_week],
-            FIELD_INSIDE: self.inside,
-            FIELD_OUTSIDE: self.outside,
-        }
-        # Set time fields for the appropriate sensor(s)
-        if self.inside:
-            result[f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {
-                FIELD_HOUR: self.start_hour,
-                FIELD_MINUTE: self.start_min,
-            }
-            result[f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {
-                FIELD_HOUR: self.end_hour,
-                FIELD_MINUTE: self.end_min,
-            }
-        else:
-            # Default empty times for inside
-            result[f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {
-                FIELD_HOUR: 0,
-                FIELD_MINUTE: 0,
-            }
-            result[f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {
-                FIELD_HOUR: 0,
-                FIELD_MINUTE: 0,
-            }
+        """Serialize for the wire, device-to-client.
 
-        if self.outside:
-            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {
-                FIELD_HOUR: self.start_hour,
-                FIELD_MINUTE: self.start_min,
-            }
-            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {
-                FIELD_HOUR: self.end_hour,
-                FIELD_MINUTE: self.end_min,
-            }
-        else:
-            # Default empty times for outside
-            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}"] = {
-                FIELD_HOUR: 0,
-                FIELD_MINUTE: 0,
-            }
-            result[f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}"] = {
-                FIELD_HOUR: 0,
-                FIELD_MINUTE: 0,
-            }
-
-        return result
+        The simulator plays the *device*, so this emits what a real door is
+        observed to reply with — spelled by
+        :data:`~powerpetdoor.schedule.SCHEDULE_WIRE_FROM_DEVICE`. It differs
+        from the library's client->device emitter in exactly one field
+        (``enabled``: ``"1"``/``"0"`` here, a JSON boolean there), and that
+        is deliberate: opposite directions are not twins. Do not unify them.
+        """
+        return build_schedule_payload(
+            SCHEDULE_WIRE_FROM_DEVICE,
+            index=self.index,
+            enabled=self.enabled,
+            days_of_week=self.days_of_week,
+            inside=self.inside,
+            outside=self.outside,
+            start=(self.start_hour, self.start_min),
+            end=(self.end_hour, self.end_min),
+        )
 
     @classmethod
     def from_dict(cls, data: dict) -> "Schedule":

@@ -70,7 +70,7 @@ from ..const import (
     DOOR_STATE_RISING,
 )
 from ..sanitize import sanitize_text
-from ..schedule import MAX_SCHEDULE_INDEX
+from ..schedule import MAX_SCHEDULE_INDEX, coerce_schedule_flag
 from .state import Schedule
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,12 @@ MAX_SCRIPT_HOLD_TIME = 900.0
 #: (Security round-5 Informational 2). One day is far beyond any real
 #: simulation and still rejects ``inf``/``nan`` outright.
 MAX_SCRIPT_DELAY = 86400.0
+
+#: Script-file spellings of the boolean values that the shared wire
+#: coercer does not know. These are *front-end* vocabulary (``set
+#: safety_lock enabled``) and are deliberately not added to ``make_bool``,
+#: which reads device data.
+_SCRIPT_BOOL_ALIASES = {"enabled": True, "disabled": False}
 
 
 class ScriptError(Exception):
@@ -417,7 +423,7 @@ class ScriptRunner:
             self.simulator.activate_sensor("outside", duration)
 
         elif action == "open":
-            hold = params.get("hold", False)
+            hold = self._script_bool(params.get("hold", False))
             await self.simulator.open_door(hold=hold)
 
         elif action == "close":
@@ -464,14 +470,14 @@ class ScriptRunner:
             # Bounded like every other writer of a schedule index: a script
             # could otherwise allocate a slot the wire path itself rejects.
             index = int(self._script_number(params.get("index", 1), "index", 0, MAX_SCHEDULE_INDEX))
-            enabled = params.get("enabled", True)
+            enabled = self._script_bool(params.get("enabled", True))
             # Create a schedule that allows BOTH sensors 24/7 (midnight to midnight)
             # This ensures tests pass regardless of the time of day.
             # Note: Each schedule entry controls specific sensors via inside/outside flags.
             schedule = Schedule(
                 index=index,
                 enabled=enabled,
-                days_of_week=[1, 1, 1, 1, 1, 1, 1],  # All days
+                days_of_week=[True] * 7,  # All days
                 inside=True,  # Allow inside sensor
                 outside=True,  # Allow outside sensor
                 start_hour=0,
@@ -637,12 +643,35 @@ class ScriptRunner:
             raise ScriptError(f"{name} must be between {minimum} and {maximum}, got {number!r}")
         return number
 
+    @staticmethod
+    def _script_bool(value: object) -> bool:
+        """Coerce a script-supplied boolean parameter, fail-closed.
+
+        The third writer of these flags, and the one that was reading them
+        with plain truthiness: unquoted YAML ``false`` parses to a real
+        bool, but a quoted or templated ``"false"``/``"0"``/``"off"`` is a
+        non-empty string, so ``enabled: "0"`` produced an **enabled**
+        schedule (round-6 backend T1). Routed through the library's
+        ``coerce_schedule_flag`` (``make_bool`` underneath) so this file
+        stops being a third implementation of one concept, with the
+        script-only ``enabled``/``disabled`` spellings layered on top -
+        script vocabulary is a front-end concern and must not widen what
+        the *protocol* parsers accept.
+        """
+        if isinstance(value, str):
+            alias = _SCRIPT_BOOL_ALIASES.get(value.strip().lower())
+            if alias is not None:
+                return alias
+        return coerce_schedule_flag(value, "script boolean")
+
     def _set_value(self, name: str, value: str):
         """Set a state value."""
         state = self.simulator.state
         name = name.lower().replace("-", "_")
 
-        bool_value = str(value).lower() in ("true", "1", "on", "yes", "enabled")
+        # One coercer for the whole file (and shared with the library),
+        # rather than a third hand-rolled truthiness rule (T1).
+        bool_value = self._script_bool(value)
 
         if name == "power":
             state.power = bool_value
@@ -783,13 +812,45 @@ def describe_script_argument() -> str:
     return "Script name (paths are not accepted over the control channel)"
 
 
+def script_escapes_directory(path: Path, base: Path) -> bool:
+    """Whether ``path`` resolves outside its own ``base`` directory.
+
+    The single containment rule, shared by the loader and by every surface
+    that advertises a script. It used to live only in the loader, so a
+    symlink pointing out of ``--scripts-dir`` was listed by ``list``,
+    ``--list-scripts`` and tab completion - and then refused by ``run``
+    with ``Unknown script: linked. Available: ..., linked, ...``, a message
+    that contradicted itself inside one line (round-6 frontend L1).
+
+    Args:
+        path: Candidate script file.
+        base: Already-resolved directory it must live directly in.
+    """
+    return path.resolve().parent != base
+
+
 def _script_files_in(directory: Path) -> dict[str, Path]:
-    """Map script name -> path for the YAML files directly in ``directory``."""
+    """Map script name -> path for the YAML files directly in ``directory``.
+
+    Files that resolve outside ``directory`` are omitted, so what is
+    advertised is exactly what :meth:`load_script` will accept.
+    """
     scripts: dict[str, Path] = {}
-    if directory.exists():
-        for pattern in ("*.yaml", "*.yml"):
-            for path in directory.glob(pattern):
-                scripts[path.stem] = path
+    if not directory.exists():
+        return scripts
+    base = directory.resolve()
+    for pattern in ("*.yaml", "*.yml"):
+        for path in directory.glob(pattern):
+            if script_escapes_directory(path, base):
+                # DEBUG, not WARNING: tab completion calls this on every
+                # keystroke. `run <name>` explains the refusal in full.
+                logger.debug(
+                    "Not listing %s: it resolves outside %s",
+                    sanitize_text(path.name),
+                    base,
+                )
+                continue
+            scripts[path.stem] = path
     return scripts
 
 
@@ -912,10 +973,14 @@ def script_completer(prefix: str = "") -> list[tuple[str, str]]:
     else:
         # No specific directory - show builtin scripts and cwd files
 
-        # Add builtin scripts, then any registered --scripts-dir scripts
+        # Add builtin scripts, then any registered --scripts-dir scripts.
+        # A shadowed built-in is skipped rather than offered a second time:
+        # the completer cannot disambiguate two identical strings, and the
+        # scripts-dir copy is the one `run` would pick (L3).
+        extra_files = get_extra_script_files()
         for script_files, label in (
-            (_get_script_files(), "(builtin)"),
-            (get_extra_script_files(), "(scripts-dir)"),
+            ({k: v for k, v in _get_script_files().items() if k not in extra_files}, "(builtin)"),
+            (extra_files, "(scripts-dir)"),
         ):
             if YAML_AVAILABLE:
                 for name, path in sorted(script_files.items()):

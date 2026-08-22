@@ -8,20 +8,33 @@
 This module provides pure utility functions for working with Power Pet Door
 schedules, including validation, compression, and diffing.
 
-It also owns the single set of coercion helpers used to turn an untrusted
-``daysOfWeek``/time/index payload into safe values
-(:func:`coerce_schedule_int` and friends). Both schedule parsers - the
-library's :class:`powerpetdoor.door.Schedule` and the simulator's
-:class:`powerpetdoor.simulator.state.Schedule` - read wire data through
-them, so hardening lands on both sides at once.
+It also owns both untrusted-data boundaries for schedules, which are the
+two outer layers of a deliberate three-layer split:
+
+1. **Python API (strict).** :class:`powerpetdoor.door.Schedule` and
+   :class:`powerpetdoor.simulator.state.Schedule` use real Python types
+   and only those - ``enabled: bool``, ``days_of_week: list[bool]``,
+   ``hour: int``. Nothing in memory ever holds ``"1"``.
+2. **Serialization (conforms to the wire).** :class:`ScheduleWireFormat`
+   plus :func:`build_schedule_payload` are the *single* place strict
+   Python values are turned into what the firmware expects, and the only
+   place a field's wire spelling is decided. It is per *direction*:
+   client->device and device->client are separate formats and are not
+   required to agree.
+3. **Deserialization (liberal).** :func:`coerce_schedule_int` and friends
+   accept every spelling a real device might plausibly send (``true`` /
+   ``"1"`` / ``1``) and coerce to the layer-1 types. Both parsers read
+   through them, so hardening lands on both sides at once.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
 from copy import deepcopy
+from dataclasses import dataclass, replace
 from datetime import time
-from typing import Any, cast
+from typing import Any
 
 from .client import make_bool
 from .const import (
@@ -278,24 +291,152 @@ def validate_schedule_entry(sched: dict) -> bool:
         return False
 
 
-# Schedule template with all fields initialized to defaults.
+# =============================================================================
+# WIRE REPRESENTATION - the serialization boundary (layer 2)
 #
-# Wire types match docs/protocol.md "Schedule Format" (and therefore
-# ``simulator.state.Schedule.to_dict``) field for field: ``index`` int,
-# ``daysOfWeek`` 7 ints, ``inside``/``outside`` JSON bools, ``enabled`` the
-# string "1"/"0", and ``{hour, min}`` ints. ``enabled`` was a JSON boolean
-# here, which every ``compress_schedule()`` result inherited (M1).
-schedule_template = {
-    FIELD_INDEX: 0,
-    FIELD_DAYSOFWEEK: [0, 0, 0, 0, 0, 0, 0],
-    FIELD_INSIDE: False,
-    FIELD_OUTSIDE: False,
-    FIELD_ENABLED: "1",
-    FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX: {FIELD_HOUR: 0, FIELD_MINUTE: 0},
-    FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX: {FIELD_HOUR: 0, FIELD_MINUTE: 0},
-    FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX: {FIELD_HOUR: 0, FIELD_MINUTE: 0},
-    FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX: {FIELD_HOUR: 0, FIELD_MINUTE: 0},
-}
+# WIRE REPRESENTATION - DETERMINED BY DEVICE FIRMWARE, NOT BY OUR PREFERENCE.
+#
+# Everything below decides how a strict Python value is *spelled* on the
+# wire. Do not "tidy" it to match the Python types, to match the other
+# direction, or to match docs/protocol.md - that document is
+# reverse-engineered and is not authority over what the firmware accepts.
+# Round 5 changed the client->device `enabled` spelling to "1"/"0" on the
+# doc's say-so and it had to be reverted: the JSON boolean is what has
+# actually run against real Power Pet Doors since v0.1.0.
+#
+# Each field is one line in one of the two format constants, so when a real
+# device settles a question, flipping that field's spelling is a one-line
+# change here with no ripple into the Python API (layer 1) or the parsers
+# (layer 3, which stay liberal and accept every spelling regardless).
+# =============================================================================
+
+
+def wire_json_bool(value: bool) -> bool:
+    """Spell a flag as a JSON boolean (``true``/``false``)."""
+    return bool(value)
+
+
+def wire_flag_string(value: bool) -> str:
+    """Spell a flag as the string ``"1"``/``"0"``."""
+    return "1" if value else "0"
+
+
+def wire_int_flag(value: bool) -> int:
+    """Spell a flag as the integer ``1``/``0``."""
+    return 1 if value else 0
+
+
+def wire_int(value: int) -> int:
+    """Spell a number as a JSON integer."""
+    return int(value)
+
+
+@dataclass(frozen=True)
+class ScheduleWireFormat:
+    """How each schedule field is spelled on the wire, for one direction.
+
+    One callable per field, so a firmware finding changes exactly one line.
+    See the module docstring for the three-layer split this sits in the
+    middle of.
+    """
+
+    index: Callable[[int], Any]
+    enabled: Callable[[bool], Any]
+    inside: Callable[[bool], Any]
+    outside: Callable[[bool], Any]
+    day: Callable[[bool], Any]
+    hour: Callable[[int], Any]
+    minute: Callable[[int], Any]
+
+    def time(self, hour: int, minute: int) -> dict[str, Any]:
+        """Spell one ``{hour, min}`` block."""
+        return {FIELD_HOUR: self.hour(hour), FIELD_MINUTE: self.minute(minute)}
+
+
+#: **client -> device**: the shape the library SENDS in ``SET_SCHEDULE``.
+#: These spellings have run against real hardware since v0.1.0.
+SCHEDULE_WIRE_TO_DEVICE = ScheduleWireFormat(
+    index=wire_int,
+    enabled=wire_json_bool,  # JSON boolean - proven against real firmware
+    inside=wire_json_bool,
+    outside=wire_json_bool,
+    day=wire_int_flag,  # 1/0 integers
+    hour=wire_int,
+    minute=wire_int,
+)
+
+#: **device -> client**: the shape a real door is observed to REPLY with,
+#: and therefore what the simulator emits. It differs from
+#: :data:`SCHEDULE_WIRE_TO_DEVICE` in exactly one field, and that is not a
+#: bug: the two are opposite directions, not twins.
+SCHEDULE_WIRE_FROM_DEVICE = replace(
+    SCHEDULE_WIRE_TO_DEVICE,
+    enabled=wire_flag_string,  # "1"/"0" string - as observed from the device
+)
+
+
+def build_schedule_payload(
+    fmt: ScheduleWireFormat,
+    *,
+    index: int,
+    enabled: bool,
+    days_of_week: Sequence[bool],
+    inside: bool,
+    outside: bool,
+    start: tuple[int, int],
+    end: tuple[int, int],
+) -> dict[str, Any]:
+    """Serialize one schedule entry in ``fmt``'s direction.
+
+    The single serialization site for schedules: both
+    :meth:`powerpetdoor.door.Schedule.to_dict` (client->device) and the
+    simulator's :meth:`Schedule.to_dict` (device->client) go through it, so
+    the only difference between the two directions is the format constant
+    they pass.
+
+    A schedule entry gates ONE sensor, so one time window is supplied and
+    the unselected sensor's block is zeroed - which is why callers pass a
+    single ``start``/``end`` rather than two.
+
+    Args:
+        fmt: Wire format for the direction being written.
+        index: Schedule slot.
+        enabled: Whether the entry is active.
+        days_of_week: Seven flags, ``[Sun..Sat]``.
+        inside: Whether the entry gates the inside sensor.
+        outside: Whether the entry gates the outside sensor.
+        start: ``(hour, minute)`` the window opens.
+        end: ``(hour, minute)`` the window closes.
+    """
+    payload: dict[str, Any] = {
+        FIELD_INDEX: fmt.index(index),
+        FIELD_ENABLED: fmt.enabled(enabled),
+        FIELD_DAYSOFWEEK: [fmt.day(bool(day)) for day in days_of_week],
+        FIELD_INSIDE: fmt.inside(inside),
+        FIELD_OUTSIDE: fmt.outside(outside),
+    }
+    for selected, prefix in ((inside, FIELD_INSIDE_PREFIX), (outside, FIELD_OUTSIDE_PREFIX)):
+        window = (start, end) if selected else ((0, 0), (0, 0))
+        payload[prefix + FIELD_START_TIME_SUFFIX] = fmt.time(*window[0])
+        payload[prefix + FIELD_END_TIME_SUFFIX] = fmt.time(*window[1])
+    return payload
+
+
+#: Schedule template with all fields initialized to defaults.
+#:
+#: Built through the client->device boundary above, because every
+#: ``compress_schedule()`` result is a deep copy of it and those payloads
+#: are SENT to the device.
+schedule_template = build_schedule_payload(
+    SCHEDULE_WIRE_TO_DEVICE,
+    index=0,
+    enabled=True,
+    days_of_week=[False] * 7,
+    inside=False,
+    outside=False,
+    start=(0, 0),
+    end=(0, 0),
+)
 
 
 def _require_complete_entry(sched: dict, position: int) -> None:
@@ -430,16 +571,18 @@ def compress_schedule(schedule: list[dict]) -> list[dict]:
                 found = False
                 for ent in out:
                     if ent["start"] == sched["start"] and ent["end"] == sched["end"]:
-                        ent[FIELD_DAYSOFWEEK][day] = 1
+                        ent[FIELD_DAYSOFWEEK][day] = True
                         found = True
                         break
                 if not found:
+                    # Booleans in memory; the 1/0 wire spelling is applied
+                    # once, at the serialization boundary (layer 1 vs 2).
                     ent = {
                         "start": sched["start"],
                         "end": sched["end"],
-                        FIELD_DAYSOFWEEK: [0, 0, 0, 0, 0, 0, 0],
+                        FIELD_DAYSOFWEEK: [False] * 7,
                     }
-                    ent[FIELD_DAYSOFWEEK][day] = 1
+                    ent[FIELD_DAYSOFWEEK][day] = True
                     out.append(ent)
         return out
 
@@ -480,31 +623,21 @@ def compress_schedule(schedule: list[dict]) -> list[dict]:
             }
             final_sched.append(ent)
 
-    # Step 5, make template rows
-    out = []
-    index = 0
-    for sched in final_sched:
-        ent = deepcopy(schedule_template)
-        ent[FIELD_INDEX] = index
-        ent[FIELD_DAYSOFWEEK] = sched[FIELD_DAYSOFWEEK]
-        if sched[FIELD_INSIDE]:
-            ent[FIELD_INSIDE] = True
-            ent[FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_HOUR] = sched["start"].hour
-            ent[FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_MINUTE] = sched["start"].minute
-            ent[FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_HOUR] = sched["end"].hour
-            ent[FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_MINUTE] = sched["end"].minute
-        if sched[FIELD_OUTSIDE]:
-            ent[FIELD_OUTSIDE] = True
-            ent[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_HOUR] = sched["start"].hour
-            ent[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX][FIELD_MINUTE] = sched[
-                "start"
-            ].minute
-            ent[FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_HOUR] = sched["end"].hour
-            ent[FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX][FIELD_MINUTE] = sched["end"].minute
-        out.append(ent)
-        index += 1
-
-    return out
+    # Step 5, serialize. These payloads are SENT, so they go through the
+    # client->device boundary rather than spelling any field by hand.
+    return [
+        build_schedule_payload(
+            SCHEDULE_WIRE_TO_DEVICE,
+            index=index,
+            enabled=True,
+            days_of_week=sched[FIELD_DAYSOFWEEK],
+            inside=sched[FIELD_INSIDE],
+            outside=sched[FIELD_OUTSIDE],
+            start=(sched["start"].hour, sched["start"].minute),
+            end=(sched["end"].hour, sched["end"].minute),
+        )
+        for index, sched in enumerate(final_sched)
+    ]
 
 
 def schedule_entry_content_key(entry: dict) -> tuple:
@@ -590,6 +723,15 @@ def compute_schedule_diff(
     deep copies of the new entries with their ``index`` field reassigned
     (L13).
 
+    ``current_schedule`` may be raw device dicts (the docstring below
+    invites exactly that, and this helper is a public export), so every
+    index read out of it goes through :func:`coerce_schedule_int` rather
+    than being trusted. A current entry whose index is not a usable slot
+    number cannot be addressed by ``SET_SCHEDULE``/``DELETE_SCHEDULE`` at
+    all, so it is skipped with a warning - instead of raising ``TypeError``
+    out of a public helper on a mixed list, or silently handing the caller
+    a payload with ``"index": null`` (round-6 backend L3).
+
     Args:
         current_schedule: List of current schedule entries on device
         new_schedule: List of desired schedule entries
@@ -600,26 +742,30 @@ def compute_schedule_diff(
         - entries_to_set: list of schedule entries (copies) to add/update
           via SET_SCHEDULE
     """
-    # Build lookup of current entries by content key
-    current_by_content = {}
+    # Content key -> the (validated) slot that content occupies on the device.
+    current_by_content: dict[tuple, int] = {}
+    current_indices: set[int] = set()
     for entry in current_schedule:
-        key = schedule_entry_content_key(entry)
-        current_by_content[key] = entry
-
-    # Build set of indices currently in use. Entries are raw protocol dicts
-    # (untyped); device entries always carry an integer index, so cast tells
-    # the type checker what .get() returns without changing runtime behavior.
-    current_indices = {cast(int, entry.get(FIELD_INDEX)) for entry in current_schedule}
+        try:
+            index = coerce_schedule_int(entry.get(FIELD_INDEX), "index", MAX_SCHEDULE_INDEX)
+        except ValueError as err:
+            _LOGGER.warning(
+                "Ignoring a current schedule entry that has no usable index: %s",
+                sanitize_text(err),
+            )
+            continue
+        current_by_content[schedule_entry_content_key(entry)] = index
+        current_indices.add(index)
 
     # Find entries that already exist (no change needed) and track which new entries need to be set
-    entries_to_set = []
+    entries_to_set: list[dict] = []
     matched_indices: set[int] = set()
 
     for entry in new_schedule:
         key = schedule_entry_content_key(entry)
         if key in current_by_content:
             # This content already exists - no change needed
-            matched_indices.add(cast(int, current_by_content[key].get(FIELD_INDEX)))
+            matched_indices.add(current_by_content[key])
         else:
             # This is a new/changed entry that needs to be SET. Copy it so
             # the index reassignment below never mutates the caller's
@@ -629,28 +775,30 @@ def compute_schedule_diff(
     # Indices that can be reused (current indices that weren't matched)
     reusable_indices = sorted(current_indices - matched_indices)
 
-    # Indices to delete (reusable indices we won't use because we have fewer new entries)
-    entries_to_delete = []
-
     # Assign indices to entries that need to be SET
     for i, entry in enumerate(entries_to_set):
         if i < len(reusable_indices):
             # Reuse an existing index (this is an UPDATE)
             entry[FIELD_INDEX] = reusable_indices[i]
         else:
-            # Need a new index - find the lowest unused index
-            new_index = 0
+            # Need a new index - the lowest slot nothing else is using.
+            # `matched | reusable` is exactly `current_indices`, so the
+            # only thing that has to be added is the slots already handed
+            # to *earlier* brand-new entries in this same loop - without
+            # that, two new entries share one index and one silently
+            # overwrites the other (round-6 test-fanatic M1).
             used_indices = (
                 matched_indices
-                | set(reusable_indices[:i])
-                | {e.get(FIELD_INDEX) for e in entries_to_set[:i]}
+                | set(reusable_indices)
+                | {e[FIELD_INDEX] for e in entries_to_set[:i]}
             )
-            while new_index in used_indices or new_index in current_indices:
+            new_index = 0
+            while new_index in used_indices:
                 new_index += 1
             entry[FIELD_INDEX] = new_index
 
-    # Delete any leftover reusable indices we didn't use
-    if len(entries_to_set) < len(reusable_indices):
-        entries_to_delete = reusable_indices[len(entries_to_set) :]
+    # Delete any leftover reusable indices we didn't use (the slice is
+    # empty whenever there are at least as many new entries as slots).
+    entries_to_delete = reusable_indices[len(entries_to_set) :]
 
     return (entries_to_delete, entries_to_set)

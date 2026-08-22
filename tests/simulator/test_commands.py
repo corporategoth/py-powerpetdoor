@@ -1331,7 +1331,13 @@ class TestScriptBusyVisibility:
             result = await queued_handler.execute("stop")
 
             assert result.success is True
-            assert result.message == "Stopping script: Slow Script"
+            # The queue is left alone, and - unlike before round 6 - the
+            # answer says so, because the observable consequence of `stop`
+            # here is that a *different* script starts driving the door
+            # (frontend L2).
+            assert result.message == (
+                "Stopping script: Slow Script (2 still queued; use 'stop all' to discard them)"
+            )
             assert queued_handler.script_queue.qsize() == 2
         finally:
             release.set()
@@ -1455,12 +1461,23 @@ class TestScriptPathRestrictions:
         # The lexical guard has nothing to catch here.
         assert "/" not in "evil"
 
-        with pytest.raises(ScriptError, match="Unknown script: evil"):
+        # Refused, and the refusal explains itself: `Unknown script: evil.
+        # Available: ..., evil, ...` contradicted itself inside one line,
+        # because `list`/completion advertised the symlink (frontend L1).
+        with pytest.raises(ValueError, match="resolves outside"):
             restricted_handler.load_script("evil")
 
         result = await restricted_handler.execute("run evil")
         assert result.success is False
-        assert "Unknown script: evil" in result.message
+        assert "resolves outside" in result.message
+        assert "Unknown script" not in result.message
+
+        # ... and no surface advertises it any more.
+        listing = await restricted_handler.execute("list")
+        assert "evil" not in listing.message
+        from powerpetdoor.simulator.scripting import script_completer
+
+        assert "evil" not in [name for name, _ in script_completer("")]
 
     async def test_name_resolution_never_escapes_the_scripts_dir(
         self, restricted_handler, tmp_path
@@ -1469,14 +1486,21 @@ class TestScriptPathRestrictions:
 
         In the unrestricted front end it is reached whenever
         `Path(script_ref).exists()` is False, so the containment check is
-        the only thing between it and an arbitrary file (R5-M2).
+        the only thing between it and an arbitrary file (R5-M2). Since
+        round 6 the refusal names the reason instead of claiming the file
+        does not exist (frontend L1); it still refuses.
         """
         outside = tmp_path.parent / "outside"
         outside.mkdir(exist_ok=True)
         (outside / "secret.yaml").write_text(PASSING_SCRIPT)
 
-        with pytest.raises(ScriptError, match="Unknown script"):
+        with pytest.raises(ValueError, match="resolves outside"):
             restricted_handler._load_script_by_name("../outside/secret")
+
+    async def test_a_genuinely_unknown_name_still_says_unknown(self, restricted_handler):
+        """The L1 fix must not turn every miss into a path-policy message."""
+        with pytest.raises(ScriptError, match="Unknown script: nope"):
+            restricted_handler._load_script_by_name("nope")
 
 
 class TestScriptsDirVisibility:

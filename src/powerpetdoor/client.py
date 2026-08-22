@@ -116,8 +116,14 @@ from .const import (
     PRIORITY_LOW,
     SUCCESS_TRUE,
 )
-from .framing import MAX_BUFFER_SIZE, EventThrottle, FrameScanner, find_frame_end
-from .sanitize import sanitize_text
+from .framing import (
+    MAX_BUFFER_SIZE,
+    EventThrottle,
+    FrameDispatcher,
+    FrameScanner,
+    find_frame_end,
+)
+from .sanitize import MAX_LOGGED_LENGTH, sanitize_text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -335,6 +341,25 @@ class PowerPetDoorClient(asyncio.Protocol):
             "Received non-ASCII bytes from device; escaped them (affected frames are "
             "dropped) - %d chunks, %d bytes so far on this connection",
         )
+        # The per-*frame* twins of the counter above. Round 5 throttled the
+        # per-chunk sites, which are limited by the peer's packet rate; these
+        # are limited by its byte rate, so a peer can pack 21,845 three-byte
+        # `{x}` frames into one 64 KiB write and buy x28 write amplification
+        # in a third party's log (round-6 security finding 2).
+        self._bad_frames = EventThrottle(
+            _LOGGER,
+            logging.ERROR,
+            "Failed to decode %d JSON frame(s) from device (%d bytes) on this connection",
+        )
+        self._bad_messages = EventThrottle(
+            _LOGGER,
+            logging.WARNING,
+            "Ignored %d malformed message(s) from device (%d bytes) on this connection",
+        )
+        # One task per framed message, created synchronously per read, was
+        # unbounded: one 256 KiB read of `{}` admitted 131,072 live tasks
+        # and ~135 MB of heap (round-6 security finding 1).
+        self._dispatcher = FrameDispatcher(self._dispatch_frame)
         # Fire-and-forget work is tracked so failures are logged
         # immediately (L3). _tasks is connection-scoped work that
         # disconnect() cancels; _handler_tasks holds async lifecycle
@@ -507,7 +532,10 @@ class PowerPetDoorClient(asyncio.Protocol):
             settings_update: Called with full settings dict
             sensor_update: Dict mapping sensor field (or "*" for all) to a
                 callback invoked as ``callback(field, value)`` where value
-                is the coerced boolean (or None if unrecognized)
+                is the coerced boolean, or None if the device sent a value
+                ``make_bool`` does not recognize. Test for None explicitly:
+                ``if value:`` maps "unparseable" onto False, which for a
+                safety lock fails in the permissive direction
             notifications_update: Dict mapping notification field (or "*")
                 to a callback invoked as ``callback(field, value)``
             stats_update: Dict mapping stats field (or "*") to a callback
@@ -515,7 +543,9 @@ class PowerPetDoorClient(asyncio.Protocol):
             hw_info_update: Called with hardware info dict
             battery_update: Called with battery status dict
             timezone_update: Called with timezone string
-            hold_time_update: Called with hold time in seconds
+            hold_time_update: Called with hold time in **centiseconds**,
+                the raw device value (``PowerPetDoor`` divides by 100 to
+                expose seconds)
             sensor_trigger_voltage_update: Called with trigger voltage
             sleep_sensor_trigger_voltage_update: Called with sleep trigger voltage
             remote_id_update: Called with True if device has remote ID
@@ -907,10 +937,34 @@ class PowerPetDoorClient(asyncio.Protocol):
 
     @ResponseHandlerRegistry.handler(CMD_GET_HW_INFO)
     def _handle_hw_info(self, msg: dict, future) -> None:
-        """Handle hardware info response."""
-        if FIELD_FWINFO in msg:
-            self._notify_listeners(self.hw_info_listeners, msg[FIELD_FWINFO])
-            self._resolve_future(future, msg[FIELD_FWINFO])
+        """Handle hardware info response.
+
+        ``fwInfo`` is the sixth response sub-object of the shape
+        :meth:`_payload_mapping` exists for, and the only one whose value
+        is *cached* rather than merely read - ``door._hw_info`` kept it and
+        three documented public properties then treated it as a dict
+        (round-6 backend M1).
+
+        Deliberately liberal in what it accepts: whatever the device put
+        there still resolves the future, so a caller using
+        ``send_message(..., notify=True)`` sees exactly what the device
+        said. Only the ``hw_info_update`` listeners are shielded, because
+        they are declared ``Callable[[dict], None]`` and
+        :meth:`_notify_listeners` would swallow their ``AttributeError``
+        with nothing in the log tying it to the frame that caused it.
+        """
+        if FIELD_FWINFO not in msg:
+            return
+        fw_info = self._payload_mapping(msg, FIELD_FWINFO)
+        if fw_info is not None:
+            self._notify_listeners(self.hw_info_listeners, fw_info)
+        else:
+            _LOGGER.warning(
+                "Device sent a non-mapping %s payload; not notifying hw_info listeners: %s",
+                FIELD_FWINFO,
+                sanitize_text(msg[FIELD_FWINFO], MAX_LOGGED_LENGTH),
+            )
+        self._resolve_future(future, msg[FIELD_FWINFO])
 
     @ResponseHandlerRegistry.handler(CMD_GET_DOOR_BATTERY)
     def _handle_battery(self, msg: dict, future) -> None:
@@ -1391,8 +1445,11 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._scanner.reset()
         # Same connection scope as the scanner: report the tail, then start
         # the next connection's count clean.
-        self._non_ascii.flush()
-        self._non_ascii.reset()
+        for throttle in (self._non_ascii, self._bad_frames, self._bad_messages):
+            throttle.flush()
+            throttle.reset()
+        # Undispatched frames belong to the connection that delivered them.
+        self._dispatcher.reset()
         self._queue.clear()
         self._msg_sequence = 0  # Reset sequence counter
 
@@ -1640,13 +1697,34 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._drop_connection()
             return
 
-        for frame in frames:
-            try:
-                msg = json.loads(frame)
-            except json.JSONDecodeError as err:
-                _LOGGER.error("Failed to decode JSON frame (%s): %s", err, sanitize_text(frame))
-                continue
-            self._track_task(self.process_message(msg))
+        # Bounded dispatch: one task per frame, created synchronously here,
+        # let one 256 KiB read of `{}` admit 131,072 live tasks and ~135 MB
+        # of heap before any of them ran (round-6 security finding 1).
+        self._dispatcher.submit(frames, self._transport)
+
+    def _dispatch_frame(self, frame: str) -> asyncio.Task | None:
+        """Decode one framed message and start its handler.
+
+        Returns:
+            The handler task, or None if the frame was not usable JSON.
+        """
+        try:
+            msg = json.loads(frame)
+        except json.JSONDecodeError as err:
+            # Throttled: this fires once per *frame*, so it is limited by
+            # the peer's byte rate rather than its packet rate - `{x}` is
+            # three bytes and used to buy a 135-byte ERROR, x28 write
+            # amplification (round-6 security finding 2). The detail rides
+            # the same doubling schedule as the summary, bounded in length
+            # because the frame is peer-chosen.
+            if self._bad_frames.record(len(frame)):
+                _LOGGER.error(
+                    "Failed to decode JSON frame (%s): %s",
+                    err,
+                    sanitize_text(frame, MAX_LOGGED_LENGTH),
+                )
+            return None
+        return self._track_task(self.process_message(msg))
 
     async def process_message(self, msg) -> None:
         """Process an incoming message from the device.
@@ -1671,7 +1749,15 @@ class PowerPetDoorClient(asyncio.Protocol):
 
         success = msg.get(FIELD_SUCCESS)
         if cmd is None and success is None:
-            _LOGGER.warning("Ignoring malformed message from device: %s", json.dumps(msg))
+            # Per-frame and peer-controlled, exactly like the JSON decode
+            # failure above: `{}` is two bytes of legal JSON and bought a
+            # ~100-byte WARNING each (round-6 security finding 2).
+            rendered = json.dumps(msg)
+            if self._bad_messages.record(len(rendered)):
+                _LOGGER.warning(
+                    "Ignoring malformed message from device: %s",
+                    sanitize_text(rendered, MAX_LOGGED_LENGTH),
+                )
             return
 
         future = None

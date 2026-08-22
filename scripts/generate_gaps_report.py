@@ -19,11 +19,60 @@ import os
 import re
 import sys
 import tokenize
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
 SOURCE_PREFIX = "src/powerpetdoor/"
 SCRIPTS_PREFIX = "scripts/"
+PYPROJECT = Path("pyproject.toml")
+
+#: Human-readable gloss for each configured exclusion pattern. Anything
+#: without an entry is still reported, just without the explanation, so a
+#: new pattern can never go undisclosed.
+_EXCLUSION_NOTES = {
+    "pragma: no cover": "Explicitly annotated lines (see Pragma Exclusions below)",
+    "def __repr__": "String representation methods",
+    "raise NotImplementedError": "Abstract method stubs",
+    "if TYPE_CHECKING:": "Type-checking-only imports",
+    "if __name__ == .__main__.:": "Script entry-point guards",
+    "@overload": "Typing overload declarations",
+    "(^\\s*\\.\\.\\.\\s*$)|(:\\s*\\.\\.\\.\\s*$)": "Ellipsis stub bodies",
+}
+#: Gloss for each configured omit pattern.
+_OMIT_NOTES = {
+    "*/__init__.py": "Package init files",
+    "*/__main__.py": "Entry point files",
+}
+
+
+def coverage_config() -> tuple[list[str], list[str]]:
+    """Read the configured ``omit`` and ``exclude_lines`` from pyproject.
+
+    The report used to hard-code six bullets while the config carried seven
+    patterns, so the project's own gap-disclosure artifact did not disclose
+    the exclusion that mattered most (round-6 test-fanatic M2). Reading the
+    config means the two cannot drift.
+    """
+    if not PYPROJECT.exists():
+        return [], []
+    config = tomllib.loads(PYPROJECT.read_text())
+    coverage = config.get("tool", {}).get("coverage", {})
+    omit = list(coverage.get("run", {}).get("omit", []))
+    exclude = list(coverage.get("report", {}).get("exclude_lines", []))
+    return omit, exclude
+
+
+def render_automatic_exclusions() -> list[str]:
+    """Render the "Automatic Exclusions" bullets from the live config."""
+    omit, exclude = coverage_config()
+    bullets = []
+    for pattern, notes in ((omit, _OMIT_NOTES), (exclude, _EXCLUSION_NOTES)):
+        for entry in pattern:
+            note = notes.get(entry)
+            suffix = f" - {note}" if note else ""
+            bullets.append(f"- `{entry}`{suffix}")
+    return bullets
 
 
 def _comment_tokens(source: str) -> dict[int, tuple[int, str]]:
@@ -310,12 +359,8 @@ def main() -> int:
     lines.append("")
     lines.append("The following are excluded from coverage by configuration (`pyproject.toml`):")
     lines.append("")
-    lines.append("- `*/__init__.py` - Package init files")
-    lines.append("- `*/__main__.py` - Entry point files")
-    lines.append("- `def __repr__` - String representation methods")
-    lines.append("- `raise NotImplementedError` - Abstract method stubs")
-    lines.append("- `if TYPE_CHECKING:` - Type-checking-only imports")
-    lines.append("- `@overload` - Typing overload declarations")
+    # Rendered from the live config, never hand-maintained (M2).
+    lines.extend(render_automatic_exclusions())
     lines.append("")
 
     if pragma_exclusions:

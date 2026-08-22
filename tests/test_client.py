@@ -21,6 +21,7 @@ from powerpetdoor import (
     PowerPetDoorClient,
     PrioritizedMessage,
     find_end,
+    framing,
     make_bool,
 )
 from powerpetdoor.client import MAX_FAILED_MSG, MAX_FAILED_PINGS, CommandError
@@ -835,6 +836,45 @@ class TestConnectionLost:
             await client.reconnect(0)
 
             assert mock_connect.await_count == 0
+
+    async def test_connect_failure_after_shutdown_does_not_reconnect(
+        self, disconnected_client, caplog
+    ):
+        """The funnel every connect failure goes through checks _shutdown.
+
+        `handle_connect_failure()` is reached from `connect()`'s except
+        block, i.e. after `stop()` may already have landed. Nothing
+        asserted that a failure arriving *then* stays quiet: mutating the
+        guard to `if True:` survived the whole 2324-test suite, because
+        the bare three-dot coverage exclusion pattern had removed the log
+        line beneath it from the gate entirely (round-6 test-fanatic H2).
+        """
+        client = disconnected_client
+        client._shutdown = True
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            client.handle_connect_failure()
+
+        assert client._reconnect_task is None
+        assert caplog.records == []
+
+    async def test_connect_failure_before_shutdown_does_reconnect(
+        self, disconnected_client, caplog
+    ):
+        """The other side of the guard: a live client still recovers."""
+        client = disconnected_client
+        client._shutdown = False
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            client.handle_connect_failure()
+
+        try:
+            assert client._reconnect_task is not None
+            assert [rec.getMessage() for rec in caplog.records] == [
+                "Unable to connect to power pet door. Reconnecting..."
+            ]
+        finally:
+            client.stop()
 
     async def test_connect_is_noop_when_shutdown(self, disconnected_client):
         """connect() refuses to run once the client is shut down (H2)."""
@@ -3748,3 +3788,224 @@ class TestBackgroundTaskTracking:
             await ran.wait()
         await asyncio.sleep(0)  # let the done-callback untrack the task
         assert client._handler_tasks == set()
+
+
+# ============================================================================
+# Bounded frame dispatch and per-frame log throttling (round-6 security 1, 2)
+# ============================================================================
+
+
+class TestBoundedFrameDispatch:
+    """One read must not admit one live task per framed message.
+
+    asyncio reads up to 256 KiB per callback and `{}` is a legal two-byte
+    frame, so a hostile door turned one read into 131,072 tasks and ~135 MB
+    of client heap before any of them ran (round-6 security finding 1).
+    """
+
+    async def test_a_packed_read_creates_a_bounded_number_of_tasks(self, mock_client):
+        client, transport, _ = mock_client
+        frames = 5000
+
+        client.data_received(b"{}" * frames)
+
+        assert client._dispatcher.inflight == framing.MAX_INFLIGHT_FRAMES
+        assert client._dispatcher.backlog == frames - framing.MAX_INFLIGHT_FRAMES
+
+    async def test_reading_is_paused_while_the_backlog_drains(self, mock_client):
+        client, transport, _ = mock_client
+
+        client.data_received(b"{}" * 5000)
+
+        assert transport.reading_paused is True
+        assert transport.pause_calls == 1
+
+    async def test_every_frame_is_still_processed_and_reading_resumes(self, mock_client):
+        client, transport, _ = mock_client
+        seen: list[dict] = []
+        original = client.process_message
+
+        async def recording(msg):
+            seen.append(msg)
+            await original(msg)
+
+        client.process_message = recording
+        frames = 500
+
+        client.data_received(b'{"a":1}' * frames)
+        for _ in range(5000):
+            if not client._dispatcher.backlog and not client._dispatcher.inflight:
+                break
+            await asyncio.sleep(0)
+
+        assert len(seen) == frames
+        assert transport.reading_paused is False
+        assert transport.resume_calls == 1
+
+    async def test_normal_traffic_is_dispatched_exactly_as_before(self, mock_client):
+        """A real device's burst is far below the bound; nothing changes."""
+        client, transport, _ = mock_client
+
+        client.data_received(b'{"CMD":"A","success":"true"}{"CMD":"B","success":"true"}')
+
+        assert client._dispatcher.backlog == 0
+        assert client._dispatcher.inflight == 2
+        assert transport.pause_calls == 0
+        await asyncio.gather(*list(client._tasks), return_exceptions=True)
+
+    async def test_disconnect_drops_the_undispatched_backlog(self, mock_client):
+        client, _, _ = mock_client
+        client.data_received(b"{}" * 5000)
+        assert client._dispatcher.backlog > 0
+
+        client.disconnect()
+
+        assert client._dispatcher.backlog == 0
+
+
+class TestPerFrameLogThrottling:
+    """Per-frame log sites are limited by the peer's *byte* rate."""
+
+    async def test_malformed_frames_are_summarized_not_echoed_one_per_frame(
+        self, mock_client, caplog
+    ):
+        """`{x}` is three bytes and used to buy a 135-byte ERROR each."""
+        client, _, _ = mock_client
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            client.data_received(b"{x}" * 1000)
+
+        tallies = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Failed to decode ")
+            and "JSON frame(s)" in record.getMessage()
+        ]
+        # 1, 2, 4, ... 512 - logarithmic in 1000 frames, not linear.
+        assert len(tallies) == 10
+        assert tallies[-1] == (
+            "Failed to decode 512 JSON frame(s) from device (1536 bytes) on this connection"
+        )
+        assert client._bad_frames.count == 1000
+
+    async def test_the_frame_detail_rides_the_same_schedule(self, mock_client, caplog):
+        client, _, _ = mock_client
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            client.data_received(b"{x}" * 1000)
+
+        details = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Failed to decode JSON frame")
+        ]
+        assert len(details) == 10
+
+    async def test_the_echoed_frame_is_bounded(self, mock_client, caplog):
+        """The frame is peer-chosen up to the 64 KiB framing cap."""
+        client, _, _ = mock_client
+        payload = b"{" + b"z" * 5000 + b"}"
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            client.data_received(payload)
+
+        detail = next(
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Failed to decode JSON frame")
+        )
+        assert detail.endswith("...(truncated)")
+        assert len(detail) < 400
+
+    async def test_malformed_messages_are_summarized_too(self, mock_client, caplog):
+        """`{}` is two bytes of *legal* JSON and cost a WARNING each."""
+        client, _, _ = mock_client
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            client.data_received(b"{}" * 200)
+            for _ in range(5000):
+                if not client._dispatcher.backlog and not client._dispatcher.inflight:
+                    break
+                await asyncio.sleep(0)
+
+        tallies = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Ignored ")
+        ]
+        assert len(tallies) == 8  # 1, 2, 4, ... 128
+        assert client._bad_messages.count == 200
+
+    async def test_disconnect_flushes_the_per_frame_tails(self, mock_client, caplog):
+        """Nothing counted is lost when the connection ends."""
+        client, _, _ = mock_client
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            client.data_received(b"{x}" * 3)
+            caplog.clear()
+
+            client.disconnect()
+
+        assert [record.getMessage() for record in caplog.records] == [
+            "Failed to decode 3 JSON frame(s) from device (9 bytes) on this connection"
+        ]
+        assert client._bad_frames.count == 0
+
+
+class TestHardwareInfoPayload:
+    """`fwInfo` is the one payload sub-object whose value is *cached*."""
+
+    async def test_a_mapping_payload_reaches_the_listeners(self, mock_client):
+        client, _, device = mock_client
+        seen: list[dict] = []
+        client.add_listener("t", hw_info_update=seen.append)
+
+        device.respond_success(1, "GET_HW_INFO", fwInfo={"ver": "1", "fw_maj": 2})
+        await asyncio.sleep(0)
+
+        assert seen == [{"ver": "1", "fw_maj": 2}]
+
+    async def test_a_scalar_payload_is_not_handed_to_dict_typed_listeners(
+        self, mock_client, caplog
+    ):
+        """`hw_info_update` is declared Callable[[dict], None].
+
+        Handing it a string made `_notify_listeners` swallow the resulting
+        AttributeError with nothing tying it to the frame that caused it,
+        and `PowerPetDoor` then cached the scalar - poisoning three
+        documented public properties until the next well-formed reply
+        (round-6 backend M1).
+        """
+        client, _, device = mock_client
+        seen: list[object] = []
+        client.add_listener("t", hw_info_update=seen.append)
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            device.respond_success(1, "GET_HW_INFO", fwInfo="1.2.3")
+            await asyncio.sleep(0)
+
+        assert seen == []
+        assert [record.getMessage() for record in caplog.records] == [
+            "Device sent a non-mapping fwInfo payload; not notifying hw_info listeners: 1.2.3"
+        ]
+
+    async def test_a_scalar_payload_still_resolves_the_caller_future(self, mock_client):
+        """Liberal in what we accept: send_message() sees what was sent."""
+        client, transport, device = mock_client
+        future = client.send_message("config", "GET_HW_INFO", notify=True)
+        await asyncio.sleep(0)
+        msg_id = transport.get_last_message()["msgId"]
+
+        device.respond_success(msg_id, "GET_HW_INFO", fwInfo="1.2.3")
+
+        assert await asyncio.wait_for(future, 1.0) == "1.2.3"
+
+    async def test_an_absent_payload_fails_the_future_typed(self, mock_client):
+        client, transport, device = mock_client
+        future = client.send_message("config", "GET_HW_INFO", notify=True)
+        await asyncio.sleep(0)
+        msg_id = transport.get_last_message()["msgId"]
+
+        device.respond_success(msg_id, "GET_HW_INFO")
+
+        with pytest.raises(CommandError, match="Response missing expected field"):
+            await asyncio.wait_for(future, 1.0)

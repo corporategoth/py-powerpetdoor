@@ -23,8 +23,14 @@ class TestMakeBoolProperties:
     @settings(max_examples=200, deadline=None)
     @given(text=st.text(max_size=12))
     def test_text_maps_into_tristate(self, text):
-        """Any string maps to exactly True, False or None - never raises."""
-        assert make_bool(text) in (True, False, None)
+        """Any string maps to exactly True, False or None - never raises.
+
+        Asserted by identity: `1 in (True, False, None)` is True in Python,
+        so membership does not pin the type the docstring promises
+        (round-6 test-fanatic L2).
+        """
+        result = make_bool(text)
+        assert result is True or result is False or result is None
 
     @given(token=st.sampled_from(["1", "true", "yes", "on"]), data=st.data())
     def test_true_tokens_in_any_case(self, token, data):

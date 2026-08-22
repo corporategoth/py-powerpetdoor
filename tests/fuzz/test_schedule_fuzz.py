@@ -256,4 +256,10 @@ class TestValidateProperties:
     @settings(max_examples=100, deadline=None)
     @given(entry=st.dictionaries(st.text(max_size=12), _messy_values, max_size=6))
     def test_validate_never_raises_and_returns_bool(self, entry):
-        assert validate_schedule_entry(entry) in (True, False)
+        """`x in (True, False)` is satisfied by `1`, so it pins nothing.
+
+        Identity is what the name promises (round-6 test-fanatic L2, the
+        pattern round 5 removed from the sibling fuzz module).
+        """
+        result = validate_schedule_entry(entry)
+        assert result is True or result is False

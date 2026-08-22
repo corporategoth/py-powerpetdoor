@@ -113,7 +113,11 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "if __name__ == .__main__.:",
     "@overload",
-    "\\.\\.\\.",
+    # Ellipsis *stub bodies* only. A bare `\.\.\.` is a `re.search` against the
+    # whole source line, so it also matches log strings, comments and
+    # `tuple[str, ...]` annotations — which silently removed 34 statements and
+    # 28 branch destinations from the gate (round 6, test-fanatic H2).
+    "(^\\s*\\.\\.\\.\\s*$)|(:\\s*\\.\\.\\.\\s*$)",
 ]
 
 [tool.coverage.paths]

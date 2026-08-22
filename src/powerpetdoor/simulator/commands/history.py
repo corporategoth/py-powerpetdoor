@@ -14,7 +14,21 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .base import CommandResult
+
 logger = logging.getLogger(__name__)
+
+#: The one message shown when history is unavailable. There used to be two
+#: (this class said "History not available (install prompt_toolkit)", the
+#: live command spelled out the pip install), which is exactly the drift a
+#: dead duplicate produces (round-6 frontend T1).
+HISTORY_UNAVAILABLE_MESSAGE = (
+    "History not available. Install prompt_toolkit for history support:\n"
+    "  pip install pypowerpetdoor[interactive]"
+)
+
+#: Entries ``history`` shows when no count is given.
+DEFAULT_HISTORY_LIMIT = 20
 
 
 def _create_private_file(path: str | Path) -> None:
@@ -58,15 +72,23 @@ class History:
                 # Execute resolved_cmd, show prefix
     """
 
-    def __init__(self, history_file: str | Path | None = None):
+    def __init__(self, history_file: str | Path | None = None, *, backend: Any = None):
         """Initialize history manager.
 
         Args:
             history_file: Path to history file, "none" to disable file storage,
                          or None for in-memory only.
+            backend: An already-built prompt_toolkit history object to wrap
+                instead of creating one. This is how the ``history``
+                command reaches these operations: the command handler is
+                handed the raw backend, and wrapping it here is what let
+                the inline re-implementation of clear + formatting go away
+                (round-6 frontend T1).
         """
-        self._history: Any = None
-        self._prompt_toolkit_available = False
+        self._history: Any = backend
+        self._prompt_toolkit_available = backend is not None
+        if backend is not None:
+            return
 
         try:
             from prompt_toolkit.history import FileHistory, InMemoryHistory
@@ -178,6 +200,19 @@ class History:
                 for line in entry.split("\n"):
                     f.write(f"+{line}\n")
 
+    def _clear_backend(self) -> None:
+        """Clear the in-memory cache and truncate the file.
+
+        Raises whatever the backend raises; :meth:`clear` reports that as
+        False and :meth:`execute_command` reports it to the operator with
+        the reason attached.
+        """
+        if hasattr(self._history, "_loaded_strings"):
+            self._history._loaded_strings.clear()
+        if hasattr(self._history, "filename"):
+            with open(self._history.filename, "w"):
+                pass
+
     def clear(self) -> bool:
         """Clear all history entries.
 
@@ -190,20 +225,26 @@ class History:
             return False
 
         try:
-            # Clear in-memory history
-            if hasattr(self._history, "_loaded_strings"):
-                self._history._loaded_strings.clear()
-
-            # Truncate the file
-            if hasattr(self._history, "filename"):
-                with open(self._history.filename, "w"):
-                    pass
+            self._clear_backend()
             return True
         except Exception as e:
             logger.debug(f"Error clearing history: {e}")
             return False
 
-    def format_entries(self, limit: int = 20) -> str:
+    @staticmethod
+    def _render(entries: list[str], limit: int) -> str:
+        """Render history entries with absolute, 1-indexed IDs."""
+        if not entries:
+            return "No history"
+        total = len(entries)
+        start_idx = max(0, total - limit)
+        shown_entries = entries[start_idx:]
+        lines = [f"History ({len(shown_entries)} of {total} commands):"]
+        for i, entry in enumerate(shown_entries):
+            lines.append(f"  {start_idx + i + 1:5d}  {entry}")
+        return "\n".join(lines)
+
+    def format_entries(self, limit: int = DEFAULT_HISTORY_LIMIT) -> str:
         """Format history entries for display.
 
         Args:
@@ -213,21 +254,10 @@ class History:
             Formatted string with history entries.
         """
         if not self._history:
-            return "History not available (install prompt_toolkit)"
+            return HISTORY_UNAVAILABLE_MESSAGE
 
         try:
-            entries = self.get_entries()
-            if not entries:
-                return "No history"
-
-            total = len(entries)
-            start_idx = max(0, total - limit)
-            shown_entries = entries[start_idx:]
-            lines = [f"History ({len(shown_entries)} of {total} commands):"]
-            for i, entry in enumerate(shown_entries):
-                history_id = start_idx + i + 1  # 1-indexed
-                lines.append(f"  {history_id:5d}  {entry}")
-            return "\n".join(lines)
+            return self._render(self.get_entries(), limit)
         except Exception as e:
             return f"Error reading history: {e}"
 
@@ -292,34 +322,41 @@ class History:
         except ValueError:
             return None  # Not a history recall pattern
 
-    def execute_command(self, arg: str | None = None) -> str:
+    def execute_command(self, arg: str | None = None) -> CommandResult:
         """Execute the history command with optional argument.
 
-        This handles the 'history' command itself (show/clear history).
+        This is the single implementation of the ``history`` command;
+        ``InfoCommandsMixin.history`` wraps its backend and delegates here.
 
         Args:
             arg: Optional argument - 'clear' to clear history,
                  or a number to show last N commands.
 
         Returns:
-            Result message to display.
+            The command result to display.
         """
         if not self._history:
-            return "History not available (install prompt_toolkit)"
+            return CommandResult(False, HISTORY_UNAVAILABLE_MESSAGE)
 
         if arg and arg.lower() == "clear":
-            if self.clear():
-                return "History cleared"
-            else:
-                return "Error clearing history"
+            try:
+                self._clear_backend()
+            except Exception as e:
+                return CommandResult(False, f"Error clearing history: {e}")
+            return CommandResult(True, "History cleared")
 
-        limit = 20
+        limit = DEFAULT_HISTORY_LIMIT
         if arg:
             try:
                 limit = int(arg)
-                if limit <= 0:
-                    return "Number must be positive"
             except ValueError:
-                return f"Invalid argument: {arg}. Use 'clear' or a number."
+                return CommandResult(False, f"Invalid argument: {arg}. Use 'clear' or a number.")
+            if limit <= 0:
+                return CommandResult(False, "Number must be positive")
 
-        return self.format_entries(limit)
+        try:
+            # get_strings() returns oldest first, which is what we want for indexing
+            entries = list(self._history.get_strings())
+        except Exception as e:
+            return CommandResult(False, f"Error reading history: {e}")
+        return CommandResult(True, self._render(entries, limit))

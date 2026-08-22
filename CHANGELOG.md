@@ -43,6 +43,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails if any name in `__all__` appears in no prose doc
 
 ### Changed
+- Schedule serialization is now a single, explicitly-marked boundary
+  (`SCHEDULE_WIRE_TO_DEVICE` / `SCHEDULE_WIRE_FROM_DEVICE` in
+  `powerpetdoor/schedule.py`). The Python API is strict (`enabled: bool`,
+  `days_of_week: list[bool]`), the parsers stay liberal (`true`/`"1"`/`1` all
+  accepted), and each field's wire spelling is one line at the boundary.
+  **The client→device and device→client directions are documented separately
+  and are not required to agree**: the library sends `enabled` as a JSON
+  boolean (what has run against real hardware since v0.1.0) while the device is
+  observed to reply `"1"`/`"0"`. `docs/protocol.md` is reverse-engineered and
+  is not authority over what the firmware accepts
+- Simulator: plain `stop` now says how many runs are still queued, since its
+  observable consequence is that the *next* script starts driving the door
+- Simulator: a `--scripts-dir` entry that resolves outside that directory is no
+  longer advertised by `list`, `--list-scripts` or tab completion, and `run`
+  explains the refusal instead of answering `Unknown script: X. Available:
+  ..., X, ...`
+- Simulator: a `--scripts-dir` script that shadows a built-in is marked as such
+  in `list`, and the shadowed built-in is dropped from tab completion
 - `loop=None` now resolves the running event loop lazily at connect time; the
   documented `PowerPetDoor(host)` + `await door.connect()` pattern works
 - `door.connect()` waits on an event and raises on failure instead of polling
@@ -109,6 +127,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `loop.add_reader()`, which Windows' ProactorEventLoop does not implement
 
 ### Fixed
+- The 64 KiB framing cap bounds memory again, not just a character count: the
+  retained remainder is coalesced once it grows past `MAX_RETAINED_PIECES`
+  pieces (measured: 512 KiB/connection → 67 KiB at 1-byte chunks, for under 4%
+  of the framing throughput)
+- `GET_HW_INFO`: a non-mapping `fwInfo` is no longer handed to the dict-typed
+  `hw_info_update` listeners, and `PowerPetDoor` no longer caches it — a scalar
+  there made three documented public properties raise `AttributeError` with
+  nothing in the log naming the frame that caused it. The value still resolves
+  the caller's future unchanged
+- `PowerPetDoor.refresh_schedules()` rejects a non-list `GET_SCHEDULE_LIST`
+  payload instead of raising `TypeError` out of a documented coroutine, or
+  issuing one `GET_SCHEDULE` per character of a string
+- `compute_schedule_diff()` validates every index it reads out of the
+  caller-supplied device entries, so a hostile index can no longer raise
+  `TypeError` out of a public helper or produce a `SET_SCHEDULE` payload with
+  `"index": null`; two brand-new entries can no longer be assigned the same slot
+- Simulator scripts: `enabled: "0"` / `hold: "off"` are read as flags rather
+  than by truthiness, so a quoted false no longer produces an *enabled* schedule
 - Receive framing: garbage bytes raised `IndexError`, a brace inside a JSON
   string corrupted framing, and either could wedge the connection permanently
 - A single undecodable byte no longer discards the chunk or desyncs framing
@@ -185,6 +221,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `format_recall`, which both call sites use
 
 ### Security
+- Bounded per-frame dispatch on both client and simulator: one `asyncio.Task`
+  used to be created per framed message, synchronously, per read — one 256 KiB
+  read of `{}` admitted 131,072 live tasks (~165 MB measured) before any of them
+  ran. Dispatch now runs at most `MAX_INFLIGHT_FRAMES` handlers at a time and
+  pauses the transport while the backlog drains (measured: 131,072 tasks /
+  165.5 MB → 64 tasks / 6.5 MB; a `{"cmd":"a"}` flood that made `ctl status`
+  time out at 15 s is now answered in 12 ms)
+- The simulator's door transport got the write-buffer ceiling the control
+  channel already had: a client that issues valid commands and never reads the
+  answers is dropped instead of growing the daemon's heap without bound
+  (measured: +18.1 MB → +2.2 MB for 3.2 MB of requests)
+- Throttled the four per-*frame* log sites (malformed frame and malformed
+  message on the client; JSON parse error and unknown command on the
+  simulator). These fire at the peer's *byte* rate rather than its packet rate,
+  so one 64 KiB write of `{x}` bought ×64 write amplification in a third
+  party's log; now ×0.05. The echoed frame is also length-bounded
+- `EventThrottle` gained an elapsed-time floor and an interval ceiling, so a
+  *new* burst of events on a long-lived connection is always reported promptly
+  instead of being swallowed by a threshold the connection passed hours ago
 - Capped the receive buffer on both client and simulator (unbounded growth was a
   memory-exhaustion vector for a malicious peer)
 - The simulator control channel is unauthenticated, so it now binds loopback by

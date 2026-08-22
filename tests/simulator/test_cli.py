@@ -1670,6 +1670,39 @@ class TestRunStartupScripts:
         assert ">>> Waiting 0.01s before next loop..." in out
         assert ">>> Client disconnected, stopping scripts" in out
 
+    async def test_zero_script_delay_loops_without_waiting(self, capsys):
+        """`--loop --script-delay 0` must continue, not sleep.
+
+        The `if script_delay > 0:` guard in the outer loop was never
+        exercised in its False direction - mutating it to `>= 0` survived
+        the whole suite, hidden from the coverage gate by the bare
+        three-dot exclusion pattern (round-6 test-fanatic H2).
+        """
+
+        async def stop_after_two(script, sim):
+            if len(runs) >= 2:
+                sim.protocols.clear()
+            return True
+
+        sim, handler, runner, stop, result, runs, _ = self._make(side_effect=stop_after_two)
+        sim.protocols.append("client")
+        await self._run(
+            ["s1"],
+            sim,
+            handler,
+            runner,
+            stop,
+            result,
+            loop_scripts=True,
+            script_delay=0,
+            wait_for_client=True,
+        )
+
+        assert runs == ["s1", "s1"]
+        out = capsys.readouterr().out
+        assert ">>> Script run #2" in out
+        assert "before next loop" not in out
+
     async def test_cancelled_mid_script_still_records_result(self):
         blocker = asyncio.Event()
 
@@ -2107,7 +2140,9 @@ class TestRunSimulatorInteractive:
 
         out = capsys.readouterr().out
         prompt_text = f"127.0.0.1:{ports['door']}> "
-        assert out.count(prompt_text) >= 3  # initial, after empty line, after output
+        # Exactly three: initial, after the empty line, after the output.
+        # `>= 3` let a duplicated-prompt regression through (L5).
+        assert out.count(prompt_text) == 3
         assert ">>> " in out
         assert "Door:" in out  # status output
         assert "Shutting down" in out

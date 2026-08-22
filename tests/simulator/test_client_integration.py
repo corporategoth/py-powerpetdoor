@@ -275,11 +275,20 @@ class TestQueryCommands:
         assert "acPresent" in result
 
     async def test_get_hw_info(self, client, simulator):
-        """GET_HW_INFO should return hardware info."""
+        """GET_HW_INFO returns all five hardware fields, like its sibling.
+
+        `isinstance(result, dict)` accepted an empty dict; the battery test
+        two methods up pins its three fields (round-6 L5).
+        """
         future = client.send_message(CONFIG, CMD_GET_HW_INFO, notify=True)
         result = await asyncio.wait_for(future, timeout=2.0)
 
-        assert isinstance(result, dict)
+        assert set(result) == {"ver", "rev", "fw_maj", "fw_min", "fw_pat"}
+        assert result["fw_maj"] == simulator.state.fw_major
+        assert result["fw_min"] == simulator.state.fw_minor
+        assert result["fw_pat"] == simulator.state.fw_patch
+        assert result["ver"] == simulator.state.hw_ver
+        assert result["rev"] == simulator.state.hw_rev
 
 
 # ============================================================================

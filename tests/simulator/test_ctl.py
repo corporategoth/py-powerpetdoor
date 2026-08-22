@@ -161,11 +161,15 @@ class TestSendCommand:
         like a long script with no logging; the answer must still arrive.
         """
         released = asyncio.Event()
+        # Recorded, not asserted: an AssertionError inside a connected
+        # callback goes to the loop exception handler, not to the test
+        # (round-6 test-fanatic L5).
+        received: list[bytes] = []
 
         async def slow_wait_run(reader, writer):
             line = await reader.readline()
             if line:
-                assert line == b"run full_test_suite wait\n"
+                received.append(line)
                 released.set()
                 # Silence an order of magnitude longer than the timeout.
                 await asyncio.sleep(0.5)
@@ -181,6 +185,7 @@ class TestSendCommand:
             await server.wait_closed()
 
         assert released.is_set()
+        assert received == [b"run full_test_suite wait\n"]
         assert success is True
         assert msg == "OK: Script PASSED: Full Test Suite"
 

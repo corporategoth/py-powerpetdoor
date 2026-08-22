@@ -17,6 +17,7 @@ from .base import (
     get_command_registry,
     subcommand,
 )
+from .history import HISTORY_UNAVAILABLE_MESSAGE, History
 from .scripts import ScriptStatus, format_script_status
 
 if TYPE_CHECKING:
@@ -346,57 +347,18 @@ class InfoCommandsMixin:
             history N       - Show last N commands
             history clear   - Clear command history
 
+        Delegates to :meth:`History.execute_command`, which is the single
+        implementation. This method used to re-implement clear + formatting
+        inline against the raw prompt_toolkit object, and the two copies
+        had already drifted on user-facing text - with the well-documented
+        one being the dead copy a maintainer would edit (round-6 frontend
+        T1).
+
         Note: Requires prompt_toolkit (install with pip install pypowerpetdoor[interactive])
         """
         if self._history is None:
-            return CommandResult(
-                False,
-                "History not available. Install prompt_toolkit for history support:\n"
-                "  pip install pypowerpetdoor[interactive]",
-            )
-
-        if arg and arg.lower() == "clear":
-            # Clear history (both in-memory and file)
-            try:
-                # Clear in-memory history
-                if hasattr(self._history, "_loaded_strings"):
-                    self._history._loaded_strings.clear()
-                # Truncate the file if using FileHistory
-                if hasattr(self._history, "filename"):
-                    with open(self._history.filename, "w"):
-                        pass
-                return CommandResult(True, "History cleared")
-            except Exception as e:
-                return CommandResult(False, f"Error clearing history: {e}")
-
-        # Determine how many entries to show
-        limit = 20
-        if arg:
-            try:
-                limit = int(arg)
-                if limit <= 0:
-                    return CommandResult(False, "Number must be positive")
-            except ValueError:
-                return CommandResult(False, f"Invalid argument: {arg}. Use 'clear' or a number.")
-
-        # Get history entries
-        try:
-            # get_strings() returns oldest first, which is what we want for indexing
-            entries = list(self._history.get_strings())
-            if not entries:
-                return CommandResult(True, "No history")
-
-            # Show last N entries with absolute history IDs
-            total = len(entries)
-            start_idx = max(0, total - limit)
-            shown_entries = entries[start_idx:]
-            lines = [f"History ({len(shown_entries)} of {total} commands):"]
-            for i, entry in enumerate(shown_entries):
-                history_id = start_idx + i + 1  # 1-indexed absolute position
-                lines.append(f"  {history_id:5d}  {entry}")
-            return CommandResult(True, "\n".join(lines))
-        except Exception as e:
-            return CommandResult(False, f"Error reading history: {e}")
+            return CommandResult(False, HISTORY_UNAVAILABLE_MESSAGE)
+        return History(backend=self._history).execute_command(arg)
 
     def get_help(self) -> str:
         """Generate help text from registered commands."""

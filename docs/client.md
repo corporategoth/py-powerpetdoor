@@ -352,9 +352,10 @@ and semantics are documented in
 | Envelope | `FIELD_CMD`, `FIELD_SUCCESS`, `FIELD_REASON`, `FIELD_MSG_ID`, `FIELD_MSG_ID_RESPONSE`, `FIELD_DIRECTION` | [Message Envelope](protocol.md#message-format) |
 | Direction | `DOOR_TO_PHONE`, `PHONE_TO_DOOR` | [Message Envelope](protocol.md#message-format) |
 | Door state values | `DOOR_STATE_IDLE`, `DOOR_STATE_CLOSED`, `DOOR_STATE_RISING`, `DOOR_STATE_SLOWING`, `DOOR_STATE_HOLDING`, `DOOR_STATE_KEEPUP`, `DOOR_STATE_CLOSING_TOP_OPEN`, `DOOR_STATE_CLOSING_MID_OPEN` | [Door Status Values](protocol.md#door-status-values) |
-| Status payload | `FIELD_DOOR_STATUS`, `FIELD_SENSOR_STATE` | [Door Status Values](protocol.md#door-status-values) |
+| Status payload | `FIELD_DOOR_STATUS` (`"door_status"`) | [Unsolicited Door Status](protocol.md#unsolicited-door-status) |
+| Notification payload | `FIELD_SENSOR_STATE` (`"sensorState"`, `"on"`/`"off"`) | [Notification Messages](protocol.md#notification-messages-door-to-client) |
 | Notification flags | `FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS`, `FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS`, `FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS`, `FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS`, `FIELD_LOW_BATTERY_NOTIFICATIONS` | [Notification Settings Fields](protocol.md#notification-settings-fields) |
-| Hardware / firmware | `FIELD_FW_MAJOR`, `FIELD_FW_MINOR`, `FIELD_FW_PATCH`, `FIELD_HW_VERSION`, `FIELD_HW_REVISION` | [Hardware Info](protocol.md#settings-fields) |
+| Hardware / firmware | `FIELD_FW_MAJOR` (`"fw_maj"`), `FIELD_FW_MINOR` (`"fw_min"`), `FIELD_FW_PATCH` (`"fw_pat"`), `FIELD_HW_VERSION` (`"ver"`), `FIELD_HW_REVISION` (`"rev"`) | [Query Commands](protocol.md#query-commands) (the `GET_HW_INFO` `fwInfo` object) |
 | Diagnostics | `FIELD_HAS_REMOTE_ID`, `FIELD_HAS_REMOTE_KEY`, `FIELD_RESET_REASON` | [Diagnostic Commands](protocol.md#diagnostic-commands) |
 
 `DoorStatus.from_string()` ([door.md](door.md#doorstatus)) maps the
@@ -471,8 +472,8 @@ client.del_listener("my_app")
 |----------|-------------------|-------------|
 | `door_status_update` | `(status: str)` | Door state changes |
 | `settings_update` | `(settings: dict)` | Full settings dict |
-| `sensor_update` | `{field: (field: str, val: bool)}` | Sensor state changes |
-| `notifications_update` | `{field: (field: str, val: bool)}` | Notification setting changes |
+| `sensor_update` | `{field: (field: str, val: bool \| None)}` | Sensor state changes |
+| `notifications_update` | `{field: (field: str, val: bool \| None)}` | Notification setting changes |
 | `stats_update` | `{field: (field: str, val: int)}` | Statistics updates |
 | `hw_info_update` | `(info: dict)` | Hardware info |
 | `battery_update` | `(data: dict)` | Battery status |
@@ -486,6 +487,11 @@ client.del_listener("my_app")
 | `schedule_update` | `(schedule: dict)` | Schedule created or updated |
 | `schedule_delete` | `(index: int)` | Schedule deleted |
 | `notification_event` | `(event: str, state: str \| None)` | Device-initiated sensor/battery event |
+
+`val` is `None` when the device sent a value `make_bool()` does not
+recognize. Test for it explicitly — writing `if val:` maps "we could not
+parse what the device said" onto `False`, which for a safety lock or a
+command lockout fails in the permissive direction.
 
 ## Connection Handlers
 
@@ -567,10 +573,14 @@ from powerpetdoor import PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_LOW, PRIORIT
 |----------|-------|--------------|
 | `PRIORITY_CRITICAL` | 0 | PING/PONG keepalives |
 | `PRIORITY_HIGH` | 1 | Door control (OPEN, OPEN_AND_HOLD, CLOSE) |
-| `PRIORITY_MEDIUM` | 2 | Settings changes (enable/disable, power, SET_*) |
-| `PRIORITY_LOW` | 3 | Status queries (GET_*) and schedule commands |
+| `PRIORITY_MEDIUM` | 2 | Sensor/power enable-disable, and `SET_NOTIFICATIONS` / `SET_HOLD_TIME` / `SET_TIMEZONE` / `SET_SENSOR_TRIGGER_VOLTAGE` / `SET_SLEEP_SENSOR_TRIGGER_VOLTAGE` |
+| `PRIORITY_LOW` | 3 | Status queries (`GET_*`) and **all** schedule commands, including `SET_SCHEDULE`, `SET_SCHEDULE_LIST` and `DELETE_SCHEDULE` |
 
 This ensures keepalives and urgent door commands are processed before routine queries.
+
+Anything not in the priority map defaults to `PRIORITY_LOW`
+(`COMMAND_PRIORITIES.get(arg, PRIORITY_LOW)`), which is what a caller
+passing a hand-rolled command name gets.
 
 ## Timing
 

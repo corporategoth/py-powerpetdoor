@@ -652,3 +652,42 @@ class TestAgainstTheRealRepository:
         total = sum(e["end_line"] - e["line"] + 1 for entries in found.values() for e in entries)
         assert total == counted
         assert counted > 0
+
+    def test_automatic_exclusions_are_rendered_from_the_live_config(self):
+        """The disclosure list is derived, not hand-maintained.
+
+        The hard-coded list carried six bullets while `pyproject.toml`
+        configured seven `exclude_lines` patterns - so the artifact that
+        exists to disclose the project's coverage exclusions omitted the
+        one removing a whole production method from the gate (round-6
+        test-fanatic M2).
+        """
+        omit, exclude = gaps.coverage_config()
+        bullets = gaps.render_automatic_exclusions()
+
+        assert omit, "coverage.run.omit went missing from pyproject.toml"
+        assert exclude, "coverage.report.exclude_lines went missing from pyproject.toml"
+        # Exactly one bullet per configured pattern, in configuration order.
+        assert len(bullets) == len(omit) + len(exclude)
+        for pattern, bullet in zip(omit + exclude, bullets, strict=True):
+            assert bullet.startswith(f"- `{pattern}`")
+
+    def test_every_configured_exclusion_reaches_the_rendered_report(self, workspace, monkeypatch):
+        """The rendered document, not just the helper, lists every pattern."""
+        write_coverage(workspace, FULL_COVERAGE)
+        monkeypatch.setattr(gaps, "PYPROJECT", REPO_ROOT / "pyproject.toml")
+        monkeypatch.setattr(sys, "argv", ["generate_gaps_report.py"])
+
+        gaps.main()
+        rendered = (workspace / "tests" / "TESTING_GAPS.md").read_text()
+
+        omit, exclude = gaps.coverage_config()
+        for pattern in omit + exclude:
+            assert f"- `{pattern}`" in rendered
+
+    def test_coverage_config_is_empty_without_a_pyproject(self, workspace, monkeypatch):
+        """Rendering must not explode outside a checkout."""
+        monkeypatch.setattr(gaps, "PYPROJECT", workspace / "pyproject.toml")
+
+        assert gaps.coverage_config() == ([], [])
+        assert gaps.render_automatic_exclusions() == []

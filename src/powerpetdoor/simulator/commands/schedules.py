@@ -8,7 +8,7 @@
 from typing import TYPE_CHECKING
 
 from ...schedule import MAX_SCHEDULE_INDEX
-from .base import DAY_NAMES, ArgSpec, CommandResult, command, subcommand
+from .base import DAY_NAMES, DAY_PRESETS, ArgSpec, CommandResult, command, subcommand
 
 if TYPE_CHECKING:
     from ..server import DoorSimulator
@@ -25,13 +25,13 @@ class ScheduleCommandsMixin:
         """Format time as HH:MM."""
         return f"{hour:02d}:{minute:02d}"
 
-    def _format_days(self, days: list) -> str:
+    def _format_days(self, days: list[bool]) -> str:
         """Format days list as readable string."""
-        if days == [1, 1, 1, 1, 1, 1, 1]:
+        if days == DAY_PRESETS["all"]:
             return "all days"
-        if days == [0, 1, 1, 1, 1, 1, 0]:
+        if days == DAY_PRESETS["weekdays"]:
             return "weekdays"
-        if days == [1, 0, 0, 0, 0, 0, 1]:
+        if days == DAY_PRESETS["weekends"]:
             return "weekends"
         active = [DAY_NAMES[i] for i, v in enumerate(days) if v]
         return ", ".join(active) if active else "none"
@@ -100,7 +100,10 @@ class ScheduleCommandsMixin:
                 "days",
                 "days",
                 required=False,
-                default=[1, 1, 1, 1, 1, 1, 1],
+                # A fresh list, not DAY_PRESETS["all"]: the parsed value is
+                # handed straight to a Schedule and would otherwise alias the
+                # shared preset.
+                default=[True] * 7,
                 default_display="all",
                 description="Days (e.g., mon,tue,wed or all/weekdays/weekends)",
             ),
@@ -110,7 +113,7 @@ class ScheduleCommandsMixin:
         self,
         sensor: str,
         time: tuple[int, int, int, int],
-        days: list[int],
+        days: list[bool],
     ) -> CommandResult:
         """Add a new schedule entry."""
         # Map sensor to inside/outside flags
@@ -262,7 +265,7 @@ class ScheduleCommandsMixin:
             ),
         ],
     )
-    def schedule_days(self, index: int, days: list[int]) -> CommandResult:
+    def schedule_days(self, index: int, days: list[bool]) -> CommandResult:
         """Set the days for a schedule."""
         sched = self._get_schedule(index)
         if isinstance(sched, CommandResult):

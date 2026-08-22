@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from powerpetdoor import framing
 from powerpetdoor.const import (
     CMD_CHECK_RESET_REASON,
     CMD_CLOSE,
@@ -158,6 +159,9 @@ def mock_transport():
     transport = MagicMock()
     transport.get_extra_info.return_value = ("127.0.0.1", 12345)
     transport.write = MagicMock()
+    # A real transport answers with an int; the write-buffer ceiling in
+    # _send() compares against it.
+    transport.get_write_buffer_size.return_value = 0
     return transport
 
 
@@ -1898,3 +1902,149 @@ class TestWireValueValidation:
         assert "Rejected SET_TIMEZONE" in caplog.text
         assert "\x1b" not in caplog.text
         assert "\\x1b[2J" in caplog.text
+
+
+class TestBoundedDispatchAndBackpressure:
+    """The simulator's twin of the client's bounded frame dispatch.
+
+    256 KiB of packed `{}` admitted 131,072 live tasks / 145 MB, linear in
+    connections, with no connection cap anywhere (round-6 security 1).
+    """
+
+    async def test_a_packed_read_creates_a_bounded_number_of_tasks(self, protocol):
+        protocol.data_received(b"{}" * 5000)
+
+        assert protocol._dispatcher.inflight == framing.MAX_INFLIGHT_FRAMES
+        assert protocol._dispatcher.backlog == 5000 - framing.MAX_INFLIGHT_FRAMES
+        assert len(protocol._tasks) == framing.MAX_INFLIGHT_FRAMES
+
+    async def test_reading_is_paused_while_the_backlog_is_deep(self, protocol, mock_transport):
+        protocol.data_received(b"{}" * 5000)
+
+        mock_transport.pause_reading.assert_called_once_with()
+        assert protocol._dispatcher.paused is True
+
+    async def test_every_frame_is_still_handled_and_reading_resumes(self, protocol, mock_transport):
+        protocol.data_received(b'{"config":"GET_DOOR_STATUS"}' * 400)
+        await protocol.drain()
+
+        assert len(all_responses(mock_transport)) == 400
+        assert protocol._dispatcher.backlog == 0
+        mock_transport.resume_reading.assert_called_once_with()
+
+    async def test_normal_traffic_never_pauses(self, protocol, mock_transport):
+        protocol.data_received(b'{"config":"GET_DOOR_STATUS"}{"config":"GET_POWER"}')
+        await protocol.drain()
+
+        assert mock_transport.pause_reading.call_count == 0
+        assert len(all_responses(mock_transport)) == 2
+
+    async def test_connection_lost_drops_the_backlog(self, protocol):
+        protocol.data_received(b"{}" * 5000)
+        assert protocol._dispatcher.backlog > 0
+
+        protocol.connection_lost(None)
+
+        assert protocol._dispatcher.backlog == 0
+
+
+class TestPerFrameLogThrottling:
+    """Per-frame log sites are limited by the peer's byte rate, not packets."""
+
+    async def test_parse_errors_are_summarized(self, protocol, caplog):
+        """`{x}` is three bytes; 21,845 of them fit in one 64 KiB write."""
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
+            protocol.data_received(b"{x}" * 1000)
+            await protocol.drain()
+
+        tallies = [
+            record.getMessage()
+            for record in caplog.records
+            if "JSON parse error(s)" in record.getMessage()
+        ]
+        assert len(tallies) == 10  # 1, 2, 4, ... 512
+        assert tallies[-1] == ("Simulator: 512 JSON parse error(s) (1536 bytes) on this connection")
+        assert protocol._bad_frames.count == 1000
+
+    async def test_the_parse_error_detail_is_bounded(self, protocol, caplog):
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
+            protocol.data_received(b"{" + b"z" * 5000 + b"}")
+            await protocol.drain()
+
+        detail = next(
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Simulator: JSON parse error:")
+        )
+        assert "...(truncated))" in detail
+        assert len(detail) < 400
+
+    async def test_unknown_commands_are_summarized(self, protocol, mock_transport, caplog):
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
+            protocol.data_received(b'{"cmd":"a"}' * 100)
+            await protocol.drain()
+
+        tallies = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Simulator: Unknown command:")
+        ]
+        assert len(tallies) == 7  # 1, 2, 4, ... 64
+        assert protocol._unknown_commands.count == 100
+        # Every one of them is still answered with the error envelope.
+        assert len(all_responses(mock_transport)) == 100
+
+    async def test_connection_lost_flushes_the_per_frame_tails(self, protocol, caplog):
+        protocol.data_received(b"{x}" * 3)
+        await protocol.drain()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
+            caplog.clear()
+            protocol.connection_lost(None)
+
+        assert [record.getMessage() for record in caplog.records] == [
+            "Simulator: 3 JSON parse error(s) (9 bytes) on this connection"
+        ]
+
+
+class TestWriteBacklogCeiling:
+    """A peer that never reads its answers made the daemon buffer them.
+
+    1.50 MB of valid `{"config":"GET_SETTINGS"}` bought +36 MB of daemon
+    heap, held for as long as the socket stayed open. The control channel
+    got this ceiling in round 5; the door transport did not (round-6
+    security 1, secondary instance).
+    """
+
+    async def test_a_client_that_is_not_reading_is_dropped(self, protocol, mock_transport, caplog):
+        mock_transport.get_write_buffer_size.return_value = protocol_module.MAX_WRITE_BACKLOG + 1
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.simulator.protocol"):
+            protocol.data_received(b'{"config":"GET_DOOR_STATUS"}')
+            await protocol.drain()
+
+        mock_transport.close.assert_called_once_with()
+        mock_transport.write.assert_not_called()
+        assert (
+            caplog.records[0]
+            .getMessage()
+            .startswith("Simulator: client is not reading its responses")
+        )
+
+    async def test_a_client_at_the_ceiling_is_still_served(self, protocol, mock_transport):
+        """The bound is a ceiling, not a hair trigger."""
+        mock_transport.get_write_buffer_size.return_value = protocol_module.MAX_WRITE_BACKLOG
+
+        protocol.data_received(b'{"config":"GET_DOOR_STATUS"}')
+        await protocol.drain()
+
+        mock_transport.close.assert_not_called()
+        assert len(all_responses(mock_transport)) == 1
+
+    async def test_send_without_a_transport_is_a_noop(self, state):
+        """connection_lost() clears nothing, but a protocol may never connect."""
+        proto = DoorSimulatorProtocol(state)
+
+        proto._send({"CMD": "PONG"})  # must not raise
+
+        assert proto.transport is None

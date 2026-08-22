@@ -11,7 +11,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
-from ..scripting import describe_script_argument, list_extra_scripts, script_completer
+from ..scripting import (
+    describe_script_argument,
+    list_extra_scripts,
+    script_completer,
+    script_escapes_directory,
+)
 from .base import ArgSpec, CommandResult, command
 
 if TYPE_CHECKING:
@@ -229,14 +234,30 @@ class ScriptsCommandsMixin:
         return self._load_script_by_name(script_ref)
 
     def _load_script_by_name(self, name: str) -> "Script":
-        """Resolve a bare script name against the scripts dir, then built-ins."""
+        """Resolve a bare script name against the scripts dir, then built-ins.
+
+        Raises:
+            ValueError: If the name matches a file in the scripts directory
+                that resolves outside it. Falling through to
+                ``Unknown script: <name>. Available: ..., <name>, ...``
+                told the operator the script both did and did not exist,
+                with no hint that a path policy was involved (round-6
+                frontend L1). ``list``/``--list-scripts``/completion no
+                longer advertise such files either.
+        """
         if self._scripts_dir:
             base = Path(self._scripts_dir).resolve()
             for suffix in (".yaml", ".yml"):
-                candidate = (base / f"{name}{suffix}").resolve()
-                # Belt and braces: never follow a resolved path out of the base dir
-                if candidate.is_file() and candidate.parent == base:
-                    return self._Script.from_file(candidate)
+                candidate = base / f"{name}{suffix}"
+                if not candidate.is_file():
+                    continue
+                # Never follow a resolved path out of the base dir.
+                if script_escapes_directory(candidate, base):
+                    raise ValueError(
+                        f"Script '{name}' resolves outside {self._scripts_dir} and cannot be "
+                        f"run by name; move it into the directory or run it by path"
+                    )
+                return self._Script.from_file(candidate.resolve())
         return self._get_builtin_script(name)
 
     def script_status(self) -> ScriptStatus:
@@ -256,12 +277,22 @@ class ScriptsCommandsMixin:
 
     @command("list", ["/", "scripts"], "List runnable scripts", category="scripts")
     def list_scripts(self) -> CommandResult:
-        """List available scripts (built-in plus any from --scripts-dir)."""
+        """List available scripts (built-in plus any from --scripts-dir).
+
+        A ``--scripts-dir`` script whose name matches a built-in shadows it
+        (docs/simulator.md records that precedence). The listing says so
+        rather than printing the same name twice with two descriptions and
+        no marker of which one ``run`` picks - over ctl the built-in is
+        genuinely unreachable, since paths are refused (round-6 frontend
+        L3).
+        """
+        extra = list_extra_scripts()
+        shadowed = {name for name, _ in extra}
         scripts = list(self._list_builtin_scripts())
         lines = ["Built-in scripts:"]
         for name, desc in scripts:
-            lines.append(f"  {name}: {desc}")
-        extra = list_extra_scripts()
+            marker = f" (shadowed by {self._scripts_dir}/{name})" if name in shadowed else ""
+            lines.append(f"  {name}: {desc}{marker}")
         if self._scripts_dir is not None:
             # Header even when the directory is empty, exactly as
             # `--list-scripts` prints it: a ctl user who cannot see the
@@ -345,7 +376,17 @@ class ScriptsCommandsMixin:
             return CommandResult(
                 False, "No script is running (use 'shutdown' to stop the simulator)"
             )
-        suffix = f" (dropped {len(dropped)} queued)" if dropped else ""
+        if dropped:
+            suffix = f" (dropped {len(dropped)} queued)"
+        elif status.queued:
+            # Plain `stop` on a non-empty queue immediately starts the next
+            # run - so "the door is now idle" is exactly the wrong mental
+            # model, and a repeated `stop` (the commonest way to check
+            # whether the first one landed) kills the *next* script rather
+            # than being idempotent (round-6 frontend L2).
+            suffix = f" ({status.queued} still queued; use 'stop all' to discard them)"
+        else:
+            suffix = ""
         if status.stopping:
             # Repeating `stop` used to answer with a fresh success, which
             # reads as if the first one had not registered (L3).

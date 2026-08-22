@@ -527,6 +527,25 @@ class TestScriptRunner:
         with pytest.raises(ScriptError, match="Timeout waiting for condition: door_keepup"):
             await asyncio.wait_for(task, timeout=2.0)
 
+    async def test_stop_during_a_status_wait_says_stopped_not_timeout(self, runner, simulator):
+        """`stop` during `wait_for door_open` must not be reported as a timeout.
+
+        Two independent mutants of the `if stopper in done:` branch survived
+        the whole suite: the branch never firing, and its message replaced by
+        the timeout message. An operator who typed `stop` was then told
+        "Timeout waiting for condition: door_open" - a misleading diagnosis
+        with a generous timeout still running (round-6 test-fanatic L3).
+        """
+        task = asyncio.create_task(runner._wait_for_condition("door_keepup", 30))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)  # enter the status wait
+
+        runner.stop()
+
+        with pytest.raises(ScriptError) as excinfo:
+            await asyncio.wait_for(task, timeout=2.0)
+        assert str(excinfo.value) == "Script stopped while waiting"
+
     async def test_stop_between_steps_aborts_script(self, runner, simulator, caplog):
         """A stop() during one step prevents the next step from running."""
 
@@ -1188,11 +1207,25 @@ class TestBuiltinScriptInfrastructure:
             get_builtin_script("nonexistent_script_xyz")
 
     def test_all_builtin_scripts_parse(self):
-        """All built-in scripts should parse without errors."""
-        for name, _ in list_builtin_scripts():
+        """All built-in scripts parse, and the parse is actually pinned.
+
+        `script.name is not None` and `len(steps) > 0` claim "parses
+        without errors" while pinning almost nothing, and the loop had no
+        non-emptiness guard so it would pass vacuously if discovery broke
+        (round-6 test-fanatic L5).
+        """
+        listed = list_builtin_scripts()
+
+        assert len(listed) >= 5
+        for name, description in listed:
             script = get_builtin_script(name)
-            assert script.name is not None
-            assert len(script.steps) > 0
+            assert script.name and isinstance(script.name, str)
+            assert script.description == description
+            assert script.steps
+            for step in script.steps:
+                assert isinstance(step, ScriptStep)
+                assert step.action and isinstance(step.action, str)
+                assert isinstance(step.params, dict)
 
     def test_scripts_dir_supports_yml_extension(self, tmp_path, monkeypatch):
         """Both .yaml and .yml files are discovered as built-ins."""
@@ -1519,3 +1552,67 @@ class TestScriptSerialization:
         await asyncio.wait_for(first, 2.0)
 
         assert await runner.run(self._script("Second"), queue_if_busy=False) is True
+
+
+class TestScriptBooleanCoercion:
+    """Script booleans go through one coercer, and fail closed (T1)."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (True, True),
+            (False, False),
+            ("true", True),
+            ("1", True),
+            ("on", True),
+            ("yes", True),
+            ("enabled", True),
+            ("false", False),
+            ("0", False),
+            ("off", False),
+            ("no", False),
+            ("disabled", False),
+            # Unrecognizable spellings fail closed, like every wire flag.
+            ("banana", False),
+            (None, False),
+            ([1], False),
+        ],
+        ids=repr,
+    )
+    def test_script_bool_matrix(self, value, expected):
+        assert ScriptRunner._script_bool(value) is expected
+
+    async def test_a_quoted_false_no_longer_enables_a_schedule(self, runner, simulator):
+        """`enabled: "0"` produced an *enabled* schedule.
+
+        Unquoted YAML `false` parses to a real bool, so this only bit a
+        quoted or templated value - but the same argument applied to the
+        numeric parameters and round 5 bounded all of them (round-6
+        backend T1).
+        """
+        await runner._execute_step(
+            ScriptStep(action="add_schedule", params={"index": 3, "enabled": "0"})
+        )
+
+        assert simulator.state.schedules[3].enabled is False
+        assert simulator.state.schedules[3].to_dict()["enabled"] == "0"
+
+    async def test_a_quoted_true_still_enables_a_schedule(self, runner, simulator):
+        await runner._execute_step(
+            ScriptStep(action="add_schedule", params={"index": 4, "enabled": "yes"})
+        )
+
+        assert simulator.state.schedules[4].enabled is True
+
+    async def test_a_quoted_false_hold_no_longer_holds_the_door(self, runner, simulator):
+        held: list[bool] = []
+
+        async def record(hold=False):
+            held.append(hold)
+
+        simulator.open_door = record
+
+        await runner._execute_step(ScriptStep(action="open", params={"hold": "off"}))
+        await runner._execute_step(ScriptStep(action="open", params={"hold": "on"}))
+
+        assert held == [False, True]

@@ -15,10 +15,15 @@ from __future__ import annotations
 import os
 import stat
 import sys
+from unittest.mock import MagicMock
 
 import pytest
 
-from powerpetdoor.simulator.commands.history import History, _create_private_file
+from powerpetdoor.simulator.commands.history import (
+    HISTORY_UNAVAILABLE_MESSAGE,
+    History,
+    _create_private_file,
+)
 
 
 @pytest.fixture
@@ -136,15 +141,16 @@ class TestDisabledBehavior:
         assert disabled_history.clear() is False
 
     def test_format_entries_unavailable_message(self, disabled_history):
-        assert disabled_history.format_entries() == "History not available (install prompt_toolkit)"
+        assert disabled_history.format_entries() == HISTORY_UNAVAILABLE_MESSAGE
 
     def test_resolve_recall_none(self, disabled_history):
         assert disabled_history.resolve_recall("!!") is None
 
     def test_execute_command_unavailable_message(self, disabled_history):
-        assert (
-            disabled_history.execute_command() == "History not available (install prompt_toolkit)"
-        )
+        """One message for both surfaces now (frontend T1)."""
+        result = disabled_history.execute_command()
+        assert result.success is False
+        assert result.message == HISTORY_UNAVAILABLE_MESSAGE
 
 
 # ============================================================================
@@ -361,36 +367,59 @@ class TestResolveRecall:
 class TestExecuteCommand:
     def test_no_arg_shows_last_20(self, memory_history):
         result = memory_history.execute_command()
-        assert result.startswith("History (3 of 3 commands):")
-        assert "      3  close" in result
+        assert result.success is True
+        assert result.message.startswith("History (3 of 3 commands):")
+        assert "      3  close" in result.message
 
     def test_numeric_arg_limits_output(self, memory_history):
         result = memory_history.execute_command("1")
-        assert result == "History (1 of 3 commands):\n      3  close"
+        assert result.success is True
+        assert result.message == "History (1 of 3 commands):\n      3  close"
 
     def test_limit_larger_than_history(self, memory_history):
         result = memory_history.execute_command("99")
-        assert result.startswith("History (3 of 3 commands):")
+        assert result.success is True
+        assert result.message.startswith("History (3 of 3 commands):")
 
     def test_clear(self, memory_history):
-        assert memory_history.execute_command("clear") == "History cleared"
+        result = memory_history.execute_command("clear")
+        assert result.success is True
+        assert result.message == "History cleared"
         assert memory_history.get_entries() == []
 
     def test_clear_case_insensitive(self, memory_history):
-        assert memory_history.execute_command("CLEAR") == "History cleared"
+        assert memory_history.execute_command("CLEAR").message == "History cleared"
 
     def test_clear_error(self, file_history, tmp_path):
+        """The reason is now carried through, as the live command always did."""
         file_history.prompt_toolkit_history.filename = str(tmp_path)
-        assert file_history.execute_command("clear") == "Error clearing history"
+        result = file_history.execute_command("clear")
+        assert result.success is False
+        assert result.message.startswith("Error clearing history: ")
+        assert "Is a directory" in result.message
 
     def test_zero_rejected(self, memory_history):
-        assert memory_history.execute_command("0") == "Number must be positive"
+        result = memory_history.execute_command("0")
+        assert result.success is False
+        assert result.message == "Number must be positive"
 
     def test_negative_rejected(self, memory_history):
-        assert memory_history.execute_command("-5") == "Number must be positive"
+        result = memory_history.execute_command("-5")
+        assert result.success is False
+        assert result.message == "Number must be positive"
 
     def test_invalid_argument(self, memory_history):
-        assert (
-            memory_history.execute_command("abc")
-            == "Invalid argument: abc. Use 'clear' or a number."
-        )
+        result = memory_history.execute_command("abc")
+        assert result.success is False
+        assert result.message == "Invalid argument: abc. Use 'clear' or a number."
+
+    def test_read_error_reported(self, memory_history):
+        """A backend whose get_strings() raises is reported, not swallowed."""
+        stub = MagicMock()
+        stub.get_strings.side_effect = RuntimeError("boom")
+        wrapped = History(backend=stub)
+
+        result = wrapped.execute_command()
+
+        assert result.success is False
+        assert result.message == "Error reading history: boom"

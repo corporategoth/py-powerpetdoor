@@ -42,7 +42,7 @@ from powerpetdoor.simulator import (
     DoorSimulatorState,
     DoorTimingConfig,
 )
-from tests.conftest import GOLDEN_SCHEDULE_WIRE, assert_schedule_wire_types
+from tests.conftest import GOLDEN_SCHEDULE_WIRE_TO_DEVICE, assert_schedule_wire_types
 
 # ============================================================================
 # Test Fixtures
@@ -280,14 +280,17 @@ class TestSchedule:
         assert restored.start.hour == original.start.hour
         assert restored.end.minute == original.end.minute
 
-    def test_to_dict_matches_the_documented_wire_shape(self):
-        """The library emitter matches docs/protocol.md exactly (M1).
+    def test_to_dict_matches_the_client_to_device_wire_shape(self):
+        """The library emitter pins the shape it SENDS to the device.
 
-        Compared against the same golden payload the simulator's emitter is
-        compared against, so the two can never drift apart again in any
-        field - ``enabled`` went out as a JSON boolean here while the doc
-        and the simulator both use the string "1", and the round trip stayed
-        green because the simulator's parser accepts both.
+        Every field is pinned against the same golden payload the
+        simulator's emitter is checked against, so the two can never drift
+        in any field - except ``enabled``, which differs on purpose: this
+        emitter is client->device and has sent a JSON boolean to real
+        firmware since v0.1.0, while the simulator plays the device side
+        and replies ``"1"``. Round 5 unified them on the authority of the
+        reverse-engineered docs/protocol.md; that was reverted, and this
+        test is what stops it happening again.
         """
         schedule = Schedule(
             index=3,
@@ -301,15 +304,18 @@ class TestSchedule:
 
         payload = schedule.to_dict()
 
-        assert payload == GOLDEN_SCHEDULE_WIRE
-        assert_schedule_wire_types(payload)
+        assert payload == GOLDEN_SCHEDULE_WIRE_TO_DEVICE
+        assert_schedule_wire_types(payload, enabled_type=bool)
 
-    def test_to_dict_disabled_emits_the_zero_string(self):
-        """``enabled: False`` is the wire's "0", not JSON false (M1)."""
+    def test_to_dict_disabled_emits_json_false(self):
+        """``enabled: False`` goes out as JSON ``false``, not the string "0".
+
+        This is the client->device direction; the JSON boolean is what has
+        run against real hardware.
+        """
         payload = Schedule(index=0, enabled=False, inside=True).to_dict()
 
-        assert payload["enabled"] == "0"
-        assert isinstance(payload["enabled"], str)
+        assert payload["enabled"] is False
 
     def test_to_dict_days_are_wire_ints(self):
         """The wire protocol carries literal 1/0 ints, never bools (L2)."""
@@ -397,8 +403,9 @@ class TestSchedule:
 
         assert restored.enabled is True
         assert isinstance(restored.enabled, bool)
-        # In memory a bool; on the wire the protocol's "1"/"0" string (M1).
-        assert restored.to_dict()["enabled"] == "1"
+        # Liberal in what we accept (1), conservative in what we send: the
+        # client->device payload carries the JSON boolean it always has.
+        assert restored.to_dict()["enabled"] is True
 
     def test_from_dict_no_days_defaults_to_every_day(self):
         """An absent daysOfWeek means "every day", and that is pinned (R5-L1).
@@ -1926,3 +1933,117 @@ class TestScheduleCacheMaintenance:
         door._on_schedule_update(Schedule(index=0, inside=True).to_dict())
 
         assert calls == ["bad", ("good", [0])]
+
+
+# ============================================================================
+# Untrusted device payloads reaching the facade (round-6 backend M1/L2)
+# ============================================================================
+
+
+async def _next_request(transport, timeout: float = 5.0) -> dict:
+    """Wait for the client to actually put a request on the wire.
+
+    ``enqueue_data`` hands off to a task and the send path honours
+    ``MINIMUM_TIME_BETWEEN_MSGS``, so the write is not synchronous with the
+    call that requested it.
+    """
+    async with asyncio.timeout(timeout):
+        while True:
+            message = transport.get_last_message()
+            if message is not None:
+                return message
+            await asyncio.sleep(0.005)
+
+
+class TestFacadeRejectsMalformedDevicePayloads:
+    """The facade caches device data; a scalar there poisons it silently."""
+
+    async def test_hw_info_listener_ignores_a_non_mapping(self, caplog):
+        """`_hw_info` is the only retained payload, and three public
+        properties treat it as a dict - `hardware_info` raised
+        `AttributeError: 'str' object has no attribute 'copy'` with nothing
+        in the log naming the frame that caused it (round-6 backend M1)."""
+        door = PowerPetDoor("127.0.0.1")
+        door._hw_info = {"ver": "1"}
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            door._on_hw_info_update("1.2.3")
+
+        assert door._hw_info == {"ver": "1"}
+        assert door.hardware_info == {"ver": "1"}
+        assert door.firmware_version == "0.0.0"
+        assert [record.getMessage() for record in caplog.records] == [
+            "Ignoring non-mapping hardware info: 1.2.3"
+        ]
+
+    async def test_hw_info_listener_still_caches_a_mapping(self):
+        door = PowerPetDoor("127.0.0.1")
+
+        door._on_hw_info_update({"fw_maj": 1, "fw_min": 2, "fw_pat": 3})
+
+        assert door.firmware_version == "1.2.3"
+
+    async def test_refresh_hardware_info_ignores_a_non_mapping_result(self, mock_client, caplog):
+        client, transport, device = mock_client
+        door = PowerPetDoor("127.0.0.1")
+        door._client = client
+        door._hw_info = {"ver": "9"}
+
+        task = asyncio.ensure_future(door.refresh_hardware_info())
+        msg_id = (await _next_request(transport))["msgId"]
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            device.respond_success(msg_id, "GET_HW_INFO", fwInfo=5)
+            result = await asyncio.wait_for(task, 1.0)
+
+        assert result == {"ver": "9"}
+        assert door._hw_info == {"ver": "9"}
+        assert [r.getMessage() for r in caplog.records if r.name == "powerpetdoor.door"] == [
+            "Ignoring non-mapping hardware info: 5"
+        ]
+
+    @pytest.mark.parametrize("payload", [3, 1.5, True, "01", {"0": {}}], ids=repr)
+    async def test_refresh_schedules_rejects_a_non_list_index_list(
+        self, mock_client, caplog, payload
+    ):
+        """Iterating the raw value raised TypeError out of a documented
+        coroutine for a scalar, and issued one GET_SCHEDULE *per character*
+        for a string - 200 sequential round trips against a device that
+        rate-limits between messages (round-6 backend L2)."""
+        client, transport, device = mock_client
+        door = PowerPetDoor("127.0.0.1")
+        door._client = client
+        door._schedules = [Schedule(index=7)]
+
+        task = asyncio.ensure_future(door.refresh_schedules())
+        msg_id = (await _next_request(transport))["msgId"]
+        transport.clear()
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            device.respond_success(msg_id, "GET_SCHEDULE_LIST", schedules=payload)
+            result = await asyncio.wait_for(task, 1.0)
+
+        assert result == []
+        assert door.schedules == []
+        # No follow-up GET_SCHEDULE was issued at all.
+        assert transport.get_written_messages() == []
+        door_logs = [r.getMessage() for r in caplog.records if r.name == "powerpetdoor.door"]
+        assert len(door_logs) == 1
+        assert door_logs[0].startswith("Device sent a non-list schedule index list: ")
+
+    async def test_refresh_schedules_timeout_log_survives_a_string_index(self, mock_client, caplog):
+        """`%d` on a device-supplied index turned the timeout warning into
+        a logging-internal formatting error on stderr (backend L2)."""
+        client, transport, device = mock_client
+        door = PowerPetDoor("127.0.0.1")
+        door._client = client
+
+        # Step 1 is answered; step 2 (GET_SCHEDULE index "zero") is not, so
+        # the timeout warning fires with a string index.
+        task = asyncio.ensure_future(door.refresh_schedules(timeout=0.3))
+        msg_id = (await _next_request(transport))["msgId"]
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            device.respond_success(msg_id, "GET_SCHEDULE_LIST", schedules=["zero"])
+            assert await asyncio.wait_for(task, 5.0) == []
+
+        assert "Timeout fetching schedule zero" in [
+            r.getMessage() for r in caplog.records if r.name == "powerpetdoor.door"
+        ]

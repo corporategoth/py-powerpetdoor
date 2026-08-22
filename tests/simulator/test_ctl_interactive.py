@@ -650,6 +650,36 @@ class TestInterruptsAndCancellation:
         await asyncio.wait_for(task, 10)
         assert daemon.drain_received() == []
 
+    async def test_eof_raised_at_the_prompt_ends_the_session(
+        self, daemon, piped_stdin, recorded_stdout, monkeypatch, start_session
+    ):
+        """An EOFError surfacing at the prompt ends the session cleanly.
+
+        The clause carried a `# pragma: no cover` claiming it could not be
+        triggered deterministically, while the structurally identical
+        `except EOFError` in prompt_common.py has no pragma and is covered
+        by exactly this technique (round-6 test-fanatic T3).
+        """
+        await daemon.start()
+
+        real_wait = asyncio.wait
+        calls = {"n": 0}
+
+        async def eof_wait(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise EOFError
+            return await real_wait(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "wait", eof_wait)
+        piped_stdin()
+        recorded_stdout()
+
+        task = start_session(daemon)
+
+        assert await asyncio.wait_for(task, 10) is None
+        assert calls["n"] == 1
+
     async def test_ctrl_c_during_command_prints_exiting(
         self, daemon, piped_stdin, recorded_stdout, monkeypatch, start_session
     ):

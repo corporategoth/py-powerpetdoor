@@ -272,12 +272,15 @@ class TestReentrantStatusListeners:
             seen.append(status)
             if status == DOOR_STATE_CLOSING_TOP_OPEN and not reopened:
                 reopened = True
-                assert engine.open() is True
                 # Sampled *inside* the dispatch. A re-entrant open() must
                 # defer: starting the sequence here would cancel the owner
                 # task from inside itself and leave a second _run racing it.
+                # `assert` cannot be used here - engine.py wraps listener
+                # calls in `except Exception`, which swallows AssertionError
+                # (round-6 test-fanatic L5) - so the return value is
+                # sampled and asserted outside the listener instead.
                 sampled_inside_dispatch.append(
-                    (state.door_status, engine._restart_handle is not None)
+                    (engine.open(), state.door_status, engine._restart_handle is not None)
                 )
 
         engine.add_status_listener(opener)
@@ -287,7 +290,7 @@ class TestReentrantStatusListeners:
         finally:
             await engine.stop()
 
-        assert sampled_inside_dispatch == [(DOOR_STATE_CLOSING_TOP_OPEN, True)]
+        assert sampled_inside_dispatch == [(True, DOOR_STATE_CLOSING_TOP_OPEN, True)]
         # HOLDING -> CLOSING_TOP_OPEN (the listener asks to open) -> the door
         # is still at CLOSING_TOP_OPEN when the deferral runs, so it reverses
         # to SLOWING. No status is ever emitted twice in a row.

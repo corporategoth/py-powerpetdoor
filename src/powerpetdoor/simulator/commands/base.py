@@ -232,29 +232,31 @@ def _parse_time_str(time_str: str) -> tuple[int, int]:
     return hour, minute
 
 
-# Day parsing constants
+# Day parsing constants. Booleans, not 1/0: this is the operator-facing
+# Python layer, and the 1/0 wire spelling is applied once, at the
+# serialization boundary in powerpetdoor.schedule.
 DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
-_DAY_PRESETS = {
-    "all": [1, 1, 1, 1, 1, 1, 1],
-    "weekdays": [0, 1, 1, 1, 1, 1, 0],  # Mon-Fri
-    "weekends": [1, 0, 0, 0, 0, 0, 1],  # Sun, Sat
+DAY_PRESETS: dict[str, list[bool]] = {
+    "all": [True] * 7,
+    "weekdays": [False, True, True, True, True, True, False],  # Mon-Fri
+    "weekends": [True, False, False, False, False, False, True],  # Sun, Sat
 }
 # Public preset names for completion/highlighting
-DAY_PRESET_NAMES = tuple(_DAY_PRESETS)
+DAY_PRESET_NAMES = tuple(DAY_PRESETS)
 
 
-def _parse_days_str(days_str: str) -> list[int]:
-    """Parse days string like 'mon,tue,wed' or 'weekdays' into list."""
+def _parse_days_str(days_str: str) -> list[bool]:
+    """Parse days string like 'mon,tue,wed' or 'weekdays' into flags."""
     days_str = days_str.lower().strip()
-    if days_str in _DAY_PRESETS:
-        return _DAY_PRESETS[days_str].copy()
+    if days_str in DAY_PRESETS:
+        return DAY_PRESETS[days_str].copy()
 
     # Start with all days off
-    days = [0, 0, 0, 0, 0, 0, 0]
+    days = [False] * 7
     for day in days_str.split(","):
         day = day.strip()[:3]  # Take first 3 chars
         if day in DAY_NAMES:
-            days[DAY_NAMES.index(day)] = 1
+            days[DAY_NAMES.index(day)] = True
         else:
             raise ValueError(
                 f"Unknown day: {day}. Use: {', '.join(DAY_NAMES)} or all/weekdays/weekends"

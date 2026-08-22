@@ -100,13 +100,18 @@ silently accepted.
 
 ## Message Types
 
+These are the top-level **envelope keys** that identify what a frame is:
+
 | Type | Field | Usage |
 |------|-------|-------|
 | Command | `"cmd"` | Actions: OPEN, CLOSE, ENABLE_*, DISABLE_*, POWER_* |
 | Config | `"config"` | Queries and settings: GET_*, SET_* |
 | Ping | `"PING"` | Keepalive request |
 | Pong | `"PONG"` | Keepalive response |
-| Door Status | `"DOOR_STATUS"` | Unsolicited status update |
+
+`DOOR_STATUS` is **not** an envelope key — it is a `CMD` *value* carried by
+an unsolicited device push. See
+[Unsolicited Door Status](#unsolicited-door-status).
 
 ---
 
@@ -145,15 +150,29 @@ A value of 200 means 2 seconds.
 
 ## Keepalive
 
+The `PING` value is an **opaque correlation token** chosen by the client
+(this library sends the current wall-clock time in milliseconds, as a
+string). The device echoes it back verbatim as the `PONG` value.
+
 **Request**:
 ```json
-{"PING": "", "msgId": 1, "dir": "p2d"}
+{"PING": "1710000000123", "msgId": 1, "dir": "p2d"}
 ```
 
 **Response**:
 ```json
-{"CMD": "PONG", "PONG": "", "success": "true", "dir": "d2p"}
+{"CMD": "PONG", "PONG": "1710000000123", "success": "true", "dir": "d2p"}
 ```
+
+**The `PONG` value must be the exact `PING` value.** The client compares
+them and only counts an exact match as a reply; a mismatched or empty
+`PONG` is counted as a failed ping, and three failures in a row drop the
+connection (`MAX_FAILED_PINGS = 3`). At the default 30 s interval that is a
+hard disconnect roughly every 90 seconds, reported as `Last PING not
+responded to 3 times.` — so an alternate implementation that answers
+`{"PONG": ""}` looks like a flaky network rather than a protocol mismatch.
+The token's *content* is not interpreted by the device; only the echo
+matters. `msgId` should be echoed back as `msgID` like any other response.
 
 Typical interval: 30 seconds
 
@@ -540,6 +559,21 @@ Clients should also tolerate CMD-style variants of these events
 (`{"CMD": "SENSOR_INDOOR", "success": "true", "sensorState": "on"}`)
 without treating them as command responses.
 
+### Unsolicited Door Status
+
+The device also pushes door-state changes that nobody asked for, using the
+normal response envelope with `CMD: "DOOR_STATUS"` and no `msgID`:
+
+```json
+{"CMD": "DOOR_STATUS", "door_status": "DOOR_RISING", "success": "true", "dir": "d2p"}
+```
+
+`door_status` carries one of the [Door Status Values](#door-status-values).
+This is the same payload key a `GET_DOOR_STATUS` *response* uses, and
+clients should route both to the same handler — a client that only handles
+solicited replies will miss every state change it did not request. Note
+that `DOOR_STATUS` here is a `CMD` value, not an envelope key.
+
 ---
 
 ## Schedule Format
@@ -573,14 +607,31 @@ without treating them as command responses.
 Note: Each schedule controls ONE sensor. Set times for that sensor; the other sensor's times should be zeros. If a payload sets *both* flags (out of spec, but the
 simulator's `schedule add both` produces it), the **inside** window wins.
 
-Both emitters in this project — `powerpetdoor.door.Schedule.to_dict()` (and
-therefore every `compress_schedule()` result) and the simulator's
-`Schedule.to_dict()` — produce exactly the types in the table above, and a
-golden-payload test on each side compares them against the same reference so
-neither can drift. Note in particular that `enabled` is the **string**
-`"1"`/`"0"`, not a JSON boolean, while `inside`/`outside` *are* JSON booleans.
-Readers on both sides accept `"1"`/`1`/`true` and `"0"`/`0`/`false`
-interchangeably.
+### `enabled` differs by direction (reverse-engineered, unverified)
+
+The two directions of this protocol are documented separately here because
+they are not known to agree, and **this document is reverse-engineered from
+observation — it is not authority over what the firmware accepts**:
+
+| Direction | `enabled` | Basis |
+|-----------|-----------|-------|
+| client → device (`SET_SCHEDULE`) | JSON boolean `true`/`false` | What `powerpetdoor.door.Schedule.to_dict()` (and every `compress_schedule()` result) has sent to real Power Pet Doors since v0.1.0 |
+| device → client (`GET_SCHEDULE`) | string `"1"`/`"0"` | What the device was observed to reply, and what the simulator emits |
+
+Every other field is identical in both directions: `index` int, `daysOfWeek`
+seven ints, `inside`/`outside` JSON booleans, `{hour, min}` ints. A
+golden-payload test on each side pins its own direction and compares every
+other field against the same reference, so neither can drift.
+
+**Neither spelling has been confirmed against firmware**, so do not "unify"
+them. Each field's wire spelling lives in exactly one place —
+`SCHEDULE_WIRE_TO_DEVICE` / `SCHEDULE_WIRE_FROM_DEVICE` in
+`powerpetdoor/schedule.py` — so a definitive answer from a real device is a
+one-line change there.
+
+**Readers on both sides are deliberately liberal** and accept `"1"`/`1`/`true`
+and `"0"`/`0`/`false` interchangeably for every flag, so an implementation
+that picks either spelling interoperates.
 
 `GET_SCHEDULE_LIST` returns slot indices sorted ascending.
 

@@ -143,6 +143,9 @@ def attach_recorder(sim: DoorSimulator) -> list[dict]:
     proto = DoorSimulatorProtocol(sim.state, engine=sim.engine)
     transport = MagicMock()
     transport.get_extra_info.return_value = ("127.0.0.1", 12345)
+    # A real transport answers with an int; _send()'s write-buffer ceiling
+    # compares against it.
+    transport.get_write_buffer_size.return_value = 0
     proto.connection_made(transport)
     sim.protocols.append(proto)
 
@@ -209,12 +212,25 @@ class TestDoorSimulator:
     """Tests for DoorSimulator server."""
 
     async def test_start_stop(self, timing_config):
-        """Should start and stop cleanly."""
+        """Should start and stop cleanly, and really stop listening."""
         state = DoorSimulatorState(timing=timing_config)
         sim = DoorSimulator(port=0, state=state)
+
         await sim.start()
         assert sim.server is not None
+        assert sim.server.is_serving()
+        port = sim.server.sockets[0].getsockname()[1]
+
         await sim.stop()
+
+        # `assert sim.server is not None` alone was pure redundancy with
+        # test_listens_on_port (round-6 L5); the shutdown half was untested.
+        assert sim.server.is_serving() is False
+        with pytest.raises(OSError):
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", port), timeout=2.0
+            )
+            writer.close()
 
     async def test_stop_without_start(self, timing_config):
         """stop() on a never-started simulator is a clean no-op."""

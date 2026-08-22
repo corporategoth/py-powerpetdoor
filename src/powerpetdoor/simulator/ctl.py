@@ -588,7 +588,9 @@ async def interactive_mode_async(
                     # EOF
                     break
                 line = line.strip()
-            except EOFError:  # pragma: no cover (defensive: both prompt paths signal EOF by returning None rather than raising)
+            except EOFError:
+                # Both prompt paths normally signal EOF by returning None, but
+                # a raising prompt implementation must not escape the loop.
                 break
             except KeyboardInterrupt:
                 continue

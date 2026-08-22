@@ -238,7 +238,7 @@ The `schedule` command (alias `sched`) manages schedule entries:
 | `run <script>` | `r`, `file` | Queue a script — built-in name, `--scripts-dir` name, or YAML file path. The command returns as soon as the script is queued; the PASSED/FAILED result is only logged. A queued script waits for any script already running |
 | `run <script> wait` | `r`, `file` | Run the script synchronously and report `Script PASSED`/`Script FAILED` as the command result. Fails immediately with `Another script is already running: <name>` rather than queueing, so the result always belongs to the script you asked for. Over ctl this is the only form whose exit code reflects the script |
 | `list` | `/`, `scripts` | List runnable scripts (built-in, plus any from `--scripts-dir` — the header for that directory is printed even when it is empty, so "not configured" and "configured but empty" are distinguishable), ending with the runner's current state and, if anything is waiting, a `Queued: <names>` line naming the pending runs |
-| `stop` | | Stop the **running script** at its next step boundary (the run then reports FAILED). Leaves the queue alone — only `stop all` touches it. While the request is pending, `status`/`list` show `Script: stopping "<name>"`, and a repeat `stop` answers `Stop already requested for: <name>`. With nothing running but runs still pending it reports how many are queued and points at `stop all`. Does *not* stop the simulator — use `shutdown` for that |
+| `stop` | | Stop the **running script** at its next step boundary (the run then reports FAILED). Leaves the queue alone — only `stop all` touches it — and says so: with runs pending the answer is `Stopping script: <name> (N still queued; use 'stop all' to discard them)`, because the observable consequence is that the *next* script immediately starts driving the door. While the request is pending, `status`/`list` show `Script: stopping "<name>"`, and a repeat `stop` answers `Stop already requested for: <name>`. With nothing running but runs still pending it reports how many are queued and points at `stop all`. Does *not* stop the simulator — use `shutdown` for that |
 | `stop all` | | As `stop`, and additionally discards **every** run still queued — including one already taken off the queue but not yet started — reporting how many were dropped. The count always matches the `queued` figure `status`/`list` showed a moment earlier, and one `stop all` is always enough. Idempotent: with nothing running or queued it succeeds with `Nothing running or queued` |
 
 ### Info
@@ -313,6 +313,15 @@ Start the daemon with `--scripts-dir DIR` to make your own YAML scripts
 runnable by bare name. They then show up in `list`, in `--list-scripts` and in
 the "Available:" hint of an unknown-script error, so a ctl user who did not
 start the daemon can still discover them with `list`.
+
+A file in that directory that *resolves outside* it (a symlink pointing away)
+is not runnable by bare name, and is not listed by `list`, `--list-scripts`,
+the `Available:` hint or tab completion either — all four surfaces agree with
+the loader. Naming it explicitly answers `Script '<name>' resolves outside
+<dir> and cannot be run by name; move it into the directory or run it by path`.
+A scripts-dir script whose name matches a built-in **shadows** it; `list`
+marks the built-in `(shadowed by <dir>/<name>)` and tab completion offers the
+name once.
 
 Tab completion for those names works in the **simulator CLI only**.
 `ppd-simulator-ctl` is a separate process that never learns the daemon's

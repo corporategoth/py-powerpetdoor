@@ -13,6 +13,7 @@ These tests pin two contracts:
    is executable, so the docs cannot drift from the real exports.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -153,11 +154,38 @@ class TestEveryExportIsDocumented:
         assert len(self._all_doc_text()) > 10000
 
     def test_every_exported_name_appears_in_the_prose_docs(self):
+        """Matched as a *token*, not as a substring.
+
+        15 of the 121 exports are strict substrings of another export
+        (``CMD_OPEN`` < ``CMD_OPEN_AND_HOLD``, ``Schedule`` <
+        ``ScheduleTime``, ``DOOR_STATUS`` < ``FIELD_DOOR_STATUS``, ...), so
+        a plain ``in`` check could be satisfied by a longer name and report
+        a genuinely undocumented export as documented. Demonstrated on a
+        throwaway copy of the corpus in round 6 (test-fanatic L1); latent
+        rather than active, because every name does appear standalone
+        today - which is exactly what this now pins.
+        """
         text = self._all_doc_text()
 
-        undocumented = [name for name in powerpetdoor.__all__ if name not in text]
+        undocumented = [
+            name
+            for name in powerpetdoor.__all__
+            if not re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", text)
+        ]
 
         assert undocumented == []
+
+    def test_the_token_check_is_not_satisfied_by_a_longer_name(self):
+        """The substring hole itself, pinned.
+
+        ``FIELD_AUTO`` occurring only inside ``FIELD_AUTORETRACT`` must not
+        count as documenting ``FIELD_AUTO``.
+        """
+        corpus = "See FIELD_AUTORETRACT and PowerPetDoorClient for details."
+
+        assert "FIELD_AUTO" in corpus
+        assert not re.search(r"(?<![A-Za-z0-9_])FIELD_AUTO(?![A-Za-z0-9_])", corpus)
+        assert re.search(r"(?<![A-Za-z0-9_])FIELD_AUTORETRACT(?![A-Za-z0-9_])", corpus)
 
 
 class TestDocImports:

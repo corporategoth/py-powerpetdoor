@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -619,3 +620,386 @@ class TestGarbageLogVolumeIsBounded:
             scanner.reset()
 
         assert caplog.records == []
+
+
+class ManualClock:
+    """A monotonic clock the test advances explicitly."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class TestEventThrottleTimeFloor:
+    """A new burst after a quiet period is never invisible (round-6 L4)."""
+
+    def _throttle(self, clock, **kwargs):
+        return framing.EventThrottle(
+            framing._LOGGER, logging.WARNING, "seen %d (%d bytes)", clock=clock, **kwargs
+        )
+
+    def test_a_fresh_burst_after_a_quiet_period_reports_immediately(self, caplog):
+        """The exact scenario the doubling schedule alone could not report.
+
+        After 1024 events the next count threshold is 2048, so a device
+        that *starts* corrupting bytes on a months-old connection produced
+        nothing at all for its first 1023 corrupted reads.
+        """
+        clock = ManualClock()
+        throttle = self._throttle(clock)
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            for _ in range(1024):
+                throttle.record()
+            clock.advance(framing.THROTTLE_QUIET_PERIOD)
+            caplog.clear()
+
+            throttle.record()
+
+        assert [record.getMessage() for record in caplog.records] == ["seen 1025 (1025 bytes)"]
+
+    def test_the_new_burst_gets_its_own_doubling_schedule(self, caplog):
+        """Log volume stays logarithmic *per burst*, not just per connection."""
+        clock = ManualClock()
+        throttle = self._throttle(clock)
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            for _ in range(1024):
+                throttle.record()
+            clock.advance(framing.THROTTLE_QUIET_PERIOD)
+            caplog.clear()
+
+            for _ in range(8):
+                throttle.record()
+
+        # Reported at burst-relative occurrences 1, 2, 4, 8.
+        assert [record.getMessage() for record in caplog.records] == [
+            "seen 1025 (1025 bytes)",
+            "seen 1026 (1026 bytes)",
+            "seen 1028 (1028 bytes)",
+            "seen 1032 (1032 bytes)",
+        ]
+
+    def test_an_uninterrupted_flood_is_not_made_louder(self, caplog):
+        """The anti-amplification property is unchanged when time does not pass."""
+        clock = ManualClock()
+        throttle = self._throttle(clock)
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            for _ in range(16):
+                throttle.record()
+
+        assert [record.getMessage() for record in caplog.records] == [
+            "seen 1 (1 bytes)",
+            "seen 2 (2 bytes)",
+            "seen 4 (4 bytes)",
+            "seen 8 (8 bytes)",
+            "seen 16 (16 bytes)",
+        ]
+
+    def test_just_under_the_quiet_period_does_not_report(self, caplog):
+        """The floor is an elapsed-time threshold, not "any gap at all"."""
+        clock = ManualClock()
+        throttle = self._throttle(clock)
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            throttle.record()
+            clock.advance(framing.THROTTLE_QUIET_PERIOD - 0.001)
+            caplog.clear()
+
+            throttle.record()
+            throttle.record()
+
+        # Occurrence 2 is due on the count schedule; occurrence 3 is not,
+        # and the near-miss on the clock does not promote it.
+        assert [record.getMessage() for record in caplog.records] == ["seen 2 (2 bytes)"]
+
+    def test_flush_restarts_the_quiet_period(self, caplog):
+        """A flushed tail counts as a report, so it is not double-counted."""
+        clock = ManualClock()
+        throttle = self._throttle(clock)
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            for _ in range(5):  # reports at 1, 2, 4; the 5th is suppressed
+                throttle.record()
+            caplog.clear()
+
+            throttle.flush()
+            clock.advance(framing.THROTTLE_QUIET_PERIOD - 0.001)
+            throttle.record()
+
+        # Only the flushed tail: the 6th occurrence is still inside the
+        # quiet period the flush restarted, and is not due on the count.
+        assert [record.getMessage() for record in caplog.records] == ["seen 5 (5 bytes)"]
+
+    def test_reset_restarts_the_quiet_period_too(self):
+        clock = ManualClock()
+        throttle = self._throttle(clock)
+        throttle.record()
+
+        clock.advance(1000.0)
+        throttle.reset()
+
+        assert throttle.count == 0
+        assert throttle._last_report == clock.now
+
+
+class TestEventThrottleIntervalCeiling:
+    """The reporting gap is capped, so the cadence cannot degrade forever."""
+
+    def _throttle(self, clock, max_interval):
+        return framing.EventThrottle(
+            framing._LOGGER,
+            logging.WARNING,
+            "seen %d (%d bytes)",
+            max_interval=max_interval,
+            clock=clock,
+        )
+
+    def test_the_gap_stops_doubling_at_max_interval(self, caplog):
+        """Without the cap, 2^20 events meant the next report was at 2^21."""
+        clock = ManualClock()
+        throttle = self._throttle(clock, max_interval=8)
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            for _ in range(40):
+                throttle.record()
+
+        reported = [int(record.getMessage().split()[1]) for record in caplog.records]
+        # Doubles to the ceiling, then a fixed stride of 8.
+        assert reported == [1, 2, 4, 8, 16, 24, 32, 40]
+
+    def test_the_default_ceiling_is_the_module_constant(self):
+        throttle = framing.EventThrottle(framing._LOGGER, logging.WARNING, "%d %d")
+
+        assert throttle._max_interval == framing.MAX_THROTTLE_INTERVAL
+
+    def test_record_reports_whether_it_logged(self):
+        """Callers with a per-event detail ride the same schedule."""
+        clock = ManualClock()
+        throttle = self._throttle(clock, max_interval=4096)
+
+        assert [throttle.record() for _ in range(5)] == [True, True, False, True, False]
+
+
+class TestRetainedPiecesAreCoalesced:
+    """The character cap must bound memory, not just the character count."""
+
+    def test_pieces_are_joined_once_the_list_grows_past_the_bound(self):
+        """A piece per delivered byte cost ~26x the cap in object overhead.
+
+        `_retained` counts characters, but each retained piece is a
+        separate `str` (~49 bytes of header) plus a pointer slot, so a peer
+        dribbling two bytes per segment held 1.71 MiB against a 64 KiB cap
+        (round-6 backend L1).
+        """
+        scanner = FrameScanner()
+        scanner.feed('{"a": "')
+
+        for _ in range(framing.MAX_RETAINED_PIECES * 3):
+            scanner.feed("xx")
+
+        assert len(scanner._pieces) <= framing.MAX_RETAINED_PIECES + 1
+
+    def test_coalescing_does_not_change_what_is_framed(self):
+        """Byte-for-byte identical to a one-shot feed of the same stream."""
+        stream = '{"a": "' + "x" * (framing.MAX_RETAINED_PIECES * 10) + '"}{"b": 1}'
+        scanner = FrameScanner()
+        dribbled: list[str] = []
+        for i in range(0, len(stream), 2):
+            frames, _ = scanner.feed(stream[i : i + 2])
+            dribbled.extend(frames)
+
+        one_shot, remainder, _ = extract_frames(stream)
+
+        assert dribbled == one_shot
+        assert scanner.buffer == remainder == ""
+        assert [json.loads(frame) for frame in dribbled] == [{"a": "x" * 640}, {"b": 1}]
+
+    def test_the_retained_length_still_matches_the_pieces_after_coalescing(self):
+        scanner = FrameScanner()
+        scanner.feed("{")
+        for _ in range(framing.MAX_RETAINED_PIECES * 2):
+            scanner.feed("ab")
+
+        assert scanner._retained == sum(len(piece) for piece in scanner._pieces)
+        assert scanner._retained == len(scanner.buffer)
+
+    def test_the_cap_still_fires_on_the_character_count(self):
+        """Coalescing must not let a dribbling peer past the 64 KiB cap."""
+        scanner = FrameScanner(max_buffer=256)
+        overflowed = False
+        for _ in range(400):
+            _, diag = scanner.feed("{" if not overflowed else "x")
+            overflowed = overflowed or diag.overflow
+
+        assert overflowed
+        assert scanner.buffer == ""
+
+
+class RecordingTransport:
+    """A transport that records the dispatcher's flow-control calls."""
+
+    def __init__(self) -> None:
+        self.paused = False
+        self.pause_calls = 0
+        self.resume_calls = 0
+
+    def pause_reading(self) -> None:
+        self.paused = True
+        self.pause_calls += 1
+
+    def resume_reading(self) -> None:
+        self.paused = False
+        self.resume_calls += 1
+
+
+class TestFrameDispatcher:
+    """One task per frame, created synchronously per read, was unbounded.
+
+    asyncio reads up to 256 KiB per callback and the cheapest legal frame
+    is two bytes, so one read admitted 131,072 live tasks and ~145 MB of
+    heap before any of them ran - in the shipped client as well as the
+    simulator (round-6 security finding 1).
+    """
+
+    @pytest.fixture
+    async def dispatchers(self):
+        """Build dispatchers whose tasks are cancelled and awaited after."""
+        tasks: list[asyncio.Task] = []
+        built: list[framing.FrameDispatcher] = []
+
+        def factory(started: list[str], **kwargs):
+            async def handler(frame):
+                started.append(frame)
+                await asyncio.sleep(0)
+
+            def dispatch(frame):
+                task = asyncio.ensure_future(handler(frame))
+                tasks.append(task)
+                return task
+
+            dispatcher = framing.FrameDispatcher(dispatch, **kwargs)
+            built.append(dispatcher)
+            return dispatcher
+
+        yield factory
+        # Drop the backlog first: a cancelled task's done-callback pumps the
+        # next frame, which would create a task after the gather below.
+        for dispatcher in built:
+            dispatcher.reset()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_concurrency_is_bounded_by_max_inflight(self, dispatchers):
+        started: list[str] = []
+        dispatcher = dispatchers(started, max_inflight=4, pause_at=1000)
+        transport = RecordingTransport()
+
+        dispatcher.submit([f"{{{i}}}" for i in range(50)], transport)
+
+        # Four tasks created, 46 frames still held as strings rather than
+        # as ~1 KB of live task each.
+        assert dispatcher.inflight == 4
+        assert dispatcher.backlog == 46
+        await asyncio.sleep(0)
+        assert len(started) == 4
+
+    async def test_the_whole_backlog_still_runs(self, dispatchers):
+        started: list[str] = []
+        dispatcher = dispatchers(started, max_inflight=4, pause_at=1000)
+        frames = [f"{{{i}}}" for i in range(50)]
+
+        dispatcher.submit(frames, RecordingTransport())
+        for _ in range(400):
+            if not dispatcher.backlog and not dispatcher.inflight:
+                break
+            await asyncio.sleep(0)
+
+        assert started == frames
+        assert dispatcher.backlog == 0
+        assert dispatcher.inflight == 0
+
+    async def test_reading_is_paused_while_the_backlog_is_deep(self, dispatchers):
+        started: list[str] = []
+        dispatcher = dispatchers(started, max_inflight=2, pause_at=4)
+        transport = RecordingTransport()
+
+        dispatcher.submit([f"{{{i}}}" for i in range(20)], transport)
+
+        assert transport.paused is True
+        assert dispatcher.paused is True
+        assert transport.pause_calls == 1
+
+    async def test_reading_resumes_once_the_backlog_drains(self, dispatchers):
+        started: list[str] = []
+        dispatcher = dispatchers(started, max_inflight=2, pause_at=4)
+        transport = RecordingTransport()
+        dispatcher.submit([f"{{{i}}}" for i in range(20)], transport)
+
+        for _ in range(400):
+            if not dispatcher.backlog and not dispatcher.inflight:
+                break
+            await asyncio.sleep(0)
+
+        assert transport.paused is False
+        assert transport.pause_calls == 1
+        assert transport.resume_calls == 1
+
+    async def test_a_small_read_never_pauses_anything(self, dispatchers):
+        """Real device traffic must be dispatched exactly as before."""
+        started: list[str] = []
+        dispatcher = dispatchers(started)
+        transport = RecordingTransport()
+
+        dispatcher.submit(["{1}", "{2}", "{3}"], transport)
+
+        assert dispatcher.backlog == 0
+        assert dispatcher.inflight == 3
+        assert transport.pause_calls == 0
+        assert transport.resume_calls == 0
+
+    async def test_a_frame_that_produces_no_task_is_not_counted(self):
+        """A frame that fails json.loads costs nothing here."""
+
+        def dispatch(frame):
+            return None
+
+        dispatcher = framing.FrameDispatcher(dispatch, max_inflight=1)
+        dispatcher.submit(["{x}", "{y}"], RecordingTransport())
+
+        assert dispatcher.inflight == 0
+        assert dispatcher.backlog == 0
+
+    async def test_reset_drops_the_backlog_and_the_transport(self, dispatchers):
+        """The undispatched frames belong to the connection that is over."""
+        started: list[str] = []
+        dispatcher = dispatchers(started, max_inflight=1, pause_at=1)
+        transport = RecordingTransport()
+        dispatcher.submit([f"{{{i}}}" for i in range(10)], transport)
+        assert transport.paused is True
+
+        dispatcher.reset()
+
+        assert dispatcher.backlog == 0
+        assert dispatcher.paused is False
+        # Flow control is not touched on a dead transport; draining the
+        # in-flight task must not raise either.
+        for _ in range(50):
+            if not dispatcher.inflight:
+                break
+            await asyncio.sleep(0)
+        assert dispatcher.inflight == 0
+        assert transport.resume_calls == 0
+
+    async def test_no_transport_disables_flow_control_but_not_the_bound(self, dispatchers):
+        started: list[str] = []
+        dispatcher = dispatchers(started, max_inflight=2, pause_at=1)
+
+        dispatcher.submit([f"{{{i}}}" for i in range(6)], None)
+
+        assert dispatcher.inflight == 2
+        assert dispatcher.backlog == 4
+        assert dispatcher.paused is False
