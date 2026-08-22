@@ -66,17 +66,27 @@ jobs:
   # Nothing in tests/ or .github/ checked, which is why it slipped silently.
   changelog:
     name: Changelog
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      # BASE_REF is passed via env, never interpolated into the script: a ref
+      # name is attacker-controllable on a fork PR and would otherwise be
+      # executed by the shell. On a push there is no base_ref, so diff against
+      # the commit's own parent — otherwise this job could never run on the
+      # direct-to-main pushes this project actually uses.
       - name: CHANGELOG.md moves whenever src/ does
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          base="origin/${{ github.base_ref }}"
-          changed="$(git diff --name-only "$base"...HEAD)"
+          if [ -n "$BASE_REF" ]; then
+            base="origin/$BASE_REF"
+          else
+            base="HEAD^"
+          fi
+          changed="$(git diff --name-only "$base"...HEAD 2>/dev/null || git diff --name-only "$base" HEAD)"
           if echo "$changed" | grep -q '^src/' && ! echo "$changed" | grep -q '^CHANGELOG\.md$'; then
             echo "::error::src/ changed but CHANGELOG.md did not."
             echo "Add an entry under [Unreleased], or explain why the change is not user-visible."
