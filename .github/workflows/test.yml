@@ -198,5 +198,7 @@ jobs:
             coverage_html/
             coverage.json
           if-no-files-found: ignore
-      - name: Check coverage threshold
-        run: coverage report > /dev/null
+      # The real gate: pyproject's fail_under=100 applies here, on the
+      # coverage combined across every Python version in the matrix.
+      - name: Enforce 100% coverage
+        run: coverage report --fail-under=100
