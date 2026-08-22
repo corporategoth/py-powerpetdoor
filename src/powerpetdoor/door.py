@@ -242,12 +242,27 @@ class Schedule:
     end: ScheduleTime = field(default_factory=lambda: ScheduleTime(22, 0))
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to protocol dict format."""
+        """Convert to protocol dict format.
+
+        Wire types follow docs/protocol.md "Schedule Format" exactly, which
+        is also what the simulator's :meth:`Schedule.to_dict` emits:
+        ``index`` int, ``enabled`` the string ``"1"``/``"0"``,
+        ``daysOfWeek`` a list of 7 ints, ``inside``/``outside`` JSON bools,
+        and the four time objects ``{hour, min}`` ints.
+
+        ``enabled`` used to go out as a JSON boolean - the one field where
+        the library's emitter disagreed with both the documented protocol
+        and the simulator, and the field that decides whether an
+        access-control entry is live (M1). Every reader in this tree takes
+        both spellings (``coerce_schedule_flag`` and
+        ``schedule_entry_content_key`` both go through ``make_bool``), so
+        nothing downstream changes.
+        """
         # Protocol uses 1/0 for days, convert from booleans
         days_as_int = [1 if d else 0 for d in self.days_of_week]
-        result = {
+        result: dict[str, Any] = {
             FIELD_INDEX: self.index,
-            FIELD_ENABLED: self.enabled,
+            FIELD_ENABLED: "1" if self.enabled else "0",
             FIELD_DAYSOFWEEK: days_as_int,
             FIELD_INSIDE: self.inside,
             FIELD_OUTSIDE: self.outside,
@@ -1064,6 +1079,11 @@ class PowerPetDoor:
             except Exception:
                 logger.exception("Error fetching schedule %d", idx)
 
+        # Sorted for the same reason _on_schedule_update sorts: the public
+        # `schedules` property must not be ordered by whichever code path
+        # last touched it. GET_SCHEDULE_LIST returns slots, and a device
+        # with slots filled out of order returns them out of order (T3).
+        schedules.sort(key=lambda s: s.index)
         self._schedules = schedules
         return self._schedules.copy()
 

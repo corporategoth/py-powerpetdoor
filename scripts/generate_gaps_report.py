@@ -330,6 +330,7 @@ def main() -> int:
         lines.append("")
         lines.append(
             f"**{total_pragma_lines} lines** across **{len(pragma_exclusions)} files** "
+            f"in **{total_pragma_entries} annotations** "
             f"are excluded via `# pragma: no cover` or `# pragma: no branch`."
         )
         lines.append("")

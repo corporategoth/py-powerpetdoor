@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from ..sanitize import sanitize_text
 from ..tz_utils import async_init_timezone_cache
 from .commands import CommandHandler
-from .commands.scripts import ScriptQueue
+from .commands.scripts import QueuedScript, ScriptQueue
 from .prompt_common import (
     CLI_HISTORY_FILE as HISTORY_FILE,
 )
@@ -178,7 +178,18 @@ class _ControlLogHandler(logging.Handler):
     and one closed ``ctl`` session floods every other session with hundreds
     of lines (H1). Three things break the loop: dead writers are dropped,
     failing writers are dropped, and ``emit`` refuses to re-enter.
+
+    Records are also dropped for a client whose write buffer has run away.
+    ``emit`` cannot ``drain()`` (it is called synchronously from arbitrary
+    logging call sites), so a ``ctl -i`` session parked in a terminal and
+    not reading grows an unbounded queue in the daemon's memory - measured
+    at +0.16 MB/s under a hostile dribble, tracking the log rate with no
+    bound in sight (Security round-5 Finding 1).
     """
+
+    #: Per-client write-buffer ceiling, in bytes, above which log records
+    #: are dropped for that client rather than queued in daemon memory.
+    MAX_CLIENT_BACKLOG = 1024 * 1024
 
     def __init__(self, clients: set[asyncio.StreamWriter]):
         super().__init__()
@@ -205,6 +216,11 @@ class _ControlLogHandler(logging.Handler):
                     self._clients.discard(writer)
                     continue
                 try:
+                    if writer.transport.get_write_buffer_size() > self.MAX_CLIENT_BACKLOG:
+                        # This client is not reading. Dropping its log lines
+                        # is strictly better than growing the daemon's heap
+                        # on behalf of a stalled terminal.
+                        continue
                     writer.write(data)
                     # Don't await drain here - it would block.
                     # The message will be sent eventually.
@@ -331,6 +347,14 @@ class ControlChannel:
                 # Check if we should exit
                 if self.stop_event.is_set():
                     break
+        except ConnectionError as e:
+            # A one-shot ctl reads its `OK:` line and exits while the daemon
+            # is still emitting log lines for that command, so essentially
+            # every one-shot `run`/`stop` hung up mid-write. Reporting a
+            # normal hang-up at ERROR - and broadcasting it to every other
+            # ctl session via _ControlLogHandler - trains operators to
+            # ignore the one severity that should never be ignorable (L1).
+            logger.debug(f"Control client {addr} hung up: {e}")
         except Exception as e:
             logger.error(f"Control client error: {e}")
         finally:
@@ -378,26 +402,35 @@ async def _process_script_queue(
     while not stop_event.is_set():
         try:
             try:
-                script_ref = await asyncio.wait_for(script_queue.get(), timeout=poll_interval)
+                entry = await asyncio.wait_for(script_queue.get(), timeout=poll_interval)
             except TimeoutError:
                 continue
 
             try:
-                script = cmd_handler.load_script(script_ref)
-                logger.info(f"Running queued script: {sanitize_text(script.name)}")
-                # The claim is dropped when the run actually starts, not
-                # when it was dequeued: until then it is still pending and
-                # `status`/`list` must say so (M2).
-                success = await script_runner.run(
-                    script, on_start=lambda: script_queue.release(script_ref)
-                )
-                status = "PASSED" if success else "FAILED"
-                logger.info(f"Script {status}: {sanitize_text(script.name)}")
+                script = cmd_handler.load_script(entry.ref)
+
+                def _on_start(entry: QueuedScript = entry, name: str = script.name) -> bool:
+                    """Release the claim, and veto a run that was dropped."""
+                    # The claim is dropped when the run actually starts, not
+                    # when it was dequeued: until then it is still pending
+                    # and `status`/`list` must say so (M2). A `stop all` in
+                    # that window cancels it, and the run is abandoned
+                    # rather than started seconds later (frontend M1).
+                    if not script_queue.start(entry):
+                        logger.info(f"Dropped queued script: {sanitize_text(name)}")
+                        return False
+                    logger.info(f"Running queued script: {sanitize_text(name)}")
+                    return True
+
+                success = await script_runner.run(script, on_start=_on_start)
+                if not entry.cancelled:
+                    status = "PASSED" if success else "FAILED"
+                    logger.info(f"Script {status}: {sanitize_text(script.name)}")
             except Exception as e:
                 logger.error(f"Error running queued script: {sanitize_text(e)}")
             finally:
                 # Also covers a load failure, which never reaches on_start.
-                script_queue.release(script_ref)
+                script_queue.release(entry)
         except asyncio.CancelledError:
             break
 
@@ -783,7 +816,7 @@ async def run_simulator(
                     try:
                         async for input_line in session.input_loop(stop_check=stop_event.is_set):
                             if input_line.was_history_recall:
-                                print(f">>> {input_line.original} -> {input_line.resolved}")
+                                print(session.format_recall(input_line))
 
                             result = await cmd_handler.execute(input_line.resolved)
                             session.handle_result(input_line, result.success)

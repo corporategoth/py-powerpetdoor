@@ -404,11 +404,15 @@ if PROMPT_TOOLKIT_AVAILABLE:
                 ]
                 options.extend((day, "") for day in DAY_NAMES)
                 return options
-            elif arg.arg_type == "choice" and arg.choices:
-                return [(c.lower(), c) for c in arg.choices]
-            # Also check for choices on string args (like history's "clear")
             elif arg.choices:
-                return [(c.lower(), c) for c in arg.choices]
+                # The meta column gets the ArgSpec's own description, not
+                # the value echoed back at itself: `stop ⇥⇥` showed
+                # "all    all" while bool_toggle showed "on    Enable"
+                # and days showed "weekdays    Monday-Friday" (T3). Covers
+                # both "choice" args and string args carrying choices
+                # (history's "clear").
+                meta = arg.describe()
+                return [(c.lower(), meta or c) for c in arg.choices]
             # Check for dynamic completer
             elif arg.completer:
                 try:
@@ -529,10 +533,12 @@ class InteractiveSession:
         )
 
         async for input_line in session.input_loop():
+            if input_line.was_history_recall:
+                print(session.format_recall(input_line))
             result = await execute_command(input_line.resolved)
             session.handle_result(input_line, result.success)
             if result.message:
-                print(session.format_output(input_line, result.message))
+                print(render_result(result.message))
     """
 
     def __init__(
@@ -699,23 +705,25 @@ class InteractiveSession:
             if canonical:
                 self._history.replace_last_entry(canonical)
 
-    def format_output(self, input_line: InputLine, message: str) -> str:
-        """Format command output with history recall prefix if needed.
+    @staticmethod
+    def format_recall(input_line: InputLine) -> str:
+        """Render the ``!!``/``!n`` echo for a resolved input line.
 
-        Every line goes through :func:`render_result`, so this cannot
-        become a second, unsanitized path to the operator's terminal (T2).
+        Both input loops print this *before* executing the command, which
+        is why the combined "recall plus result" helper this replaced
+        could never be used and sat dead - leaving the two live echoes as
+        raw f-strings, the only terminal writes in the tree that did not
+        go through :func:`render_result` (T6). History entries can carry
+        anything the operator ever pasted, so they are sanitized like
+        every other line.
 
         Args:
-            input_line: The InputLine from the input loop
-            message: The command result message
+            input_line: The InputLine from the input loop.
 
         Returns:
-            Formatted output string with >>> prefix and history recall info
+            The sanitized ``>>> original -> resolved`` line.
         """
-        if input_line.was_history_recall:
-            recall = render_result(f"{input_line.original} -> {input_line.resolved}")
-            return f"{recall}\n{render_result(message)}"
-        return render_result(message)
+        return render_result(f"{input_line.original} -> {input_line.resolved}")
 
     async def prompt_async(self) -> str | None:
         """Get input from the user asynchronously.
@@ -757,10 +765,12 @@ class InteractiveSession:
 
         Example:
             async for input_line in session.input_loop(stop_check=stop_event.is_set):
+                if input_line.was_history_recall:
+                    print(session.format_recall(input_line))
                 result = await execute(input_line.resolved)
                 session.handle_result(input_line, result.success)
                 if result.message:
-                    print(session.format_output(input_line, result.message))
+                    print(render_result(result.message))
         """
         while True:
             # Check stop condition

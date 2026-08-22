@@ -26,7 +26,7 @@ from powerpetdoor.simulator import (
 )
 from powerpetdoor.simulator.commands import CommandHandler
 from powerpetdoor.simulator.commands.scripts import ScriptQueue, is_wait_run
-from powerpetdoor.simulator.scripting import Script, ScriptRunner, ScriptStep
+from powerpetdoor.simulator.scripting import Script, ScriptError, ScriptRunner, ScriptStep
 
 
 class _TtyStdout(io.StringIO):
@@ -977,25 +977,45 @@ class TestRunWaitMode:
 
 
 class TestScriptQueue:
-    """The queue counts the run already taken off it (M2)."""
+    """The queue counts the run already taken off it (M2), and can drop it."""
 
     async def test_put_then_get_preserves_order(self):
         queue = ScriptQueue()
-        await queue.put("a")
-        await queue.put("b")
+        await queue.put("a", "Script A")
+        await queue.put("b", "Script B")
 
-        assert await queue.get() == "a"
-        assert await queue.get() == "b"
+        assert (await queue.get()).ref == "a"
+        assert (await queue.get()).ref == "b"
+
+    async def test_entries_carry_the_display_name(self):
+        """`list` reports names, not raw references (T2)."""
+        queue = ScriptQueue()
+        await queue.put("./scripts/long2.yaml", "Long Script B")
+
+        assert queue.pending() == ["Long Script B"]
+        assert (await queue.get()).name == "Long Script B"
+
+    async def test_identical_references_are_distinct_entries(self):
+        """`run quick` twelve times is twelve runs, not one (identity, not value)."""
+        queue = ScriptQueue()
+        first = await queue.put("quick", "Quick")
+        second = await queue.put("quick", "Quick")
+
+        assert first is not second
+        assert queue.qsize() == 2
+        claimed = await queue.get()
+        queue.release(claimed)
+        assert queue.qsize() == 1
 
     async def test_a_claimed_run_is_still_pending(self):
         queue = ScriptQueue()
-        await queue.put("a")
+        await queue.put("a", "Script A")
 
         assert queue.qsize() == 1
         claimed = await queue.get()
         # Dequeued but not started: still waiting, from the operator's view.
         assert queue.qsize() == 1
-        assert queue.pending() == ["a"]
+        assert queue.pending() == ["Script A"]
 
         queue.release(claimed)
         assert queue.qsize() == 0
@@ -1004,7 +1024,7 @@ class TestScriptQueue:
     async def test_release_is_idempotent(self):
         """The consumer releases on start and again in its finally."""
         queue = ScriptQueue()
-        await queue.put("a")
+        await queue.put("a", "Script A")
         claimed = await queue.get()
 
         queue.release(claimed)
@@ -1014,20 +1034,52 @@ class TestScriptQueue:
 
     async def test_pending_lists_claimed_first(self):
         queue = ScriptQueue()
-        await queue.put("a")
-        await queue.put("b")
+        await queue.put("a", "Script A")
+        await queue.put("b", "Script B")
         await queue.get()
 
-        assert queue.pending() == ["a", "b"]
+        assert queue.pending() == ["Script A", "Script B"]
 
-    async def test_clear_drops_unclaimed_runs_only(self):
+    async def test_clear_drops_claimed_runs_too(self):
+        """`stop all` must leave nothing pending, claim included (M1).
+
+        clear() used to empty `_waiting` only, so the one entry claim
+        tracking exists for survived the drop, the reported count
+        contradicted the depth `list` had just printed, and the "dropped"
+        script started running seconds later.
+        """
         queue = ScriptQueue()
         for ref in ("a", "b", "c"):
-            await queue.put(ref)
-        await queue.get()  # "a" is claimed and already starting
+            await queue.put(ref, f"Script {ref.upper()}")
+        await queue.get()  # "a" is claimed and waiting for the runner
 
-        assert queue.clear() == ["b", "c"]
-        assert queue.pending() == ["a"]
+        depth_before = queue.qsize()
+        dropped = queue.clear()
+
+        assert [entry.name for entry in dropped] == ["Script A", "Script B", "Script C"]
+        # The count reported always matches the depth status/list showed.
+        assert len(dropped) == depth_before
+        assert queue.pending() == []
+        assert queue.qsize() == 0
+
+    async def test_a_cleared_claim_reports_it_must_not_start(self):
+        """start() is how the consumer learns its run was dropped (M1)."""
+        queue = ScriptQueue()
+        await queue.put("a", "Script A")
+        claimed = await queue.get()
+
+        queue.clear()
+
+        assert claimed.cancelled is True
+        assert queue.start(claimed) is False
+
+    async def test_start_releases_the_claim_and_allows_the_run(self):
+        queue = ScriptQueue()
+        await queue.put("a", "Script A")
+        claimed = await queue.get()
+
+        assert queue.start(claimed) is True
+        assert queue.qsize() == 0
 
     async def test_get_waits_for_an_arrival(self):
         queue = ScriptQueue()
@@ -1035,9 +1087,9 @@ class TestScriptQueue:
         await asyncio.sleep(0)
         assert not getter.done()
 
-        await queue.put("late")
+        await queue.put("late", "Late Script")
 
-        assert await asyncio.wait_for(getter, 2.0) == "late"
+        assert (await asyncio.wait_for(getter, 2.0)).ref == "late"
 
     async def test_get_can_be_polled_with_a_timeout(self):
         """_process_script_queue wraps get() in wait_for; it must be cancellable."""
@@ -1046,8 +1098,8 @@ class TestScriptQueue:
             await asyncio.wait_for(queue.get(), timeout=0.01)
 
         # A cancelled get must not have consumed anything.
-        await queue.put("still-here")
-        assert await asyncio.wait_for(queue.get(), 2.0) == "still-here"
+        await queue.put("still-here", "Still Here")
+        assert (await asyncio.wait_for(queue.get(), 2.0)).ref == "still-here"
 
 
 class TestScriptBusyVisibility:
@@ -1193,19 +1245,20 @@ class TestScriptBusyVisibility:
         """
         task, release = await self._start_blocking_script(queued_handler.script_runner)
         try:
-            await queued_handler.script_queue.put("my_custom")
+            await queued_handler.script_queue.put("my_custom", "My Custom Script")
             # Exactly what _process_script_queue does before blocking on
             # the run lock.
             claimed = await queued_handler.script_queue.get()
-            assert claimed == "my_custom"
+            assert claimed.ref == "my_custom"
 
             result = await queued_handler.execute("status")
             assert '  Script: running "Slow Script" (1 queued)' in result.message
             assert result.data["queued_scripts"] == 1
 
             listed = await queued_handler.execute("list")
-            assert "Queued: my_custom" in listed.message
-            assert listed.data["pending"] == ["my_custom"]
+            # The name, not the reference: every other line prints names (T2).
+            assert "Queued: My Custom Script" in listed.message
+            assert listed.data["pending"] == ["My Custom Script"]
         finally:
             release.set()
             await asyncio.wait_for(task, 2.0)
@@ -1215,7 +1268,7 @@ class TestScriptBusyVisibility:
         task, release = await self._start_blocking_script(queued_handler.script_runner)
         try:
             for _ in range(3):
-                await queued_handler.script_queue.put("my_custom")
+                await queued_handler.script_queue.put("my_custom", "My Custom Script")
 
             result = await queued_handler.execute("stop all")
 
@@ -1226,9 +1279,67 @@ class TestScriptBusyVisibility:
             release.set()
             await asyncio.wait_for(task, 2.0)
 
+    async def test_stop_all_drop_count_matches_the_depth_list_just_printed(self, queued_handler):
+        """Running + N queued + a claimed one: all gone, one command (M1).
+
+        The claim-tracking fix (M2) and the `stop all` fix (L2) did not
+        know about each other: `clear()` emptied `_waiting` only while
+        `qsize()` counted the claim, so `stop all` reported one fewer than
+        `list` had shown a breath earlier and left the claimed run to start
+        as soon as the running script stopped. Two `stop all` commands were
+        needed to clear one running plus two queued.
+        """
+        task, release = await self._start_blocking_script(queued_handler.script_runner)
+        try:
+            for name in ("Long Script B", "Long Script C"):
+                await queued_handler.script_queue.put("my_custom", name)
+            # The consumer claims the head and parks on the run lock.
+            claimed = await queued_handler.script_queue.get()
+
+            listed = await queued_handler.execute("list")
+            assert 'Script: running "Slow Script" (2 queued)' in listed.message
+            assert listed.data["pending"] == ["Long Script B", "Long Script C"]
+
+            result = await queued_handler.execute("stop all")
+
+            assert result.success is True
+            assert result.message == "Stopping script: Slow Script (dropped 2 queued)"
+            assert queued_handler.script_queue.qsize() == 0
+            assert queued_handler.script_queue.pending() == []
+            # And the claimed entry knows it must not start (frontend M1).
+            assert claimed.cancelled is True
+            assert queued_handler.script_queue.start(claimed) is False
+
+            after = await queued_handler.execute("list")
+            assert "Queued:" not in after.message
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 2.0)
+
+    async def test_bare_stop_leaves_the_queue_alone(self, queued_handler):
+        """Only `stop all` touches the queue - the distinction it exists for.
+
+        Deleting `scope == STOP_ALL_KEYWORD and` from the guard survived
+        every test in the suite: no test issued a bare `stop` with runs
+        queued (R5-L2).
+        """
+        task, release = await self._start_blocking_script(queued_handler.script_runner)
+        try:
+            for _ in range(2):
+                await queued_handler.script_queue.put("my_custom", "My Custom Script")
+
+            result = await queued_handler.execute("stop")
+
+            assert result.success is True
+            assert result.message == "Stopping script: Slow Script"
+            assert queued_handler.script_queue.qsize() == 2
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 2.0)
+
     async def test_stop_all_with_nothing_running_still_drains(self, queued_handler):
         """Draining the queue is worth reporting even with nothing in flight."""
-        await queued_handler.script_queue.put("my_custom")
+        await queued_handler.script_queue.put("my_custom", "My Custom Script")
 
         result = await queued_handler.execute("stop all")
 
@@ -1237,10 +1348,30 @@ class TestScriptBusyVisibility:
         assert queued_handler.script_queue.qsize() == 0
 
     async def test_stop_all_with_nothing_at_all_reports_idle(self, queued_handler):
+        """`stop all` is idempotent: the requested state already holds (T1).
+
+        A CI wrapper doing `ctl stop all || fail` used to get a false
+        failure for having nothing to do.
+        """
         result = await queued_handler.execute("stop all")
 
+        assert result.success is True
+        assert result.message == "Nothing running or queued"
+
+    async def test_bare_stop_with_a_pending_run_says_so(self, queued_handler):
+        """ "No script is running" was wrong in the claim window (M1).
+
+        Nothing is running, but a claimed run *is* pending, so the flat
+        answer left the operator polling `list` and retrying.
+        """
+        await queued_handler.script_queue.put("my_custom", "My Custom Script")
+        await queued_handler.script_queue.get()
+
+        result = await queued_handler.execute("stop")
+
         assert result.success is False
-        assert result.message == "No script is running (use 'shutdown' to stop the simulator)"
+        assert result.message == ("No script is running; 1 queued (use 'stop all' to discard them)")
+        assert queued_handler.script_queue.qsize() == 1
 
     async def test_stop_rejects_an_unknown_scope(self, queued_handler):
         result = await queued_handler.execute("stop everything")
@@ -1302,6 +1433,51 @@ class TestScriptPathRestrictions:
         script = restricted_handler.load_script("pet_presence_test")
         assert script.name
 
+    @pytest.mark.parametrize("suffix", [".yaml", ".yml"])
+    async def test_restricted_refuses_a_symlink_out_of_the_scripts_dir(
+        self, restricted_handler, tmp_path, suffix
+    ):
+        """A bare name must not follow a symlink out of the base dir (R5-M2).
+
+        The lexical rejections above are all stopped earlier, by
+        `_load_script_restricted`. Nothing tested the check that actually
+        needs `resolve()`: a lexically innocent name - no slash, no dot, no
+        backslash, accepted over the *unauthenticated* control channel -
+        whose resolved target is outside the scripts directory. Dropping
+        `and candidate.parent == base` survived the whole suite.
+        """
+        outside = tmp_path.parent / "outside"
+        outside.mkdir(exist_ok=True)
+        secret = outside / f"secret{suffix}"
+        secret.write_text(PASSING_SCRIPT.replace("Passing Script", "SECRET SCRIPT"))
+        (tmp_path / f"evil{suffix}").symlink_to(secret)
+
+        # The lexical guard has nothing to catch here.
+        assert "/" not in "evil"
+
+        with pytest.raises(ScriptError, match="Unknown script: evil"):
+            restricted_handler.load_script("evil")
+
+        result = await restricted_handler.execute("run evil")
+        assert result.success is False
+        assert "Unknown script: evil" in result.message
+
+    async def test_name_resolution_never_escapes_the_scripts_dir(
+        self, restricted_handler, tmp_path
+    ):
+        """`_load_script_by_name` is reachable with a traversal-shaped name.
+
+        In the unrestricted front end it is reached whenever
+        `Path(script_ref).exists()` is False, so the containment check is
+        the only thing between it and an arbitrary file (R5-M2).
+        """
+        outside = tmp_path.parent / "outside"
+        outside.mkdir(exist_ok=True)
+        (outside / "secret.yaml").write_text(PASSING_SCRIPT)
+
+        with pytest.raises(ScriptError, match="Unknown script"):
+            restricted_handler._load_script_by_name("../outside/secret")
+
 
 class TestScriptsDirVisibility:
     """--scripts-dir scripts must be discoverable, not just runnable (M4)."""
@@ -1345,6 +1521,43 @@ class TestScriptsDirVisibility:
 
         assert result.success is True
         assert "Scripts from" not in result.message
+
+    async def test_list_shows_an_empty_scripts_dir_as_configured_but_empty(
+        self, simulator, tmp_path
+    ):
+        """`--list-scripts` prints the header for an empty dir; `list` must too (T5).
+
+        A ctl user cannot see the daemon's command line, so without the
+        header they cannot tell "no --scripts-dir configured" from
+        "configured but empty".
+        """
+        handler = CommandHandler(
+            simulator=simulator,
+            script_runner=ScriptRunner(simulator),
+            stop_callback=MagicMock(),
+            scripts_dir=str(tmp_path),
+            allow_script_paths=False,
+        )
+
+        result = await handler.execute("list")
+
+        assert f"Scripts from {tmp_path}:" in result.message
+        assert "  (none)" in result.message
+
+    async def test_run_help_does_not_advertise_paths_over_the_control_channel(
+        self, scripts_dir_handler
+    ):
+        """The in-client help pointed at the form the channel refuses (L2)."""
+        result = await scripts_dir_handler.execute("run help")
+
+        assert "paths are not accepted over the control channel" in result.message
+        assert "Script name or file path" not in result.message
+
+    async def test_run_help_still_advertises_paths_on_the_local_cli(self, command_handler):
+        """The interactive CLI really does accept paths, so it still says so."""
+        result = await command_handler.execute("run help")
+
+        assert "Script name or file path" in result.message
 
 
 # ============================================================================

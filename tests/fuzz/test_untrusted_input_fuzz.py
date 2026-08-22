@@ -17,6 +17,20 @@ exactly this class (``int(float("inf"))`` raising ``OverflowError`` out of
 a validator), and the library-side ``Schedule.from_dict`` had eight
 distinct crash shapes that a totality property found in under a minute.
 
+**A property is only worth its runtime if it draws the values it exists
+for** (R5-M3). ``st.recursive`` with ``max_leaves=8`` spends its budget on
+containers, so the measured draw rate for a top-level non-finite float was
+0/600 and for a parseable 7-element ``daysOfWeek`` 18/600 - i.e. removing
+``OverflowError`` from ``coerce_schedule_int``'s except clause survived the
+whole fuzz suite, and ``coerce_schedule_day`` returning ``int(flag)``
+survived too. Two strategies fix that:
+
+- ``_pathological`` is mixed into every scalar coercer's input, so the
+  non-finite/overflowing values these validators were written for are
+  drawn on a fixed fraction of examples rather than by luck.
+- ``_well_shaped_*`` feed the *success* path, so post-conditions that only
+  run after a successful parse actually execute.
+
 Example counts are bounded to keep the fuzz suite fast.
 """
 
@@ -28,8 +42,9 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from powerpetdoor.door import Schedule as LibrarySchedule
-from powerpetdoor.sanitize import _CONTROL_CHAR_RE, sanitize_text
+from powerpetdoor.sanitize import sanitize_text
 from powerpetdoor.schedule import (
+    MAX_DAYS_BITMASK,
     MAX_SCHEDULE_INDEX,
     coerce_schedule_day,
     coerce_schedule_days,
@@ -63,9 +78,42 @@ _json_values = st.recursive(
     max_leaves=8,
 )
 
+# The values these validators exist to reject, drawn deliberately rather
+# than hoped for. `1e400` is what `json.loads("1e400")` produces (inf);
+# `int()` of any of the three floats raises OverflowError or ValueError,
+# which is the totality hole R4 fixed and R5 found untested.
+_pathological = st.sampled_from(
+    [
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        1e400,
+        -(2**64),
+        2**64,
+        -1,
+        MAX_SCHEDULE_INDEX + 1,
+    ]
+)
+
+#: Hostile input with the pathological scalars mixed in explicitly.
+_scalar_values = st.one_of(_json_values, _pathological)
+
+#: The protocol's actual daysOfWeek shape, in every spelling the coercers
+#: accept - so the success-path post-conditions genuinely run.
+_well_shaped_days = st.lists(st.sampled_from([0, 1, "0", "1", True, False]), min_size=7, max_size=7)
+
+#: A legal legacy bitmask.
+_well_shaped_bitmask = st.integers(min_value=0, max_value=MAX_DAYS_BITMASK)
+
+#: The protocol's actual {hour, min} shape.
+_well_shaped_time = st.fixed_dictionaries(
+    {"hour": st.integers(min_value=0, max_value=23), "min": st.integers(min_value=0, max_value=59)}
+)
+
 _time_payloads = st.one_of(
     _json_values,
-    st.fixed_dictionaries({"hour": _json_values, "min": _json_values}),
+    _well_shaped_time,
+    st.fixed_dictionaries({"hour": _scalar_values, "min": _scalar_values}),
 )
 
 # Protocol-shaped schedule payloads: realistic keys, arbitrary values.
@@ -74,11 +122,16 @@ _schedule_payloads = st.one_of(
     st.fixed_dictionaries(
         {},
         optional={
-            "index": _json_values,
-            "enabled": _json_values,
-            "daysOfWeek": st.one_of(_json_values, st.lists(_json_values, max_size=8)),
-            "inside": _json_values,
-            "outside": _json_values,
+            "index": st.one_of(_scalar_values, st.integers(0, MAX_SCHEDULE_INDEX)),
+            "enabled": st.one_of(_scalar_values, st.sampled_from([0, 1, "0", "1"])),
+            "daysOfWeek": st.one_of(
+                _json_values,
+                st.lists(_json_values, max_size=8),
+                _well_shaped_days,
+                _well_shaped_bitmask,
+            ),
+            "inside": st.one_of(_scalar_values, st.booleans()),
+            "outside": st.one_of(_scalar_values, st.booleans()),
             "in_start_time": _time_payloads,
             "in_end_time": _time_payloads,
             "out_start_time": _time_payloads,
@@ -87,19 +140,27 @@ _schedule_payloads = st.one_of(
     ),
 )
 
+#: Every codepoint :func:`sanitize_text` promises to neutralize, spelled
+#: out independently of the module's own regex. Asserting the output
+#: against ``_CONTROL_CHAR_RE`` made the property unable to fail: narrowing
+#: the production regex to ``[\x00]`` narrows the *check* in lockstep
+#: (R5-M3(b)).
+_CONTROL_CODEPOINTS = frozenset([*range(0x00, 0x09), 0x0B, *range(0x0C, 0x20), *range(0x7F, 0xA0)])
+
 
 class TestWireCoercerTotality:
     """Every ``_coerce_wire_*`` raises WireValueError or nothing at all."""
 
     @settings(max_examples=200, deadline=None)
-    @given(value=_json_values)
+    @given(value=_scalar_values)
     def test_number_coercer_only_raises_wire_value_error(self, value):
         with contextlib.suppress(WireValueError):
             result = _coerce_wire_number(value, "field", 0, 90000)
             assert isinstance(result, float)
+            assert 0 <= result <= 90000
 
     @settings(max_examples=200, deadline=None)
-    @given(value=_json_values)
+    @given(value=_scalar_values)
     def test_int_coercer_only_raises_wire_value_error(self, value):
         with contextlib.suppress(WireValueError):
             result = _coerce_wire_int(value, "field", 0, MAX_SCHEDULE_INDEX)
@@ -107,7 +168,7 @@ class TestWireCoercerTotality:
             assert 0 <= result <= MAX_SCHEDULE_INDEX
 
     @settings(max_examples=200, deadline=None)
-    @given(value=_json_values)
+    @given(value=_scalar_values)
     def test_string_coercer_only_raises_wire_value_error(self, value):
         with contextlib.suppress(WireValueError):
             result = _coerce_wire_string(value, "field", 128)
@@ -115,30 +176,48 @@ class TestWireCoercerTotality:
             assert len(result) <= 128
 
     @settings(max_examples=200, deadline=None)
-    @given(value=_json_values)
+    @given(value=_scalar_values)
     def test_flag_coercer_only_raises_wire_value_error(self, value):
         with contextlib.suppress(WireValueError):
-            assert _coerce_wire_flag(value, "field") in (True, False)
+            assert isinstance(_coerce_wire_flag(value, "field"), bool)
 
 
 class TestScheduleCoercerTotality:
     """The shared schedule helpers raise ValueError or nothing at all."""
 
     @settings(max_examples=200, deadline=None)
-    @given(value=_json_values)
+    @given(value=_scalar_values)
     def test_int_coercer_is_total(self, value):
         with contextlib.suppress(ValueError):
             result = coerce_schedule_int(value, "index", MAX_SCHEDULE_INDEX)
+            assert isinstance(result, int)
             assert 0 <= result <= MAX_SCHEDULE_INDEX
 
-    @settings(max_examples=200, deadline=None)
-    @given(value=_json_values)
-    def test_day_coercer_is_total(self, value):
-        with contextlib.suppress(ValueError):
-            assert coerce_schedule_day(value, 0) in (True, False)
+    @settings(max_examples=100, deadline=None)
+    @given(value=st.sampled_from([float("inf"), float("-inf"), float("nan"), 1e400]))
+    def test_non_finite_floats_are_rejected_cleanly(self, value):
+        """``int(float("inf"))`` raises OverflowError, not ValueError.
+
+        The totality hole the file's docstring cites: removing
+        ``OverflowError`` from the except tuple survived the whole fuzz
+        suite because the strategy drew a top-level non-finite float 0
+        times in 600 examples (R5-M3(a)).
+        """
+        try:
+            coerce_schedule_int(value, "index", MAX_SCHEDULE_INDEX)
+        except ValueError as err:
+            assert "must be a number" in str(err)
+        else:  # pragma: no cover - a finite result here would be the bug
+            raise AssertionError(f"{value!r} was accepted as an index")
 
     @settings(max_examples=200, deadline=None)
-    @given(value=_json_values)
+    @given(value=_scalar_values)
+    def test_day_coercer_is_total(self, value):
+        with contextlib.suppress(ValueError):
+            assert isinstance(coerce_schedule_day(value, 0), bool)
+
+    @settings(max_examples=200, deadline=None)
+    @given(value=st.one_of(_scalar_values, _well_shaped_days, _well_shaped_bitmask))
     def test_days_coercer_is_total(self, value):
         with contextlib.suppress(ValueError):
             days = coerce_schedule_days(value)
@@ -146,18 +225,50 @@ class TestScheduleCoercerTotality:
             assert all(isinstance(day, bool) for day in days)
 
     @settings(max_examples=200, deadline=None)
-    @given(value=_json_values)
+    @given(value=_well_shaped_days)
+    def test_a_well_shaped_day_list_always_parses_to_seven_bools(self, value):
+        """The protocol's actual shape must reach the success path.
+
+        ``x in (True, False)`` does not pin the bool contract - ``1 in
+        (True, False)`` is True in Python - and the one assertion that did
+        use ``isinstance`` was only reached on 18/600 draws, all through
+        the integer-bitmask branch (R5-M3(c)).
+        """
+        days = coerce_schedule_days(value)
+
+        assert len(days) == 7
+        assert all(isinstance(day, bool) for day in days)
+        assert days == [flag in (1, "1", True) for flag in value]
+
+    @settings(max_examples=200, deadline=None)
+    @given(value=_well_shaped_bitmask)
+    def test_a_legal_bitmask_always_parses_to_seven_bools(self, value):
+        days = coerce_schedule_days(value)
+
+        assert all(isinstance(day, bool) for day in days)
+        assert days == [bool((value >> i) & 1) for i in range(7)]
+
+    @settings(max_examples=200, deadline=None)
+    @given(value=_scalar_values)
     def test_flag_coercer_never_raises_at_all(self, value):
         """Flags fail closed rather than raising - and never grant access."""
-        assert coerce_schedule_flag(value, "inside") in (True, False)
+        assert isinstance(coerce_schedule_flag(value, "inside"), bool)
 
     @settings(max_examples=200, deadline=None)
     @given(value=_time_payloads)
     def test_time_coercer_is_total(self, value):
         with contextlib.suppress(ValueError):
             hour, minute = coerce_schedule_time(value, "start time")
+            assert isinstance(hour, int)
+            assert isinstance(minute, int)
             assert 0 <= hour <= 23
             assert 0 <= minute <= 59
+
+    @settings(max_examples=200, deadline=None)
+    @given(value=_well_shaped_time)
+    def test_a_well_shaped_time_always_parses(self, value):
+        """The success path, executed on every draw rather than by luck."""
+        assert coerce_schedule_time(value, "start time") == (value["hour"], value["min"])
 
 
 class TestScheduleParserTotality:
@@ -175,6 +286,7 @@ class TestScheduleParserTotality:
         with contextlib.suppress(ValueError):
             schedule = LibrarySchedule.from_dict(payload)
             assert len(schedule.days_of_week) == 7
+            assert all(isinstance(day, bool) for day in schedule.days_of_week)
             assert isinstance(schedule.enabled, bool)
             assert 0 <= schedule.index <= MAX_SCHEDULE_INDEX
 
@@ -184,8 +296,32 @@ class TestScheduleParserTotality:
         with contextlib.suppress(ValueError):
             schedule = SimulatorSchedule.from_dict(payload)
             assert len(schedule.days_of_week) == 7
+            assert all(isinstance(day, bool) for day in schedule.days_of_week)
             assert isinstance(schedule.enabled, bool)
             assert 0 <= schedule.index <= MAX_SCHEDULE_INDEX
+
+    @settings(max_examples=200, deadline=None)
+    @given(payload=_schedule_payloads)
+    def test_both_emitters_agree_on_every_field(self, payload):
+        """Whatever both parsers accept, both must re-emit identically (M1).
+
+        The library's emitter sent ``enabled`` as a JSON boolean while the
+        simulator's (and docs/protocol.md) used the string ``"1"``; the
+        round trip stayed green because both *parsers* accept both.
+        Comparing the emitted payloads is what catches that.
+        """
+        try:
+            library = LibrarySchedule.from_dict(payload)
+            simulator = SimulatorSchedule.from_dict(payload)
+        except ValueError:
+            return
+
+        emitted = library.to_dict()
+
+        assert emitted == simulator.to_dict()
+        assert isinstance(emitted["enabled"], str)
+        assert emitted["enabled"] in ("0", "1")
+        assert all(day in (0, 1) and not isinstance(day, bool) for day in emitted["daysOfWeek"])
 
     @settings(max_examples=200, deadline=None)
     @given(payload=_schedule_payloads)
@@ -194,8 +330,8 @@ class TestScheduleParserTotality:
         with contextlib.suppress(ValueError):
             schedule = SimulatorSchedule.from_dict(payload)
             for weekday in range(7):
-                assert schedule.is_day_active(weekday) in (True, False)
-                assert schedule.is_sensor_allowed("inside", 12, 30, weekday) in (True, False)
+                assert isinstance(schedule.is_day_active(weekday), bool)
+                assert isinstance(schedule.is_sensor_allowed("inside", 12, 30, weekday), bool)
 
 
 class TestSanitizeProperties:
@@ -204,14 +340,37 @@ class TestSanitizeProperties:
     @settings(max_examples=300, deadline=None)
     @given(text=st.text())
     def test_no_control_character_survives_and_it_is_idempotent(self, text):
+        """Checked against an independent definition of "control character".
+
+        Validating the output with ``sanitize_text``'s own
+        ``_CONTROL_CHAR_RE`` made this property unable to fail: narrowing
+        the production regex to ``[\\x00]`` narrows the check with it, so
+        ESC/CSI/DEL pass through and the property still passes (R5-M3(b)).
+        """
         out = sanitize_text(text)
-        assert _CONTROL_CHAR_RE.search(out) is None
+
+        assert not _CONTROL_CODEPOINTS.intersection(ord(char) for char in out)
         assert sanitize_text(out) == out
 
+    @settings(max_examples=300, deadline=None)
+    @given(
+        text=st.text(
+            alphabet=st.sampled_from([chr(code) for code in sorted(_CONTROL_CODEPOINTS)]),
+            min_size=1,
+            max_size=8,
+        )
+    )
+    def test_every_control_character_is_replaced_by_its_escape(self, text):
+        """The fail-closed direction: each one appears as a visible ``\\xNN``."""
+        out = sanitize_text(text)
+
+        assert out == "".join(f"\\x{ord(char):02x}" for char in text)
+
     @settings(max_examples=200, deadline=None)
-    @given(value=_json_values)
+    @given(value=_scalar_values)
     def test_any_value_can_be_sanitized(self, value):
         """Log call sites hand it whatever came off the wire, not just str."""
         out = sanitize_text(value)
+
         assert isinstance(out, str)
-        assert _CONTROL_CHAR_RE.search(out) is None
+        assert not _CONTROL_CODEPOINTS.intersection(ord(char) for char in out)

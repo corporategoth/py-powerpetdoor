@@ -281,3 +281,66 @@ def make_async_callback(callback_tracker):
         return callback
 
     return factory
+
+
+# ============================================================================
+# Golden wire payloads (backend M1)
+# ============================================================================
+
+#: The exact ``SET_SCHEDULE``/``GET_SCHEDULE`` payload docs/protocol.md
+#: "Schedule Format" specifies, for a schedule numbered 3 that gates the
+#: inside sensor 06:30-22:15 on Sun/Tue/Thu/Sat.
+#:
+#: Both emitters - ``powerpetdoor.door.Schedule.to_dict`` and
+#: ``powerpetdoor.simulator.state.Schedule.to_dict`` - must produce this
+#: dict exactly. They agreed on every field but ``enabled``, which the
+#: library sent as a JSON boolean while the doc and the simulator use the
+#: string ``"1"``; nothing caught it because the simulator's parser accepts
+#: both spellings by design (M1). A golden payload compared on both sides
+#: fails on a divergence in *any* field, not just the one that diverged.
+GOLDEN_SCHEDULE_WIRE = {
+    "index": 3,
+    "enabled": "1",
+    "daysOfWeek": [1, 0, 1, 0, 1, 0, 1],
+    "inside": True,
+    "outside": False,
+    "in_start_time": {"hour": 6, "min": 30},
+    "in_end_time": {"hour": 22, "min": 15},
+    "out_start_time": {"hour": 0, "min": 0},
+    "out_end_time": {"hour": 0, "min": 0},
+}
+
+
+def _is_wire_int(value: object) -> bool:
+    """True for a JSON integer - and not for a bool, which is an int subclass."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def assert_schedule_wire_types(payload: dict) -> None:
+    """Assert an emitted schedule matches docs/protocol.md field for field.
+
+    Dict equality alone is not enough: ``True == 1`` in Python, so a
+    ``daysOfWeek`` of ``[True, ...]`` compares equal to ``[1, ...]`` and an
+    ``inside`` of ``1`` compares equal to ``True``. The types have to be
+    asserted explicitly for the golden payload to mean anything.
+    """
+    assert set(payload) == set(GOLDEN_SCHEDULE_WIRE)
+    assert _is_wire_int(payload["index"])
+    # "0"/"1" strings, per docs/protocol.md "Schedule Format".
+    assert isinstance(payload["enabled"], str)
+    assert payload["enabled"] in ("0", "1")
+    days = payload["daysOfWeek"]
+    assert isinstance(days, list)
+    assert len(days) == 7
+    assert all(_is_wire_int(day) and day in (0, 1) for day in days)
+    # JSON booleans, per docs/protocol.md - unlike enabled.
+    assert isinstance(payload["inside"], bool)
+    assert isinstance(payload["outside"], bool)
+    for key in ("in_start_time", "in_end_time", "out_start_time", "out_end_time"):
+        block = payload[key]
+        assert isinstance(block, dict)
+        assert set(block) == {"hour", "min"}
+        assert _is_wire_int(block["hour"])
+        assert 0 <= block["hour"] <= 23
+        assert _is_wire_int(block["min"])
+        assert 0 <= block["min"] <= 59

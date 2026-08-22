@@ -91,7 +91,9 @@ class ArgSpec:
         default_display: Human-readable form of the default for help text
                         (e.g., "all" instead of a raw Python list)
         choices: Valid choices for "choice" type
-        description: Help text describing this argument
+        description: Help text describing this argument, or a callable
+                    returning it when the text depends on runtime policy
+                    (see :meth:`describe`)
         min_value: Minimum value for numeric types
         max_value: Maximum value for numeric types
         completer: Optional callable for tab completion. Can have signature:
@@ -105,10 +107,21 @@ class ArgSpec:
     default: Any = None
     default_display: str | None = None
     choices: list[str] | None = None  # For "choice" type
-    description: str = ""
+    description: str | Callable[[], str] = ""
     min_value: float | None = None  # For int/float types
     max_value: float | None = None  # For int/float types
     completer: Callable[..., list[tuple[str, str]]] | None = None
+
+    def describe(self) -> str:
+        """Resolve this argument's help text.
+
+        A description can depend on runtime policy the way ``completer``
+        already does: ``run``'s ``script`` argument accepts names *and*
+        file paths on the interactive CLI, but only bare names over the
+        control channel - and the in-client help was advertising the form
+        that channel refuses outright (L2).
+        """
+        return self.description() if callable(self.description) else self.description
 
     def generate_usage(self) -> str:
         """Generate usage string for this argument."""

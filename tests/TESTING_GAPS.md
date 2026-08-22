@@ -2,7 +2,7 @@
 
 This file is **auto-generated** by CI after each test run. Do not edit manually.
 
-**Last updated:** 2026-08-22 06:21 UTC
+**Last updated:** 2026-08-22 08:45 UTC
 
 ## Summary
 
@@ -10,8 +10,8 @@ This file is **auto-generated** by CI after each test run. Do not edit manually.
 |--------|-------|
 | Line Coverage | 100.00% |
 | Branch Coverage | 100.00% |
-| Lines Covered | 6,279 / 6,279 |
-| Branches Covered | 2,254 / 2,254 |
+| Lines Covered | 6,391 / 6,391 |
+| Branches Covered | 2,280 / 2,280 |
 | Lines Missing | 0 |
 
 ## Coverage by Category
@@ -43,14 +43,14 @@ The following are excluded from coverage by configuration (`pyproject.toml`):
 
 ### Pragma Exclusions
 
-**5 lines** across **2 files** are excluded via `# pragma: no cover` or `# pragma: no branch`.
+**5 lines** across **2 files** in **5 annotations** are excluded via `# pragma: no cover` or `# pragma: no branch`.
 
 #### `simulator/cli.py` (2 lines)
 
 | Lines | Type | Reason | Code |
 |-------|------|--------|------|
 | 100 | no branch | defensive: enable() always installs a handler | `if self._handler:` |
-| 656 | no branch | bound after start() | `if simulator.server and simulator.server.sockets:` |
+| 689 | no branch | bound after start() | `if simulator.server and simulator.server.sockets:` |
 
 #### `simulator/ctl.py` (3 lines)
 

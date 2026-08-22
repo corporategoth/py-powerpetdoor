@@ -101,7 +101,7 @@ class InfoCommandsMixin:
 
         for arg in info.args:
             required = "required" if arg.required else "optional"
-            desc = arg.description or f"{arg.arg_type} value"
+            desc = arg.describe() or f"{arg.arg_type} value"
 
             # Build constraints string
             constraints = []

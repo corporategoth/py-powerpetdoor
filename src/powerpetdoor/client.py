@@ -116,7 +116,7 @@ from .const import (
     PRIORITY_LOW,
     SUCCESS_TRUE,
 )
-from .framing import MAX_BUFFER_SIZE, FrameScanner, find_frame_end
+from .framing import MAX_BUFFER_SIZE, EventThrottle, FrameScanner, find_frame_end
 from .sanitize import sanitize_text
 
 _LOGGER = logging.getLogger(__name__)
@@ -308,13 +308,13 @@ class PowerPetDoorClient(asyncio.Protocol):
         #: that has already been superseded (L1) - asyncio passes no
         #: transport identity, so this count is the only way to tell.
         self._pending_direct_losses = 0
-        self._keepalive = None
-        self._check_receipt = None
+        self._keepalive: asyncio.Task | None = None
+        self._check_receipt: asyncio.Task | None = None
         self._reconnect_task: asyncio.Task | None = None
         self._reconnect_attempts = 0
         self._was_connected = False
-        self._last_ping = None
-        self._last_command = None
+        self._last_ping: str | None = None
+        self._last_command: str | None = None
         self._can_dequeue = False
         self._last_send = 0.0
         self._last_ping_time = 0.0
@@ -325,6 +325,16 @@ class PowerPetDoorClient(asyncio.Protocol):
         # peer that dribbles the bytes of a never-terminated object must not
         # make us re-scan the retained buffer every time (S1).
         self._scanner = FrameScanner()
+        # A peer that speaks non-ASCII gets one notice per connection plus
+        # doubling-schedule summaries, not one ERROR per data_received():
+        # one byte per TCP segment used to buy x247 write amplification in
+        # a third party's log (Security round-5 Finding 1).
+        self._non_ascii = EventThrottle(
+            _LOGGER,
+            logging.ERROR,
+            "Received non-ASCII bytes from device; escaped them (affected frames are "
+            "dropped) - %d chunks, %d bytes so far on this connection",
+        )
         # Fire-and-forget work is tracked so failures are logged
         # immediately (L3). _tasks is connection-scoped work that
         # disconnect() cancels; _handler_tasks holds async lifecycle
@@ -685,21 +695,54 @@ class PowerPetDoorClient(asyncio.Protocol):
         if future is not None and not future.done():
             future.set_result(result)
 
+    @staticmethod
+    def _payload_mapping(msg: dict, key: str) -> dict | None:
+        """Return ``msg[key]`` when the device sent a mapping there.
+
+        Every sub-object in a response is device-supplied, so ``field in
+        msg[key]`` raises ``TypeError`` for a scalar and ``msg[key]``
+        raises ``KeyError`` when absent - both escape into
+        ``_LOGGER.exception``, a full traceback per frame, where the
+        graceful "Response missing expected field" path already exists
+        (Security round-5 Finding 1).
+        """
+        value = msg.get(key)
+        return value if isinstance(value, dict) else None
+
     # -------------------------------------------------------------------------
     # Response Handlers - registered via decorator pattern
     # -------------------------------------------------------------------------
 
     @ResponseHandlerRegistry.handler(CMD_GET_DOOR_STATUS, DOOR_STATUS)
     def _handle_door_status(self, msg: dict, future) -> None:
-        """Handle door status responses."""
+        """Handle door status responses.
+
+        A legal envelope missing the payload field returns without
+        resolving, which process_message turns into the typed
+        ``CommandError("Response missing expected field")`` a few lines
+        below its handler call. Indexing directly instead raised a
+        ``KeyError`` into ``_LOGGER.exception`` - a full traceback per
+        39-byte frame, x12.7 write amplification, for a case the graceful
+        path already covered (Security round-5 Finding 1).
+        """
+        if FIELD_DOOR_STATUS not in msg:
+            return
         status = msg[FIELD_DOOR_STATUS]
         self._notify_listeners(self.door_status_listeners, status)
         self._resolve_future(future, status)
 
     @ResponseHandlerRegistry.handler(CMD_GET_SETTINGS)
     def _handle_get_settings(self, msg: dict, future) -> None:
-        """Handle settings response - extracts many sub-values."""
-        settings = msg[FIELD_SETTINGS]
+        """Handle settings response - extracts many sub-values.
+
+        Missing or non-mapping payloads take the "Response missing
+        expected field" path rather than a traceback (see
+        :meth:`_handle_door_status`); ``field in settings`` raises
+        ``TypeError`` for a scalar, which is the same amplification.
+        """
+        settings = self._payload_mapping(msg, FIELD_SETTINGS)
+        if settings is None:
+            return
         self._notify_listeners(self.settings_listeners, settings)
 
         # Notify sensor listeners for fields in settings
@@ -743,8 +786,14 @@ class PowerPetDoorClient(asyncio.Protocol):
 
     @ResponseHandlerRegistry.handler(CMD_GET_NOTIFICATIONS, CMD_SET_NOTIFICATIONS)
     def _handle_notifications(self, msg: dict, future) -> None:
-        """Handle notifications response."""
-        notifications = msg[FIELD_NOTIFICATIONS]
+        """Handle notifications response.
+
+        Same missing/non-mapping guard as :meth:`_handle_get_settings` -
+        this is the sibling site with the identical shape.
+        """
+        notifications = self._payload_mapping(msg, FIELD_NOTIFICATIONS)
+        if notifications is None:
+            return
         notification_fields = [
             FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
             FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
@@ -824,8 +873,9 @@ class PowerPetDoorClient(asyncio.Protocol):
     )
     def _handle_safety_lock(self, msg: dict, future) -> None:
         """Handle outside sensor safety lock responses."""
-        if FIELD_SETTINGS in msg and FIELD_OUTSIDE_SENSOR_SAFETY_LOCK in msg[FIELD_SETTINGS]:
-            val = make_bool(msg[FIELD_SETTINGS][FIELD_OUTSIDE_SENSOR_SAFETY_LOCK])
+        settings = self._payload_mapping(msg, FIELD_SETTINGS)
+        if settings is not None and FIELD_OUTSIDE_SENSOR_SAFETY_LOCK in settings:
+            val = make_bool(settings[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK])
             self._notify_listeners(
                 self.sensor_listeners[FIELD_OUTSIDE_SENSOR_SAFETY_LOCK],
                 FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
@@ -838,8 +888,9 @@ class PowerPetDoorClient(asyncio.Protocol):
     )
     def _handle_cmd_lockout(self, msg: dict, future) -> None:
         """Handle command lockout responses."""
-        if FIELD_SETTINGS in msg and FIELD_CMD_LOCKOUT in msg[FIELD_SETTINGS]:
-            val = make_bool(msg[FIELD_SETTINGS][FIELD_CMD_LOCKOUT])
+        settings = self._payload_mapping(msg, FIELD_SETTINGS)
+        if settings is not None and FIELD_CMD_LOCKOUT in settings:
+            val = make_bool(settings[FIELD_CMD_LOCKOUT])
             self._notify_listeners(self.sensor_listeners[FIELD_CMD_LOCKOUT], FIELD_CMD_LOCKOUT, val)
             self._resolve_future(future, val)
 
@@ -848,8 +899,9 @@ class PowerPetDoorClient(asyncio.Protocol):
     )
     def _handle_autoretract(self, msg: dict, future) -> None:
         """Handle autoretract responses."""
-        if FIELD_SETTINGS in msg and FIELD_AUTORETRACT in msg[FIELD_SETTINGS]:
-            val = make_bool(msg[FIELD_SETTINGS][FIELD_AUTORETRACT])
+        settings = self._payload_mapping(msg, FIELD_SETTINGS)
+        if settings is not None and FIELD_AUTORETRACT in settings:
+            val = make_bool(settings[FIELD_AUTORETRACT])
             self._notify_listeners(self.sensor_listeners[FIELD_AUTORETRACT], FIELD_AUTORETRACT, val)
             self._resolve_future(future, val)
 
@@ -907,7 +959,13 @@ class PowerPetDoorClient(asyncio.Protocol):
 
     @ResponseHandlerRegistry.handler(CMD_GET_SCHEDULE_LIST)
     def _handle_schedule_list(self, msg: dict, future) -> None:
-        """Handle schedule list response."""
+        """Handle schedule list response.
+
+        Same missing-field guard as :meth:`_handle_door_status` - the last
+        of the four handlers that indexed its payload field directly.
+        """
+        if FIELD_SCHEDULES not in msg:
+            return
         self._resolve_future(future, msg[FIELD_SCHEDULES])
 
     @ResponseHandlerRegistry.handler(CMD_DELETE_SCHEDULE)
@@ -1200,7 +1258,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._reconnect_attempts = 0
 
         if self.cfg_keepalive:
-            self._keepalive = self.ensure_future(self.keepalive())
+            self._keepalive = self._track_task(self.keepalive())
 
         # Flush anything that was enqueued while disconnected (L3),
         # otherwise open the dequeue gate for the next enqueue.
@@ -1331,6 +1389,10 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._failed_pings = 0
         self._inflight_msg_id = None
         self._scanner.reset()
+        # Same connection scope as the scanner: report the tail, then start
+        # the next connection's count clean.
+        self._non_ascii.flush()
+        self._non_ascii.reset()
         self._queue.clear()
         self._msg_sequence = 0  # Reset sequence counter
 
@@ -1486,10 +1548,10 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._last_send = time.monotonic()
 
             if self.cfg_keepalive:
-                self._keepalive = self.ensure_future(self.keepalive())
+                self._keepalive = self._track_task(self.keepalive())
 
             if self._last_command:
-                self._check_receipt = self.ensure_future(self.check_receipt(rawdata))
+                self._check_receipt = self._track_task(self.check_receipt(rawdata))
             else:
                 await self.dequeue_data()
 
@@ -1552,9 +1614,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         # json.loads and is skipped on its own.
         decoded = data.decode("ascii", errors="backslashreplace")
         if len(decoded) != len(data):
-            _LOGGER.error(
-                "Received non-ASCII bytes from device; escaped them (affected frames are dropped)"
-            )
+            self._non_ascii.record(len(data))
 
         # Device bytes reach an operator's terminal through the host
         # application's log (`tail -f`, `journalctl`, `docker logs`), so ESC
@@ -1565,6 +1625,21 @@ class PowerPetDoorClient(asyncio.Protocol):
             _LOGGER.debug("RX < %s", sanitize_text(decoded))
         frames, diag = self._scanner.feed(decoded)
 
+        if diag.overflow:
+            # Checked before dispatch, not after: _drop_connection() ->
+            # disconnect() cancels every task in `_tasks`, so frames
+            # dispatched first were created and then killed before they ran
+            # - a complete, legitimate frame vanishing with nothing in the
+            # log to say so (T5). Report the loss instead of hiding it.
+            _LOGGER.error(
+                "Receive buffer exceeded %d bytes without a complete message; disconnecting "
+                "(discarding %d complete frame(s) received in the same read)",
+                MAX_BUFFER_SIZE,
+                len(frames),
+            )
+            self._drop_connection()
+            return
+
         for frame in frames:
             try:
                 msg = json.loads(frame)
@@ -1572,13 +1647,6 @@ class PowerPetDoorClient(asyncio.Protocol):
                 _LOGGER.error("Failed to decode JSON frame (%s): %s", err, sanitize_text(frame))
                 continue
             self._track_task(self.process_message(msg))
-
-        if diag.overflow:
-            _LOGGER.error(
-                "Receive buffer exceeded %d bytes without a complete message; disconnecting",
-                MAX_BUFFER_SIZE,
-            )
-            self._drop_connection()
 
     async def process_message(self, msg) -> None:
         """Process an incoming message from the device.

@@ -281,6 +281,14 @@ from powerpetdoor import (
     CMD_GET_NOTIFICATIONS,
     CMD_GET_SCHEDULE_LIST,
     CMD_GET_SCHEDULE,
+    CMD_GET_AUTORETRACT,                 # read counterparts of the
+    CMD_GET_CMD_LOCKOUT,                 # enable/disable commands below
+    CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
+
+    # Diagnostic queries (use with CONFIG)
+    CMD_HAS_REMOTE_ID,
+    CMD_HAS_REMOTE_KEY,
+    CMD_CHECK_RESET_REASON,
 
     # Configuration commands (use with CONFIG)
     CMD_SET_HOLD_TIME,
@@ -331,6 +339,26 @@ client.send_message(COMMAND, CMD_DISABLE_OUTSIDE)
 client.send_message(COMMAND, CMD_POWER_ON)
 client.send_message(COMMAND, CMD_POWER_OFF)
 ```
+
+### Envelope, Field and State Constants
+
+Every wire name the client reads or writes is also exported as a constant,
+so callers never have to spell a protocol string by hand. Their *values*
+and semantics are documented in
+[docs/protocol.md](protocol.md) — this is the name-to-group index.
+
+| Group | Constants | Documented in |
+|-------|-----------|---------------|
+| Envelope | `FIELD_CMD`, `FIELD_SUCCESS`, `FIELD_REASON`, `FIELD_MSG_ID`, `FIELD_MSG_ID_RESPONSE`, `FIELD_DIRECTION` | [Message Envelope](protocol.md#message-format) |
+| Direction | `DOOR_TO_PHONE`, `PHONE_TO_DOOR` | [Message Envelope](protocol.md#message-format) |
+| Door state values | `DOOR_STATE_IDLE`, `DOOR_STATE_CLOSED`, `DOOR_STATE_RISING`, `DOOR_STATE_SLOWING`, `DOOR_STATE_HOLDING`, `DOOR_STATE_KEEPUP`, `DOOR_STATE_CLOSING_TOP_OPEN`, `DOOR_STATE_CLOSING_MID_OPEN` | [Door Status Values](protocol.md#door-status-values) |
+| Status payload | `FIELD_DOOR_STATUS`, `FIELD_SENSOR_STATE` | [Door Status Values](protocol.md#door-status-values) |
+| Notification flags | `FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS`, `FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS`, `FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS`, `FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS`, `FIELD_LOW_BATTERY_NOTIFICATIONS` | [Notification Settings Fields](protocol.md#notification-settings-fields) |
+| Hardware / firmware | `FIELD_FW_MAJOR`, `FIELD_FW_MINOR`, `FIELD_FW_PATCH`, `FIELD_HW_VERSION`, `FIELD_HW_REVISION` | [Hardware Info](protocol.md#settings-fields) |
+| Diagnostics | `FIELD_HAS_REMOTE_ID`, `FIELD_HAS_REMOTE_KEY`, `FIELD_RESET_REASON` | [Diagnostic Commands](protocol.md#diagnostic-commands) |
+
+`DoorStatus.from_string()` ([door.md](door.md#doorstatus)) maps the
+`DOOR_STATE_*` values onto an enum if you would rather not compare strings.
 
 ## Listeners
 
@@ -517,25 +545,30 @@ make_bool(0)        # False
 For advanced queue manipulation (rarely needed):
 
 ```python
-from powerpetdoor import PrioritizedMessage
+from powerpetdoor import PRIORITY_HIGH, PrioritizedMessage
 
 msg = PrioritizedMessage(
-    priority=1,    # Lower = higher priority
-    sequence=0,    # For FIFO ordering within same priority
+    priority=PRIORITY_HIGH,    # Lower value = higher priority
+    sequence=0,                # For FIFO ordering within same priority
     data={"cmd": "OPEN"}
 )
 ```
 
 ## Message Priority
 
-Messages are automatically prioritized:
+Messages are automatically prioritized. The levels are exported as
+constants — prefer them to the bare numbers:
 
-| Priority | Message Types |
-|----------|--------------|
-| Critical (0) | PING/PONG keepalives |
-| High (1) | Door control (OPEN, OPEN_AND_HOLD, CLOSE) |
-| Medium (2) | Settings changes (enable/disable, power, SET_*) |
-| Low (3) | Status queries (GET_*) and schedule commands |
+```python
+from powerpetdoor import PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_MEDIUM
+```
+
+| Constant | Value | Message Types |
+|----------|-------|--------------|
+| `PRIORITY_CRITICAL` | 0 | PING/PONG keepalives |
+| `PRIORITY_HIGH` | 1 | Door control (OPEN, OPEN_AND_HOLD, CLOSE) |
+| `PRIORITY_MEDIUM` | 2 | Settings changes (enable/disable, power, SET_*) |
+| `PRIORITY_LOW` | 3 | Status queries (GET_*) and schedule commands |
 
 This ensures keepalives and urgent door commands are processed before routine queries.
 

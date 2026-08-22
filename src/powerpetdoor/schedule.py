@@ -89,17 +89,31 @@ def coerce_schedule_day(value: object, position: int) -> bool:
     return flag
 
 
+#: Widest legacy ``daysOfWeek`` bitmask: seven days, bit 0 = Sunday.
+MAX_DAYS_BITMASK = 0b1111111
+
+
 def coerce_schedule_days(value: object) -> list[bool]:
     """Coerce an untrusted ``daysOfWeek`` value to exactly 7 booleans.
 
     Accepts the protocol's 7-element list or the legacy integer bitmask.
+    The bitmask is range-checked like every other numeric wire field:
+    ``(-1 >> i) & 1`` is 1 forever, so an unbounded mask turned *every*
+    negative integer into "active all seven days" - failing open, which is
+    the exact opposite of the doctrine :func:`coerce_schedule_flag`
+    documents (R5-L1).
 
     Raises:
-        ValueError: If the value is neither of those shapes, or an element
-            is not a 0/1 flag.
+        ValueError: If the value is neither of those shapes, an element is
+            not a 0/1 flag, or the bitmask is out of range.
     """
     if isinstance(value, int):
         # Legacy bitmask -> [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+        if not 0 <= value <= MAX_DAYS_BITMASK:
+            raise ValueError(
+                f"Schedule daysOfWeek bitmask must be between 0 and {MAX_DAYS_BITMASK}, "
+                f"got {value!r}"
+            )
         return [bool((value >> i) & 1) for i in range(7)]
     if isinstance(value, list) and len(value) == 7:
         return [coerce_schedule_day(day, i) for i, day in enumerate(value)]
@@ -264,13 +278,19 @@ def validate_schedule_entry(sched: dict) -> bool:
         return False
 
 
-# Schedule template with all fields initialized to defaults
+# Schedule template with all fields initialized to defaults.
+#
+# Wire types match docs/protocol.md "Schedule Format" (and therefore
+# ``simulator.state.Schedule.to_dict``) field for field: ``index`` int,
+# ``daysOfWeek`` 7 ints, ``inside``/``outside`` JSON bools, ``enabled`` the
+# string "1"/"0", and ``{hour, min}`` ints. ``enabled`` was a JSON boolean
+# here, which every ``compress_schedule()`` result inherited (M1).
 schedule_template = {
     FIELD_INDEX: 0,
     FIELD_DAYSOFWEEK: [0, 0, 0, 0, 0, 0, 0],
     FIELD_INSIDE: False,
     FIELD_OUTSIDE: False,
-    FIELD_ENABLED: True,
+    FIELD_ENABLED: "1",
     FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX: {FIELD_HOUR: 0, FIELD_MINUTE: 0},
     FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX: {FIELD_HOUR: 0, FIELD_MINUTE: 0},
     FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX: {FIELD_HOUR: 0, FIELD_MINUTE: 0},
@@ -493,6 +513,16 @@ def schedule_entry_content_key(entry: dict) -> tuple:
     This allows comparing entries by their actual content rather than their index,
     which is important for incremental sync since compression may reassign indices.
 
+    Every flag is read through the shared coercers, so the wire spellings
+    the rest of the codebase already accepts (``"1"``/``1``/``true``) all
+    collapse to the same key. This is the third reader of ``daysOfWeek``
+    and it was the only one still comparing the field raw: against the
+    firmware variant that sends ``["1", ...]`` - the one
+    ``compress_schedule`` and ``coerce_schedule_day`` were both hardened
+    for - every entry looked changed, so the incremental-sync path this
+    function exists to enable issued a full ``SET_SCHEDULE`` sweep at every
+    sync against a single-connection, rate-limited device (L1).
+
     Args:
         entry: Schedule entry dictionary
 
@@ -517,21 +547,25 @@ def schedule_entry_content_key(entry: dict) -> tuple:
         entry.get(FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX, {}).get(FIELD_MINUTE, 0),
     )
 
-    # Normalize enabled to boolean - door returns '1'/'0' strings, we use True/False
-    enabled = entry.get(FIELD_ENABLED, True)
-    if isinstance(enabled, str):
-        enabled = enabled == "1"
+    # Every flag through the shared coercers (make_bool under the hood), so
+    # "1"/1/True are one key and "0"/0/False/absent are another. The three
+    # hand-rolled `== "1"` normalizations that used to live here were the
+    # last places in the tree reading a wire flag without make_bool.
+    enabled = coerce_schedule_flag(entry.get(FIELD_ENABLED, True), FIELD_ENABLED)
+    inside = coerce_schedule_flag(entry.get(FIELD_INSIDE, False), FIELD_INSIDE)
+    outside = coerce_schedule_flag(entry.get(FIELD_OUTSIDE, False), FIELD_OUTSIDE)
 
-    # Normalize inside/outside to boolean in case they come as strings
-    inside = entry.get(FIELD_INSIDE, False)
-    if isinstance(inside, str):
-        inside = inside == "1"
-    outside = entry.get(FIELD_OUTSIDE, False)
-    if isinstance(outside, str):
-        outside = outside == "1"
+    days = entry.get(FIELD_DAYSOFWEEK, [0] * 7)
+    try:
+        day_key: tuple = tuple(coerce_schedule_days(days))
+    except ValueError:
+        # Unrecognizable day masks still have to produce *some* key rather
+        # than raise out of a diffing helper; keep them distinct from every
+        # readable mask by tagging the raw repr.
+        day_key = ("?", repr(days))
 
     return (
-        tuple(entry.get(FIELD_DAYSOFWEEK, [0] * 7)),
+        day_key,
         inside,
         outside,
         enabled,

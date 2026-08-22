@@ -33,6 +33,7 @@ from powerpetdoor.const import (
     FIELD_OUTSIDE_PREFIX,
     FIELD_START_TIME_SUFFIX,
 )
+from tests.conftest import assert_schedule_wire_types
 
 # ============================================================================
 # Helper Functions Tests
@@ -230,6 +231,29 @@ class TestValidateScheduleEntry:
 
 class TestCompressSchedule:
     """Tests for schedule compression algorithm."""
+
+    def test_compressed_entries_carry_documented_wire_types(self):
+        """compress_schedule() output goes straight onto the wire (M1).
+
+        Every entry is a deep copy of ``schedule_template``, so a wrong
+        wire type there ships in every incremental sync. Checked with the
+        same field-by-field assertion both ``Schedule.to_dict`` emitters
+        are checked with.
+        """
+        entries = compress_schedule(
+            [
+                self.create_schedule_entry(
+                    0, [1, 0, 1, 0, 1, 0, 1], inside=True, in_start=(6, 30), in_end=(22, 15)
+                ),
+                self.create_schedule_entry(
+                    1, [1, 1, 0, 0, 0, 0, 0], outside=True, out_start=(8, 0), out_end=(9, 0)
+                ),
+            ]
+        )
+
+        assert len(entries) == 2
+        for entry in entries:
+            assert_schedule_wire_types(entry)
 
     def create_schedule_entry(
         self,
@@ -697,6 +721,115 @@ class TestScheduleEntryContentKey:
         assert schedule_entry_content_key(enabled) != schedule_entry_content_key(disabled)
         assert schedule_entry_content_key(disabled)[3] is False
 
+    @pytest.mark.parametrize("flag", ["1", 1, True], ids=repr)
+    def test_day_flag_spellings_all_produce_one_key(self, flag):
+        """String day flags must not make every entry look changed (L1).
+
+        This is the third reader of ``daysOfWeek`` and the only one that
+        was still comparing the field raw. Against the firmware variant
+        ``compress_schedule`` and ``coerce_schedule_day`` were both
+        hardened for, ``("1", ...)`` and ``(1, ...)`` were different keys,
+        so ``compute_schedule_diff`` reported every entry as changed and
+        the incremental sync issued a full SET_SCHEDULE sweep.
+        """
+        canonical = {FIELD_DAYSOFWEEK: [1] * 7, FIELD_INSIDE: True}
+        variant = {FIELD_DAYSOFWEEK: [flag] * 7, FIELD_INSIDE: True}
+
+        assert schedule_entry_content_key(variant) == schedule_entry_content_key(canonical)
+
+    @pytest.mark.parametrize("flag", ["0", 0, False], ids=repr)
+    def test_disabled_day_flag_spellings_all_produce_one_key(self, flag):
+        """bool("0") is True, so the off spellings must collapse too (L1)."""
+        canonical = {FIELD_DAYSOFWEEK: [0] * 7, FIELD_INSIDE: True}
+        variant = {FIELD_DAYSOFWEEK: [flag] * 7, FIELD_INSIDE: True}
+
+        assert schedule_entry_content_key(variant) == schedule_entry_content_key(canonical)
+        assert schedule_entry_content_key(variant) != schedule_entry_content_key(
+            {FIELD_DAYSOFWEEK: [1] * 7, FIELD_INSIDE: True}
+        )
+
+    def test_integer_enabled_flag_matches_the_boolean(self):
+        """``enabled`` got half the treatment: str was read, int was not (L1)."""
+        assert schedule_entry_content_key(
+            {FIELD_DAYSOFWEEK: [1] * 7, FIELD_ENABLED: 0}
+        ) == schedule_entry_content_key({FIELD_DAYSOFWEEK: [1] * 7, FIELD_ENABLED: False})
+
+    def test_device_string_days_are_a_no_op_diff_against_local_ints(self):
+        """The measured symptom of L1: a full rewrite where nothing changed."""
+        local = {
+            FIELD_INDEX: 0,
+            FIELD_DAYSOFWEEK: [1, 1, 1, 1, 1, 1, 1],
+            FIELD_INSIDE: True,
+            FIELD_OUTSIDE: False,
+            FIELD_ENABLED: "1",
+            FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX: {FIELD_HOUR: 6, FIELD_MINUTE: 0},
+            FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX: {FIELD_HOUR: 22, FIELD_MINUTE: 0},
+            FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX: {FIELD_HOUR: 0, FIELD_MINUTE: 0},
+            FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX: {FIELD_HOUR: 0, FIELD_MINUTE: 0},
+        }
+        device = deepcopy(local)
+        device[FIELD_DAYSOFWEEK] = ["1"] * 7
+
+        to_delete, to_set = compute_schedule_diff([device], [local])
+
+        assert (to_delete, to_set) == ([], [])
+
+    def test_the_new_wire_types_diff_to_a_no_op_against_the_device(self):
+        """M1 and L1 compose: a device echo of what we sent is not a change.
+
+        The emitter fix put ``enabled: "1"`` on the wire and the key fix
+        made ``daysOfWeek`` spelling-insensitive. Together they have to
+        produce *no* diff for a device that stores exactly what
+        ``compress_schedule`` sent and answers ``GET_SCHEDULE`` with the
+        simulator's own emitter - otherwise the incremental sync path
+        rewrites every entry on every sync, which is what L1 measured.
+        """
+        from powerpetdoor.simulator import Schedule as SimulatorSchedule
+
+        local = compress_schedule(
+            [
+                {
+                    FIELD_INDEX: 0,
+                    FIELD_DAYSOFWEEK: [1, 0, 1, 0, 1, 0, 1],
+                    FIELD_INSIDE: True,
+                    FIELD_OUTSIDE: False,
+                    FIELD_ENABLED: "1",
+                    FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX: {
+                        FIELD_HOUR: 6,
+                        FIELD_MINUTE: 30,
+                    },
+                    FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX: {
+                        FIELD_HOUR: 22,
+                        FIELD_MINUTE: 15,
+                    },
+                    FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX: {
+                        FIELD_HOUR: 0,
+                        FIELD_MINUTE: 0,
+                    },
+                    FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX: {FIELD_HOUR: 0, FIELD_MINUTE: 0},
+                }
+            ]
+        )
+        # What the device answers after storing what we sent.
+        device = [SimulatorSchedule.from_dict(entry).to_dict() for entry in local]
+
+        assert compute_schedule_diff(device, local) == ([], [])
+
+    def test_unreadable_day_mask_still_produces_a_hashable_key(self):
+        """A diffing helper must not raise on a device's novel spelling.
+
+        An unreadable mask gets its own key rather than colliding with a
+        readable one, and stays usable as a dict key (a raw list would not
+        be).
+        """
+        weird = {FIELD_DAYSOFWEEK: [{"a": 1}] * 7, FIELD_INSIDE: True}
+        readable = {FIELD_DAYSOFWEEK: [1] * 7, FIELD_INSIDE: True}
+
+        key = schedule_entry_content_key(weird)
+
+        assert hash(key)
+        assert key != schedule_entry_content_key(readable)
+
 
 # ============================================================================
 # Schedule Diff Tests
@@ -870,7 +1003,10 @@ class TestScheduleTemplate:
         assert schedule_template[FIELD_DAYSOFWEEK] == [0, 0, 0, 0, 0, 0, 0]
         assert schedule_template[FIELD_INSIDE] is False
         assert schedule_template[FIELD_OUTSIDE] is False
-        assert schedule_template[FIELD_ENABLED] is True
+        # The wire spelling docs/protocol.md gives, not a JSON boolean:
+        # every compress_schedule() result inherits this template (M1).
+        assert schedule_template[FIELD_ENABLED] == "1"
+        assert isinstance(schedule_template[FIELD_ENABLED], str)
 
     def test_template_time_defaults(self):
         """Test template time field defaults."""

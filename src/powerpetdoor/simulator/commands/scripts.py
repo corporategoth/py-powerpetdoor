@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
-from ..scripting import list_extra_scripts, script_completer
+from ..scripting import describe_script_argument, list_extra_scripts, script_completer
 from .base import ArgSpec, CommandResult, command
 
 if TYPE_CHECKING:
@@ -27,6 +27,31 @@ RUN_WAIT_KEYWORD = "wait"
 STOP_ALL_KEYWORD = "all"
 
 
+class QueuedScript:
+    """One pending run: how to load it, what to call it, and its state.
+
+    Deliberately a plain object rather than a tuple or a NamedTuple:
+    ``run quick`` twelve times enqueues twelve *distinct* runs, so entries
+    must compare by identity. The display name is carried alongside the
+    reference because ``run`` has already loaded the script and knows it -
+    ``list`` used to print a raw ``./scripts/long2.yaml`` on its ``Queued:``
+    line while every other line printed ``Long Script B`` (T2).
+
+    Attributes:
+        ref: The reference passed to ``run``, used to load the script.
+        name: The script's display name.
+        cancelled: Set by :meth:`ScriptQueue.clear` when the entry is
+            dropped, including after the consumer has claimed it.
+    """
+
+    __slots__ = ("cancelled", "name", "ref")
+
+    def __init__(self, ref: str, name: str) -> None:
+        self.ref = ref
+        self.name = name
+        self.cancelled = False
+
+
 class ScriptQueue:
     """Script runs waiting to start, including the one already claimed.
 
@@ -36,44 +61,78 @@ class ScriptQueue:
     behind a ``run ... wait`` - which displayed as "nothing pending" when
     something was (M2). A claimed entry stays counted, and named, until its
     run actually starts.
+
+    A claim is *cancellable*, not merely visible. ``stop all`` used to
+    empty ``_waiting`` only, so the one entry claim-tracking exists for
+    survived the drop and started running seconds later - the drop count
+    contradicted the queue depth ``list`` had just printed, and clearing
+    one running plus N queued runs took two ``stop all`` commands
+    (frontend M1). :meth:`clear` now marks claimed entries cancelled and
+    :meth:`start` reports that to the consumer, which abandons the run.
     """
 
     def __init__(self) -> None:
-        self._waiting: deque[str] = deque()
-        self._claimed: list[str] = []
+        self._waiting: deque[QueuedScript] = deque()
+        self._claimed: list[QueuedScript] = []
         self._arrived = asyncio.Event()
 
-    async def put(self, script_ref: str) -> None:
-        """Queue a script reference to run when the runner is free."""
-        self._waiting.append(script_ref)
-        self._arrived.set()
+    async def put(self, script_ref: str, name: str) -> QueuedScript:
+        """Queue a script to run when the runner is free.
 
-    async def get(self) -> str:
+        Args:
+            script_ref: Reference the consumer loads the script from.
+            name: Display name, already known to the caller.
+
+        Returns:
+            The queued entry.
+        """
+        entry = QueuedScript(script_ref, name)
+        self._waiting.append(entry)
+        self._arrived.set()
+        return entry
+
+    async def get(self) -> QueuedScript:
         """Wait for the next queued run and claim it.
 
         The claim keeps the entry visible to :meth:`pending` while the
-        consumer waits for the run lock; :meth:`release` drops it once the
-        run has started.
+        consumer waits for the run lock; :meth:`start` drops it once the
+        run actually starts.
         """
         while not self._waiting:
             self._arrived.clear()
             await self._arrived.wait()
-        script_ref = self._waiting.popleft()
-        self._claimed.append(script_ref)
-        return script_ref
+        entry = self._waiting.popleft()
+        self._claimed.append(entry)
+        return entry
 
-    def release(self, script_ref: str) -> None:
-        """Drop a claim taken by :meth:`get`; a repeat call is a no-op."""
-        if script_ref in self._claimed:
-            self._claimed.remove(script_ref)
-
-    def clear(self) -> list[str]:
-        """Discard every run that has not been claimed yet.
+    def start(self, entry: QueuedScript) -> bool:
+        """Release a claim and report whether the run may proceed.
 
         Returns:
-            The references dropped, in queue order.
+            False if :meth:`clear` dropped this entry while the consumer
+            was parked on the run lock - the run must be abandoned, since
+            it is exactly the run the operator just discarded.
         """
-        dropped = list(self._waiting)
+        self.release(entry)
+        return not entry.cancelled
+
+    def release(self, entry: QueuedScript) -> None:
+        """Drop a claim taken by :meth:`get`; a repeat call is a no-op."""
+        if entry in self._claimed:
+            self._claimed.remove(entry)
+
+    def clear(self) -> list[QueuedScript]:
+        """Discard every pending run, claimed or not.
+
+        Returns:
+            The entries dropped, in the order :meth:`pending` reported
+            them - so ``len()`` of this always equals the ``queued`` count
+            ``status``/``list`` showed a moment earlier.
+        """
+        dropped = [*self._claimed, *self._waiting]
+        for entry in dropped:
+            entry.cancelled = True
+        self._claimed.clear()
         self._waiting.clear()
         return dropped
 
@@ -82,8 +141,8 @@ class ScriptQueue:
         return len(self._waiting) + len(self._claimed)
 
     def pending(self) -> list[str]:
-        """The pending run references, in the order they will run."""
-        return [*self._claimed, *self._waiting]
+        """The pending runs' names, in the order they will run."""
+        return [entry.name for entry in (*self._claimed, *self._waiting)]
 
 
 class ScriptStatus(NamedTuple):
@@ -93,7 +152,7 @@ class ScriptStatus(NamedTuple):
         running: Name of the running script, or None.
         queued: How many runs are still pending.
         stopping: Whether a stop has been requested for the running script.
-        pending: References of the pending runs, in order.
+        pending: Names of the pending runs, in order.
     """
 
     running: str | None
@@ -203,10 +262,16 @@ class ScriptsCommandsMixin:
         for name, desc in scripts:
             lines.append(f"  {name}: {desc}")
         extra = list_extra_scripts()
-        if extra:
+        if self._scripts_dir is not None:
+            # Header even when the directory is empty, exactly as
+            # `--list-scripts` prints it: a ctl user who cannot see the
+            # command line otherwise cannot tell "no --scripts-dir
+            # configured" from "configured but empty" (T5).
             lines.append(f"Scripts from {self._scripts_dir}:")
             for name, desc in extra:
                 lines.append(f"  {name}: {desc}")
+            if not extra:
+                lines.append("  (none)")
         status = self.script_status()
         lines.append(format_script_status(status))
         if status.pending:
@@ -248,17 +313,33 @@ class ScriptsCommandsMixin:
         its next step boundary and reports FAILED to whoever is waiting on
         it.
 
-        ``stop all`` also empties the pending queue, so an operator does not
-        have to issue one ``stop`` per queued entry and guess how many are
-        left (L2).
+        ``stop all`` also empties the pending queue - including a run the
+        consumer has already claimed but not started - so an operator does
+        not have to issue one ``stop`` per queued entry and guess how many
+        are left (L2, frontend M1). Its drop count therefore always matches
+        the ``queued`` count ``status``/``list`` reported a moment earlier.
         """
         status = self.script_status()
-        dropped: list[str] = []
+        dropped: list[QueuedScript] = []
         if scope == STOP_ALL_KEYWORD and self.script_queue:
             dropped = self.script_queue.clear()
         if status.running is None:
             if dropped:
                 return CommandResult(True, f"Dropped {len(dropped)} queued script(s)")
+            if scope == STOP_ALL_KEYWORD:
+                # "leave nothing running or queued" is already true, so a
+                # CI wrapper doing `ctl stop all || fail` must not see a
+                # failure for having nothing to do (T1).
+                return CommandResult(True, "Nothing running or queued")
+            if status.queued:
+                # A claimed-but-not-started run: something *is* pending
+                # even though nothing is running, so the flat "No script is
+                # running" was wrong and left the operator polling `list`.
+                return CommandResult(
+                    False,
+                    f"No script is running; {status.queued} queued "
+                    f"(use 'stop all' to discard them)",
+                )
             # `stop` used to be an alias for `shutdown`, so muscle memory is
             # the likeliest reason it lands on an idle simulator (T4).
             return CommandResult(
@@ -281,7 +362,7 @@ class ScriptsCommandsMixin:
             ArgSpec(
                 "script",
                 "string",
-                description="Script name or file path",
+                description=describe_script_argument,
                 completer=script_completer,
             ),
             ArgSpec(
@@ -309,7 +390,9 @@ class ScriptsCommandsMixin:
         try:
             script = self.load_script(script_ref)
             if self.script_queue and mode != RUN_WAIT_KEYWORD:
-                await self.script_queue.put(script_ref)
+                # The name goes onto the queue with the reference: `list`
+                # reports names, and the loader has already resolved it (T2).
+                await self.script_queue.put(script_ref, script.name)
                 return CommandResult(True, f"Queued script: {script.name}")
             else:
                 # Run directly (no queue configured, or 'wait' requested)

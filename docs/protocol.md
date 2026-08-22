@@ -445,6 +445,13 @@ the standard error envelope (`"success": "false"` plus a `reason` naming the
 offending field) and nothing is stored; `SET_SCHEDULE_LIST` rejects the whole
 batch rather than loading it partially.
 
+`SET_SCHEDULE_LIST` **requires** its `schedules` field, and it must be a list.
+An absent field is rejected (`schedules is required`) rather than treated as
+an empty list — otherwise a one-word packet wipes every stored schedule and
+answers success — and a wrong-typed one is rejected with
+`schedules must be a list, got ...`. Clearing every schedule is spelled out
+explicitly as `{"config": "SET_SCHEDULE_LIST", "schedules": []}`.
+
 The same validate-before-storing rule applies to every other `SET_*` command,
 so one malformed packet can never leave the simulator in a state a later
 command chokes on:
@@ -457,6 +464,7 @@ command chokes on:
 | `SET_SLEEP_SENSOR_TRIGGER_VOLTAGE` | a finite number in 0-65535 |
 | `SET_NOTIFICATIONS` | each supplied field must be a 0/1 flag (`"1"`/`1`/`true` and `"0"`/`0`/`false`); one bad field rejects the whole message, so a notification set is never half-applied |
 | `GET_SCHEDULE`, `DELETE_SCHEDULE` | `index` (when present) must be an integer in 0-255; a container, string, boolean or out-of-range value is rejected with a reason rather than raising |
+| `SET_SCHEDULE_LIST` | `schedules` is required and must be a list; absent or wrong-typed payloads are rejected with a reason and leave the store untouched |
 
 A rejection answers `{"success": "false", "reason": "<field> must be ..."}`
 and leaves state untouched.
@@ -556,13 +564,25 @@ without treating them as command responses.
 | `enabled` | "0"/"1" | Whether schedule is active |
 | `inside` | bool | This schedule controls inside sensor |
 | `outside` | bool | This schedule controls outside sensor |
-| `daysOfWeek` | [int] | [Sun, Mon, Tue, Wed, Thu, Fri, Sat], 1=active |
+| `daysOfWeek` | [int] | [Sun, Mon, Tue, Wed, Thu, Fri, Sat], 1=active. A legacy integer bitmask (bit 0 = Sunday, 0-127) is also accepted on input; out-of-range masks are rejected rather than read modulo 7 bits, because a negative mask would otherwise activate every day |
 | `in_start_time` | {hour, min} | Inside sensor start time |
 | `in_end_time` | {hour, min} | Inside sensor end time |
 | `out_start_time` | {hour, min} | Outside sensor start time |
 | `out_end_time` | {hour, min} | Outside sensor end time |
 
-Note: Each schedule controls ONE sensor. Set times for that sensor; the other sensor's times should be zeros.
+Note: Each schedule controls ONE sensor. Set times for that sensor; the other sensor's times should be zeros. If a payload sets *both* flags (out of spec, but the
+simulator's `schedule add both` produces it), the **inside** window wins.
+
+Both emitters in this project — `powerpetdoor.door.Schedule.to_dict()` (and
+therefore every `compress_schedule()` result) and the simulator's
+`Schedule.to_dict()` — produce exactly the types in the table above, and a
+golden-payload test on each side compares them against the same reference so
+neither can drift. Note in particular that `enabled` is the **string**
+`"1"`/`"0"`, not a JSON boolean, while `inside`/`outside` *are* JSON booleans.
+Readers on both sides accept `"1"`/`1`/`true` and `"0"`/`0`/`false`
+interchangeably.
+
+`GET_SCHEDULE_LIST` returns slot indices sorted ascending.
 
 ---
 

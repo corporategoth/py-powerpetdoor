@@ -131,6 +131,35 @@ class TestAllExports:
         assert "Door is locked" in str(err)
 
 
+class TestEveryExportIsDocumented:
+    """A name in ``__all__`` is public API, so the prose must mention it.
+
+    49 of 121 exports appeared in no doc at all (frontend L3) - including
+    the seven timezone helpers that bridge IANA names to the POSIX strings
+    ``door.set_timezone`` documents as its only accepted form, and the
+    ``PRIORITY_*`` constants the ``PrioritizedMessage`` example replaced
+    with a magic number. Pinned here so the next export cannot slip in
+    undocumented.
+    """
+
+    @staticmethod
+    def _all_doc_text() -> str:
+        """Every prose file a reader might reach for, not just the curated set."""
+        paths = [REPO_ROOT / "README.md", *sorted((REPO_ROOT / "docs").glob("*.md"))]
+        return "\n".join(path.read_text() for path in paths)
+
+    def test_the_doc_corpus_is_not_empty(self):
+        # Guard against the glob silently matching nothing after a move.
+        assert len(self._all_doc_text()) > 10000
+
+    def test_every_exported_name_appears_in_the_prose_docs(self):
+        text = self._all_doc_text()
+
+        undocumented = [name for name in powerpetdoor.__all__ if name not in text]
+
+        assert undocumented == []
+
+
 class TestDocImports:
     """Every documented package-root import block must execute."""
 

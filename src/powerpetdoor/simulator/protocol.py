@@ -124,7 +124,7 @@ from ..const import (
     SUCCESS_FALSE,
     SUCCESS_TRUE,
 )
-from ..framing import FrameScanner
+from ..framing import EventThrottle, FrameScanner
 from ..sanitize import sanitize_text
 from ..schedule import MAX_SCHEDULE_INDEX
 from ..tz_utils import get_posix_tz_string, is_cache_initialized
@@ -306,6 +306,15 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         # so an unauthenticated peer dribbling a never-terminated object
         # cannot make the daemon re-scan its retained buffer every time (S1).
         self._scanner = FrameScanner()
+        # Twin of the client's counter: one notice per connection plus
+        # doubling-schedule summaries, so a peer sending one non-ASCII byte
+        # per TCP segment cannot buy one WARNING per byte - amplified again
+        # by the control channel's log fan-out (Security round-5 Finding 1).
+        self._non_ascii = EventThrottle(
+            logger,
+            logging.WARNING,
+            "Simulator: escaped non-ASCII bytes in %d received chunks (%d bytes total)",
+        )
         self._tasks: set[asyncio.Task] = set()
         self._owns_engine = engine is None
         self.engine = engine or DoorMotionEngine(
@@ -326,6 +335,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc):
         logger.info("Simulator: Client disconnected")
+        # End of this connection's framing state: report the counters'
+        # suppressed tail rather than dropping it.
+        self._non_ascii.flush()
+        self._scanner.reset()
         for task in list(self._tasks):
             task.cancel()
         if self._owns_engine:
@@ -365,7 +378,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         # and is skipped on its own; later frames still arrive (L2).
         text = data.decode("ascii", errors="backslashreplace")
         if len(text) != len(data):
-            logger.warning("Simulator: escaped non-ASCII bytes in %d received bytes", len(data))
+            self._non_ascii.record(len(data))
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Simulator RX: %s", sanitize_log_text(text))
@@ -669,22 +682,35 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     @CommandRegistry.handler(CMD_SET_SCHEDULE_LIST)
     async def _handle_set_schedule_list(self, msg: dict, response: dict) -> None:
-        schedules_data = msg.get(FIELD_SCHEDULES, [])
-        if isinstance(schedules_data, list):
-            try:
-                parsed = [Schedule.from_dict(sched_data) for sched_data in schedules_data]
-            except ValueError as err:
-                # Reject the whole list atomically: a partial load would
-                # leave the simulator in a state no client asked for.
-                logger.warning("Simulator: Rejected schedule list: %s", sanitize_log_text(err))
-                response[FIELD_SUCCESS] = SUCCESS_FALSE
-                response[FIELD_REASON] = str(err)
-                return
-            # Clear existing and load new schedules
-            self.state.schedules.clear()
-            for schedule in parsed:
-                self.state.schedules[schedule.index] = schedule
-            logger.info("Simulator: Loaded %d schedules", len(schedules_data))
+        """Replace the whole schedule store from the wire.
+
+        The field is *required*, and must be a list. Defaulting an absent
+        ``schedules`` to ``[]`` made a one-word packet wipe every stored
+        schedule and answer ``success: "true"``, and a wrong-typed field
+        fell straight through to the same success response having done
+        nothing (L2). "Clear everything" now has to be spelled out as an
+        explicit ``"schedules": []``, and every other shape is rejected
+        with a reason the way docs/protocol.md says every ``SET_*`` is.
+        """
+        if FIELD_SCHEDULES not in msg:
+            raise WireValueError(f"{FIELD_SCHEDULES} is required")
+        schedules_data = msg[FIELD_SCHEDULES]
+        if not isinstance(schedules_data, list):
+            raise WireValueError(f"{FIELD_SCHEDULES} must be a list, got {schedules_data!r}")
+        try:
+            parsed = [Schedule.from_dict(sched_data) for sched_data in schedules_data]
+        except ValueError as err:
+            # Reject the whole list atomically: a partial load would
+            # leave the simulator in a state no client asked for.
+            logger.warning("Simulator: Rejected schedule list: %s", sanitize_log_text(err))
+            response[FIELD_SUCCESS] = SUCCESS_FALSE
+            response[FIELD_REASON] = str(err)
+            return
+        # Clear existing and load new schedules
+        self.state.schedules.clear()
+        for schedule in parsed:
+            self.state.schedules[schedule.index] = schedule
+        logger.info("Simulator: Loaded %d schedules", len(schedules_data))
         response[FIELD_SCHEDULES] = self.state.get_schedule_list()
 
     # ==========================================================================

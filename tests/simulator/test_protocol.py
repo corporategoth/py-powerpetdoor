@@ -708,8 +708,15 @@ class TestProtocolViolations:
         # Nothing was stored, so schedule evaluation can never trip over it.
         assert state.schedules == {}
 
-    async def test_set_schedule_with_bad_hour_is_rejected(self, protocol, mock_transport, state):
-        """A non-numeric hour is refused with the standard error envelope."""
+    async def test_set_schedule_with_bad_hour_is_rejected(
+        self, protocol, mock_transport, state, caplog
+    ):
+        """A non-numeric hour is refused with the standard error envelope.
+
+        The operator-facing warning is asserted too: deleting it left the
+        control flow intact and survived the whole suite (R5-L4).
+        """
+        caplog.set_level(logging.WARNING, logger="powerpetdoor.simulator.protocol")
         await dispatch(
             protocol,
             {
@@ -727,6 +734,7 @@ class TestProtocolViolations:
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
         assert response[FIELD_REASON] == "Schedule start time hour must be a number, got 'noon'"
         assert state.schedules == {}
+        assert "Simulator: Rejected schedule: " in caplog.text
 
     async def test_set_schedule_list_rejects_the_whole_list_atomically(
         self, protocol, mock_transport, state
@@ -1394,19 +1402,62 @@ class TestSetHandlers:
         assert sorted(state.schedules.keys()) == [1, 2]
         assert last_response(mock_transport)[FIELD_SCHEDULES] == [1, 2]
 
-    async def test_set_schedule_list_non_list_leaves_schedules(
-        self, protocol, mock_transport, state
+    @pytest.mark.parametrize(
+        "schedules",
+        ["not-a-list", {"a": 1}, 5, True, None],
+        ids=repr,
+    )
+    async def test_set_schedule_list_rejects_a_non_list_payload(
+        self, protocol, mock_transport, state, schedules
     ):
-        """A non-list payload leaves schedules untouched and echoes them."""
+        """A wrong-typed payload is rejected with a reason, not ignored (L2).
+
+        It used to skip the load branch and fall straight through to the
+        success response, reporting success for a message that did nothing
+        - the opposite of what docs/protocol.md promises for every SET_*.
+        """
         from powerpetdoor.simulator import Schedule
 
         state.schedules[9] = Schedule(index=9, inside=True)
         await dispatch(
-            protocol, {CONFIG: CMD_SET_SCHEDULE_LIST, FIELD_SCHEDULES: "not-a-list", "msgId": 1}
+            protocol, {CONFIG: CMD_SET_SCHEDULE_LIST, FIELD_SCHEDULES: schedules, "msgId": 1}
         )
 
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == f"schedules must be a list, got {schedules!r}"
         assert list(state.schedules.keys()) == [9]
-        assert last_response(mock_transport)[FIELD_SCHEDULES] == [9]
+
+    async def test_set_schedule_list_requires_the_field(self, protocol, mock_transport, state):
+        """An absent ``schedules`` must not wipe the store (L2).
+
+        ``msg.get(FIELD_SCHEDULES, [])`` defaulted to the empty list, which
+        took the "load new schedules" branch: a one-word packet cleared
+        every schedule and answered success.
+        """
+        from powerpetdoor.simulator import Schedule
+
+        state.schedules[9] = Schedule(index=9, inside=True)
+        await dispatch(protocol, {CONFIG: CMD_SET_SCHEDULE_LIST, "msgId": 1})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == "schedules is required"
+        assert list(state.schedules.keys()) == [9]
+
+    async def test_set_schedule_list_clears_only_when_asked_explicitly(
+        self, protocol, mock_transport, state
+    ):
+        """ "Clear everything" is spelled ``"schedules": []`` and still works."""
+        from powerpetdoor.simulator import Schedule
+
+        state.schedules[9] = Schedule(index=9, inside=True)
+        await dispatch(protocol, {CONFIG: CMD_SET_SCHEDULE_LIST, FIELD_SCHEDULES: [], "msgId": 1})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert response[FIELD_SCHEDULES] == []
+        assert state.schedules == {}
 
 
 # ============================================================================

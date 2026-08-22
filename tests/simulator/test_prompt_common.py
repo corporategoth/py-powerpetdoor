@@ -80,18 +80,18 @@ class TestRenderResult:
         assert render_result(42) == ">>> 42"
 
 
-class TestFormatOutputSanitizes:
-    """format_output must not be a second, unsanitized path (T2)."""
+class TestFormatRecallSanitizes:
+    """The recall echo must not be a second, unsanitized path (T2/T6)."""
 
-    def test_plain_message_is_sanitized(self):
-        line = InputLine(original="timezone", resolved="timezone", was_history_recall=False)
-        assert InteractiveSession.format_output(None, line, "TZ: \x1b[2J") == ">>> TZ: \\x1b[2J"
-
-    def test_history_recall_prefix_is_sanitized_too(self):
+    def test_history_recall_prefix_is_sanitized(self):
         line = InputLine(original="!1", resolved="tz \x1b[2J", was_history_recall=True)
-        rendered = InteractiveSession.format_output(None, line, "TZ: \x1b[2J")
+        rendered = InteractiveSession.format_recall(line)
         assert "\x1b" not in rendered
-        assert rendered == ">>> !1 -> tz \\x1b[2J\n>>> TZ: \\x1b[2J"
+        assert rendered == ">>> !1 -> tz \\x1b[2J"
+
+    def test_recall_of_an_escaped_original_is_sanitized_too(self):
+        line = InputLine(original="!\x1b[2J", resolved="status", was_history_recall=True)
+        assert InteractiveSession.format_recall(line) == ">>> !\\x1b[2J -> status"
 
 
 class TestEscapeUnescape:
@@ -514,6 +514,30 @@ class TestCompleterInternals:
         # 'clear' from the string arg's choices, plus the help pseudo-subcommand
         assert self._completions("history ") == ["clear", "help"]
 
+    def test_choice_completions_use_the_arg_description_as_meta(self):
+        """`stop ⇥⇥` showed "all    all" - the value as its own gloss (T3).
+
+        ``bool_toggle`` shows "on -> Enable" and ``days`` shows
+        "weekdays -> Monday-Friday"; the ArgSpec description was right
+        there and the meta column was echoing the value instead.
+        """
+        from prompt_toolkit.document import Document
+
+        completions = {
+            c.text: c for c in self._completer().get_completions(Document("stop ", 5), None)
+        }
+
+        assert completions["all"].display_meta_text == ("'all' to discard every queued run as well")
+
+    def test_choice_completions_fall_back_to_the_value(self):
+        """An ArgSpec with no description still gets a usable meta column."""
+        info = SimpleNamespace(
+            args=[SimpleNamespace(arg_type="choice", choices=["ALPHA"], describe=lambda: "")],
+            subcommands=None,
+        )
+
+        assert self._completer()._get_arg_options_for_info(info, "", 0) == [("alpha", "ALPHA")]
+
     def test_run_uses_prefix_aware_script_completer(self):
         assert "basic_cycle" in self._completions("run ")
 
@@ -766,16 +790,11 @@ class TestHandleResult:
         session.handle_result(InputLine("status", "status", False), True)  # no raise
 
 
-class TestFormatOutput:
-    def test_normal_output_prefixed(self):
-        session = InteractiveSession(history_file="none")
-        line = InputLine("status", "status", False)
-        assert session.format_output(line, "Door: CLOSED") == ">>> Door: CLOSED"
-
+class TestFormatRecall:
     def test_recall_output_shows_resolution(self):
         session = InteractiveSession(history_file="none")
         line = InputLine("!1", "status", True)
-        assert session.format_output(line, "Door: CLOSED") == (">>> !1 -> status\n>>> Door: CLOSED")
+        assert session.format_recall(line) == ">>> !1 -> status"
 
 
 # ============================================================================

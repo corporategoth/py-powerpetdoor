@@ -35,8 +35,10 @@ from powerpetdoor.const import (
     CMD_GET_DOOR_STATUS,
     CMD_GET_HOLD_TIME,
     CMD_GET_HW_INFO,
+    CMD_GET_NOTIFICATIONS,
     CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
     CMD_GET_SCHEDULE,
+    CMD_GET_SCHEDULE_LIST,
     CMD_GET_SENSOR_TRIGGER_VOLTAGE,
     CMD_GET_SETTINGS,
     CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
@@ -51,6 +53,7 @@ from powerpetdoor.const import (
     FIELD_CMD_LOCKOUT,
     FIELD_INSIDE,
     FIELD_LOW_BATTERY_NOTIFICATIONS,
+    FIELD_NOTIFICATIONS,
     FIELD_OUTSIDE,
     FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
     FIELD_POWER,
@@ -58,6 +61,7 @@ from powerpetdoor.const import (
     FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
     FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
     FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
+    FIELD_SETTINGS,
     FIELD_SUCCESS,
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
@@ -1172,19 +1176,25 @@ class TestCheckReceipt:
 
         assert client._transport is None
 
-    async def test_send_data_transport_gone_after_sleep(self, mock_client):
-        """disconnect() during the rate-limit sleep is not fatal (M7)."""
+    async def test_send_data_transport_gone_after_sleep(self, mock_client, caplog):
+        """disconnect() during the rate-limit sleep is not fatal (M7).
+
+        The warning is the only trace of the dropped message, so it is
+        asserted (R5-L4).
+        """
         client, transport, _ = mock_client
         client._last_command = None
         client._last_send = time.monotonic()  # Forces the rate-limit sleep
 
-        send_task = asyncio.ensure_future(client._send_data(b'{"config": "X"}'))
-        await asyncio.sleep(0)  # Let _send_data reach its sleep
-        client.disconnect()
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            send_task = asyncio.ensure_future(client._send_data(b'{"config": "X"}'))
+            await asyncio.sleep(0)  # Let _send_data reach its sleep
+            client.disconnect()
 
-        await send_task  # Must not raise AttributeError
+            await send_task  # Must not raise AttributeError
 
         assert transport.written_data == []
+        assert "Connection closed while waiting to send; dropping message" in caplog.text
 
 
 # ============================================================================
@@ -1274,6 +1284,40 @@ class TestClientProtocolViolations:
         assert client._buffer == ""
         assert "Received non-ASCII bytes from device" in caplog.text
 
+    def test_non_ascii_notice_is_throttled_per_connection(self, mock_client, caplog):
+        """One notice, then doubling summaries - not one ERROR per chunk.
+
+        A peer sending one non-ASCII byte per TCP segment bought one ERROR
+        per byte in a third party's log: x247 write amplification, no
+        self-limiting, in the shipped library (Security round-5 Finding 1).
+        """
+        client, _, _ = mock_client
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            for _ in range(1000):
+                client.data_received(b"\x80")
+
+        records = [r for r in caplog.records if r.name == "powerpetdoor.client"]
+        # 1, 2, 4, ... 512: ten records for a thousand hostile chunks.
+        assert len(records) == 10
+        assert "Received non-ASCII bytes from device" in records[0].getMessage()
+        assert "512 chunks, 512 bytes so far" in records[-1].getMessage()
+
+    def test_disconnect_reports_the_non_ascii_total_and_resets(self, mock_client, caplog):
+        """The counter is connection-scoped, like the framing scanner."""
+        client, _, _ = mock_client
+        for _ in range(3):
+            client.data_received(b"\x80")
+        caplog.clear()
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            client.disconnect()
+
+        records = [r for r in caplog.records if r.name == "powerpetdoor.client"]
+        assert len(records) == 1
+        assert "3 chunks, 3 bytes so far" in records[0].getMessage()
+        assert client._non_ascii.count == 0
+
     def test_brace_in_string_value_framed_correctly(self, mock_client):
         """A brace inside a JSON string value does not corrupt framing (C5)."""
         client, _, _ = mock_client
@@ -1337,6 +1381,30 @@ class TestClientProtocolViolations:
         assert client._transport is None
         assert transport.is_closing()
 
+    def test_overflow_reports_the_complete_frames_it_discards(self, mock_client, caplog):
+        """A complete frame delivered with an overflow is dropped, loudly (T5).
+
+        The dispatch loop ran first, then ``_drop_connection()`` ->
+        ``disconnect()`` cancelled every task it had just created: a
+        legitimate, complete frame - an unsolicited notification, say -
+        vanished with nothing in the log to say so. The overflow check now
+        runs first and names the loss.
+        """
+        from powerpetdoor.framing import MAX_BUFFER_SIZE
+
+        client, transport, _ = mock_client
+        received = _capture_messages(client)
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            client.data_received(
+                b'{"success": "true", "CMD": "PONG", "PONG": "1"}' + b"{" * (MAX_BUFFER_SIZE + 1)
+            )
+
+        assert received == []
+        assert client._transport is None
+        assert transport.is_closing()
+        assert "discarding 1 complete frame(s) received in the same read" in caplog.text
+
     def test_empty_chunk_ignored(self, mock_client):
         """An empty chunk is a no-op."""
         client, _, _ = mock_client
@@ -1354,17 +1422,33 @@ class TestClientProtocolViolations:
 class TestProcessMessageDefensive:
     """process_message must treat every field as optional and untrusted."""
 
-    async def test_message_missing_cmd_and_success_dropped(self, mock_client):
-        """A JSON object with no CMD/success/notification is dropped quietly."""
+    async def test_message_missing_cmd_and_success_dropped(self, mock_client, caplog):
+        """A JSON object with no CMD/success/notification is dropped quietly.
+
+        The warning *is* the only observable, so it is asserted: an
+        operator debugging a misbehaving door has exactly one signal that a
+        frame was thrown away, and deleting the log call survived the whole
+        suite (R5-L4). ``_tasks`` pins "dropped", not merely "logged".
+        """
         client, _, _ = mock_client
+        before = set(client._tasks)
 
-        await client.process_message({"mystery": 1})
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            await client.process_message({"mystery": 1})
 
-    async def test_non_dict_message_dropped(self, mock_client):
-        """A non-dict message is dropped quietly."""
+        assert "Ignoring malformed message from device" in caplog.text
+        assert client._tasks == before
+
+    async def test_non_dict_message_dropped(self, mock_client, caplog):
+        """A non-dict message is dropped quietly - and says so (R5-L4)."""
         client, _, _ = mock_client
+        before = set(client._tasks)
 
-        await client.process_message("not a dict")
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            await client.process_message("not a dict")
+
+        assert "Ignoring non-object message from device" in caplog.text
+        assert client._tasks == before
 
     @pytest.mark.parametrize("bad_id", [[1, 2], {"nested": "id"}])
     async def test_unhashable_msg_id_resolves_no_future(self, mock_client, bad_id, caplog):
@@ -1386,10 +1470,11 @@ class TestProcessMessageDefensive:
     async def test_unhashable_msg_id_does_not_kill_the_receive_task(self, mock_client):
         """The whole receive path survives a list msgID off the wire (L1)."""
         client, _, _ = mock_client
+        before = set(client._tasks)  # the keepalive task is tracked too (T2)
 
         client.data_received(b'{"success": "true", "CMD": "PONG", "msgID": [1, 2]}')
 
-        tasks = list(client._tasks)
+        tasks = [task for task in client._tasks if task not in before]
         assert len(tasks) == 1
         # Before the fix this raised TypeError: unhashable type: 'list'
         await asyncio.gather(*tasks)
@@ -1418,9 +1503,11 @@ class TestProcessMessageDefensive:
         """The receive path survives a list CMD with no traceback logged (S2)."""
         client, _, _ = mock_client
 
+        # The keepalive task is tracked too (T2), so select the new one.
+        before = set(client._tasks)
         with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
             client.data_received(b'{"CMD": ["x"], "success": "true"}')
-            tasks = list(client._tasks)
+            tasks = [task for task in client._tasks if task not in before]
             assert len(tasks) == 1
             await asyncio.gather(*tasks)
 
@@ -1486,20 +1573,97 @@ class TestProcessMessageDefensive:
         assert err.reason == "Door is locked"
         assert "Door is locked" in str(err)
 
-    async def test_handler_exception_fails_future(self, mock_client):
+    async def test_handler_exception_fails_future(self, mock_client, monkeypatch):
         """A handler crash on a malformed payload fails the future (D3/M3)."""
-        from powerpetdoor.client import CommandError
+        from powerpetdoor.client import CommandError, ResponseHandlerRegistry
 
         client, _, _ = mock_client
         client._can_dequeue = False
         msg_id = client.msgId
         future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
 
-        # GET_SETTINGS response missing the settings payload entirely.
-        await client.process_message({"success": "true", "CMD": "GET_SETTINGS", "msgID": msg_id})
+        def boom(self, msg, fut):
+            raise RuntimeError("handler exploded")
+
+        monkeypatch.setitem(ResponseHandlerRegistry._handlers, CMD_GET_SETTINGS, boom)
+
+        await client.process_message(
+            {"success": "true", "CMD": "GET_SETTINGS", "msgID": msg_id, FIELD_SETTINGS: {}}
+        )
 
         assert future.done()
-        assert isinstance(future.exception(), CommandError)
+        err = future.exception()
+        assert isinstance(err, CommandError)
+        assert err.reason == "Malformed response"
+
+    @pytest.mark.parametrize(
+        ("cmd", "payload"),
+        [
+            (CMD_GET_DOOR_STATUS, {}),
+            (CMD_GET_SETTINGS, {}),
+            (CMD_GET_SETTINGS, {FIELD_SETTINGS: 5}),
+            (CMD_GET_SETTINGS, {FIELD_SETTINGS: ["door_status"]}),
+            (CMD_GET_NOTIFICATIONS, {}),
+            (CMD_GET_NOTIFICATIONS, {FIELD_NOTIFICATIONS: "nope"}),
+            (CMD_GET_SCHEDULE_LIST, {}),
+        ],
+        ids=repr,
+    )
+    async def test_missing_payload_field_takes_the_graceful_path(
+        self, mock_client, caplog, cmd, payload
+    ):
+        """A legal envelope missing its payload must not log a traceback.
+
+        Indexing ``msg[FIELD_SETTINGS]`` directly turned a 39-byte frame
+        into a full ERROR traceback (x12.7 write amplification), jumping
+        over the graceful "Response missing expected field" path that sits
+        immediately below the handler call (Security round-5 Finding 1).
+        """
+        from powerpetdoor.client import CommandError
+
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        msg_id = client.msgId
+        future = client.send_message(CONFIG, cmd, notify=True)
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            await client.process_message(
+                {"success": "true", "CMD": cmd, "msgID": msg_id, **payload}
+            )
+
+        err = future.exception()
+        assert isinstance(err, CommandError)
+        assert err.reason == "Response missing expected field"
+        assert "Traceback" not in caplog.text
+        assert [r for r in caplog.records if r.name == "powerpetdoor.client"] == []
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
+            CMD_GET_CMD_LOCKOUT,
+            CMD_GET_AUTORETRACT,
+        ],
+        ids=repr,
+    )
+    async def test_scalar_settings_block_takes_the_graceful_path(self, mock_client, caplog, cmd):
+        """``field in msg[settings]`` raises TypeError for a scalar - same class."""
+        from powerpetdoor.client import CommandError
+
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        msg_id = client.msgId
+        future = client.send_message(CONFIG, cmd, notify=True)
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            await client.process_message(
+                {"success": "true", "CMD": cmd, "msgID": msg_id, FIELD_SETTINGS: 5}
+            )
+
+        err = future.exception()
+        assert isinstance(err, CommandError)
+        assert err.reason == "Response missing expected field"
+        assert [r for r in caplog.records if r.name == "powerpetdoor.client"] == []
 
     async def test_settings_missing_optional_fields_ok(
         self, mock_client, callback_tracker, make_callback
@@ -2356,13 +2520,24 @@ class TestProcessMessageGates:
 
         assert calls == []
 
-    async def test_handler_exception_without_future_only_logs(self, mock_client, caplog):
+    async def test_handler_exception_without_future_only_logs(
+        self, mock_client, caplog, monkeypatch
+    ):
         """A handler crash with no paired future is logged, never raised."""
+        from powerpetdoor.client import ResponseHandlerRegistry
+
         client, _, _ = mock_client
         client._can_dequeue = False
 
+        def boom(self, msg, future):
+            raise RuntimeError("handler exploded")
+
+        monkeypatch.setitem(ResponseHandlerRegistry._handlers, CMD_GET_SETTINGS, boom)
+
         with caplog.at_level(logging.ERROR):
-            await client.process_message({"success": "true", "CMD": CMD_GET_SETTINGS})
+            await client.process_message(
+                {"success": "true", "CMD": CMD_GET_SETTINGS, FIELD_SETTINGS: {}}
+            )
 
         assert "Error handling GET_SETTINGS response" in caplog.text
 
@@ -2752,6 +2927,82 @@ class TestDeclinedTransports:
         assert client._reconnect_task is not None
         client.disconnect()
 
+    async def test_two_declined_transports_are_counted_off_one_at_a_time(self, mock_client, caplog):
+        """``_declined -= 1`` must decrement, not reset (R5-M1).
+
+        Every existing test uses exactly one declined transport, where a
+        decrement and ``= 0`` are indistinguishable. With two outstanding,
+        a reset consumes both on the first loss, so the second falls
+        through to ``_on_transport_lost`` with ``_was_connected`` still
+        True and tears down the healthy socket - the exact R4-L2 bug.
+        """
+        from tests.conftest import MockTransport
+
+        client, live, _ = mock_client
+        client.connection_made(MockTransport())  # declined: already connected
+        client.connection_made(MockTransport())  # declined again
+        assert client._declined == 2
+
+        disconnects: list[int] = []
+        client.add_handlers("watcher", on_disconnect=lambda: disconnects.append(1))
+
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.client"):
+            client.connection_lost(None)
+            assert client._declined == 1
+            client.connection_lost(None)
+
+        assert client._declined == 0
+        assert client._transport is live
+        assert client.available is True
+        assert live.is_closing() is False
+        assert disconnects == []
+        assert client._reconnect_task is None
+        assert "The server closed the connection" not in caplog.text
+        client.disconnect()
+
+    async def test_three_adopted_transports_leave_the_newest_alive(
+        self, disconnected_client, caplog
+    ):
+        """``_pending_direct_losses -= 1`` must decrement, not reset (R5-M1).
+
+        Two outstanding losses are the depth the existing tests reach, and
+        there a decrement and ``= 0`` behave identically. With three, a
+        reset makes the *second* loss look unsuperseded, so it disconnects
+        the live transport and burns a reconnect against a device that
+        accepts one connection.
+        """
+        from tests.conftest import MockTransport
+
+        client = disconnected_client
+        transports = [MockTransport() for _ in range(3)]
+        for transport in transports:
+            client.connection_made(transport)
+            if transport is not transports[-1]:
+                client.disconnect()
+        assert client._pending_direct_losses == 3
+
+        disconnects: list[int] = []
+        client.add_handlers("watcher", on_disconnect=lambda: disconnects.append(1))
+
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.client"):
+            client.connection_lost(None)
+            assert client._pending_direct_losses == 2
+            client.connection_lost(None)
+
+        assert client._pending_direct_losses == 1
+        assert client._transport is transports[-1]
+        assert client.available is True
+        assert transports[-1].is_closing() is False
+        assert disconnects == []
+        assert client._reconnect_task is None
+        assert "The server closed the connection" not in caplog.text
+
+        # And the newest transport's own loss is still acted on.
+        client.connection_lost(None)
+        assert client._transport is None
+        assert client._reconnect_task is not None
+        client.disconnect()
+
     def test_shim_ignores_a_declined_transports_lifecycle_events(self, mock_client):
         """A shim whose transport was declined forwards nothing at all."""
         from powerpetdoor.client import _ConnectionAttempt
@@ -2761,10 +3012,11 @@ class TestDeclinedTransports:
         attempt = _ConnectionAttempt(client)
         attempt.connection_made(MockTransport())  # declined: already connected
 
+        before = set(client._tasks)  # the keepalive task is tracked too (T2)
         attempt.data_received(b'{"success": "true", "CMD": "PONG", "PONG": "1"}')
         attempt.connection_lost(None)
 
-        assert client._tasks == set()  # no message processing was scheduled
+        assert client._tasks == before  # no message processing was scheduled
         assert client._transport is transport
         assert client.available is True
 
@@ -2779,8 +3031,9 @@ class TestDeclinedTransports:
         attempt.connection_made(transport)
 
         assert client._transport is transport
+        before = set(client._tasks)  # the keepalive task is tracked too (T2)
         attempt.data_received(b'{"success": "true", "CMD": "PONG", "PONG": "1"}')
-        assert len(client._tasks) == 1
+        assert len([task for task in client._tasks if task not in before]) == 1
         client.disconnect()
 
     async def test_shim_ignores_a_superseded_transports_loss(self, disconnected_client, caplog):
@@ -2940,7 +3193,21 @@ class TestDeclinedTransports:
     async def test_shim_ignores_a_shutdown_declined_transports_loss(
         self, disconnected_client, caplog
     ):
-        """The shim's ``_adopted`` guard is the only guard on this path (R4-L1).
+        """A shutdown-declined transport's loss is ignored (R4-L1).
+
+        Two guards cover this path, and the relationship is one-way:
+        ``_on_transport_lost``'s ``_was_connected`` early return catches it
+        (``shutdown()`` on a never-connected client leaves the flag False),
+        and the shim's ``_adopted`` check catches it first. Removing either
+        one alone leaves this test green - it is the *pair* that is pinned
+        here; ``_adopted`` is separately non-redundant in ``data_received``
+        (see ``test_shim_ignores_a_declined_transports_lifecycle_events``),
+        and ``_was_connected`` is separately non-redundant for an adopted
+        transport lost after a local teardown (see
+        ``test_disconnect_then_connect_does_not_report_a_server_close``).
+        Earlier wording called ``_adopted`` "the only guard on this path",
+        which reads as if the ``_was_connected`` return were redundant here
+        - backwards (R5-T5).
 
         With the client shut down mid-connect, ``client._transport`` is
         None, so the superseded-transport check below it cannot fire. A
@@ -3343,17 +3610,20 @@ class TestBackgroundTaskTracking:
     async def test_message_processing_is_tracked(self, mock_client):
         """data_received schedules processing into the tracked set."""
         client, _, _ = mock_client
+        # The keepalive task is tracked too (T2), so select the one under test.
+        before = set(client._tasks)
 
         client.data_received(b'{"success": "true", "CMD": "PONG", "PONG": "1"}')
 
-        tasks = list(client._tasks)
+        tasks = [task for task in client._tasks if task not in before]
         assert len(tasks) == 1
         await asyncio.gather(*tasks)
-        assert client._tasks == set()
+        assert client._tasks == before
 
     async def test_failing_task_is_logged_immediately(self, mock_client, caplog):
         """An escaping exception is reported by the done-callback, not at GC."""
         client, _, _ = mock_client
+        before = set(client._tasks)
 
         async def boom():
             raise RuntimeError("kaboom")
@@ -3363,7 +3633,26 @@ class TestBackgroundTaskTracking:
             await asyncio.gather(task, return_exceptions=True)
 
         assert "Background client task failed" in caplog.text
-        assert client._tasks == set()
+        assert client._tasks == before
+
+    async def test_keepalive_and_check_receipt_are_tracked(self, mock_client):
+        """Both fire-and-forget timers go through _track_task (T2).
+
+        Held in their own attributes *and* in ``_tasks``: an exception
+        escaping either was previously only reported by asyncio's
+        "Task exception was never retrieved" hook at GC time, which is the
+        exact failure mode ``_track_task`` exists to prevent.
+        """
+        client, _, _ = mock_client
+
+        assert client._keepalive in client._tasks
+
+        client.send_message(CONFIG, CMD_GET_SETTINGS)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert client._check_receipt is not None
+        assert client._check_receipt in client._tasks
 
     async def test_start_tracks_the_connect_task(self, disconnected_client, monkeypatch):
         """start()'s connect() is tracked, not a bare ensure_future (R4-T2).

@@ -566,10 +566,62 @@ class TestMain:
 
         report = capsys.readouterr().out
         assert "### Pragma Exclusions" in report
-        assert "**3 lines** across **1 files**" in report
+        assert "**3 lines** across **1 files** in **2 annotations**" in report
         assert "#### `mod.py` (3 lines)" in report
         assert "| 1-2 | no cover | unreachable | `a = 1` |" in report
         assert "| 3 | no branch | *no reason given* | `c = {'x': 1} or 0` |" in report
+
+    @pytest.mark.parametrize(
+        ("covered", "missing", "status"),
+        [
+            (994, 6, ":yellow_circle:"),
+            (995, 5, ":green_circle:"),
+        ],
+        ids=["99.4-just-below", "99.5-exactly-at"],
+    )
+    def test_category_status_threshold(
+        self, workspace, monkeypatch, capsys, covered, missing, status
+    ):
+        """The green/yellow boundary is a real constant, so pin it (R5-T3).
+
+        The fixtures only ever exercised 80% and 100%, so any threshold in
+        (80, 100] rendered identically and moving it survived the suite -
+        in a file that is 100%-gated precisely because it can silently
+        misreport.
+        """
+        monkeypatch.setattr(sys, "argv", ["generate_gaps_report.py", "--stdout"])
+        total = covered + missing
+        percent = covered / total * 100
+        write_coverage(
+            workspace,
+            {
+                "totals": {
+                    "percent_covered": percent,
+                    "covered_lines": covered,
+                    "missing_lines": missing,
+                    "covered_branches": 0,
+                    "missing_branches": 0,
+                },
+                "files": {
+                    "src/powerpetdoor/client.py": {
+                        "summary": {
+                            "percent_covered": percent,
+                            "num_statements": total,
+                            "num_branches": 0,
+                            "covered_lines": covered,
+                            "missing_lines": missing,
+                        },
+                        "missing_lines": [1],
+                        "missing_branches": [],
+                    },
+                },
+            },
+        )
+
+        assert gaps.main() == 0
+
+        report = capsys.readouterr().out
+        assert f"| Core Library | 1 (1 with gaps) | {percent:.1f}% | {status} |" in report
 
     def test_pipes_in_code_are_escaped_for_the_markdown_table(self, workspace, monkeypatch, capsys):
         monkeypatch.setattr(sys, "argv", ["generate_gaps_report.py", "--stdout"])

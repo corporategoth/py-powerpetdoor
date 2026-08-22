@@ -70,7 +70,8 @@ from ..const import (
     DOOR_STATE_RISING,
 )
 from ..sanitize import sanitize_text
-from .state import MAX_SCHEDULE_INDEX, Schedule
+from ..schedule import MAX_SCHEDULE_INDEX
+from .state import Schedule
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,16 @@ logger = logging.getLogger(__name__)
 #: the wire ceiling (90000 centiseconds) that ``SET_HOLD_TIME`` enforces, so
 #: no writer of this field can leave a value ``GET_SETTINGS`` chokes on.
 MAX_SCRIPT_HOLD_TIME = 900.0
+
+#: Longest delay (seconds) a script step may ask for: sensor durations,
+#: ``wait`` and ``wait_for`` timeouts. These were the last unbounded script
+#: numerics: ``duration: .nan`` reached ``asyncio.sleep`` and raised
+#: ``ValueError("Invalid delay: NaN")`` inside a fire-and-forget task, so the
+#: step silently did not happen, the sensor stayed active forever, the
+#: operator got a stack trace - and the run still reported PASSED
+#: (Security round-5 Informational 2). One day is far beyond any real
+#: simulation and still rejects ``inf``/``nan`` outright.
+MAX_SCRIPT_DELAY = 86400.0
 
 
 class ScriptError(Exception):
@@ -274,7 +285,7 @@ class ScriptRunner:
         verbose: bool = True,
         *,
         queue_if_busy: bool = True,
-        on_start: Callable[[], None] | None = None,
+        on_start: Callable[[], bool] | None = None,
     ) -> bool:
         """Execute a script, waiting for any in-flight script to finish.
 
@@ -286,11 +297,16 @@ class ScriptRunner:
                 refuse immediately rather than queue - callers that report
                 a synchronous pass/fail must not silently block.
             on_start: Called once the run lock is held and this script is
-                the running one. The queue consumer uses it to stop
-                counting the run as pending (M2).
+                about to become the running one. The queue consumer uses
+                it to stop counting the run as pending (M2). Returning
+                False abandons the run without executing a step: waiting
+                for the lock is the window in which ``stop all`` can drop
+                the entry, and starting it afterwards would run exactly
+                what the operator just discarded (frontend M1).
 
         Returns:
-            True if all steps (including assertions) passed.
+            True if all steps (including assertions) passed. False for an
+            abandoned run, which never touched the door.
 
         Raises:
             ScriptError: If another script is running and ``queue_if_busy``
@@ -299,9 +315,9 @@ class ScriptRunner:
         if not queue_if_busy and self.busy:
             raise ScriptError(f"Another script is already running: {self.current_script}")
         async with self._lock:
+            if on_start is not None and not on_start():
+                return False
             self.current_script = script.name
-            if on_start is not None:
-                on_start()
             try:
                 return await self._run_steps(script, verbose)
             finally:
@@ -388,12 +404,16 @@ class ScriptRunner:
 
         elif action == "inside":
             # Activate inside sensor with optional duration
-            duration = float(params.get("duration", 0.5))
+            duration = self._script_number(
+                params.get("duration", 0.5), "duration", 0, MAX_SCRIPT_DELAY
+            )
             self.simulator.activate_sensor("inside", duration)
 
         elif action == "outside":
             # Activate outside sensor with optional duration
-            duration = float(params.get("duration", 0.5))
+            duration = self._script_number(
+                params.get("duration", 0.5), "duration", 0, MAX_SCRIPT_DELAY
+            )
             self.simulator.activate_sensor("outside", duration)
 
         elif action == "open":
@@ -404,7 +424,9 @@ class ScriptRunner:
             await self.simulator.close_door()
 
         elif action == "wait":
-            seconds = float(params.get("seconds", 1.0))
+            seconds = self._script_number(
+                params.get("seconds", 1.0), "seconds", 0, MAX_SCRIPT_DELAY
+            )
             # Raced against the stop event, so `stop` during a long wait
             # takes effect straight away instead of at the end of the
             # sleep. This is also what shrinks the "stop lands during the
@@ -413,7 +435,9 @@ class ScriptRunner:
 
         elif action == "wait_for":
             condition = params.get("condition", "door_closed")
-            timeout = float(params.get("timeout", 30.0))
+            timeout = self._script_number(
+                params.get("timeout", 30.0), "timeout", 0, MAX_SCRIPT_DELAY
+            )
             await self._wait_for_condition(condition, timeout)
 
         elif action == "set":
@@ -739,6 +763,24 @@ def set_script_paths_allowed(allowed: bool) -> None:
     """Declare whether this front end may run scripts by file path."""
     global _script_paths_allowed
     _script_paths_allowed = allowed
+
+
+def script_paths_allowed() -> bool:
+    """Whether this front end may run scripts by file path."""
+    return _script_paths_allowed
+
+
+def describe_script_argument() -> str:
+    """Help text for a ``script`` argument, honoring the path policy.
+
+    ``run help`` over ctl answered "Script name or file path" while the
+    very next command answered "Script paths are not allowed over the
+    control channel" - the in-client help pointing at the broken form
+    (L2).
+    """
+    if _script_paths_allowed:
+        return "Script name or file path"
+    return "Script name (paths are not accepted over the control channel)"
 
 
 def _script_files_in(directory: Path) -> dict[str, Path]:

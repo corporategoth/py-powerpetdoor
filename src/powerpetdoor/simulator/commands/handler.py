@@ -99,12 +99,18 @@ class CommandHandler(
             get_builtin_script,
             list_builtin_scripts,
             set_extra_scripts_dir,
+            set_script_paths_allowed,
         )
         from ..state import Schedule
 
         # Publish the extra scripts dir so `list`, the unknown-script hint,
         # and tab completion all see the same runnable set.
         set_extra_scripts_dir(scripts_dir)
+        # Same for the path policy: it was a handler attribute *and* a
+        # module flag ctl set for its completer, and the daemon set only
+        # the attribute - so the daemon's own `run help` still advertised
+        # file paths on the channel that refuses them (L2).
+        set_script_paths_allowed(allow_script_paths)
 
         self._Script = Script
         self._get_builtin_script = get_builtin_script

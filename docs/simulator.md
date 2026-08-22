@@ -237,9 +237,9 @@ The `schedule` command (alias `sched`) manages schedule entries:
 |---------|---------|--------|
 | `run <script>` | `r`, `file` | Queue a script — built-in name, `--scripts-dir` name, or YAML file path. The command returns as soon as the script is queued; the PASSED/FAILED result is only logged. A queued script waits for any script already running |
 | `run <script> wait` | `r`, `file` | Run the script synchronously and report `Script PASSED`/`Script FAILED` as the command result. Fails immediately with `Another script is already running: <name>` rather than queueing, so the result always belongs to the script you asked for. Over ctl this is the only form whose exit code reflects the script |
-| `list` | `/`, `scripts` | List runnable scripts (built-in, plus any from `--scripts-dir`), ending with the runner's current state and, if anything is waiting, a `Queued: <names>` line |
-| `stop` | | Stop the **running script** at its next step boundary (the run then reports FAILED). While the request is pending, `status`/`list` show `Script: stopping "<name>"`, and a repeat `stop` answers `Stop already requested for: <name>`. Does *not* stop the simulator — use `shutdown` for that |
-| `stop all` | | As `stop`, and additionally discards every run still queued, reporting how many were dropped |
+| `list` | `/`, `scripts` | List runnable scripts (built-in, plus any from `--scripts-dir` — the header for that directory is printed even when it is empty, so "not configured" and "configured but empty" are distinguishable), ending with the runner's current state and, if anything is waiting, a `Queued: <names>` line naming the pending runs |
+| `stop` | | Stop the **running script** at its next step boundary (the run then reports FAILED). Leaves the queue alone — only `stop all` touches it. While the request is pending, `status`/`list` show `Script: stopping "<name>"`, and a repeat `stop` answers `Stop already requested for: <name>`. With nothing running but runs still pending it reports how many are queued and points at `stop all`. Does *not* stop the simulator — use `shutdown` for that |
+| `stop all` | | As `stop`, and additionally discards **every** run still queued — including one already taken off the queue but not yet started — reporting how many were dropped. The count always matches the `queued` figure `status`/`list` showed a moment earlier, and one `stop all` is always enough. Idempotent: with nothing running or queued it succeeds with `Nothing running or queued` |
 
 ### Info
 
@@ -344,7 +344,8 @@ scriptable.
 **For `run`, only `run <script> wait` reflects the script result** (0 passed,
 1 failed). Plain `run <script>` just queues the script and exits **0** as soon
 as it is queued — a CI job that omits `wait` always sees success, whatever the
-script does:
+script does. (A script that fails to *load* is still an error and exits 1: the
+load happens before the enqueue.)
 
 ```bash
 ppd-simulator-ctl run full_test_suite wait || echo "Tests failed!"
@@ -370,8 +371,10 @@ running fails immediately with `Another script is already running: <name>`
 instead of interleaving; a plain (queued) `run` waits its turn. `status` and
 `list` report what is running and how deep the queue is (including a run
 already taken off the queue but still waiting for the runner), `list` names
-the pending runs, `stop` ends the running script and `stop all` also empties
-the queue.
+the pending runs, `stop` ends the running script and leaves the queue alone,
+and `stop all` ends the running script *and* discards every pending run —
+the claimed-but-not-started one included, so a single `stop all` always
+leaves nothing running or queued.
 
 ### Interactive Mode
 
@@ -667,6 +670,16 @@ Wait for a condition to become true (with timeout).
   condition: door_closed
   timeout: 10        # Seconds (default: 30)
 ```
+
+> **Numeric bounds.** Every delay a script can ask for — `inside`/`outside`
+> `duration`, `wait` `seconds` and `wait_for` `timeout` — must be a finite
+> number between 0 and 86400 seconds. `.inf`/`.nan` and out-of-range values
+> fail the step (and therefore the run) with a message naming the field,
+> rather than being handed to `asyncio.sleep`: a NaN delay used to raise
+> inside a background task, so the step silently did not happen while the
+> run still reported PASSED. `set hold_time` and `set battery` are bounded
+> the same way (0–900 seconds and 0–100 percent), as are `add_schedule` /
+> `remove_schedule` indices (0–255).
 
 #### State Control
 

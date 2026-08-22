@@ -741,7 +741,10 @@ class TestCtlMain:
         assert "run SCRIPT wait" in out
         assert "exit code reflects PASSED/FAILED" in out
         assert "Stop the running script (not the daemon)" in out
-        assert "Plain 'run SCRIPT' queues the script and always exits 0" in out
+        # "always exits 0" was not literally true - a script that fails to
+        # load exits 1, because the load happens before the enqueue (T4).
+        assert "Plain 'run SCRIPT' exits 0 as soon as it is queued" in out
+        assert "script that fails to load is still an error, and exits 1." in out
 
     def test_main_forbids_script_path_completion(self, monkeypatch):
         """ctl's daemon refuses script paths, so ctl must not complete them (M1)."""

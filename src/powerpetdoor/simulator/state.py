@@ -426,8 +426,13 @@ class DoorSimulatorState:
         }
 
     def get_schedule_list(self) -> list[int]:
-        """Get list of schedule indices (matches real device behavior)."""
-        return list(self.schedules.keys())
+        """Get list of schedule indices (matches real device behavior).
+
+        Sorted by slot: the store is a dict, so a client that created slot
+        5 before slot 1 got ``[5, 1]`` back - insertion order, not slot
+        order, which no array-of-slots firmware would produce (T3).
+        """
+        return sorted(self.schedules.keys())
 
     def get_tzinfo(self) -> zoneinfo.ZoneInfo:
         """Resolve the configured timezone to a usable tzinfo.

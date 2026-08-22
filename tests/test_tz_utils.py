@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -150,10 +151,18 @@ class TestGetAvailableTimezones:
         assert "Asia/Tokyo" in result
         assert "UTC" in result
 
-    def test_returns_empty_when_not_initialized(self, reset_cache):
-        """Should return empty list when cache not initialized."""
-        result = tz_utils.get_available_timezones()
+    def test_returns_empty_when_not_initialized(self, reset_cache, caplog):
+        """Should return empty list when cache not initialized.
+
+        The warning is the caller's only clue that the empty list means
+        "not initialized" rather than "no zones", so it is asserted
+        (R5-L4): deleting the log call survived the whole suite.
+        """
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.tz_utils"):
+            result = tz_utils.get_available_timezones()
+
         assert result == []
+        assert "Timezone cache not initialized" in caplog.text
 
     def test_returns_copy_not_internal_cache(self):
         """Mutating the returned list must not affect the cache (L12)."""
@@ -236,26 +245,27 @@ class TestGetPosixTzString:
 class TestFindIanaForPosix:
     """Tests for find_iana_for_posix function."""
 
-    def test_find_eastern_timezone(self):
-        """Should find an IANA timezone for EST5EDT format."""
-        # Get the POSIX string for New York first
-        posix = tz_utils.get_posix_tz_string("America/New_York")
+    @pytest.mark.parametrize(
+        "iana",
+        ["America/New_York", "America/Los_Angeles", "Europe/Berlin", "Australia/Sydney"],
+    )
+    def test_reverse_lookup_round_trips_exactly(self, iana):
+        """The reverse map's contract, asserted exactly (R5-L5).
+
+        ``startswith("America/")`` accepted ~150 zones - and not the one
+        the test name implied: this tzdata answers ``America/Detroit`` for
+        New York's POSIX string and ``Africa/Ceuta`` for Berlin's, because
+        the map is keyed by POSIX rule, not by name. The *round trip* is
+        the invariant the reverse map exists to provide, and unlike a name
+        it is stable across tzdata builds.
+        """
+        posix = tz_utils.get_posix_tz_string(iana)
         assert posix is not None
 
-        # Reverse lookup should find a timezone
         result = tz_utils.find_iana_for_posix(posix)
-        assert result is not None
-        # Should be an America/* timezone with EST/EDT
-        assert result.startswith("America/")
 
-    def test_find_pacific_timezone(self):
-        """Should find an IANA timezone for PST8PDT format."""
-        posix = tz_utils.get_posix_tz_string("America/Los_Angeles")
-        assert posix is not None
-
-        result = tz_utils.find_iana_for_posix(posix)
         assert result is not None
-        assert result.startswith("America/")
+        assert tz_utils.get_posix_tz_string(result) == posix
 
     def test_invalid_posix_returns_none(self):
         """Invalid POSIX string should return None."""
@@ -520,13 +530,18 @@ class TestIntegration:
             assert dst in posix, f"{dst} not in POSIX for {tz}: {posix}"
 
     def test_european_timezones(self):
-        """Test common European timezones."""
+        """Berlin uses CET/CEST - so assert that, like the US sibling does.
+
+        ``std_abbrev is not None`` accepted any abbreviation at all while
+        the docstring claimed a specific pair (R5-L5). These have been
+        stable for decades.
+        """
         result = tz_utils.get_posix_tz_string("Europe/Berlin")
         assert result is not None
-        # Berlin uses CET/CEST
         parsed = tz_utils.parse_posix_tz_string(result)
         assert parsed is not None
-        assert parsed["std_abbrev"] is not None
+        assert parsed["std_abbrev"] == "CET"
+        assert parsed["dst_abbrev"] == "CEST"
 
     def test_cache_consistency(self):
         """Cache should return consistent results."""

@@ -104,11 +104,27 @@ class PipeStdin:
         return data.decode()
 
 
+class FakeTransport:
+    """Recording fake for the transport behind a StreamWriter."""
+
+    def __init__(self, write_buffer_size: int = 0):
+        self._write_buffer_size = write_buffer_size
+
+    def get_write_buffer_size(self) -> int:
+        return self._write_buffer_size
+
+
 class FakeStreamWriter:
     """Recording fake for asyncio.StreamWriter used in ControlChannel tests."""
 
     def __init__(
-        self, *, fail_write=False, fail_close=False, fail_wait_closed=False, closing=False
+        self,
+        *,
+        fail_write=False,
+        fail_close=False,
+        fail_wait_closed=False,
+        closing=False,
+        write_buffer_size=0,
     ):
         self.data = b""
         self.closed = False
@@ -116,6 +132,7 @@ class FakeStreamWriter:
         self._fail_close = fail_close
         self._fail_wait_closed = fail_wait_closed
         self._closing = closing
+        self.transport = FakeTransport(write_buffer_size)
 
     def get_extra_info(self, name):
         return ("127.0.0.1", 55555)
@@ -935,6 +952,36 @@ class TestControlLogHandler:
         assert dead.data == b""
         assert clients == {good}
 
+    def test_records_are_dropped_for_a_client_with_a_runaway_backlog(self):
+        """A parked ctl session must not grow the daemon's heap (Security F1).
+
+        `emit` cannot `drain()`, so an attached-but-not-reading client
+        queued every record in daemon memory - measured at +0.16 MB/s under
+        a hostile dribble, tracking the log rate with no bound in sight.
+        """
+        reading = FakeStreamWriter()
+        stalled = FakeStreamWriter(write_buffer_size=cli._ControlLogHandler.MAX_CLIENT_BACKLOG + 1)
+        clients = {reading, stalled}
+        handler = cli._ControlLogHandler(clients)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+
+        handler.emit(self._record("hi"))
+
+        assert reading.data == b"LOG: hi\n"
+        assert stalled.data == b""
+        # Dropped, not disconnected: the session recovers when it reads.
+        assert clients == {reading, stalled}
+
+    def test_a_client_at_the_backlog_limit_still_receives(self):
+        """The threshold is a ceiling, not a hair trigger."""
+        writer = FakeStreamWriter(write_buffer_size=cli._ControlLogHandler.MAX_CLIENT_BACKLOG)
+        handler = cli._ControlLogHandler({writer})
+        handler.setFormatter(logging.Formatter("%(message)s"))
+
+        handler.emit(self._record("hi"))
+
+        assert writer.data == b"LOG: hi\n"
+
     def test_emit_refuses_to_re_enter(self):
         """asyncio logs from inside write(); rebroadcasting that is the loop.
 
@@ -1062,6 +1109,29 @@ class TestControlChannelEdges:
         assert writer.closed is True
         assert writer not in channel.clients
 
+    async def test_normal_hang_up_is_not_an_error(self, caplog):
+        """A one-shot ctl exiting mid-write is not an ERROR (L1).
+
+        Essentially every one-shot `run`/`stop` produced one - the client
+        reads its `OK:` line and exits while the daemon is still emitting
+        log lines for that command - and `_ControlLogHandler` broadcast the
+        bogus ERROR to every other ctl session.
+        """
+
+        class HangingUpWriter(FakeStreamWriter):
+            def write(self, data: bytes):
+                raise BrokenPipeError(32, "Broken pipe")
+
+        channel = make_channel()
+        writer = HangingUpWriter()
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.simulator.cli"):
+            await channel._handle_client(FakeStreamReader([b"ping\n"]), writer)
+
+        assert [r.levelno for r in caplog.records if r.levelno >= logging.WARNING] == []
+        assert "hung up" in caplog.text
+        assert writer.closed is True
+        assert writer not in channel.clients
+
     async def test_handle_client_wait_closed_error_swallowed(self, caplog):
         channel = make_channel()
         writer = FakeStreamWriter(fail_wait_closed=True)
@@ -1148,8 +1218,8 @@ class TestProcessScriptQueue:
             return SimpleNamespace(name=f"Script-{ref}")
 
         async def run(script, on_start=None):
-            if on_start is not None:
-                on_start()
+            if on_start is not None and not on_start():
+                return False
             runs.append(script.name)
             ran.set()
             return run_result
@@ -1166,7 +1236,7 @@ class TestProcessScriptQueue:
         task = asyncio.create_task(
             cli._process_script_queue(queue, stop, handler, runner, poll_interval=0.01)
         )
-        await queue.put("good")
+        await queue.put("good", "Script-good")
         await asyncio.wait_for(ran.wait(), 5)
         stop.set()
         await asyncio.wait_for(task, 5)
@@ -1182,7 +1252,7 @@ class TestProcessScriptQueue:
         task = asyncio.create_task(
             cli._process_script_queue(queue, stop, handler, runner, poll_interval=0.01)
         )
-        await queue.put("bad")
+        await queue.put("bad", "Script-bad")
         await asyncio.wait_for(ran.wait(), 5)
         stop.set()
         await asyncio.wait_for(task, 5)
@@ -1196,13 +1266,32 @@ class TestProcessScriptQueue:
         task = asyncio.create_task(
             cli._process_script_queue(queue, stop, handler, runner, poll_interval=0.01)
         )
-        await queue.put("broken")
+        await queue.put("broken", "Script-broken")
         # Deterministic: wait until the error record has been emitted
-        while "Error running queued script: nope" not in caplog.text:
-            await asyncio.sleep(0)
+        async with asyncio.timeout(5):
+            while "Error running queued script: nope" not in caplog.text:
+                await asyncio.sleep(0)
         stop.set()
         await asyncio.wait_for(task, 5)
         assert runs == []
+
+    @staticmethod
+    def _blocking_runner(release, started, depth_while_blocked, depth_after_start, queue):
+        """A runner stub that parks on `release` the way the run lock does."""
+
+        async def run(script, on_start=None):
+            # Stand in for waiting on the run lock: the entry is dequeued
+            # but has not started, so it must still be reported as pending.
+            depth_while_blocked.append(queue.qsize())
+            await release.wait()
+            proceed = on_start is None or on_start()
+            # 0 only if on_start released the claim; the consumer's own
+            # `finally` cannot be what satisfies this (R5-L3).
+            depth_after_start.append(queue.qsize())
+            started.set()
+            return proceed
+
+        return run
 
     async def test_claim_is_released_only_once_the_run_starts(self):
         """A dequeued run stays counted until it actually starts (M2)."""
@@ -1210,18 +1299,70 @@ class TestProcessScriptQueue:
         stop = asyncio.Event()
         started = asyncio.Event()
         release = asyncio.Event()
-        depth_while_blocked = []
+        depth_while_blocked: list[int] = []
+        depth_after_start: list[int] = []
+
+        def load_script(ref):
+            return SimpleNamespace(name=f"Script-{ref}")
+
+        task = asyncio.create_task(
+            cli._process_script_queue(
+                queue,
+                stop,
+                SimpleNamespace(load_script=load_script),
+                SimpleNamespace(
+                    run=self._blocking_runner(
+                        release, started, depth_while_blocked, depth_after_start, queue
+                    )
+                ),
+                poll_interval=0.01,
+            )
+        )
+        await queue.put("waiting", "Waiting Script")
+        async with asyncio.timeout(5):
+            while not depth_while_blocked:
+                await asyncio.sleep(0)
+
+        assert depth_while_blocked == [1]
+        assert queue.pending() == ["Waiting Script"]
+
+        release.set()
+        await asyncio.wait_for(started.wait(), 5)
+        # Released by on_start, inside the run - not by the consumer's finally.
+        assert depth_after_start == [0]
+        assert queue.qsize() == 0
+
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
+    async def test_a_claim_dropped_by_stop_all_never_runs(self, caplog):
+        """`stop all` in the claim window abandons the run (frontend M1).
+
+        The consumer is parked on the run lock, so the entry is claimed but
+        not started. `clear()` cancels it, `on_start` reports that, and the
+        runner returns without executing a step - instead of starting the
+        run the operator was just told had been dropped.
+        """
+        caplog.set_level(logging.INFO, logger="powerpetdoor.simulator.cli")
+        queue = ScriptQueue()
+        stop = asyncio.Event()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        depth_while_blocked: list[int] = []
+        depth_after_start: list[int] = []
+        steps_run: list[str] = []
 
         def load_script(ref):
             return SimpleNamespace(name=f"Script-{ref}")
 
         async def run(script, on_start=None):
-            # Stand in for waiting on the run lock: the entry is dequeued
-            # but has not started, so it must still be reported as pending.
             depth_while_blocked.append(queue.qsize())
             await release.wait()
-            if on_start is not None:
-                on_start()
+            if on_start is not None and not on_start():
+                started.set()
+                return False
+            steps_run.append(script.name)
+            depth_after_start.append(queue.qsize())
             started.set()
             return True
 
@@ -1234,16 +1375,20 @@ class TestProcessScriptQueue:
                 poll_interval=0.01,
             )
         )
-        await queue.put("waiting")
-        while not depth_while_blocked:
-            await asyncio.sleep(0)
+        await queue.put("claimed", "Claimed Script")
+        async with asyncio.timeout(5):
+            while not depth_while_blocked:
+                await asyncio.sleep(0)
 
-        assert depth_while_blocked == [1]
-        assert queue.pending() == ["waiting"]
-
+        assert queue.clear() != []  # the claimed entry is what is dropped
         release.set()
         await asyncio.wait_for(started.wait(), 5)
+
+        assert steps_run == []
         assert queue.qsize() == 0
+        assert "Dropped queued script: Script-claimed" in caplog.text
+        assert "Script PASSED" not in caplog.text
+        assert "Script FAILED" not in caplog.text
 
         stop.set()
         await asyncio.wait_for(task, 5)
@@ -1265,9 +1410,10 @@ class TestProcessScriptQueue:
                 poll_interval=0.01,
             )
         )
-        await queue.put("broken")
-        while queue.qsize():
-            await asyncio.sleep(0)
+        await queue.put("broken", "Script-broken")
+        async with asyncio.timeout(5):
+            while queue.qsize():
+                await asyncio.sleep(0)
 
         assert queue.pending() == []
         stop.set()

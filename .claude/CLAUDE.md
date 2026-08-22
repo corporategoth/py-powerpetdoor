@@ -100,6 +100,25 @@ The project supports a declared matrix of CPython versions (currently
    entry uploads coverage data and which version runs single-version jobs (lint,
    coverage-report)
 
+### Manually tracked pins (MANDATORY)
+
+`.github/dependabot.yml` covers `github-actions` (root workflows **and** the
+composite action directory) plus `uv`. Two things sit outside anything
+automation can reach, so they rot silently unless a human moves them. Check
+them whenever you touch CI, and at least once per release:
+
+| Pin | Where | Why automation cannot see it |
+|-----|-------|------------------------------|
+| `neuromancy/workflows/.gitea/workflows/sync-github-wiki.yml@<sha>` | `.gitea/workflows/sync-wiki.yml` | Dependabot has no Gitea support. This is also the **only** `uses:` in the repo that receives a secret, so its SHA pin matters more than the rest |
+| Transitive versions in `uv.lock` | `uv.lock` | `uv sync` never upgrades what is already pinned, and Dependabot's grouping moves direct dependencies. Run `uv lock --upgrade` periodically (the weekly fuzz cron is a natural home) and re-run the full suite |
+
+`tzdata` deserves specific attention: it is the library's only runtime
+dependency and the whole `tz_utils`/schedule feature reads IANA rules out of
+it, so a stale lock means CI and local dev test against an old DST database.
+Consumers resolve it fresh (`dependencies = ["tzdata>=2024.1"]`), so this is a
+testing-coverage gap rather than a shipping one - but it is still the pin most
+worth watching.
+
 ## Testing Requirements (MANDATORY)
 
 **Every code change MUST include corresponding tests.** This is non-negotiable.

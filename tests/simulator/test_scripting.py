@@ -645,12 +645,34 @@ class TestScriptRunner:
 
     async def test_on_start_fires_once_the_run_lock_is_held(self, runner, simulator):
         """The queue consumer stops counting a run as pending when it starts (M2)."""
-        seen: list[str | None] = []
+        seen: list[bool] = []
         script = Script.from_simple_commands(["log hello"])
 
-        await runner.run(script, verbose=False, on_start=lambda: seen.append(runner.current_script))
+        def on_start() -> bool:
+            seen.append(runner.busy)
+            return True
 
-        assert seen == [script.name]
+        assert await runner.run(script, verbose=False, on_start=on_start) is True
+
+        # Called with the run lock held, before the first step.
+        assert seen == [True]
+
+    async def test_on_start_returning_false_abandons_the_run(self, runner, simulator):
+        """A claim dropped while parked on the lock must not run (M1).
+
+        `stop all` cancels the claimed entry while the consumer waits for
+        the run lock; starting the script afterwards would run exactly what
+        the operator was told had been dropped.
+        """
+        script = Script.from_simple_commands(["set power off"])
+        simulator.state.power = True
+
+        assert await runner.run(script, verbose=False, on_start=lambda: False) is False
+
+        # Not a single step executed, and the runner is free again.
+        assert simulator.state.power is True
+        assert runner.current_script is None
+        assert runner.busy is False
 
     async def test_unknown_action_fails(self, runner, simulator, caplog):
         """Unknown action should fail the script."""
@@ -663,11 +685,16 @@ class TestScriptRunner:
         assert result is False
         assert "Script error at step 1: Unknown action: nonexistent_action" in caplog.text
 
-    async def test_unexpected_error_fails_script(self, runner, simulator, caplog):
+    async def test_unexpected_error_fails_script(self, runner, simulator, caplog, monkeypatch):
         """A non-ScriptError exception fails the script via the catch-all."""
+
+        def boom():
+            raise RuntimeError("hardware exploded")
+
+        monkeypatch.setattr(simulator, "simulate_obstruction", boom)
         script = Script(
             name="Bad",
-            steps=[ScriptStep(action="wait", params={"seconds": "abc"}, line_number=1)],
+            steps=[ScriptStep(action="obstruction", line_number=1)],
         )
         with caplog.at_level(logging.ERROR, logger=SCRIPT_LOGGER):
             result = await runner.run(script, verbose=False)
@@ -980,6 +1007,92 @@ class TestScriptWriterIsBoundedLikeTheWire:
         runner = make_runner()
         runner._set_value("battery", "42")
         assert runner.simulator.state.battery_percent == 42
+
+
+class TestScriptDelaysAreBounded:
+    """The last unbounded script numerics (Security round-5 Informational 2).
+
+    ``duration: .nan`` reached ``asyncio.sleep`` and raised
+    ``ValueError("Invalid delay: NaN")`` inside a fire-and-forget task: the
+    step silently did not happen, the sensor stayed active forever, the
+    operator got an unhandled-task traceback - and the run still reported
+    PASSED, which is the false-green CI signal round 4's H1 was about.
+    """
+
+    @pytest.mark.parametrize(
+        ("action", "param", "name"),
+        [
+            ("inside", "duration", "duration"),
+            ("outside", "duration", "duration"),
+            ("wait", "seconds", "seconds"),
+            ("wait_for", "timeout", "timeout"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("value", "reason"),
+        [
+            (float("nan"), "must be a finite number"),
+            (float("inf"), "must be a finite number"),
+            (float("-inf"), "must be a finite number"),
+            (1e400, "must be a finite number"),
+            (-1, "must be between 0 and 86400.0"),
+            (86401, "must be between 0 and 86400.0"),
+            ("soon", "must be a number"),
+        ],
+        ids=["nan", "inf", "-inf", "1e400", "negative", "too-large", "non-numeric"],
+    )
+    async def test_delay_values_are_rejected(self, action, param, name, value, reason):
+        runner = make_runner()
+        script = Script(
+            name="Bad",
+            steps=[ScriptStep(action=action, params={param: value}, line_number=1)],
+        )
+
+        assert await runner.run(script, verbose=False) is False
+        assert runner.simulator.state.inside_sensor_active is False
+        assert runner.simulator.state.outside_sensor_active is False
+
+    @pytest.mark.parametrize(
+        ("action", "param"),
+        [("inside", "duration"), ("outside", "duration"), ("wait", "seconds")],
+    )
+    async def test_zero_is_still_accepted(self, action, param):
+        """The floor is 0, which several built-in scripts rely on."""
+        runner = make_runner()
+        script = Script(
+            name="Fine",
+            steps=[ScriptStep(action=action, params={param: 0}, line_number=1)],
+        )
+
+        assert await runner.run(script, verbose=False) is True
+
+    async def test_a_rejected_delay_reports_the_field_name(self, caplog):
+        runner = make_runner()
+        script = Script(
+            name="Bad",
+            steps=[ScriptStep(action="wait", params={"seconds": float("nan")}, line_number=1)],
+        )
+
+        with caplog.at_level(logging.ERROR, logger=SCRIPT_LOGGER):
+            assert await runner.run(script, verbose=False) is False
+
+        assert "seconds must be a finite number" in caplog.text
+
+
+class TestScriptPathsAllowedFlag:
+    """One policy flag, read by the completer and the in-client help (L2)."""
+
+    def test_default_allows_paths(self):
+        assert scripting.script_paths_allowed() is True
+        assert scripting.describe_script_argument() == "Script name or file path"
+
+    def test_restricting_changes_the_help_text(self, monkeypatch):
+        monkeypatch.setattr(scripting, "_script_paths_allowed", False)
+
+        assert scripting.script_paths_allowed() is False
+        assert scripting.describe_script_argument() == (
+            "Script name (paths are not accepted over the control channel)"
+        )
 
 
 class TestToggleValueMatrix:

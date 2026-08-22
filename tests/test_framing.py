@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -176,11 +177,16 @@ class TestExtractFrames:
         assert diag.discarded == 2
 
     def test_garbage_only_buffer_cleared(self):
-        """A garbage-only buffer is fully discarded, not retained."""
+        """A garbage-only buffer is fully discarded, not retained.
+
+        Only the non-whitespace is *counted*: the two spaces in this
+        stream are discarded like everything else, but counting them would
+        make the total depend on where the peer cut the packet (T1).
+        """
         frames, remainder, diag = extract_frames("garbage not json")
         assert frames == []
         assert remainder == ""
-        assert diag.discarded == len("garbage not json")
+        assert diag.discarded == len("garbagenotjson")
 
     def test_stray_closing_brace_discarded(self):
         """A stray '}' (e.g. from earlier mis-framing) is discarded."""
@@ -367,3 +373,249 @@ class TestFrameScanner:
         for char in payload:
             scanner.feed(char)
         assert scan_counter[0] == len(payload)
+
+
+# ============================================================================
+# Copy cost and chunk-invariance (L3, T1)
+# ============================================================================
+
+
+class TestRetainedRemainderCost:
+    """The retained remainder is never re-copied onto the incoming chunk (L3)."""
+
+    def test_the_scanner_never_sees_the_retained_remainder_again(self, monkeypatch):
+        """The string handed to the scanner is the new chunk, not buffer+chunk.
+
+        ``buf = self._buffer + data`` re-allocated the whole retained
+        remainder on every ``feed()``. While an object is in progress that
+        remainder grows toward the 64 KiB cap, so each delivered byte cost
+        a ~32 KiB memcpy - ~590x amplification at 1-byte chunks, measured.
+        The length of the string passed to ``scan`` *is* that copy.
+        """
+        sizes: list[int] = []
+        original = framing._BraceScanner.scan
+
+        def recording_scan(self, s, start):
+            sizes.append(len(s))
+            return original(self, s, start)
+
+        monkeypatch.setattr(framing._BraceScanner, "scan", recording_scan)
+
+        payload = '{"a": "' + "x" * 500 + '"}'
+        scanner = FrameScanner()
+        for char in payload:
+            frames, _diag = scanner.feed(char)
+
+        assert frames == [payload]
+        # One character per call throughout. The old shape grew to
+        # len(payload) on the last call and summed to O(N^2) bytes copied.
+        assert sizes == [1] * len(payload)
+
+    def test_the_remainder_is_retained_as_pieces_not_one_string(self):
+        """Nothing is concatenated until a frame completes."""
+        scanner = FrameScanner()
+        for chunk in ('{"a"', ': "b', "cd"):
+            scanner.feed(chunk)
+
+        assert len(scanner._pieces) == 3
+
+    def test_buffer_property_coalesces_and_is_stable(self):
+        """Reading .buffer repeatedly must not keep re-joining pieces."""
+        scanner = FrameScanner()
+        for char in '{"a": "xyz':
+            scanner.feed(char)
+
+        assert scanner.buffer == '{"a": "xyz'
+        # Coalesced in place: a second read sees a single piece.
+        assert len(scanner._pieces) == 1
+        assert scanner.buffer == '{"a": "xyz'
+
+    def test_retained_length_tracks_the_pieces(self):
+        """The overflow check reads a running total, not len(join(...))."""
+        scanner = FrameScanner()
+        for chunk in ('{"a"', ": ", '"xy'):
+            scanner.feed(chunk)
+
+        assert scanner._retained == len('{"a": "xy')
+        assert scanner.buffer == '{"a": "xy'
+
+    def test_a_frame_that_spans_three_feeds_is_assembled_intact(self):
+        """The join happens across every retained piece, in order."""
+        scanner = FrameScanner()
+        assert scanner.feed('{"a":')[0] == []
+        assert scanner.feed(' "b')[0] == []
+        frames, _diag = scanner.feed('c"}')
+
+        assert frames == ['{"a": "bc"}']
+        assert scanner.buffer == ""
+
+    def test_a_trailing_frame_after_a_spanning_one_is_not_prefixed(self):
+        """Pieces are dropped when the frame they belong to completes."""
+        scanner = FrameScanner()
+        scanner.feed('{"a":')
+        frames, _diag = scanner.feed(' 1}{"b": 2}')
+
+        assert frames == ['{"a": 1}', '{"b": 2}']
+        assert scanner.buffer == ""
+
+
+class TestDiscardedIsChunkInvariant:
+    """``discarded`` counts non-whitespace only, so chunking cannot move it (T1)."""
+
+    @pytest.mark.parametrize(
+        "stream",
+        [
+            "000000000000000 ",
+            " :}}\n\\{a{",
+            "abc \t def{}",
+            "   ",
+            "}}} {{",
+        ],
+        ids=repr,
+    )
+    def test_total_is_the_same_at_every_cut_point(self, stream):
+        one_shot = FrameScanner()
+        expected = one_shot.feed(stream)[1].discarded
+
+        for cut in range(len(stream) + 1):
+            scanner = FrameScanner()
+            total = scanner.feed(stream[:cut])[1].discarded
+            total += scanner.feed(stream[cut:])[1].discarded
+            assert total == expected, f"cut at {cut}"
+
+    def test_whitespace_inside_a_garbage_run_is_not_counted(self):
+        """The documented contract: "non-whitespace garbage characters"."""
+        frames, diag = FrameScanner().feed("ab cd{}")
+
+        assert frames == ["{}"]
+        assert diag.discarded == 4
+
+    def test_byte_at_a_time_garbage_matches_a_single_delivery(self):
+        one_shot = FrameScanner().feed("xx yy zz")[1].discarded
+
+        scanner = FrameScanner()
+        total = sum(scanner.feed(char)[1].discarded for char in "xx yy zz")
+
+        assert total == one_shot == 6
+
+
+# ============================================================================
+# EventThrottle / bounded log volume (Security round-5 Finding 1)
+# ============================================================================
+
+
+class TestEventThrottle:
+    """Repeated peer-driven notices are counted, not logged one per event."""
+
+    def _throttle(self):
+        return framing.EventThrottle(framing._LOGGER, logging.WARNING, "seen %d (%d bytes)")
+
+    def test_reports_on_a_doubling_schedule(self, caplog):
+        throttle = self._throttle()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            for _ in range(16):
+                throttle.record()
+
+        # 1, 2, 4, 8, 16 - logarithmic in the peer's traffic, not linear.
+        assert [record.getMessage() for record in caplog.records] == [
+            "seen 1 (1 bytes)",
+            "seen 2 (2 bytes)",
+            "seen 4 (4 bytes)",
+            "seen 8 (8 bytes)",
+            "seen 16 (16 bytes)",
+        ]
+
+    def test_first_occurrence_is_never_delayed(self, caplog):
+        """The operator's first signal must stay immediate."""
+        throttle = self._throttle()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            throttle.record(41)
+
+        assert len(caplog.records) == 1
+        assert throttle.count == 1
+        assert throttle.total == 41
+
+    def test_flush_reports_the_suppressed_tail(self, caplog):
+        throttle = self._throttle()
+        for _ in range(3):
+            throttle.record(10)
+        caplog.clear()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            throttle.flush()
+
+        assert [record.getMessage() for record in caplog.records] == ["seen 3 (30 bytes)"]
+
+    def test_flush_is_silent_when_nothing_is_outstanding(self, caplog):
+        throttle = self._throttle()
+        throttle.record()  # reported immediately
+        caplog.clear()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            throttle.flush()
+            throttle.flush()
+
+        assert caplog.records == []
+
+    def test_reset_starts_the_next_connection_clean(self, caplog):
+        throttle = self._throttle()
+        for _ in range(5):
+            throttle.record()
+
+        throttle.reset()
+        assert (throttle.count, throttle.total) == (0, 0)
+        caplog.clear()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            throttle.record(7)
+
+        assert [record.getMessage() for record in caplog.records] == ["seen 1 (7 bytes)"]
+
+
+class TestGarbageLogVolumeIsBounded:
+    """A garbage dribble cannot buy one log line per byte (Security F1)."""
+
+    def test_ten_thousand_garbage_chunks_produce_a_handful_of_records(self, caplog):
+        scanner = FrameScanner()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            for _ in range(10000):
+                scanner.feed("x")
+
+        # Reports at 1, 2, 4, ... 8192: 14 summaries for 10,000 events,
+        # versus 10,000 log lines before.
+        assert len(caplog.records) == 14
+        assert "8192 runs (8192 bytes)" in caplog.records[-1].getMessage()
+
+    def test_the_first_garbage_run_is_still_reported_immediately(self, caplog):
+        scanner = FrameScanner()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            scanner.feed("garbage{}")
+
+        assert len(caplog.records) == 1
+        assert "non-JSON garbage" in caplog.records[0].getMessage()
+
+    def test_reset_reports_the_connection_total_once(self, caplog):
+        scanner = FrameScanner()
+        for _ in range(3):
+            scanner.feed("zz")
+        caplog.clear()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            scanner.reset()
+
+        assert len(caplog.records) == 1
+        assert "3 runs (6 bytes)" in caplog.records[0].getMessage()
+
+    def test_reset_is_silent_when_nothing_was_discarded(self, caplog):
+        scanner = FrameScanner()
+        scanner.feed('{"a": 1}')
+        caplog.clear()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            scanner.reset()
+
+        assert caplog.records == []

@@ -259,6 +259,9 @@ await door.set_hold_time(15.0)
 
 ### Timezone
 
+The device speaks **POSIX TZ strings**, not IANA names, and
+`set_timezone()` performs no conversion:
+
 ```python
 # Get current timezone (POSIX format)
 print(f"Timezone: {door.timezone}")
@@ -266,6 +269,51 @@ print(f"Timezone: {door.timezone}")
 # Set timezone (POSIX format)
 await door.set_timezone("EST5EDT,M3.2.0,M11.1.0")
 ```
+
+To go from a familiar `America/New_York` to the string the device wants,
+use the exported timezone helpers. They read the IANA database (via
+`tzdata`), which means the cache must be initialized first — the lookups
+return `None` until it is:
+
+```python
+from powerpetdoor import (
+    async_init_timezone_cache,
+    find_iana_for_posix,
+    get_available_timezones,
+    get_posix_tz_string,
+    is_cache_initialized,
+    parse_posix_tz_string,
+)
+
+# Build the cache once, off the event loop thread (all I/O is in a thread).
+await async_init_timezone_cache()
+assert is_cache_initialized()
+
+posix = get_posix_tz_string("America/New_York")   # 'EST5EDT,M3.2.0,M11.1.0'
+await door.set_timezone(posix)
+
+# ... and back again, for display. The reverse map is keyed by POSIX rule,
+# so the name you get back is *a* zone with those rules, not necessarily
+# the one you started from - but it always round-trips to the same string.
+find_iana_for_posix(posix)                        # e.g. 'America/Detroit'
+get_posix_tz_string(find_iana_for_posix(posix)) == posix
+
+get_available_timezones()[:3]                     # every IANA name, sorted
+parse_posix_tz_string(posix)["std_abbrev"]        # 'EST'
+```
+
+| Helper | Purpose |
+|--------|---------|
+| `async_init_timezone_cache()` | Build the cache without blocking the event loop (await once at startup) |
+| `init_timezone_cache_sync()` | Blocking equivalent, for non-async callers |
+| `is_cache_initialized()` | Whether the lookups below will work |
+| `get_available_timezones()` | Sorted list of IANA zone names (a copy) |
+| `get_posix_tz_string(iana)` | IANA name -> POSIX TZ string, or `None` |
+| `find_iana_for_posix(posix)` | POSIX TZ string -> an IANA name, or `None` |
+| `parse_posix_tz_string(posix)` | POSIX TZ string -> `{std_abbrev, dst_abbrev, ...}`, or `None` |
+
+The simulator's own `timezone` command accepts either spelling because it
+uses exactly these helpers.
 
 ## Battery & Hardware
 
@@ -485,3 +533,52 @@ ALL_DAYS  = [True, True, True, True, True, True, True]     # Every day
 WEEKDAYS  = [False, True, True, True, True, True, False]   # Monday-Friday
 WEEKENDS  = [True, False, False, False, False, False, True]  # Saturday-Sunday
 ```
+
+The list is indexed **Sunday-first**, while `datetime.weekday()` is
+Monday-first. Two exported converters bridge them, so you never have to
+write the `% 7` yourself:
+
+```python
+from datetime import date
+
+from powerpetdoor import week_0_mon_to_sun, week_0_sun_to_mon
+
+index = week_0_mon_to_sun(date.today().weekday())  # Monday=0 -> Sunday=0
+schedule.days_of_week[index]                        # active today?
+
+week_0_sun_to_mon(index) == date.today().weekday()  # and back
+```
+
+### Schedule Utilities
+
+Three more exported helpers support bulk schedule work. `compress_schedule`
+merges overlapping/adjacent windows into the fewest entries the device
+needs; `compute_schedule_diff` turns "current on device" plus "what I want"
+into the minimum set of `SET_SCHEDULE`/`DELETE_SCHEDULE` calls (the device
+takes one connection and rate-limits messages, so this matters);
+`schedule_entry_content_key` is the content-addressed key the diff compares
+on, exported for callers that want to build their own index.
+
+```python
+from powerpetdoor import (
+    compress_schedule,
+    compute_schedule_diff,
+    schedule_entry_content_key,
+    schedule_template,
+    validate_schedule_entry,
+)
+
+wanted = compress_schedule([...])            # entries built from schedule_template
+current = [s.to_dict() for s in await door.refresh_schedules()]
+to_delete, to_set = compute_schedule_diff(current, wanted)
+
+# Entries that already match are left alone; every flag spelling the device
+# might use ("1"/1/true) collapses to the same key, so an unchanged schedule
+# really does diff to nothing.
+schedule_entry_content_key(current[0]) == schedule_entry_content_key(wanted[0])
+```
+
+Entries handed to `compress_schedule` must be fully populated — start from
+a deep copy of `schedule_template`, which carries every field in the wire
+types `docs/protocol.md` specifies. `validate_schedule_entry` checks an
+entry for the required fields without raising.

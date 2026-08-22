@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run, reporting how many were dropped
 - ctl: `run <script> wait` streams the daemon's `LOG:` lines to stderr, so CI
   sees progress and the assertion text behind a failure
+- Exported timezone helpers, `PRIORITY_*`, `week_0_*` and the schedule
+  utilities are documented (`docs/door.md`, `docs/client.md`); a test now
+  fails if any name in `__all__` appears in no prose doc
 
 ### Changed
 - `loop=None` now resolves the running event loop lazily at connect time; the
@@ -58,6 +61,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simulator flags scoped to a mode are rejected by argparse instead of ignored
 - Bare `battery` and `holdtime` show the current value instead of mutating it
 - Dropped the `async-timeout` dependency in favor of stdlib `asyncio.timeout`
+- `Schedule.to_dict()` and `schedule_template` emit `enabled` as the wire's
+  `"1"`/`"0"` string, matching `docs/protocol.md` and the simulator. Readers on
+  both sides already accepted either spelling
+- `GET_SCHEDULE_LIST` returns slot indices sorted, and
+  `PowerPetDoor.refresh_schedules()` sorts the list it caches, so the public
+  `door.schedules` order no longer depends on which code path last touched it
+- Simulator: `list` prints the `--scripts-dir` header even when the directory
+  is empty, and names queued runs instead of raw references
+- Simulator: `stop all` is idempotent (succeeds with nothing running or
+  queued), and a bare `stop` with runs pending reports the depth instead of
+  "No script is running"
+- ctl: the `run` help text and epilog describe what the control channel
+  actually accepts (bare names only; a failed *load* still exits 1)
 - Schedule `days_of_week` now uses list format `[Sun, Mon, Tue, Wed, Thu, Fri, Sat]` instead of bitmask
 - CLI alias 'y' now used for cycle (previously 'c' conflicted with close)
 - Removed duplicate 'f' alias from run command (kept 'r' and 'file')
@@ -149,6 +165,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - POSIX timezone strings with angle-bracket abbreviations (`<+05>-5`) now parse
 - Schedule representation to match Power Pet Door protocol format
 - Battery charge simulation test reliability
+- Simulator: `stop all` left the one run the consumer had already claimed, so
+  clearing a running script plus N queued runs took two commands and the
+  "dropped" script started running in between
+- Simulator: `SET_SCHEDULE_LIST` wiped every schedule when the `schedules`
+  field was absent, and reported success when it was the wrong type
+- `schedule_entry_content_key()` compared `daysOfWeek` raw, so the firmware
+  variant that sends `"1"`/`"0"` day flags made every entry look changed and
+  turned each incremental sync into a full `SET_SCHEDULE` sweep
+- `coerce_schedule_days()` read a negative legacy bitmask as "active every
+  day"; out-of-range masks are now rejected
+- A complete frame delivered in the same read as a buffer overflow was
+  dispatched and then cancelled without a word; the drop is now reported
+- Simulator: a normal one-shot ctl hang-up was logged as
+  `[ERROR] Control client error: [Errno 32] Broken pipe` and broadcast to
+  every other ctl session
+- `InteractiveSession.format_output` was dead code, leaving the two live
+  history-recall echoes as the only unsanitized terminal writes; replaced by
+  `format_recall`, which both call sites use
 
 ### Security
 - Capped the receive buffer on both client and simulator (unbounded growth was a
@@ -190,6 +224,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`uv sync --locked`), and the build backend is pinned exactly
 - Simulator history files are created with `0600` permissions
 - All CI actions pinned to full commit SHAs
+- Peer-driven log notices are aggregated per connection instead of once per
+  read. A peer sending one byte per TCP segment bought one log line per byte —
+  x247 write amplification with no self-limiting, in the shipped library and in
+  the simulator, and 91% of a core once the control channel fanned the records
+  out. Garbage discards and non-ASCII notices now report on a doubling
+  schedule, so log volume is logarithmic in the peer's traffic
+- Response handlers read their payload field defensively, so a legal envelope
+  missing one field takes the existing "Response missing expected field" path
+  instead of raising a `KeyError`/`TypeError` into a full ERROR traceback
+- `_ControlLogHandler` drops records for a control client whose write buffer
+  has run away, capping the daemon memory a parked `ctl -i` session can cost
+- `FrameScanner` no longer re-copies its retained remainder onto every chunk
+  (~590x CPU amplification at 1-byte chunks), and its discard counter is
+  chunk-invariant
+- The last unbounded script numerics (`inside`/`outside` `duration`, `wait`
+  `seconds`, `wait_for` `timeout`) are bounded and finite-checked: `.nan`
+  reached `asyncio.sleep`, raised inside a background task, and left the step
+  silently skipped while the run still reported PASSED
+- Dependabot now covers the composite action directory as well as the root;
+  the pins no automation can reach are listed in `.claude/CLAUDE.md`
 
 ## [0.3.0] - 2025-12-27
 

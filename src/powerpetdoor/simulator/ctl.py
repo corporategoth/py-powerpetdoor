@@ -613,7 +613,7 @@ async def interactive_mode_async(
             )
 
             if was_history_recall:
-                print(f">>> {input_line.original} -> {input_line.resolved}")
+                print(interactive.format_recall(input_line))
 
             # Check if this is a local command (local_only=True in registry)
             if local_handler.is_local_command(input_line.resolved):
@@ -676,9 +676,10 @@ Examples:
   %(prog)s -i                      # Interactive mode
   %(prog)s shutdown                # Stop the daemon
 
-Plain 'run SCRIPT' queues the script and always exits 0; only the 'wait'
-form reports the script's own result. Use the 'help' command to see
-available simulator commands.
+Plain 'run SCRIPT' exits 0 as soon as it is queued; the queued script's own
+result never reaches the exit code (only the 'wait' form reports that). A
+script that fails to load is still an error, and exits 1. Use the 'help'
+command to see available simulator commands.
 """,
     )
     parser.add_argument(

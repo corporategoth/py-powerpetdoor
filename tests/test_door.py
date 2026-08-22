@@ -42,6 +42,7 @@ from powerpetdoor.simulator import (
     DoorSimulatorState,
     DoorTimingConfig,
 )
+from tests.conftest import GOLDEN_SCHEDULE_WIRE, assert_schedule_wire_types
 
 # ============================================================================
 # Test Fixtures
@@ -279,6 +280,37 @@ class TestSchedule:
         assert restored.start.hour == original.start.hour
         assert restored.end.minute == original.end.minute
 
+    def test_to_dict_matches_the_documented_wire_shape(self):
+        """The library emitter matches docs/protocol.md exactly (M1).
+
+        Compared against the same golden payload the simulator's emitter is
+        compared against, so the two can never drift apart again in any
+        field - ``enabled`` went out as a JSON boolean here while the doc
+        and the simulator both use the string "1", and the round trip stayed
+        green because the simulator's parser accepts both.
+        """
+        schedule = Schedule(
+            index=3,
+            enabled=True,
+            days_of_week=[True, False, True, False, True, False, True],
+            inside=True,
+            outside=False,
+            start=ScheduleTime(hour=6, minute=30),
+            end=ScheduleTime(hour=22, minute=15),
+        )
+
+        payload = schedule.to_dict()
+
+        assert payload == GOLDEN_SCHEDULE_WIRE
+        assert_schedule_wire_types(payload)
+
+    def test_to_dict_disabled_emits_the_zero_string(self):
+        """``enabled: False`` is the wire's "0", not JSON false (M1)."""
+        payload = Schedule(index=0, enabled=False, inside=True).to_dict()
+
+        assert payload["enabled"] == "0"
+        assert isinstance(payload["enabled"], str)
+
     def test_to_dict_days_are_wire_ints(self):
         """The wire protocol carries literal 1/0 ints, never bools (L2)."""
         schedule = Schedule(days_of_week=[True, False, True, False, True, False, True], inside=True)
@@ -365,7 +397,73 @@ class TestSchedule:
 
         assert restored.enabled is True
         assert isinstance(restored.enabled, bool)
-        assert restored.to_dict()["enabled"] is True
+        # In memory a bool; on the wire the protocol's "1"/"0" string (M1).
+        assert restored.to_dict()["enabled"] == "1"
+
+    def test_from_dict_no_days_defaults_to_every_day(self):
+        """An absent daysOfWeek means "every day", and that is pinned (R5-L1).
+
+        The default direction matters and was unobserved on both sides: two
+        tests parsed a payload without the field, neither looked at the
+        result, so flipping ``[1]*7`` to ``[0]*7`` changed nothing any test
+        could see.
+        """
+        assert Schedule.from_dict({}).days_of_week == [True] * 7
+        assert Schedule.from_dict({"index": 4}).days_of_week == [True] * 7
+
+    @pytest.mark.parametrize(
+        ("mask", "expected"),
+        [
+            (0, [False] * 7),
+            (1, [True] + [False] * 6),
+            (127, [True] * 7),
+            (62, [False, True, True, True, True, True, False]),
+            (True, [True] + [False] * 6),
+            (False, [False] * 7),
+        ],
+        ids=repr,
+    )
+    def test_from_dict_bitmask_boundaries(self, mask, expected):
+        """The legacy bitmask branch, pinned across its whole range (R5-L1).
+
+        ``True``/``False`` are ints on this wire like everywhere else, so
+        they are masks too - one bit and no bits respectively.
+        """
+        assert Schedule.from_dict(_inside_payload(daysOfWeek=mask)).days_of_week == expected
+
+    @pytest.mark.parametrize("mask", [-1, -128, 128, 2**64], ids=repr)
+    def test_from_dict_out_of_range_bitmask_is_rejected(self, mask):
+        """An out-of-range mask is rejected, not read modulo 7 bits (R5-L1).
+
+        ``-1 >> i & 1`` is 1 forever, so the old unbounded branch turned
+        every negative integer into "every day on" - the exact opposite of
+        the fail-closed doctrine ``coerce_schedule_flag`` documents. The
+        bound is checked in both directions for the same reason every
+        other coercer here checks both.
+        """
+        with pytest.raises(ValueError, match="daysOfWeek"):
+            Schedule.from_dict(_inside_payload(daysOfWeek=mask))
+
+    def test_from_dict_inside_wins_when_both_sensors_are_flagged(self):
+        """Statement order is the rule, so pin it on both parsers (R5-T4).
+
+        ``schedule add both`` produces both-flag entries in-project, so the
+        branch is live even though docs/protocol.md calls it out of spec.
+        """
+        restored = Schedule.from_dict(
+            {
+                "index": 0,
+                "inside": True,
+                "outside": True,
+                "daysOfWeek": [1] * 7,
+                "in_start_time": {"hour": 6, "min": 0},
+                "in_end_time": {"hour": 7, "min": 0},
+                "out_start_time": {"hour": 20, "min": 0},
+                "out_end_time": {"hour": 21, "min": 0},
+            }
+        )
+
+        assert (restored.start.hour, restored.end.hour) == (6, 7)
 
     def test_from_dict_unreadable_flag_fails_closed(self):
         """An unrecognizable sensor flag disables the entry, never enables it."""
@@ -1544,6 +1642,40 @@ class TestDoorUnitEdges:
 
         assert schedules == []
         assert door.schedules == []
+
+    async def test_refresh_schedules_sorts_by_index(self):
+        """`door.schedules` order must not depend on the last code path (T3).
+
+        `GET_SCHEDULE_LIST` returns slots, and a device (or a simulator)
+        whose slots were filled out of order can answer them out of order.
+        `_on_schedule_update` re-sorts after every push, so without this
+        the public property was sorted or unsorted depending on whether the
+        last thing that touched it was a refresh or a push.
+        """
+        door = PowerPetDoor("127.0.0.1")
+
+        def fake_send(msg_type, cmd, notify=False, **kwargs):
+            future = asyncio.get_running_loop().create_future()
+            if cmd == CMD_GET_SCHEDULE_LIST:
+                future.set_result([5, 1, 3])  # insertion order, not slot order
+            else:
+                future.set_result(
+                    {
+                        "index": kwargs["index"],
+                        "daysOfWeek": [1] * 7,
+                        "inside": True,
+                        "in_start_time": {"hour": 6, "min": 0},
+                        "in_end_time": {"hour": 22, "min": 0},
+                    }
+                )
+            return future
+
+        door._client.send_message = fake_send
+
+        schedules = await door.refresh_schedules(timeout=1.0)
+
+        assert [s.index for s in schedules] == [1, 3, 5]
+        assert [s.index for s in door.schedules] == [1, 3, 5]
 
     async def test_refresh_names_each_failed_step_in_the_log(self, caplog):
         """A dead refresh step is reported at the door layer, not swallowed (L5)."""

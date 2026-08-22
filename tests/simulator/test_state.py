@@ -24,6 +24,7 @@ from powerpetdoor.simulator import (
     DoorTimingConfig,
     Schedule,
 )
+from tests.conftest import GOLDEN_SCHEDULE_WIRE, assert_schedule_wire_types
 
 # ============================================================================
 # DoorTimingConfig Tests
@@ -106,6 +107,30 @@ class TestSchedule:
         assert schedule.outside is False
         assert schedule.start_hour == 6
         assert schedule.end_hour == 22
+
+    def test_to_dict_matches_the_documented_wire_shape(self):
+        """The simulator emitter matches docs/protocol.md exactly (M1).
+
+        Twin of the library-side golden test: both emitters are compared
+        against the same payload, so a divergence in *any* field fails on
+        whichever side moved.
+        """
+        schedule = Schedule(
+            index=3,
+            enabled=True,
+            days_of_week=[True, False, True, False, True, False, True],
+            inside=True,
+            outside=False,
+            start_hour=6,
+            start_min=30,
+            end_hour=22,
+            end_min=15,
+        )
+
+        payload = schedule.to_dict()
+
+        assert payload == GOLDEN_SCHEDULE_WIRE
+        assert_schedule_wire_types(payload)
 
     def test_to_dict(self):
         """Should convert to protocol dict format."""
@@ -196,8 +221,11 @@ class TestSchedule:
             "in_end_time": {"hour": 18, "min": 30},
         }
         schedule = Schedule.from_dict(data)
-        # Bitmask 0b0011111 = 31 converts to list [1, 1, 1, 1, 1, 0, 0]
-        assert schedule.days_of_week == [1, 1, 1, 1, 1, 0, 0]
+        # Bitmask 0b0011111 = 31 -> Sun..Thu on, Fri/Sat off, as real bools.
+        # `True == 1`, so the isinstance check is what actually pins the
+        # normalization R4-M3/T3 were about (R5-T5).
+        assert schedule.days_of_week == [True, True, True, True, True, False, False]
+        assert all(isinstance(day, bool) for day in schedule.days_of_week)
 
     def test_from_dict_normalizes_days_to_seven_bools(self):
         """Wire days become exactly 7 booleans, whatever their flag spelling."""
@@ -524,6 +552,51 @@ class TestScheduleFromDictRejectsHostileInput:
         assert (schedule.inside, schedule.outside) == (False, False)
         assert (schedule.start_hour, schedule.start_min) == (6, 0)
         assert (schedule.end_hour, schedule.end_min) == (22, 0)
+        # The absent-daysOfWeek default was unobserved on both sides (R5-L1).
+        assert schedule.days_of_week == [True] * 7
+
+    def test_from_dict_no_days_defaults_to_every_day(self):
+        """An absent daysOfWeek means "every day" here too (R5-L1)."""
+        assert Schedule.from_dict({}).days_of_week == [True] * 7
+
+    @pytest.mark.parametrize(
+        ("mask", "expected"),
+        [
+            (0, [False] * 7),
+            (1, [True] + [False] * 6),
+            (127, [True] * 7),
+            (62, [False, True, True, True, True, True, False]),
+            (True, [True] + [False] * 6),
+            (False, [False] * 7),
+        ],
+        ids=repr,
+    )
+    def test_from_dict_bitmask_boundaries(self, mask, expected):
+        """The legacy bitmask branch, pinned across its range (R5-L1)."""
+        assert Schedule.from_dict({"index": 0, "daysOfWeek": mask}).days_of_week == expected
+
+    @pytest.mark.parametrize("mask", [-1, -128, 128, 2**64], ids=repr)
+    def test_from_dict_out_of_range_bitmask_is_rejected(self, mask):
+        """A negative mask must not fail open to all seven days (R5-L1)."""
+        with pytest.raises(ValueError, match="daysOfWeek"):
+            Schedule.from_dict({"index": 0, "daysOfWeek": mask})
+
+    def test_from_dict_inside_wins_when_both_sensors_are_flagged(self):
+        """Statement order is the rule, so pin it on both parsers (R5-T4)."""
+        schedule = Schedule.from_dict(
+            {
+                "index": 0,
+                "inside": True,
+                "outside": True,
+                "daysOfWeek": [1] * 7,
+                "in_start_time": {"hour": 6, "min": 0},
+                "in_end_time": {"hour": 7, "min": 0},
+                "out_start_time": {"hour": 20, "min": 0},
+                "out_end_time": {"hour": 21, "min": 0},
+            }
+        )
+
+        assert (schedule.start_hour, schedule.end_hour) == (6, 7)
 
     def test_infinite_index_is_rejected_with_the_number_reason(self):
         """int(inf) raises OverflowError, which must not escape the validator."""
@@ -632,6 +705,20 @@ class TestDoorSimulatorState:
         assert len(result) == 2
         assert result[0] == 0
         assert result[1] == 1
+
+    def test_get_schedule_list_is_sorted_by_slot(self):
+        """Slots created out of order still come back in slot order (T3).
+
+        The store is a dict, so insertion order leaked into the reply and
+        `door.refresh_schedules` inherited it - leaving the public
+        `door.schedules` sorted or unsorted depending on which code path
+        last touched it.
+        """
+        state = DoorSimulatorState()
+        for index in (5, 1, 3):
+            state.schedules[index] = Schedule(index=index)
+
+        assert state.get_schedule_list() == [1, 3, 5]
 
     def test_is_sensor_allowed_by_schedule_no_auto(self):
         """Should allow all sensors when auto/timers disabled."""
