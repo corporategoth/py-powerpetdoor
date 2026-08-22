@@ -25,7 +25,7 @@ import json
 from typing import Any
 
 from powerpetdoor.const import DOOR_STATUS, FIELD_DOOR_STATUS
-from powerpetdoor.framing import extract_frames
+from powerpetdoor.framing import FrameScanner
 
 
 class WireCapture:
@@ -40,7 +40,7 @@ class WireCapture:
         self.reader = reader
         self.writer = writer
         self.messages: list[dict[str, Any]] = []
-        self._buffer = ""
+        self._scanner = FrameScanner()
 
     async def send(self, msg: dict[str, Any]) -> None:
         """Send one message to the simulator."""
@@ -53,7 +53,7 @@ class WireCapture:
         Partial frames are carried over to the next call, so a message split
         across reads is never lost.
         """
-        frames, self._buffer, _diag = extract_frames(self._buffer + data.decode("ascii"))
+        frames, _diag = self._scanner.feed(data.decode("ascii"))
         parsed = [json.loads(frame) for frame in frames]
         self.messages.extend(parsed)
         return parsed

@@ -198,6 +198,41 @@ class TestScheduleAdd:
         assert "Added schedule #0:" in result.message
         assert sorted(command_handler.simulator.state.schedules) == [0, 1]
 
+    async def test_add_refuses_to_allocate_past_the_wire_bound(self, command_handler):
+        """The index search is capped at MAX_SCHEDULE_INDEX (security #4).
+
+        A wire peer can legitimately fill every legal slot (0-255); the
+        operator's next `schedule add` then silently created index 256,
+        which to_dict() put on the wire and GET_SCHEDULE_LIST returned - a
+        value the simulator would itself reject if a client sent it.
+        """
+        from powerpetdoor.schedule import MAX_SCHEDULE_INDEX
+        from powerpetdoor.simulator.state import Schedule
+
+        state = command_handler.simulator.state
+        for index in range(MAX_SCHEDULE_INDEX + 1):
+            state.schedules[index] = Schedule(index=index)
+
+        result = await command_handler.execute("schedule add inside 6:00-7:00")
+
+        assert result.success is False
+        assert result.message == "No free schedule slots"
+        assert max(state.schedules) == MAX_SCHEDULE_INDEX
+
+    async def test_add_still_allocates_the_last_legal_slot(self, command_handler):
+        """The cap is inclusive: slot 255 is legal and must still be usable."""
+        from powerpetdoor.schedule import MAX_SCHEDULE_INDEX
+        from powerpetdoor.simulator.state import Schedule
+
+        state = command_handler.simulator.state
+        for index in range(MAX_SCHEDULE_INDEX):
+            state.schedules[index] = Schedule(index=index)
+
+        result = await command_handler.execute("schedule add inside 6:00-7:00")
+
+        assert result.success is True
+        assert f"Added schedule #{MAX_SCHEDULE_INDEX}:" in result.message
+
     async def test_add_invalid_time_range(self, command_handler):
         result = await command_handler.execute("schedule add inside 25:00-26:00 all")
         assert result.success is False

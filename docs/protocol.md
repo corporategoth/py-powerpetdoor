@@ -456,6 +456,7 @@ command chokes on:
 | `SET_SENSOR_TRIGGER_VOLTAGE` | a finite number in 0-65535 |
 | `SET_SLEEP_SENSOR_TRIGGER_VOLTAGE` | a finite number in 0-65535 |
 | `SET_NOTIFICATIONS` | each supplied field must be a 0/1 flag (`"1"`/`1`/`true` and `"0"`/`0`/`false`); one bad field rejects the whole message, so a notification set is never half-applied |
+| `GET_SCHEDULE`, `DELETE_SCHEDULE` | `index` (when present) must be an integer in 0-255; a container, string, boolean or out-of-range value is rejected with a reason rather than raising |
 
 A rejection answers `{"success": "false", "reason": "<field> must be ..."}`
 and leaves state untouched.

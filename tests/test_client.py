@@ -477,6 +477,82 @@ class TestDataReceived:
         client.data_received('"value"}'.encode("ascii"))
         assert client._buffer == ""
 
+    def test_rx_logging_does_not_sanitize_when_debug_is_off(self, mock_client, monkeypatch):
+        """The regex substitution costs ~20x the suppressed log call it feeds (T2).
+
+        The simulator's identical line has always been guarded by
+        isEnabledFor; the library side - the one that runs unattended for
+        years inside a host application - was not.
+        """
+        from powerpetdoor import client as client_module
+
+        calls: list[object] = []
+
+        def _record(value):
+            calls.append(value)
+            return str(value)
+
+        monkeypatch.setattr(client_module, "sanitize_text", _record)
+        logger = logging.getLogger("powerpetdoor.client")
+        original_level = logger.level
+        client, _, _ = mock_client
+        try:
+            logger.setLevel(logging.INFO)
+            client.data_received(b'{"success": "true", "CMD": "PONG", "PONG": "1"}')
+            assert calls == []
+
+            logger.setLevel(logging.DEBUG)
+            client.data_received(b'{"success": "true", "CMD": "PONG", "PONG": "2"}')
+            # The guard lets it through when DEBUG really is on.
+            assert calls == ['{"success": "true", "CMD": "PONG", "PONG": "2"}']
+        finally:
+            logger.setLevel(original_level)
+
+    def test_dribbled_frame_is_scanned_once_per_byte(self, mock_client, monkeypatch):
+        """A byte-at-a-time hostile door costs O(N) CPU here, not O(N^2).
+
+        The shipped client is the sharpest edge of the quadratic re-scan
+        (S1): a ~750 byte/s trickle used to pin a full core inside the host
+        application's event loop.
+        """
+        from powerpetdoor import framing
+
+        examined = [0]
+        original = framing._BraceScanner.scan
+
+        def counting_scan(self, s, start):
+            end = original(self, s, start)
+            examined[0] += end - start
+            return end
+
+        monkeypatch.setattr(framing._BraceScanner, "scan", counting_scan)
+
+        client, _, _ = mock_client
+        payload = '{"a": "' + "x" * 4000
+        for char in payload:
+            client.data_received(char.encode("ascii"))
+
+        assert client._buffer == payload
+        assert examined[0] == len(payload)
+
+    def test_disconnect_resets_the_frame_scanner_state(self, mock_client):
+        """A partial frame left by a dead connection cannot leak into the next.
+
+        The retained text was already cleared; the brace/string state has to
+        go with it, or the first object of the new connection is swallowed
+        as a continuation of the old one.
+        """
+        client, _, _ = mock_client
+        received = _capture_messages(client)
+
+        client.data_received(b'{"a": "unterminated')
+        assert client._buffer != ""
+        client.disconnect()
+        assert client._buffer == ""
+
+        client.data_received(b'{"success": "true", "CMD": "PONG", "PONG": "5"}')
+        assert received == [{"success": "true", "CMD": "PONG", "PONG": "5"}]
+
 
 # ============================================================================
 # Listener System Tests
@@ -1318,6 +1394,38 @@ class TestProcessMessageDefensive:
         # Before the fix this raised TypeError: unhashable type: 'list'
         await asyncio.gather(*tasks)
         assert client.replyMsgId == [1, 2]
+
+    @pytest.mark.parametrize("bad_cmd", [["x"], {"nested": "cmd"}, 5, 1.5, True], ids=repr)
+    async def test_unhashable_or_non_string_cmd_matches_no_handler(self, mock_client, bad_cmd):
+        """CMD is a wire value used as a dict key - it must never raise (S2).
+
+        A JSON container is a legal value on this wire and an unhashable
+        key in Python, so ``ResponseHandlerRegistry.get`` used to raise
+        ``TypeError: unhashable type`` for the sibling field ``msgID`` was
+        already guarded against, turning a ~40-byte hostile frame into a
+        ~447-byte ERROR traceback in the host application's log.
+        """
+        from powerpetdoor.client import ResponseHandlerRegistry
+
+        assert ResponseHandlerRegistry.get(bad_cmd) is None
+
+        client, _, _ = mock_client
+        # process_message documents that handler dispatch is isolated; a
+        # container CMD must produce no exception at all.
+        await client.process_message({"success": "true", "CMD": bad_cmd})
+
+    async def test_container_cmd_does_not_kill_the_receive_task(self, mock_client, caplog):
+        """The receive path survives a list CMD with no traceback logged (S2)."""
+        client, _, _ = mock_client
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            client.data_received(b'{"CMD": ["x"], "success": "true"}')
+            tasks = list(client._tasks)
+            assert len(tasks) == 1
+            await asyncio.gather(*tasks)
+
+        assert "Traceback" not in caplog.text
+        assert caplog.records == []
 
     async def test_message_missing_success_fails_future(self, mock_client):
         """A response without success fails the matched future (typed)."""
@@ -2721,6 +2829,216 @@ class TestDeclinedTransports:
         assert client._reconnect_task is not None
         client.disconnect()
 
+    async def test_direct_path_ignores_a_superseded_transports_loss(
+        self, disconnected_client, caplog
+    ):
+        """The direct-wiring twin of the shim's superseded-transport check (L1).
+
+        ``PowerPetDoorClient`` is a documented ``asyncio.Protocol``, so it
+        may be handed to ``create_connection()`` without the shim. asyncio
+        passes no transport identity, so a stale loss from a socket
+        ``disconnect()`` already replaced used to close the healthy one,
+        fail its futures and burn a reconnect - exactly the failure the shim
+        was hardened against, reached through the other door.
+        """
+        from tests.conftest import MockTransport
+
+        client = disconnected_client
+        old_transport = MockTransport()
+        client.connection_made(old_transport)
+
+        client.disconnect()
+        new_transport = MockTransport()
+        client.connection_made(new_transport)
+
+        # Registered only now, so the list can only record a teardown caused
+        # by the stale loss itself.
+        disconnects: list[int] = []
+        client.add_handlers("watcher", on_disconnect=lambda: disconnects.append(1))
+
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.client"):
+            client.connection_lost(None)  # the old socket's loss finally lands
+
+        assert client._transport is new_transport
+        assert client.available is True
+        assert new_transport.is_closing() is False
+        assert disconnects == []
+        assert client._reconnect_task is None
+        assert "superseded transport" in caplog.text
+        assert "The server closed the connection" not in caplog.text
+        client.disconnect()
+
+    async def test_direct_path_still_forwards_the_live_transports_loss(
+        self, disconnected_client, caplog
+    ):
+        """The superseded guard must not swallow a genuine server-side close."""
+        from tests.conftest import MockTransport
+
+        client = disconnected_client
+        client.connection_made(MockTransport())
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            client.connection_lost(ConnectionResetError())
+
+        assert client._transport is None
+        assert client._reconnect_task is not None
+        assert "The server closed the connection" in caplog.text
+        client.disconnect()
+
+    async def test_a_second_loss_for_the_same_transport_is_a_no_op(self, disconnected_client):
+        """A repeated (or unpaired) loss must not re-run the teardown."""
+        from tests.conftest import MockTransport
+
+        client = disconnected_client
+        client.connection_made(MockTransport())
+        client.connection_lost(None)
+        assert client._reconnect_task is not None
+        client._reconnect_task.cancel()
+        client._reconnect_task = None
+
+        client.connection_lost(None)  # nothing left to lose
+
+        assert client._reconnect_task is None
+        assert client._pending_direct_losses == 0
+
+    async def test_a_local_drop_after_shutdown_does_not_reconnect(self, mock_client):
+        """A failure path that fires after shutdown() must stay down."""
+        client, _, _ = mock_client
+        client._shutdown = True
+
+        client._drop_connection()
+
+        assert client._transport is None
+        assert client._reconnect_task is None
+
+    async def test_direct_path_superseded_count_does_not_latch(self, disconnected_client):
+        """Each adopt/lose cycle must clear its own count, never accumulate.
+
+        A count that drifted upward would swallow a *later* genuine loss -
+        strictly worse than the bug it fixes.
+        """
+        from tests.conftest import MockTransport
+
+        client = disconnected_client
+        for _ in range(3):
+            client.connection_made(MockTransport())
+            client.connection_lost(None)  # a genuine server-side close
+            assert client._transport is None
+            if client._reconnect_task is not None:
+                client._reconnect_task.cancel()
+                client._reconnect_task = None
+
+        assert client._pending_direct_losses == 0
+
+        # A fourth genuine loss is still acted on.
+        client.connection_made(MockTransport())
+        client.connection_lost(None)
+        assert client._transport is None
+        assert client._reconnect_task is not None
+        client.disconnect()
+
+    async def test_shim_ignores_a_shutdown_declined_transports_loss(
+        self, disconnected_client, caplog
+    ):
+        """The shim's ``_adopted`` guard is the only guard on this path (R4-L1).
+
+        With the client shut down mid-connect, ``client._transport`` is
+        None, so the superseded-transport check below it cannot fire. A
+        socket the client explicitly refused must still not produce a bogus
+        ERROR and a wasted reconnect against a one-slot device.
+        """
+        from powerpetdoor.client import _ConnectionAttempt
+        from tests.conftest import MockTransport
+
+        client = disconnected_client
+        client.shutdown()
+        attempt = _ConnectionAttempt(client)
+        refused = MockTransport()
+        attempt.connection_made(refused)  # declined by the shutdown branch
+
+        assert refused.aborted is True  # abort(), not close() (R4-T3)
+        assert client._transport is None
+        client.reset_shutdown()  # the app re-enables the client
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            attempt.connection_lost(None)  # asyncio delivers the aborted loss
+
+        assert client._reconnect_task is None
+        assert "The server closed the connection" not in caplog.text
+
+    async def test_disconnect_then_connect_does_not_report_a_server_close(
+        self, disconnected_client, caplog
+    ):
+        """The real event-loop ordering: the stale loss lands *before* the new
+        transport is adopted, so no identity check can catch it (T1).
+
+        ``disconnect()`` has already torn everything down, so the trailing
+        callback must be a no-op rather than an ERROR about a connection
+        nobody lost plus a reconnect that later no-ops.
+        """
+        from powerpetdoor.client import _ConnectionAttempt
+        from tests.conftest import MockTransport
+
+        client = disconnected_client
+        first = _ConnectionAttempt(client)
+        first.connection_made(MockTransport())
+
+        client.disconnect()
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            first.connection_lost(None)  # arrives before connect() completes
+
+        assert client._reconnect_task is None
+        assert "The server closed the connection" not in caplog.text
+
+    async def test_keepalive_give_up_still_reconnects(self, disconnected_client):
+        """The 3-strike keepalive path schedules its own reconnect (T1).
+
+        It used to rely on the connection_lost() its disconnect() provokes;
+        now that the trailing loss is ignored, the reconnect has to be
+        explicit or the client never comes back.
+        """
+        from powerpetdoor.client import MAX_FAILED_PINGS
+        from tests.conftest import MockTransport
+
+        client = disconnected_client
+        client.cfg_keepalive = 0  # no background keepalive task of its own
+        client.connection_made(MockTransport())
+        # keepalive() only acts while its own task is the live one.
+        client._keepalive = asyncio.get_running_loop().create_future()
+        client._last_ping = "1"
+        client._failed_pings = MAX_FAILED_PINGS - 1
+
+        await client.keepalive()
+
+        assert client._transport is None
+        assert client._reconnect_task is not None
+        client.disconnect()
+
+    async def test_write_failure_still_reconnects(self, mock_client):
+        """A failed transport write drops the connection and reconnects (T1)."""
+
+        def broken_write(_data):
+            raise OSError("broken pipe")
+
+        client, transport, _ = mock_client
+        transport.write = broken_write
+
+        await client._send_data(b'{"a": 1}')
+
+        assert client._transport is None
+        assert client._reconnect_task is not None
+
+    async def test_overflow_drop_still_reconnects(self, mock_client):
+        """The framing overflow disconnect keeps its reconnect too (T1)."""
+        from powerpetdoor.framing import MAX_BUFFER_SIZE
+
+        client, _, _ = mock_client
+
+        client.data_received(b"{" * (MAX_BUFFER_SIZE + 1))
+
+        assert client._transport is None
+        assert client._reconnect_task is not None
+
     async def test_shutdown_during_connect_leaves_no_live_socket(self):
         """shutdown() mid-connect must not adopt the socket that arrives (M1).
 
@@ -2916,6 +3234,103 @@ class TestAclose:
         assert "did not finish in time" in caplog.text
         assert client._handler_tasks == set()
 
+    async def test_aclose_honours_its_timeout_argument(self, mock_client):
+        """cfg_timeout is 5.0 here; a 0.01 s aclose must return well inside it.
+
+        Ignoring the argument and always using cfg_timeout used to survive
+        every test, because the only caller that passes one also happened to
+        be cancelled by the longer wait (R4-M4).
+        """
+        client, _, _ = mock_client
+        assert client.cfg_timeout >= 1.0  # pin the premise the test relies on
+        client.add_handlers("app", on_disconnect=lambda: asyncio.sleep(3600))
+
+        async with asyncio.timeout(client.cfg_timeout / 2):
+            await client.aclose(timeout=0.01)
+
+        assert client._handler_tasks == set()
+
+    async def test_aclose_cancelled_mid_wait_still_cancels_the_handlers(self, mock_client):
+        """The one guarantee aclose() exists to make survives its own cancel.
+
+        asyncio.wait re-raises CancelledError, so a cancel step after it
+        never ran and every outstanding handler was left running,
+        un-awaited and un-cancelled (L2).
+        """
+        started = asyncio.Event()
+        outcome: list[str] = []
+
+        async def wedged_disconnect():
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+                outcome.append("finished")  # pragma: no cover (never reached)
+            except asyncio.CancelledError:
+                outcome.append("cancelled")
+                raise
+
+        client, _, _ = mock_client
+        client.add_handlers("app", on_disconnect=wedged_disconnect)
+
+        handler_tasks = None
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                closing = asyncio.ensure_future(client.aclose(timeout=30.0))
+                await started.wait()
+                handler_tasks = set(client._handler_tasks)
+                await closing
+
+        # The outer timeout cancelled aclose() mid-wait; the handler must
+        # still have been cancelled rather than left running.
+        await asyncio.gather(*handler_tasks, return_exceptions=True)
+        assert outcome == ["cancelled"]
+        assert all(task.done() for task in handler_tasks)
+
+    async def test_aclose_cancelled_mid_wait_skips_handlers_that_finished(self, mock_client):
+        """Only the still-running handlers are cancelled on the way out (L2)."""
+        started = asyncio.Event()
+        outcome: list[str] = []
+
+        async def quick_disconnect():
+            outcome.append("finished")
+
+        async def wedged_disconnect():
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                outcome.append("cancelled")
+                raise
+
+        client, _, _ = mock_client
+        client.add_handlers("quick", on_disconnect=quick_disconnect)
+        client.add_handlers("wedged", on_disconnect=wedged_disconnect)
+
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                closing = asyncio.ensure_future(client.aclose(timeout=30.0))
+                await started.wait()
+                await closing
+
+        assert outcome == ["finished", "cancelled"]
+
+    async def test_aclose_from_inside_a_handler_does_not_wait_for_itself(self, mock_client):
+        """The 'don't await yourself' filter, otherwise a self-deadlock (R4-M4)."""
+        client, _, _ = mock_client
+        completed = asyncio.Event()
+
+        async def closing_disconnect():
+            # Without the `task is not current` filter this waits out the
+            # full timeout on its own task before returning.
+            await client.aclose(timeout=30.0)
+            completed.set()
+
+        client.add_handlers("app", on_disconnect=closing_disconnect)
+
+        async with asyncio.timeout(5.0):
+            client.disconnect()
+            await completed.wait()
+
 
 # ============================================================================
 # Background Task Tracking Tests (L3)
@@ -2948,6 +3363,49 @@ class TestBackgroundTaskTracking:
             await asyncio.gather(task, return_exceptions=True)
 
         assert "Background client task failed" in caplog.text
+        assert client._tasks == set()
+
+    async def test_start_tracks_the_connect_task(self, disconnected_client, monkeypatch):
+        """start()'s connect() is tracked, not a bare ensure_future (R4-T2).
+
+        Tracking is what makes an exception escaping connect() get logged
+        immediately rather than at GC time, and what lets disconnect()
+        cancel an attempt still in flight.
+        """
+        client = disconnected_client
+        entered = asyncio.Event()
+
+        async def slow_connect():
+            entered.set()
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(client, "connect", slow_connect)
+        client.start()
+        async with asyncio.timeout(2.0):
+            await entered.wait()
+
+        tracked = list(client._tasks)
+        assert len(tracked) == 1
+
+        client.disconnect()
+        await asyncio.gather(*tracked, return_exceptions=True)
+        assert tracked[0].cancelled()
+        assert client._tasks == set()
+
+    async def test_scheduled_reconnect_is_tracked(self, disconnected_client):
+        """_schedule_reconnect()'s task is tracked as well (R4-T2)."""
+        client = disconnected_client
+        client.cfg_reconnect = 60
+
+        client._schedule_reconnect()
+
+        task = client._reconnect_task
+        assert task is not None
+        assert task in client._tasks
+
+        client.disconnect()
+        await asyncio.gather(task, return_exceptions=True)
+        assert task.cancelled()
         assert client._tasks == set()
 
     async def test_disconnect_cancels_in_flight_processing(self, mock_client):

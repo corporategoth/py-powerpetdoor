@@ -7,6 +7,13 @@
 
 This module provides pure utility functions for working with Power Pet Door
 schedules, including validation, compression, and diffing.
+
+It also owns the single set of coercion helpers used to turn an untrusted
+``daysOfWeek``/time/index payload into safe values
+(:func:`coerce_schedule_int` and friends). Both schedule parsers - the
+library's :class:`powerpetdoor.door.Schedule` and the simulator's
+:class:`powerpetdoor.simulator.state.Schedule` - read wire data through
+them, so hardening lands on both sides at once.
 """
 
 from __future__ import annotations
@@ -33,6 +40,130 @@ from .const import (
 from .sanitize import sanitize_text
 
 _LOGGER = logging.getLogger(__name__)
+
+#: Highest schedule slot index accepted from the wire. Also bounds the
+#: number of slots a hostile SET_SCHEDULE stream can allocate.
+MAX_SCHEDULE_INDEX = 255
+
+
+def coerce_schedule_int(value: object, name: str, maximum: int) -> int:
+    """Coerce an untrusted wire value to an int in ``0..maximum``.
+
+    Args:
+        value: Raw wire value.
+        name: Field name, used in the error message.
+        maximum: Largest accepted value (inclusive).
+
+    Raises:
+        ValueError: If the value is not numeric or is out of range.
+    """
+    try:
+        result: int = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError, OverflowError):
+        # int(float("inf")) raises OverflowError, not ValueError: without it
+        # `1e400` escapes as an unhandled exception and the caller reports a
+        # generic "Command failed" plus a stack trace for a value this
+        # validator meant to reject cleanly.
+        raise ValueError(f"Schedule {name} must be a number, got {value!r}") from None
+    if not 0 <= result <= maximum:
+        raise ValueError(f"Schedule {name} must be between 0 and {maximum}, got {result}")
+    return result
+
+
+def coerce_schedule_day(value: object, position: int) -> bool:
+    """Coerce one untrusted ``daysOfWeek`` element to a boolean.
+
+    Plain truthiness is the wrong tool: the very same object carries
+    ``enabled`` as a ``"0"``/``"1"`` *string* on the wire, and ``bool("0")``
+    is True - an access-control entry would silently become active on a day
+    the caller disabled. Values are read the way every other wire flag in
+    this project is read (``make_bool``), and anything that is not a
+    recognizable flag is rejected rather than guessed at.
+
+    Raises:
+        ValueError: If the element is not a recognizable 0/1 flag.
+    """
+    flag = make_bool(value) if isinstance(value, (bool, int, str)) else None
+    if not isinstance(flag, bool):
+        raise ValueError(f"Schedule daysOfWeek[{position}] must be 0 or 1, got {value!r}")
+    return flag
+
+
+def coerce_schedule_days(value: object) -> list[bool]:
+    """Coerce an untrusted ``daysOfWeek`` value to exactly 7 booleans.
+
+    Accepts the protocol's 7-element list or the legacy integer bitmask.
+
+    Raises:
+        ValueError: If the value is neither of those shapes, or an element
+            is not a 0/1 flag.
+    """
+    if isinstance(value, int):
+        # Legacy bitmask -> [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+        return [bool((value >> i) & 1) for i in range(7)]
+    if isinstance(value, list) and len(value) == 7:
+        return [coerce_schedule_day(day, i) for i, day in enumerate(value)]
+    raise ValueError(f"Schedule daysOfWeek must be a list of 7 values, got {value!r}")
+
+
+def coerce_schedule_flag(value: object, name: str) -> bool:
+    """Coerce an untrusted schedule flag (``enabled``/``inside``/``outside``).
+
+    Read with ``make_bool`` for the same reason the day flags are: the
+    device sends ``enabled`` as the string ``"1"``/``"0"``, and plain
+    truthiness reads ``"0"`` as True. Anything unrecognizable fails closed
+    (disabled) rather than raising - an unreadable flag must never *grant*
+    access, and a schedule the device already stores should not become
+    unreadable because one flag has a novel spelling.
+
+    Args:
+        value: Raw wire value.
+        name: Field name, used only for the debug log.
+
+    Returns:
+        The flag as a real ``bool``.
+    """
+    flag = make_bool(value) if isinstance(value, (bool, int, str)) else None
+    if flag is None:
+        _LOGGER.debug(
+            "Schedule %s is not a recognizable flag (%s); treating it as off",
+            name,
+            sanitize_text(value),
+        )
+        return False
+    return flag
+
+
+def require_schedule_field(data: dict, key: str) -> object:
+    """Return ``data[key]``, rejecting the payload when the field is absent.
+
+    Raises:
+        ValueError: If ``key`` is missing.
+    """
+    if key not in data:
+        raise ValueError(f"Schedule is missing required field {key!r}")
+    return data[key]
+
+
+def coerce_schedule_time(value: object, name: str) -> tuple[int, int]:
+    """Coerce an untrusted ``{hour, min}`` mapping to a valid (hour, minute).
+
+    The hour is required: this entry's whole purpose is to gate sensor
+    access, so materializing a permissive window out of an absent field is
+    the wrong way to fail (L5). The minute defaults to 0, matching the
+    protocol's own ``{hour: H, min: 0}`` shape.
+
+    Raises:
+        ValueError: If the value is not a mapping, carries no hour, or the
+            fields are not valid times.
+    """
+    if not isinstance(value, dict):
+        raise ValueError(f"Schedule {name} must be an object, got {value!r}")
+    if FIELD_HOUR not in value:
+        raise ValueError(f"Schedule {name} must specify {FIELD_HOUR}, got {value!r}")
+    hour = coerce_schedule_int(value[FIELD_HOUR], f"{name} hour", 23)
+    minute = coerce_schedule_int(value.get(FIELD_MINUTE, 0), f"{name} minute", 59)
+    return hour, minute
 
 
 def week_0_mon_to_sun(val: int) -> int:

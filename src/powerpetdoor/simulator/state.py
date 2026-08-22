@@ -13,7 +13,6 @@ import zoneinfo
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from ..client import make_bool
 from ..const import (
     DOOR_STATE_CLOSED,
     FIELD_AUTO,
@@ -42,6 +41,14 @@ from ..const import (
     FIELD_START_TIME_SUFFIX,
     FIELD_TZ,
 )
+from ..schedule import (
+    MAX_SCHEDULE_INDEX,
+    coerce_schedule_days,
+    coerce_schedule_flag,
+    coerce_schedule_int,
+    coerce_schedule_time,
+    require_schedule_field,
+)
 from ..tz_utils import find_iana_for_posix, get_posix_tz_string, is_cache_initialized
 
 logger = logging.getLogger(__name__)
@@ -49,97 +56,11 @@ logger = logging.getLogger(__name__)
 # Note: FIELD_INSIDE and FIELD_OUTSIDE are used both as:
 # 1. Settings fields for sensor enable/disable (string "0"/"1")
 # 2. Schedule entry fields for which sensor the entry applies to (bool)
-
-#: Highest schedule slot index accepted from the wire. Also bounds the
-#: number of slots a hostile SET_SCHEDULE stream can allocate.
-MAX_SCHEDULE_INDEX = 255
-
-
-def _coerce_schedule_int(value: object, name: str, maximum: int) -> int:
-    """Coerce an untrusted wire value to an int in ``0..maximum``.
-
-    Raises:
-        ValueError: If the value is not numeric or is out of range.
-    """
-    try:
-        result: int = int(value)  # type: ignore[call-overload]
-    except (TypeError, ValueError, OverflowError):
-        # int(float("inf")) raises OverflowError, not ValueError: without it
-        # `1e400` escapes as an unhandled exception and the caller reports a
-        # generic "Command failed" plus a stack trace for a value this
-        # validator meant to reject cleanly.
-        raise ValueError(f"Schedule {name} must be a number, got {value!r}") from None
-    if not 0 <= result <= maximum:
-        raise ValueError(f"Schedule {name} must be between 0 and {maximum}, got {result}")
-    return result
-
-
-def _coerce_schedule_day(value: object, position: int) -> bool:
-    """Coerce one untrusted ``daysOfWeek`` element to a boolean.
-
-    Plain truthiness is the wrong tool: the very same object carries
-    ``enabled`` as a ``"0"``/``"1"`` *string* on the wire, and ``bool("0")``
-    is True - an access-control entry would silently become active on a day
-    the caller disabled. Values are read the way every other wire flag in
-    this project is read (``make_bool``), and anything that is not a
-    recognizable flag is rejected rather than guessed at.
-
-    Raises:
-        ValueError: If the element is not a recognizable 0/1 flag.
-    """
-    flag = make_bool(value) if isinstance(value, (bool, int, str)) else None
-    if not isinstance(flag, bool):
-        raise ValueError(f"Schedule daysOfWeek[{position}] must be 0 or 1, got {value!r}")
-    return flag
-
-
-def _coerce_schedule_days(value: object) -> list[bool]:
-    """Coerce an untrusted ``daysOfWeek`` value to exactly 7 booleans.
-
-    Accepts the protocol's 7-element list or the legacy integer bitmask.
-
-    Raises:
-        ValueError: If the value is neither of those shapes, or an element
-            is not a 0/1 flag.
-    """
-    if isinstance(value, int):
-        # Legacy bitmask -> [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
-        return [bool((value >> i) & 1) for i in range(7)]
-    if isinstance(value, list) and len(value) == 7:
-        return [_coerce_schedule_day(day, i) for i, day in enumerate(value)]
-    raise ValueError(f"Schedule daysOfWeek must be a list of 7 values, got {value!r}")
-
-
-def _require_schedule_field(data: dict, key: str) -> object:
-    """Return ``data[key]``, rejecting the payload when the field is absent.
-
-    Raises:
-        ValueError: If ``key`` is missing.
-    """
-    if key not in data:
-        raise ValueError(f"Schedule is missing required field {key!r}")
-    return data[key]
-
-
-def _coerce_schedule_time(value: object, name: str) -> tuple[int, int]:
-    """Coerce an untrusted ``{hour, min}`` mapping to a valid (hour, minute).
-
-    The hour is required: this entry's whole purpose is to gate sensor
-    access, so materializing a permissive window out of an absent field is
-    the wrong way to fail (L5). The minute defaults to 0, matching the
-    protocol's own ``{hour: H, min: 0}`` shape.
-
-    Raises:
-        ValueError: If the value is not a mapping, carries no hour, or the
-            fields are not valid times.
-    """
-    if not isinstance(value, dict):
-        raise ValueError(f"Schedule {name} must be an object, got {value!r}")
-    if FIELD_HOUR not in value:
-        raise ValueError(f"Schedule {name} must specify {FIELD_HOUR}, got {value!r}")
-    hour = _coerce_schedule_int(value[FIELD_HOUR], f"{name} hour", 23)
-    minute = _coerce_schedule_int(value.get(FIELD_MINUTE, 0), f"{name} minute", 59)
-    return hour, minute
+#
+# The schedule-field coercion helpers (and MAX_SCHEDULE_INDEX) live in
+# powerpetdoor.schedule so this parser and the library's
+# powerpetdoor.door.Schedule parser share one implementation: hardening
+# either one hardens both.
 
 
 @dataclass
@@ -283,11 +204,11 @@ class Schedule:
 
         # Identity and day mask first, so a bad index reports the bad index
         # rather than whatever the time block happens to complain about.
-        index = _coerce_schedule_int(data.get(FIELD_INDEX, 0), "index", MAX_SCHEDULE_INDEX)
-        days_of_week = _coerce_schedule_days(data.get(FIELD_DAYSOFWEEK, [1, 1, 1, 1, 1, 1, 1]))
+        index = coerce_schedule_int(data.get(FIELD_INDEX, 0), "index", MAX_SCHEDULE_INDEX)
+        days_of_week = coerce_schedule_days(data.get(FIELD_DAYSOFWEEK, [1, 1, 1, 1, 1, 1, 1]))
 
-        inside = bool(data.get(FIELD_INSIDE, False))
-        outside = bool(data.get(FIELD_OUTSIDE, False))
+        inside = coerce_schedule_flag(data.get(FIELD_INSIDE, False), FIELD_INSIDE)
+        outside = coerce_schedule_flag(data.get(FIELD_OUTSIDE, False), FIELD_OUTSIDE)
 
         # Get time from the appropriate prefix
         if inside:
@@ -301,11 +222,11 @@ class Schedule:
             # A sensor is selected, so the window that gates it is required:
             # defaulting an absent one to 06:00-22:00 would grant 16 hours of
             # access nobody asked for (L5).
-            start_hour, start_min = _coerce_schedule_time(
-                _require_schedule_field(data, f"{prefix}{FIELD_START_TIME_SUFFIX}"), "start time"
+            start_hour, start_min = coerce_schedule_time(
+                require_schedule_field(data, f"{prefix}{FIELD_START_TIME_SUFFIX}"), "start time"
             )
-            end_hour, end_min = _coerce_schedule_time(
-                _require_schedule_field(data, f"{prefix}{FIELD_END_TIME_SUFFIX}"), "end time"
+            end_hour, end_min = coerce_schedule_time(
+                require_schedule_field(data, f"{prefix}{FIELD_END_TIME_SUFFIX}"), "end time"
             )
         else:
             # Neither sensor selected: the entry gates nothing, so the
@@ -313,11 +234,12 @@ class Schedule:
             start_hour, start_min = 6, 0
             end_hour, end_min = 22, 0
 
-        enabled_raw = data.get(FIELD_ENABLED, True)
-
         return cls(
             index=index,
-            enabled=enabled_raw == "1" if isinstance(enabled_raw, str) else bool(enabled_raw),
+            # Read like every other wire flag rather than with a bespoke
+            # `== "1"`: `true`/`yes`/`on` are as valid a spelling here as
+            # they are for daysOfWeek right next to it (T3).
+            enabled=coerce_schedule_flag(data.get(FIELD_ENABLED, True), FIELD_ENABLED),
             days_of_week=days_of_week,
             inside=inside,
             outside=outside,

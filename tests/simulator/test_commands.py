@@ -25,7 +25,7 @@ from powerpetdoor.simulator import (
     DoorTimingConfig,
 )
 from powerpetdoor.simulator.commands import CommandHandler
-from powerpetdoor.simulator.commands.scripts import is_wait_run
+from powerpetdoor.simulator.commands.scripts import ScriptQueue, is_wait_run
 from powerpetdoor.simulator.scripting import Script, ScriptRunner, ScriptStep
 
 
@@ -873,7 +873,7 @@ class TestRunWaitMode:
             simulator=simulator,
             script_runner=ScriptRunner(simulator),
             stop_callback=MagicMock(),
-            script_queue=asyncio.Queue(),
+            script_queue=ScriptQueue(),
         )
         return handler
 
@@ -976,6 +976,80 @@ class TestRunWaitMode:
         await asyncio.wait_for(busy, 2.0)
 
 
+class TestScriptQueue:
+    """The queue counts the run already taken off it (M2)."""
+
+    async def test_put_then_get_preserves_order(self):
+        queue = ScriptQueue()
+        await queue.put("a")
+        await queue.put("b")
+
+        assert await queue.get() == "a"
+        assert await queue.get() == "b"
+
+    async def test_a_claimed_run_is_still_pending(self):
+        queue = ScriptQueue()
+        await queue.put("a")
+
+        assert queue.qsize() == 1
+        claimed = await queue.get()
+        # Dequeued but not started: still waiting, from the operator's view.
+        assert queue.qsize() == 1
+        assert queue.pending() == ["a"]
+
+        queue.release(claimed)
+        assert queue.qsize() == 0
+        assert queue.pending() == []
+
+    async def test_release_is_idempotent(self):
+        """The consumer releases on start and again in its finally."""
+        queue = ScriptQueue()
+        await queue.put("a")
+        claimed = await queue.get()
+
+        queue.release(claimed)
+        queue.release(claimed)  # must not raise
+
+        assert queue.qsize() == 0
+
+    async def test_pending_lists_claimed_first(self):
+        queue = ScriptQueue()
+        await queue.put("a")
+        await queue.put("b")
+        await queue.get()
+
+        assert queue.pending() == ["a", "b"]
+
+    async def test_clear_drops_unclaimed_runs_only(self):
+        queue = ScriptQueue()
+        for ref in ("a", "b", "c"):
+            await queue.put(ref)
+        await queue.get()  # "a" is claimed and already starting
+
+        assert queue.clear() == ["b", "c"]
+        assert queue.pending() == ["a"]
+
+    async def test_get_waits_for_an_arrival(self):
+        queue = ScriptQueue()
+        getter = asyncio.ensure_future(queue.get())
+        await asyncio.sleep(0)
+        assert not getter.done()
+
+        await queue.put("late")
+
+        assert await asyncio.wait_for(getter, 2.0) == "late"
+
+    async def test_get_can_be_polled_with_a_timeout(self):
+        """_process_script_queue wraps get() in wait_for; it must be cancellable."""
+        queue = ScriptQueue()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(queue.get(), timeout=0.01)
+
+        # A cancelled get must not have consumed anything.
+        await queue.put("still-here")
+        assert await asyncio.wait_for(queue.get(), 2.0) == "still-here"
+
+
 class TestScriptBusyVisibility:
     """Serialized runs made "busy" a real state; it must be observable (M5)."""
 
@@ -985,7 +1059,7 @@ class TestScriptBusyVisibility:
             simulator=simulator,
             script_runner=ScriptRunner(simulator),
             stop_callback=MagicMock(),
-            script_queue=asyncio.Queue(),
+            script_queue=ScriptQueue(),
         )
         return handler
 
@@ -1066,7 +1140,9 @@ class TestScriptBusyVisibility:
     async def test_stop_without_a_running_script_reports_so(self, queued_handler):
         result = await queued_handler.execute("stop")
         assert result.success is False
-        assert result.message == "No script is running"
+        # `stop` was an alias for `shutdown` until this release, so muscle
+        # memory is the likeliest reason it lands on an idle simulator (T4).
+        assert result.message == "No script is running (use 'shutdown' to stop the simulator)"
 
     async def test_stop_does_not_shut_the_simulator_down(self, queued_handler):
         """The whole point of dropping the shutdown alias (M5)."""
@@ -1078,6 +1154,99 @@ class TestScriptBusyVisibility:
         assert result.success is True
         assert result.message == "Shutting down..."
         queued_handler.stop_callback.assert_called_once_with()
+
+    async def test_status_shows_a_pending_stop(self, queued_handler):
+        """A requested-but-not-yet-effective stop is visible (L3).
+
+        `stop` takes effect at a step boundary, so an operator watching
+        `status` could not tell a registered stop from one that never
+        arrived - the run above reported `running` before and after.
+        """
+        task, release = await self._start_blocking_script(queued_handler.script_runner)
+        try:
+            await queued_handler.execute("stop")
+            result = await queued_handler.execute("status")
+            assert '  Script: stopping "Slow Script"' in result.message
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 2.0)
+
+    async def test_repeat_stop_says_the_first_one_registered(self, queued_handler):
+        """A second `stop` used to answer with a fresh success (L3)."""
+        task, release = await self._start_blocking_script(queued_handler.script_runner)
+        try:
+            assert (await queued_handler.execute("stop")).message == "Stopping script: Slow Script"
+            again = await queued_handler.execute("stop")
+            assert again.success is True
+            assert again.message == "Stop already requested for: Slow Script"
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 2.0)
+
+    async def test_status_counts_a_dequeued_but_unstarted_run(self, queued_handler):
+        """The `(N queued)` indicator used to under-report by one (M2).
+
+        The queue consumer takes an entry off as soon as one exists and
+        only then waits for the run lock, so the commonest case - one
+        script waiting behind a `run ... wait` - displayed as "nothing
+        pending".
+        """
+        task, release = await self._start_blocking_script(queued_handler.script_runner)
+        try:
+            await queued_handler.script_queue.put("my_custom")
+            # Exactly what _process_script_queue does before blocking on
+            # the run lock.
+            claimed = await queued_handler.script_queue.get()
+            assert claimed == "my_custom"
+
+            result = await queued_handler.execute("status")
+            assert '  Script: running "Slow Script" (1 queued)' in result.message
+            assert result.data["queued_scripts"] == 1
+
+            listed = await queued_handler.execute("list")
+            assert "Queued: my_custom" in listed.message
+            assert listed.data["pending"] == ["my_custom"]
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 2.0)
+
+    async def test_stop_all_drains_the_queue_in_one_command(self, queued_handler):
+        """Queued runs had to be cancelled one `stop` at a time (L2)."""
+        task, release = await self._start_blocking_script(queued_handler.script_runner)
+        try:
+            for _ in range(3):
+                await queued_handler.script_queue.put("my_custom")
+
+            result = await queued_handler.execute("stop all")
+
+            assert result.success is True
+            assert result.message == "Stopping script: Slow Script (dropped 3 queued)"
+            assert queued_handler.script_queue.qsize() == 0
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 2.0)
+
+    async def test_stop_all_with_nothing_running_still_drains(self, queued_handler):
+        """Draining the queue is worth reporting even with nothing in flight."""
+        await queued_handler.script_queue.put("my_custom")
+
+        result = await queued_handler.execute("stop all")
+
+        assert result.success is True
+        assert result.message == "Dropped 1 queued script(s)"
+        assert queued_handler.script_queue.qsize() == 0
+
+    async def test_stop_all_with_nothing_at_all_reports_idle(self, queued_handler):
+        result = await queued_handler.execute("stop all")
+
+        assert result.success is False
+        assert result.message == "No script is running (use 'shutdown' to stop the simulator)"
+
+    async def test_stop_rejects_an_unknown_scope(self, queued_handler):
+        result = await queued_handler.execute("stop everything")
+
+        assert result.success is False
+        assert "everything" in result.message
 
 
 class TestScriptPathRestrictions:

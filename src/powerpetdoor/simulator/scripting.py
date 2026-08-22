@@ -45,6 +45,8 @@ Available actions:
 
 import asyncio
 import logging
+import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -67,9 +69,15 @@ from ..const import (
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
 )
-from .state import Schedule
+from ..sanitize import sanitize_text
+from .state import MAX_SCHEDULE_INDEX, Schedule
 
 logger = logging.getLogger(__name__)
+
+#: Widest hold time (seconds) a script may park on the simulator. Matches
+#: the wire ceiling (90000 centiseconds) that ``SET_HOLD_TIME`` enforces, so
+#: no writer of this field can leave a value ``GET_SETTINGS`` chokes on.
+MAX_SCRIPT_HOLD_TIME = 900.0
 
 
 class ScriptError(Exception):
@@ -251,8 +259,22 @@ class ScriptRunner:
         """Whether a script is currently executing."""
         return self._lock.locked()
 
+    @property
+    def stop_requested(self) -> bool:
+        """Whether a stop has been requested for the running script.
+
+        ``stop`` takes effect at a step boundary, so the operator needs a
+        way to tell a registered stop from one that never arrived (L3).
+        """
+        return self._stop_requested
+
     async def run(
-        self, script: Script, verbose: bool = True, *, queue_if_busy: bool = True
+        self,
+        script: Script,
+        verbose: bool = True,
+        *,
+        queue_if_busy: bool = True,
+        on_start: Callable[[], None] | None = None,
     ) -> bool:
         """Execute a script, waiting for any in-flight script to finish.
 
@@ -263,6 +285,9 @@ class ScriptRunner:
                 queue), wait for the running script to finish. When False,
                 refuse immediately rather than queue - callers that report
                 a synchronous pass/fail must not silently block.
+            on_start: Called once the run lock is held and this script is
+                the running one. The queue consumer uses it to stop
+                counting the run as pending (M2).
 
         Returns:
             True if all steps (including assertions) passed.
@@ -275,6 +300,8 @@ class ScriptRunner:
             raise ScriptError(f"Another script is already running: {self.current_script}")
         async with self._lock:
             self.current_script = script.name
+            if on_start is not None:
+                on_start()
             try:
                 return await self._run_steps(script, verbose)
             finally:
@@ -287,9 +314,14 @@ class ScriptRunner:
         self._stop_event.clear()
 
         if verbose:
-            logger.info(f"Running script: {script.name}")
+            # A YAML script is an untrusted input in this project's threat
+            # model ("here is a repro script for the bug I filed"), and
+            # PyYAML's "\e" escape puts a real ESC in a file that looks
+            # clean. Sanitize at the source, exactly as the protocol
+            # channel does (S3).
+            logger.info(f"Running script: {sanitize_text(script.name)}")
             if script.description:
-                logger.info(f"  {script.description}")
+                logger.info(f"  {sanitize_text(script.description)}")
 
         try:
             for step in script.steps:
@@ -298,22 +330,30 @@ class ScriptRunner:
                     return False
 
                 if verbose:
-                    logger.info(f"  Step {step.line_number}: {step}")
+                    logger.info(f"  Step {step.line_number}: {sanitize_text(step)}")
 
                 await self._execute_step(step)
 
+            if self._stop_requested:
+                # A stop that landed during the *last* step used to be
+                # discarded: the loop simply ended and the run reported
+                # PASSED with exit code 0, the opposite of what `stop`
+                # documents and the one signal a CI abort relies on (H1).
+                logger.info("Script stopped by request")
+                return False
+
             if verbose:
-                logger.info(f"Script '{script.name}' completed successfully")
+                logger.info(f"Script '{sanitize_text(script.name)}' completed successfully")
             return True
 
         except ScriptAssertionError as e:
-            logger.error(f"Assertion failed at step {step.line_number}: {e}")
+            logger.error(f"Assertion failed at step {step.line_number}: {sanitize_text(e)}")
             return False
         except ScriptError as e:
-            logger.error(f"Script error at step {step.line_number}: {e}")
+            logger.error(f"Script error at step {step.line_number}: {sanitize_text(e)}")
             return False
         except Exception as e:
-            logger.error(f"Unexpected error at step {step.line_number}: {e}")
+            logger.error(f"Unexpected error at step {step.line_number}: {sanitize_text(e)}")
             return False
         finally:
             self.running = False
@@ -365,7 +405,11 @@ class ScriptRunner:
 
         elif action == "wait":
             seconds = float(params.get("seconds", 1.0))
-            await asyncio.sleep(seconds)
+            # Raced against the stop event, so `stop` during a long wait
+            # takes effect straight away instead of at the end of the
+            # sleep. This is also what shrinks the "stop lands during the
+            # final step" window that H1 is about.
+            await self._sleep_or_stop(seconds)
 
         elif action == "wait_for":
             condition = params.get("condition", "door_closed")
@@ -388,10 +432,14 @@ class ScriptRunner:
 
         elif action == "log":
             message = params.get("message", "")
-            logger.info(f"  [SCRIPT] {message}")
+            # Script-supplied text reaching an operator's terminal: same
+            # rule as the wire channel (S3).
+            logger.info(f"  [SCRIPT] {sanitize_text(message)}")
 
         elif action == "add_schedule":
-            index = int(params.get("index", 1))
+            # Bounded like every other writer of a schedule index: a script
+            # could otherwise allocate a slot the wire path itself rejects.
+            index = int(self._script_number(params.get("index", 1), "index", 0, MAX_SCHEDULE_INDEX))
             enabled = params.get("enabled", True)
             # Create a schedule that allows BOTH sensors 24/7 (midnight to midnight)
             # This ensures tests pass regardless of the time of day.
@@ -410,15 +458,34 @@ class ScriptRunner:
             self.simulator.add_schedule(schedule)
 
         elif action == "remove_schedule":
-            index = int(params.get("index", 1))
+            index = int(self._script_number(params.get("index", 1), "index", 0, MAX_SCHEDULE_INDEX))
             self.simulator.remove_schedule(index)
 
         elif action == "battery":
-            percent = int(params.get("percent", params.get("value", 50)))
-            self.simulator.set_battery(percent)
+            percent = self._script_number(
+                params.get("percent", params.get("value", 50)), "battery", 0, 100
+            )
+            self.simulator.set_battery(int(percent))
 
         else:
             raise ScriptError(f"Unknown action: {action}")
+
+    async def _sleep_or_stop(self, seconds: float) -> None:
+        """Sleep, returning early if :meth:`stop` is requested meanwhile.
+
+        A plain ``asyncio.sleep`` made ``wait`` uninterruptible, so the
+        window in which a ``stop`` request sits unobserved was as long as
+        the wait itself - and if that was the final step, the request was
+        discarded entirely (H1).
+        """
+        if self._stop_requested:
+            return
+        stopper = asyncio.ensure_future(self._stop_event.wait())
+        try:
+            await asyncio.wait({stopper}, timeout=seconds)
+        finally:
+            stopper.cancel()
+            await asyncio.gather(stopper, return_exceptions=True)
 
     async def _wait_for_condition(self, condition: str, timeout: float):
         """Wait for a condition to become true.
@@ -523,23 +590,49 @@ class ScriptRunner:
         else:
             raise ScriptError(f"Unknown condition: {condition}")
 
+    @staticmethod
+    def _script_number(value: object, name: str, minimum: float, maximum: float) -> float:
+        """Coerce a script-supplied numeric setting, bounded and finite.
+
+        The YAML script channel is the third writer of these fields, and
+        the only one that was unbounded: ``set hold_time inf`` stored a
+        value that broke ``GET_SETTINGS`` for every client for the life of
+        the process and parked the door in DOOR_HOLDING - the same damage
+        the wire path was hardened against in round 3 (S3).
+
+        Raises:
+            ScriptError: If the value is not a finite number in range.
+        """
+        try:
+            number = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            raise ScriptError(f"{name} must be a number, got {sanitize_text(value)!r}") from None
+        if not math.isfinite(number):
+            raise ScriptError(f"{name} must be a finite number, got {number!r}")
+        if not minimum <= number <= maximum:
+            raise ScriptError(f"{name} must be between {minimum} and {maximum}, got {number!r}")
+        return number
+
     def _set_value(self, name: str, value: str):
         """Set a state value."""
         state = self.simulator.state
         name = name.lower().replace("-", "_")
 
-        bool_value = value.lower() in ("true", "1", "on", "yes", "enabled")
+        bool_value = str(value).lower() in ("true", "1", "on", "yes", "enabled")
 
         if name == "power":
             state.power = bool_value
         elif name == "auto":
             state.auto = bool_value
         elif name == "battery":
-            state.battery_percent = int(value)
+            # Through the simulator so the 0-100 clamp and the low-battery
+            # notification threshold logic apply, exactly as they do for
+            # the operator's `battery` command.
+            self.simulator.set_battery(int(self._script_number(value, "battery", 0, 100)))
         elif name == "hold_time":
             # hold_time is a float everywhere else (the protocol carries
             # centiseconds), so fractional values must be accepted here.
-            state.hold_time = float(value)
+            state.hold_time = self._script_number(value, "hold_time", 0, MAX_SCRIPT_HOLD_TIME)
         elif name == "inside":
             state.inside = bool_value
         elif name == "outside":
@@ -627,10 +720,25 @@ SCRIPTS_DIR = Path(__file__).parent / "scripts"
 _extra_scripts_dir: Path | None = None
 
 
+#: Whether this process may run a script by file path. ctl talks to a
+#: daemon that refuses paths outright (`_load_script_restricted`), so
+#: completing local YAML files there steers the user to a form guaranteed
+#: to fail - and cannot offer the bare name that works (M1). Module-level
+#: for the same reason as _extra_scripts_dir: the completer is referenced
+#: from an ArgSpec and has no handler context of its own.
+_script_paths_allowed = True
+
+
 def set_extra_scripts_dir(directory: str | Path | None) -> None:
     """Register (or clear) the extra scripts directory from ``--scripts-dir``."""
     global _extra_scripts_dir
     _extra_scripts_dir = Path(directory) if directory else None
+
+
+def set_script_paths_allowed(allowed: bool) -> None:
+    """Declare whether this front end may run scripts by file path."""
+    global _script_paths_allowed
+    _script_paths_allowed = allowed
 
 
 def _script_files_in(directory: Path) -> dict[str, Path]:
@@ -661,8 +769,9 @@ def _describe_scripts(script_files: dict[str, Path]) -> list[tuple[str, str]]:
             script = Script.from_file(path)
             result.append((name, script.description))
         except Exception as e:
-            logger.warning(f"Failed to load script {name}: {e}")
-            result.append((name, f"(Error loading: {e})"))
+            # Both the name and the error text are file-derived (S3).
+            logger.warning(f"Failed to load script {sanitize_text(name)}: {sanitize_text(e)}")
+            result.append((name, f"(Error loading: {sanitize_text(e)})"))
     return result
 
 
@@ -705,8 +814,16 @@ def script_completer(prefix: str = "") -> list[tuple[str, str]]:
         prefix: The partial path/name being completed (e.g., "", "basic", "./scr")
 
     Gracefully handles missing PyYAML by returning just script names.
+    When this front end may not run scripts by path (ctl, whose daemon
+    refuses them), only script *names* are offered - suggesting a local
+    file there is suggesting a command that always fails (M1).
     """
-    result = []
+    result: list[tuple[str, str]] = []
+
+    if not _script_paths_allowed and ("/" in prefix or "\\" in prefix):
+        # A path-shaped prefix can only ever complete to a command this
+        # front end's daemon refuses outright, so offer nothing (M1).
+        return result
 
     # Determine the directory to search based on prefix
     # We preserve the original prefix format (e.g., "./" stays as "./")
@@ -769,19 +886,20 @@ def script_completer(prefix: str = "") -> list[tuple[str, str]]:
                 for name in sorted(script_files.keys()):
                     result.append((name, label))
 
-        # Add YAML files from current directory
-        cwd = Path.cwd()
-        for pattern in ("*.yaml", "*.yml"):
-            for path in cwd.glob(pattern):
-                if path.is_file():
-                    result.append((path.name, "(local file)"))
+        if _script_paths_allowed:
+            # Add YAML files from current directory
+            cwd = Path.cwd()
+            for pattern in ("*.yaml", "*.yml"):
+                for path in cwd.glob(pattern):
+                    if path.is_file():
+                        result.append((path.name, "(local file)"))
 
-        # Add subdirectories that might contain scripts
-        for subdir in cwd.iterdir():
-            if subdir.is_dir() and not subdir.name.startswith("."):
-                # Check if it has any yaml files
-                has_yaml = any(subdir.glob("*.yaml")) or any(subdir.glob("*.yml"))
-                if has_yaml:
-                    result.append((subdir.name + "/", "(directory)"))
+            # Add subdirectories that might contain scripts
+            for subdir in cwd.iterdir():
+                if subdir.is_dir() and not subdir.name.startswith("."):
+                    # Check if it has any yaml files
+                    has_yaml = any(subdir.glob("*.yaml")) or any(subdir.glob("*.yml"))
+                    if has_yaml:
+                        result.append((subdir.name + "/", "(directory)"))
 
     return result

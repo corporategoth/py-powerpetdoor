@@ -51,9 +51,12 @@ def _reset_extra_scripts_dir():
     agree; a test that sets one must not leak it into the next.
     """
     yield
-    from powerpetdoor.simulator.scripting import set_extra_scripts_dir
+    from powerpetdoor.simulator.scripting import set_extra_scripts_dir, set_script_paths_allowed
 
     set_extra_scripts_dir(None)
+    # ctl.main() declares that this process may not run scripts by path;
+    # that must not leak into a test expecting the simulator CLI's completer.
+    set_script_paths_allowed(True)
 
 
 # ============================================================================

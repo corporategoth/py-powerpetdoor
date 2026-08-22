@@ -702,6 +702,9 @@ class InteractiveSession:
     def format_output(self, input_line: InputLine, message: str) -> str:
         """Format command output with history recall prefix if needed.
 
+        Every line goes through :func:`render_result`, so this cannot
+        become a second, unsanitized path to the operator's terminal (T2).
+
         Args:
             input_line: The InputLine from the input loop
             message: The command result message
@@ -710,8 +713,9 @@ class InteractiveSession:
             Formatted output string with >>> prefix and history recall info
         """
         if input_line.was_history_recall:
-            return f">>> {input_line.original} -> {input_line.resolved}\n>>> {message}"
-        return f">>> {message}"
+            recall = render_result(f"{input_line.original} -> {input_line.resolved}")
+            return f"{recall}\n{render_result(message)}"
+        return render_result(message)
 
     async def prompt_async(self) -> str | None:
         """Get input from the user asynchronously.

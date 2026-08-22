@@ -32,7 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   application has a clean teardown point. `PowerPetDoor.disconnect()` uses it
 - Simulator: `stop` command — stops the **running script** (see Changed)
 - Simulator: `status` and `list` report the script runner's state
-  (`Script: running "<name>" (N queued)`)
+  (`Script: none running` / `Script: running "<name>" (N queued)` /
+  `Script: stopping "<name>"`); `list` also names the pending runs
+- Simulator: `stop all` stops the running script *and* discards every queued
+  run, reporting how many were dropped
 - ctl: `run <script> wait` streams the daemon's `LOG:` lines to stderr, so CI
   sees progress and the assertion text behind a failure
 
@@ -69,7 +72,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simulator status/progress output is flushed, so the startup banner and script
   progress appear in redirected output (and survive SIGTERM)
 - A nonexistent `--scripts-dir` is now a startup error; an empty one warns
-- ctl `--help` describes `--timeout`'s silence-gap semantics
+- ctl `--help` describes `--timeout`'s silence-gap semantics, and its epilog
+  now shows `run <script> wait` (the only exit-code-bearing form) and `stop`
+- ctl output is line-buffered off a terminal, so `ctl -i > log`, `| tee` and
+  container/supervisor capture see streamed daemon logs live instead of in one
+  burst at the next prompt
+- ctl no longer tab-completes local YAML files or directories for `run`: the
+  daemon refuses script paths, so every one of those completions was a command
+  guaranteed to fail
+- `--list-scripts` and the `list` command now print the same `Built-in
+  scripts:` header
+- `stop` with nothing running points at `shutdown`; a repeat `stop` answers
+  `Stop already requested for: <name>` rather than a fresh success
+- A plain `wait N` script step is now interruptible by `stop`
+- Schedule coercion helpers moved into `powerpetdoor.schedule` and are shared
+  by the library's and the simulator's `Schedule.from_dict()`, so hardening
+  either one hardens both
 - Packaging: replaced the `OS Independent` classifier with explicit
   Linux/macOS classifiers — the simulator's plain-stdin prompt fallback uses
   `loop.add_reader()`, which Windows' ProactorEventLoop does not implement
@@ -96,7 +114,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after shutdown) delivered `connection_lost` into the live connection's
   teardown path, closing a perfectly healthy connection
 - A stale `connection_lost` after `disconnect()`+`connect()` logged a bogus
-  ERROR and burned a reconnect attempt
+  ERROR and burned a reconnect attempt. The local-failure paths (keepalive
+  give-up, write failure, framing overflow) now schedule their reconnect
+  explicitly instead of relying on that event
+- A superseded transport's `connection_lost` tore down the healthy connection
+  when `PowerPetDoorClient` was wired into `create_connection()` directly (the
+  per-attempt shim was already guarded)
+- `aclose()` cancelled while waiting on its handlers left them running,
+  un-awaited and un-cancelled — the exact guarantee it exists to make
+- `PowerPetDoor.get_schedule()`/`refresh_schedules()`/schedule updates raised
+  `TypeError`/`AttributeError` on a malformed device payload instead of a
+  handled `ValueError`; a malformed schedule update silently froze the cached
+  schedule list
+- Simulator: `stop` issued during a script's **final** step was discarded, and
+  the run reported `Script PASSED` with exit code 0
+- Simulator: the `(N queued)` indicator under-reported by one, so a single
+  script waiting behind a `run ... wait` displayed as nothing pending
+- Simulator: the `>>> Client disconnected, stopping scripts` progress line was
+  not flushed, so a redirected `--wait-for-client` log simply stopped
+- Simulator: the operator's `schedule add` could allocate index 256, past the
+  bound the wire path enforces
+- `generate_gaps_report.py` truncated any `# pragma:` reason containing
+  parentheses, and did not scan `scripts/`
 - `connect()` escaped with `UnicodeEncodeError`/`OverflowError` for an invalid
   host or port instead of logging and scheduling a reconnect
 - Simulator: a status listener commanding the door with `hold_time` ~0 replayed
@@ -132,6 +171,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `schedule.py`, `tz_utils.py`, the simulator and both front ends
 - The interactive simulator CLI sanitizes its own command output, which can
   carry network-poisoned state (e.g. a wire-set timezone)
+- Framing now carries its scanner state across reads instead of re-scanning the
+  retained buffer, removing a ~1000x CPU amplification: a peer dribbling one
+  never-terminated JSON object cost O(N^2) work, enough for a ~750 byte/s
+  trickle to pin a core in the host application's event loop (and in the
+  simulator's unauthenticated door port)
+- Untrusted values used as dict keys are guarded at the remaining two sites —
+  the client's response `CMD` and the simulator's `GET_SCHEDULE`/
+  `DELETE_SCHEDULE` `index` — so one malformed frame no longer produces a full
+  traceback at ERROR (14x log write-amplification from an unauthenticated port)
+- The YAML script channel is held to the same bounds as the wire: `set
+  hold_time inf` (which permanently broke `GET_SETTINGS`) and out-of-range
+  battery/index values are rejected, and script names, descriptions, step
+  parameters and `log` messages are sanitized before they reach a terminal
+- The sanitizing log formatter is installed on the `--script` (headless/CI) and
+  `--daemon` paths too, not only the interactive ones
 - CI and release workflows install from the committed, hashed `uv.lock`
   (`uv sync --locked`), and the build backend is pinned exactly
 - Simulator history files are created with `0600` permissions

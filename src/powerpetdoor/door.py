@@ -112,6 +112,14 @@ from .const import (
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
 )
+from .schedule import (
+    MAX_SCHEDULE_INDEX,
+    coerce_schedule_days,
+    coerce_schedule_flag,
+    coerce_schedule_int,
+    coerce_schedule_time,
+    require_schedule_field,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -187,9 +195,23 @@ class ScheduleTime:
         return {FIELD_HOUR: self.hour, FIELD_MINUTE: self.minute}
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ScheduleTime:
-        """Create from protocol dict."""
-        return cls(hour=data.get(FIELD_HOUR, 0), minute=data.get(FIELD_MINUTE, 0))
+    def from_dict(cls, data: object, name: str = "time") -> ScheduleTime:
+        """Create from protocol dict.
+
+        Everything here comes off the wire and is untrusted: a device that
+        answers ``in_start_time: 5`` (or ``null``, or a list) must produce a
+        ``ValueError`` the caller can handle, not an ``AttributeError`` out
+        of a documented coroutine (R4-M1).
+
+        Args:
+            data: The ``{hour, min}`` mapping from the device.
+            name: Field name used in error messages.
+
+        Raises:
+            ValueError: If the value is not a valid ``{hour, min}`` mapping.
+        """
+        hour, minute = coerce_schedule_time(data, name)
+        return cls(hour=hour, minute=minute)
 
 
 @dataclass
@@ -261,50 +283,64 @@ class Schedule:
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Schedule:
-        """Create from protocol dict."""
-        inside = data.get(FIELD_INSIDE, False)
-        outside = data.get(FIELD_OUTSIDE, False)
+    def from_dict(cls, data: object) -> Schedule:
+        """Create from protocol dict.
+
+        Every field here comes off the wire and is untrusted. Each is
+        validated through the shared coercion helpers in
+        :mod:`powerpetdoor.schedule` - the same ones the simulator's
+        parser uses - so a malformed device reply raises a ``ValueError``
+        naming the offending field instead of a ``TypeError`` /
+        ``AttributeError`` escaping a documented public coroutine (or being
+        swallowed by listener isolation, silently freezing the cached
+        schedule list).
+
+        Raises:
+            ValueError: If the payload is not a schedule-shaped mapping, or
+                a field is not coercible / out of its protocol range.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(f"Schedule must be an object, got {data!r}")
+
+        # Identity and day mask first, so a bad index reports the bad index
+        # rather than whatever the time block happens to complain about.
+        index = coerce_schedule_int(data.get(FIELD_INDEX, 0), "index", MAX_SCHEDULE_INDEX)
+        # A list of 7 flags or the legacy integer bitmask. Read with
+        # make_bool, never truthiness: bool("0") is True, so a firmware
+        # variant sending "0"/"1" day flags would otherwise turn on every
+        # day of the week (L4).
+        days = coerce_schedule_days(data.get(FIELD_DAYSOFWEEK, [1, 1, 1, 1, 1, 1, 1]))
+        inside = coerce_schedule_flag(data.get(FIELD_INSIDE, False), FIELD_INSIDE)
+        outside = coerce_schedule_flag(data.get(FIELD_OUTSIDE, False), FIELD_OUTSIDE)
 
         # Get time from the appropriate prefix
         if inside:
-            start = ScheduleTime.from_dict(
-                data.get(f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}", {})
-            )
-            end = ScheduleTime.from_dict(
-                data.get(f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}", {})
-            )
+            prefix = FIELD_INSIDE_PREFIX
         elif outside:
+            prefix = FIELD_OUTSIDE_PREFIX
+        else:
+            prefix = ""
+
+        if prefix:
+            # A sensor is selected, so the window that gates it is required
+            # (L5) - the same rule the simulator's parser enforces.
             start = ScheduleTime.from_dict(
-                data.get(f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}", {})
+                require_schedule_field(data, f"{prefix}{FIELD_START_TIME_SUFFIX}"), "start time"
             )
             end = ScheduleTime.from_dict(
-                data.get(f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}", {})
+                require_schedule_field(data, f"{prefix}{FIELD_END_TIME_SUFFIX}"), "end time"
             )
         else:
+            # Neither sensor selected: the entry gates nothing.
             start = ScheduleTime()
             end = ScheduleTime()
 
-        # Handle daysOfWeek - could be list or legacy bitmask, convert to booleans
-        days = data.get(FIELD_DAYSOFWEEK, [1, 1, 1, 1, 1, 1, 1])
-        if isinstance(days, int):
-            # Convert bitmask to list of booleans [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
-            days = [bool((days >> i) & 1) for i in range(7)]
-        else:
-            # Read each flag the way every other wire flag is read: bool("0")
-            # is True, so plain truthiness would turn a day the device
-            # reported as disabled back on. Anything make_bool cannot read
-            # fails closed rather than granting access (L4).
-            days = [make_bool(d) is True for d in days]
-
-        # Handle enabled field - could be bool or string
-        enabled = data.get(FIELD_ENABLED, True)
-        if isinstance(enabled, str):
-            enabled = enabled == "1"
-
         return cls(
-            index=data.get(FIELD_INDEX, 0),
-            enabled=enabled,
+            index=index,
+            # Read like every other wire flag rather than with a bespoke
+            # `== "1"`, and normalized to a real bool so a field declared
+            # `enabled: bool` never holds 1/0 (T3).
+            enabled=coerce_schedule_flag(data.get(FIELD_ENABLED, True), FIELD_ENABLED),
             days_of_week=days,
             inside=inside,
             outside=outside,
@@ -1334,8 +1370,18 @@ class PowerPetDoor:
         self._latency = latency_ms / 1000.0
 
     def _on_schedule_update(self, schedule_data: dict[str, Any]) -> None:
-        """Handle schedule add/update from client."""
-        schedule = Schedule.from_dict(schedule_data)
+        """Handle schedule add/update from client.
+
+        A malformed entry is reported and dropped rather than allowed to
+        raise: the client isolates listener exceptions, so an escaping
+        error would leave the cached schedule list silently stale with
+        nothing in the log to say the update was lost (R4-M1).
+        """
+        try:
+            schedule = Schedule.from_dict(schedule_data)
+        except ValueError as err:
+            logger.warning("Ignoring malformed schedule update from device: %s", err)
+            return
         # Update or add the schedule in our cache
         for i, s in enumerate(self._schedules):
             if s.index == schedule.index:

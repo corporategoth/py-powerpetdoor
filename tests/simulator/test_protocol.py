@@ -572,6 +572,41 @@ class TestFraming:
         await dispatch(protocol, {PING: "still-alive"})
         assert last_response(mock_transport)[PONG] == "still-alive"
 
+    async def test_dribbled_frame_is_scanned_once_per_byte(self, protocol, monkeypatch):
+        """A byte-at-a-time unauthenticated peer costs O(N) CPU, not O(N^2).
+
+        Same defect as the client side (S1); the simulator's door port is
+        the unauthenticated half of it.
+        """
+        from powerpetdoor import framing
+
+        examined = [0]
+        original = framing._BraceScanner.scan
+
+        def counting_scan(self, s, start):
+            end = original(self, s, start)
+            examined[0] += end - start
+            return end
+
+        monkeypatch.setattr(framing._BraceScanner, "scan", counting_scan)
+
+        payload = '{"a": "' + "x" * 4000
+        for char in payload:
+            protocol.data_received(char.encode("ascii"))
+        await protocol.drain()
+
+        assert protocol.buffer == payload
+        assert examined[0] == len(payload)
+
+    async def test_overflow_resets_the_scanner_state(self, protocol, mock_transport):
+        """After an overflow drop, a fresh object is not read as a continuation."""
+        protocol.data_received(b'{"a": "' + b"x" * (MAX_BUFFER_SIZE + 1024))
+        await protocol.drain()
+        assert protocol.buffer == ""
+
+        await dispatch(protocol, {PING: "after-overflow"})
+        assert last_response(mock_transport)[PONG] == "after-overflow"
+
     async def test_non_ascii_byte_mid_frame_does_not_desync(self, protocol, mock_transport):
         """One bad byte kills only its own frame, never the framing (L2)."""
         # Half a PING arrives, then its tail carrying a stray byte.
@@ -735,6 +770,62 @@ class TestProtocolViolations:
     async def test_delete_schedule_unknown_index_fails(self, protocol, mock_transport):
         """DELETE_SCHEDULE for a missing index answers failure with a reason."""
         await dispatch(protocol, {CONFIG: CMD_DELETE_SCHEDULE, FIELD_INDEX: 42, "msgId": 6})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == "Schedule not found"
+
+    @pytest.mark.parametrize("cmd", [CMD_GET_SCHEDULE, CMD_DELETE_SCHEDULE])
+    @pytest.mark.parametrize(
+        ("index", "reason"),
+        [
+            ([1, 2], "index must be a number, got [1, 2]"),
+            ({"a": 1}, "index must be a number, got {'a': 1}"),
+            ("0", "index must be a number, got '0'"),
+            (True, "index must be a number, got True"),
+            (float("inf"), "index must be a finite number, got inf"),
+            (-1, "index must be between 0 and 255, got -1"),
+            (256, "index must be between 0 and 255, got 256"),
+        ],
+        ids=["list", "dict", "string", "bool", "inf", "negative", "too-large"],
+    )
+    async def test_index_addressed_commands_reject_bad_indices(
+        self, protocol, mock_transport, caplog, cmd, index, reason
+    ):
+        """The last two unguarded wire values used as dict keys (L3/S2).
+
+        A JSON container is unhashable, so ``index in schedules`` raised
+        ``TypeError`` - one packet per full Python traceback at ERROR from an
+        unauthenticated port, and a useless "Command failed" reason for a
+        legitimate client. The sibling msgID field has been guarded since
+        round 2 and every SET_* field since round 3.
+        """
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
+            await dispatch(protocol, {CONFIG: cmd, FIELD_INDEX: index, "msgId": 7})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == reason
+        assert "Traceback" not in caplog.text
+        assert [record.levelno for record in caplog.records] == [logging.WARNING]
+
+    @pytest.mark.parametrize("cmd", [CMD_GET_SCHEDULE, CMD_DELETE_SCHEDULE])
+    async def test_index_addressed_commands_without_an_index_still_fail_cleanly(
+        self, protocol, mock_transport, cmd
+    ):
+        """An absent index is 'not found', not a validation error."""
+        await dispatch(protocol, {CONFIG: cmd, "msgId": 8})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == "Schedule not found"
+
+    @pytest.mark.parametrize("cmd", [CMD_GET_SCHEDULE, CMD_DELETE_SCHEDULE])
+    async def test_index_addressed_commands_reject_a_null_index(
+        self, protocol, mock_transport, cmd
+    ):
+        """An explicit null index behaves like an absent one."""
+        await dispatch(protocol, {CONFIG: cmd, FIELD_INDEX: None, "msgId": 9})
 
         response = last_response(mock_transport)
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE

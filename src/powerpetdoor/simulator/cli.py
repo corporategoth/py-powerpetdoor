@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from ..sanitize import sanitize_text
 from ..tz_utils import async_init_timezone_cache
 from .commands import CommandHandler
+from .commands.scripts import ScriptQueue
 from .prompt_common import (
     CLI_HISTORY_FILE as HISTORY_FILE,
 )
@@ -367,7 +368,7 @@ def _build_state(
 
 
 async def _process_script_queue(
-    script_queue: "asyncio.Queue[str]",
+    script_queue: ScriptQueue,
     stop_event: asyncio.Event,
     cmd_handler: CommandHandler,
     script_runner: "ScriptRunner",
@@ -383,11 +384,20 @@ async def _process_script_queue(
 
             try:
                 script = cmd_handler.load_script(script_ref)
-                logger.info(f"Running queued script: {script.name}")
-                success = await script_runner.run(script)
-                logger.info(f"Script {'PASSED' if success else 'FAILED'}: {script.name}")
+                logger.info(f"Running queued script: {sanitize_text(script.name)}")
+                # The claim is dropped when the run actually starts, not
+                # when it was dequeued: until then it is still pending and
+                # `status`/`list` must say so (M2).
+                success = await script_runner.run(
+                    script, on_start=lambda: script_queue.release(script_ref)
+                )
+                status = "PASSED" if success else "FAILED"
+                logger.info(f"Script {status}: {sanitize_text(script.name)}")
             except Exception as e:
-                logger.error(f"Error running queued script: {e}")
+                logger.error(f"Error running queued script: {sanitize_text(e)}")
+            finally:
+                # Also covers a load failure, which never reaches on_start.
+                script_queue.release(script_ref)
         except asyncio.CancelledError:
             break
 
@@ -435,7 +445,10 @@ async def _run_startup_scripts(
             for i, script_ref in enumerate(scripts):
                 # Check for disconnect before each script
                 if wait_for_client and not simulator.protocols:
-                    print(">>> Client disconnected, stopping scripts")
+                    # Flushed like every other progress line: this is the
+                    # one that explains why the remaining scripts never
+                    # ran, and it died in the buffer (L1).
+                    status_print(">>> Client disconnected, stopping scripts")
                     break
 
                 # Add delay between scripts (not before first one)
@@ -445,15 +458,22 @@ async def _run_startup_scripts(
 
                 try:
                     script = cmd_handler.load_script(script_ref)
-                    status_print(f"\n>>> Running script: {script.name}")
+                    # The name comes out of a YAML file, which this project's
+                    # threat model treats as untrusted; PyYAML's "\e" escape
+                    # puts a real ESC in a file that looks clean, and this
+                    # goes straight to the operator's terminal (S3).
+                    name = sanitize_text(script.name)
+                    status_print(f"\n>>> Running script: {name}")
                     success = await script_runner.run(script)
                     if not success:
                         all_success = False
-                        status_print(f">>> Script FAILED: {script.name}")
+                        status_print(f">>> Script FAILED: {name}")
                     else:
-                        status_print(f">>> Script PASSED: {script.name}")
+                        status_print(f">>> Script PASSED: {name}")
                 except Exception as e:
-                    status_print(f"Error running script '{script_ref}': {e}")
+                    status_print(
+                        f"Error running script '{sanitize_text(script_ref)}': {sanitize_text(e)}"
+                    )
                     all_success = False
             else:
                 # Loop completed without break (no disconnect)
@@ -642,7 +662,7 @@ async def run_simulator(
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     script_result = [None]  # Use list to allow mutation in nested function
-    script_queue: asyncio.Queue[str] = asyncio.Queue()
+    script_queue = ScriptQueue()
 
     # Create command handler. In daemon mode the handler serves the
     # unauthenticated control channel, so restrict script running to bare
@@ -970,14 +990,24 @@ def main():
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
+    # Defence in depth for anything not sanitized at its source: the
+    # interactive paths install this formatter themselves, but --script
+    # (headless/CI) and --daemon kept the plain one, so they had no
+    # terminal-escape protection at all (S3).
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(_SanitizingFormatter("%(asctime)s [%(levelname)s] %(message)s"))
 
     # List scripts and exit
     if args.list_scripts:
         from .scripting import list_builtin_scripts, list_extra_scripts, set_extra_scripts_dir
 
-        print("Available built-in scripts:")
+        # Same header the `list` command prints (T1): two spellings of the
+        # same list in the two places a user looks for it is a needless
+        # inconsistency.
+        print("Built-in scripts:")
         for name, desc in list_builtin_scripts():
-            print(f"  {name}: {desc}")
+            # Descriptions come out of YAML files (S3).
+            print(f"  {sanitize_text(name)}: {sanitize_text(desc)}")
         set_extra_scripts_dir(args.scripts_dir)
         if args.scripts_dir is not None:
             # Always print the header, even when empty, so the flag's effect
@@ -985,7 +1015,7 @@ def main():
             print(f"Scripts from {args.scripts_dir}:")
             extra = list_extra_scripts()
             for name, desc in extra:
-                print(f"  {name}: {desc}")
+                print(f"  {sanitize_text(name)}: {sanitize_text(desc)}")
             if not extra:
                 print("  (none)")
         return

@@ -21,8 +21,8 @@ from types import SimpleNamespace
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from powerpetdoor import PowerPetDoorClient
-from powerpetdoor.framing import MAX_BUFFER_SIZE, extract_frames
+from powerpetdoor import PowerPetDoorClient, framing
+from powerpetdoor.framing import MAX_BUFFER_SIZE, FrameScanner, extract_frames
 
 # JSON payloads kept small: framing behavior does not depend on payload
 # size, and small examples keep the suite fast.
@@ -148,6 +148,74 @@ class TestFramingProperties:
         assert frames == []
         assert remainder == ""
         assert diag.overflow is True
+
+
+class TestScannerLinearityProperties:
+    """Total scan work is linear in bytes delivered, whatever the chunking.
+
+    ``MAX_BUFFER_SIZE`` bounds the *memory* a dribbling peer can cost; it
+    does not bound the CPU spent reaching that bound. Re-scanning the
+    retained buffer on every ``data_received`` made that quadratic, and the
+    attacker picks the chunk size, so the attacker picks the exponent (S1).
+    """
+
+    @staticmethod
+    def _feed_with_counter(chunks: list[str]) -> tuple[list[str], int]:
+        """Feed chunks through a FrameScanner, counting characters examined."""
+        examined = 0
+        original = framing._BraceScanner.scan
+        scanner = FrameScanner()
+        collected: list[str] = []
+        try:
+
+            def counting_scan(self, s, start):
+                nonlocal examined
+                end = original(self, s, start)
+                examined += end - start
+                return end
+
+            framing._BraceScanner.scan = counting_scan
+            for chunk in chunks:
+                frames, _diag = scanner.feed(chunk)
+                collected.extend(frames)
+        finally:
+            framing._BraceScanner.scan = original
+        return collected, examined
+
+    @settings(max_examples=50, deadline=None)
+    @given(
+        objs=st.lists(_json_objects, min_size=1, max_size=4),
+        data=st.data(),
+    )
+    def test_complete_stream_is_examined_once_per_character(self, objs, data):
+        stream = "".join(json.dumps(o) for o in objs)
+        cuts = data.draw(st.lists(st.integers(min_value=0, max_value=len(stream)), max_size=8))
+
+        collected, examined = self._feed_with_counter(_split_at(stream, cuts))
+
+        assert [json.loads(f) for f in collected] == objs
+        # Whitespace and garbage are skipped without entering the scanner,
+        # so the bound is "at most once", never "more than once".
+        assert examined <= len(stream)
+
+    @settings(max_examples=25, deadline=None)
+    @given(
+        body=st.text(
+            alphabet=st.characters(blacklist_characters='{}"\\', blacklist_categories=("Cs",)),
+            min_size=64,
+            max_size=400,
+        ),
+        chunk_size=st.integers(min_value=1, max_value=32),
+    )
+    def test_unterminated_object_costs_one_pass_at_any_chunk_size(self, body, chunk_size):
+        """The attack payload: an object that never closes, dribbled in."""
+        payload = "{" + body
+        chunks = [payload[i : i + chunk_size] for i in range(0, len(payload), chunk_size)]
+
+        collected, examined = self._feed_with_counter(chunks)
+
+        assert collected == []
+        assert examined == len(payload)
 
 
 class TestClientFramingProperties:

@@ -22,6 +22,7 @@ from powerpetdoor.const import (
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
+    FIELD_HOLD_OPEN_TIME,
 )
 from powerpetdoor.simulator import (
     DoorSimulator,
@@ -543,6 +544,114 @@ class TestScriptRunner:
         assert "Script stopped by request" in messages
         assert "  [SCRIPT] after-stop" not in messages
 
+    async def test_stop_during_the_last_step_fails_the_run(self, runner, simulator, caplog):
+        """A stop landing during the FINAL step must still report FAILED (H1).
+
+        The stop check only ran at the top of each iteration, so a stop
+        during the last step was silently discarded: the loop ended, the
+        run reported `Script PASSED` and a ctl wait-run exited 0 - the
+        opposite of what `stop` documents, from the one command whose whole
+        purpose is a trustworthy exit code.
+        """
+
+        async def stopping_open(hold=False):
+            runner.stop()
+
+        simulator.open_door = stopping_open
+        script = Script.from_simple_commands(["open"])  # the stop is the last step
+
+        with caplog.at_level(logging.INFO, logger=SCRIPT_LOGGER):
+            result = await runner.run(script, verbose=False)
+
+        assert result is False
+        messages = [rec.getMessage() for rec in caplog.records]
+        assert "Script stopped by request" in messages
+
+    async def test_stop_during_the_last_step_of_a_longer_script_fails_the_run(
+        self, runner, simulator
+    ):
+        """Same defect with steps before the last one (the two-step case, H1)."""
+
+        async def stopping_close():
+            runner.stop()
+
+        simulator.close_door = stopping_close
+        script = Script.from_simple_commands(["log first", "close"])
+
+        assert await runner.run(script, verbose=False) is False
+
+    async def test_stop_interrupts_a_plain_wait(self, runner, simulator):
+        """`wait N` is raced against the stop event, not slept through (H1).
+
+        An uninterruptible wait made the "stop lands during the final step"
+        window as long as the final wait.
+        """
+        script = Script.from_simple_commands(["wait 30"])
+
+        task = asyncio.create_task(runner.run(script, verbose=False))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)  # let the runner enter the wait step
+        runner.stop()
+
+        async with asyncio.timeout(2.0):
+            assert await task is False
+
+    async def test_wait_still_waits_when_no_stop_is_requested(self, runner, simulator):
+        """The interruptible wait must still actually wait."""
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        assert await runner.run(Script.from_simple_commands(["wait 0.05"]), verbose=False) is True
+
+        assert loop.time() - started >= 0.05
+
+    async def test_wait_returns_immediately_when_already_stopped(self, runner, simulator):
+        """A stop requested before the wait step skips the sleep entirely."""
+        runner.stop()
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        assert await runner._sleep_or_stop(30) is None
+
+        assert loop.time() - started < 1.0
+
+    async def test_stop_requested_is_observable_while_running(self, runner, simulator):
+        """`stop` takes effect at a step boundary, so the pending state shows (L3)."""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking_step(step):
+            entered.set()
+            await release.wait()
+
+        runner._execute_step = blocking_step
+        script = Script.from_simple_commands(["log a", "log b"])
+        task = asyncio.ensure_future(runner.run(script, verbose=False))
+        async with asyncio.timeout(2.0):
+            await entered.wait()
+
+        assert runner.stop_requested is False
+        runner.stop()
+        assert runner.stop_requested is True
+
+        release.set()
+        assert await asyncio.wait_for(task, 2.0) is False
+
+        # The request is cleared when the next run starts, so it cannot leak
+        # across runs even though the flag outlives the run that set it.
+        del runner._execute_step
+        assert await runner.run(Script.from_simple_commands(["log b"]), verbose=False) is True
+        assert runner.stop_requested is False
+
+    async def test_on_start_fires_once_the_run_lock_is_held(self, runner, simulator):
+        """The queue consumer stops counting a run as pending when it starts (M2)."""
+        seen: list[str | None] = []
+        script = Script.from_simple_commands(["log hello"])
+
+        await runner.run(script, verbose=False, on_start=lambda: seen.append(runner.current_script))
+
+        assert seen == [script.name]
+
     async def test_unknown_action_fails(self, runner, simulator, caplog):
         """Unknown action should fail the script."""
         script = Script(
@@ -800,6 +909,79 @@ class TestSetValueMatrix:
             runner._set_value("bogus", "1")
 
 
+class TestScriptWriterIsBoundedLikeTheWire:
+    """The YAML script channel is the third writer of these fields (S3).
+
+    Round 3 bounded the wire path and the CLI path was already bounded; the
+    script path was not, so `set hold_time inf` re-opened exactly the
+    Medium round 3 closed - GET_SETTINGS (issued by the shipped client on
+    every connect and refresh) then fails for every client for the life of
+    the process, and the door parks in DOOR_HOLDING.
+    """
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            ("inf", "hold_time must be a finite number"),
+            ("-inf", "hold_time must be a finite number"),
+            ("nan", "hold_time must be a finite number"),
+            ("1e400", "hold_time must be a finite number"),
+            ("-1", "hold_time must be between 0 and 900.0"),
+            ("901", "hold_time must be between 0 and 900.0"),
+            ("later", "hold_time must be a number"),
+        ],
+        ids=["inf", "-inf", "nan", "1e400", "negative", "too-large", "non-numeric"],
+    )
+    def test_hold_time_rejects_what_the_wire_rejects(self, value, message):
+        runner = make_runner()
+        before = runner.simulator.state.hold_time
+
+        with pytest.raises(ScriptError, match=message):
+            runner._set_value("hold_time", value)
+
+        assert runner.simulator.state.hold_time == before
+
+    def test_hold_time_at_the_ceiling_is_accepted(self):
+        """The bound matches the wire's 90000 centiseconds, not something tighter."""
+        runner = make_runner()
+        runner._set_value("hold_time", "900")
+        assert runner.simulator.state.hold_time == 900.0
+
+    def test_rejected_hold_time_leaves_get_settings_working(self):
+        """The damage the bound exists to prevent, reproduced end to end."""
+        runner = make_runner()
+        with pytest.raises(ScriptError):
+            runner._set_value("hold_time", "inf")
+
+        # int(inf * 100) raises OverflowError; this must still answer.
+        assert runner.simulator.state.get_settings()[FIELD_HOLD_OPEN_TIME] == 200
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            ("99999999999", "battery must be between 0 and 100"),
+            ("-5", "battery must be between 0 and 100"),
+            ("inf", "battery must be a finite number"),
+            ("full", "battery must be a number"),
+        ],
+        ids=["huge", "negative", "inf", "non-numeric"],
+    )
+    def test_battery_is_bounded_and_clamped(self, value, message):
+        runner = make_runner()
+        before = runner.simulator.state.battery_percent
+
+        with pytest.raises(ScriptError, match=message):
+            runner._set_value("battery", value)
+
+        assert runner.simulator.state.battery_percent == before
+
+    def test_battery_goes_through_the_simulator_clamp(self):
+        """set battery uses set_battery(), like the operator's own command."""
+        runner = make_runner()
+        runner._set_value("battery", "42")
+        assert runner.simulator.state.battery_percent == 42
+
+
 class TestToggleValueMatrix:
     """_toggle_value flips every supported boolean."""
 
@@ -1032,6 +1214,116 @@ class TestScriptCompleter:
         monkeypatch.setattr(scripting.Script, "from_file", raise_load)
         result = dict(script_completer(""))
         assert result["basic_cycle"] == "(builtin)"
+
+
+class TestScriptChannelIsSanitized:
+    """A YAML script is a named untrusted input in this threat model (S3).
+
+    PyYAML rejects raw C0 bytes in scalars but its ``\\e`` escape produces a
+    real ESC, so "the file looks clean" is not a defence. Every script
+    string that reaches a log is sanitized at its source, exactly as the
+    protocol channel's are.
+    """
+
+    POISON = "\x1b[2J\x1b[1;1H*** PWNED ***\x07"
+
+    async def test_script_name_and_description_are_sanitized(self, runner, simulator, caplog):
+        script = Script(
+            name=self.POISON,
+            description=self.POISON,
+            steps=[ScriptStep(action="log", params={"message": "hi"}, line_number=1)],
+        )
+
+        with caplog.at_level(logging.INFO, logger=SCRIPT_LOGGER):
+            assert await runner.run(script) is True
+
+        assert "\x1b" not in caplog.text
+        assert "\x07" not in caplog.text
+        assert "\\x1b[2J" in caplog.text
+
+    async def test_log_action_message_is_sanitized(self, runner, simulator, caplog):
+        script = Script(
+            name="clean",
+            steps=[ScriptStep(action="log", params={"message": self.POISON}, line_number=1)],
+        )
+
+        with caplog.at_level(logging.INFO, logger=SCRIPT_LOGGER):
+            await runner.run(script, verbose=False)
+
+        assert "[SCRIPT] \\x1b[2J" in caplog.text
+        assert "\x1b" not in caplog.text
+
+    async def test_step_parameters_are_sanitized(self, runner, simulator, caplog):
+        """The verbose per-step line echoes params straight from the file."""
+        script = Script(
+            name="clean",
+            steps=[ScriptStep(action="log", params={"message": self.POISON}, line_number=1)],
+        )
+
+        with caplog.at_level(logging.INFO, logger=SCRIPT_LOGGER):
+            await runner.run(script, verbose=True)
+
+        assert "Step 1: log(message=\\x1b[2J" in caplog.text
+        assert "\x1b" not in caplog.text
+
+    async def test_script_error_text_is_sanitized(self, runner, simulator, caplog):
+        """Failure reasons quote script-supplied text back at the operator."""
+        script = Script(
+            name="clean",
+            steps=[ScriptStep(action=f"nope{self.POISON}", line_number=1)],
+        )
+
+        with caplog.at_level(logging.ERROR, logger=SCRIPT_LOGGER):
+            assert await runner.run(script, verbose=False) is False
+
+        assert "\x1b" not in caplog.text
+        assert "\x07" not in caplog.text
+        # The action name is case-normalized before it reaches the message.
+        assert "Unknown action: nope\\x1b[2j" in caplog.text
+
+
+class TestScriptCompleterWithoutPaths:
+    """ctl's daemon refuses script paths, so ctl must not complete them (M1).
+
+    Completion used to offer ``my_custom.yaml`` - guaranteed to fail with
+    "Unknown script" - while the name that works (``my_custom``) was the
+    one thing it could not offer.
+    """
+
+    @pytest.fixture(autouse=True)
+    def no_paths(self):
+        scripting.set_script_paths_allowed(False)
+        yield
+        scripting.set_script_paths_allowed(True)
+
+    def test_only_script_names_are_offered(self, completer_tree):
+        as_dict = dict(script_completer(""))
+
+        assert as_dict["basic_cycle"] == get_builtin_script("basic_cycle").description
+        assert "local.yaml" not in as_dict
+        assert "other.yml" not in as_dict
+        assert "subdir/" not in as_dict
+
+    def test_scripts_dir_names_are_still_offered(self, completer_tree, tmp_path):
+        """A daemon-side --scripts-dir name is a bare name, so it stays."""
+        extra = tmp_path / "extras"
+        extra.mkdir()
+        (extra / "my_custom.yaml").write_text("name: Custom\nsteps: []\n")
+        scripting.set_extra_scripts_dir(extra)
+
+        as_dict = dict(script_completer(""))
+
+        assert "my_custom" in as_dict
+        assert "my_custom.yaml" not in as_dict
+
+    @pytest.mark.parametrize("prefix", ["./", "./subdir/", "scripts/", "./nope/"])
+    def test_path_prefixes_offer_nothing(self, completer_tree, prefix):
+        """Every path form the daemon refuses completes to nothing."""
+        assert script_completer(prefix) == []
+
+    def test_name_prefix_still_completes(self, completer_tree):
+        """A bare name prefix keeps working - that is the form that runs."""
+        assert dict(script_completer("bas"))["basic_cycle"]
 
 
 # ============================================================================

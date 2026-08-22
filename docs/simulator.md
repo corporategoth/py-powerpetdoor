@@ -237,8 +237,9 @@ The `schedule` command (alias `sched`) manages schedule entries:
 |---------|---------|--------|
 | `run <script>` | `r`, `file` | Queue a script — built-in name, `--scripts-dir` name, or YAML file path. The command returns as soon as the script is queued; the PASSED/FAILED result is only logged. A queued script waits for any script already running |
 | `run <script> wait` | `r`, `file` | Run the script synchronously and report `Script PASSED`/`Script FAILED` as the command result. Fails immediately with `Another script is already running: <name>` rather than queueing, so the result always belongs to the script you asked for. Over ctl this is the only form whose exit code reflects the script |
-| `list` | `/`, `scripts` | List runnable scripts (built-in, plus any from `--scripts-dir`), ending with the runner's current state |
-| `stop` | | Stop the **running script** at its next step boundary (the run then reports FAILED). Does *not* stop the simulator — use `shutdown` for that |
+| `list` | `/`, `scripts` | List runnable scripts (built-in, plus any from `--scripts-dir`), ending with the runner's current state and, if anything is waiting, a `Queued: <names>` line |
+| `stop` | | Stop the **running script** at its next step boundary (the run then reports FAILED). While the request is pending, `status`/`list` show `Script: stopping "<name>"`, and a repeat `stop` answers `Stop already requested for: <name>`. Does *not* stop the simulator — use `shutdown` for that |
+| `stop all` | | As `stop`, and additionally discards every run still queued, reporting how many were dropped |
 
 ### Info
 
@@ -316,7 +317,9 @@ start the daemon can still discover them with `list`.
 Tab completion for those names works in the **simulator CLI only**.
 `ppd-simulator-ctl` is a separate process that never learns the daemon's
 `--scripts-dir`, so its completer offers the built-in names only — use `list`
-to see the rest. A nonexistent `--scripts-dir` is rejected at startup, and an
+to see the rest. ctl also does not complete local YAML files or directories,
+because the daemon refuses script *paths* over the control channel; the
+simulator CLI, which can run them, still does. A nonexistent `--scripts-dir` is rejected at startup, and an
 existing but empty one logs a warning.
 
 ## Remote Control (ppd-simulator-ctl)
@@ -365,8 +368,10 @@ ppd-simulator-ctl run full_test_suite wait 2>run.log || cat run.log
 Only one script runs at a time. A wait-run issued while another script is
 running fails immediately with `Another script is already running: <name>`
 instead of interleaving; a plain (queued) `run` waits its turn. `status` and
-`list` report what is running and how deep the queue is, and `stop` ends the
-running script.
+`list` report what is running and how deep the queue is (including a run
+already taken off the queue but still waiting for the runner), `list` names
+the pending runs, `stop` ends the running script and `stop all` also empties
+the queue.
 
 ### Interactive Mode
 
@@ -479,11 +484,12 @@ from powerpetdoor.simulator import Schedule
 
 async def manage_schedules(simulator):
     # Create a schedule (weekdays 7am-6pm)
-    # days_of_week is a list: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+    # days_of_week is a list of booleans: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+    # (1/0 also work; from_dict() normalizes wire data to booleans)
     schedule = Schedule(
         index=1,
         enabled=True,
-        days_of_week=[0, 1, 1, 1, 1, 1, 0],  # Mon-Fri
+        days_of_week=[False, True, True, True, True, True, False],  # Mon-Fri
         inside=True,       # This schedule controls inside sensor
         outside=False,
         start_hour=7,

@@ -13,9 +13,12 @@ Output:
     Writes directly to tests/TESTING_GAPS.md (or prints to stdout if --stdout).
 """
 
+import io
 import json
+import os
 import re
 import sys
+import tokenize
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,40 +26,81 @@ SOURCE_PREFIX = "src/powerpetdoor/"
 SCRIPTS_PREFIX = "scripts/"
 
 
-def _collect_pragma_exclusions(source_dir: Path) -> dict[str, list[dict]]:
+def _comment_tokens(source: str) -> dict[int, tuple[int, str]]:
+    """Map line number -> (column, text) for every real comment in ``source``.
+
+    Tokenizing rather than regexing raw lines matters as soon as more than
+    one root is scanned: this generator's own report body contains the
+    literal words "# pragma: no cover" inside string literals, and a raw
+    regex reported them as the project's coverage exclusions.
+
+    A file that will not tokenize (a syntax error) simply reports no
+    pragmas rather than falling back to a scan that cannot tell code from
+    text.
+    """
+    comments: dict[int, tuple[int, str]] = {}
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.type == tokenize.COMMENT:
+                comments[token.start[0]] = (token.start[1], token.string)
+    except (tokenize.TokenError, SyntaxError, IndentationError):
+        return {}
+    return comments
+
+
+def _collect_pragma_exclusions(source_dir: Path, root: Path | None = None) -> dict[str, list[dict]]:
     """Scan source files for pragma annotations and collect them.
+
+    Args:
+        source_dir: Directory to scan recursively.
+        root: Directory the reported paths are relative to. Defaults to
+            ``source_dir.parent.parent``, which is the repo root for the
+            two-level ``src/powerpetdoor``; a one-level root such as
+            ``scripts`` passes its own parent.
 
     Returns a dict mapping relative file paths to lists of pragma entries,
     each with 'line', 'end_line', 'pragma_type', 'reason', and 'code'.
     """
-    pragma_re = re.compile(
-        r"#\s*pragma:\s*no\s+(cover|branch)"
-        r"(?:\s*\(([^)]+)\))?",  # optional reason in parens
-    )
+    base = source_dir.parent.parent if root is None else root
+    pragma_re = re.compile(r"#\s*pragma:\s*no\s+(cover|branch)")
+    # Matched separately against the tail so the reason can contain its own
+    # parentheses: `([^)]+)` stopped at the first ')' and reported two of
+    # this project's own pragmas as "defensive: enable(" and "bound after
+    # start(" (R4-L2). Anchored at both ends, and applied only to the tail,
+    # so a line with trailing text after the parens keeps its pragma and
+    # simply reports no reason rather than disappearing from the report.
+    reason_re = re.compile(r"^\s*\((.+)\)\s*$")
     exclusions: dict[str, list[dict]] = {}
 
     for py_file in sorted(source_dir.rglob("*.py")):
-        rel_path = str(py_file.relative_to(source_dir.parent.parent))
+        rel_path = os.path.relpath(py_file, base).replace(os.sep, "/")
         # Skip __init__.py and __main__.py (excluded from coverage entirely)
         if py_file.name in ("__init__.py", "__main__.py"):
             continue
 
         try:
-            file_lines = py_file.read_text(encoding="utf-8").splitlines()
+            source = py_file.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
+        file_lines = source.splitlines()
+        comments = _comment_tokens(source)
 
         # Track last pragma for grouping consecutive lines of the same type
         last_line_num = 0
         last_pragma_type = ""
 
         for i, line in enumerate(file_lines, start=1):
-            match = pragma_re.search(line)
+            comment = comments.get(i)
+            if comment is None:
+                continue
+            column, text = comment
+            match = pragma_re.search(text)
             if not match:
                 continue
 
             pragma_type = match.group(1)  # "cover" or "branch"
-            reason = (match.group(2) or "").strip()
+            reason_match = reason_re.match(text[match.end() :])
+            reason = reason_match.group(1).strip() if reason_match else ""
 
             # Group consecutive lines with the same pragma type
             if (
@@ -78,11 +122,11 @@ def _collect_pragma_exclusions(source_dir: Path) -> dict[str, list[dict]]:
             last_pragma_type = pragma_type
 
             code = line.strip()
-            # Remove the pragma comment itself for cleaner display. Slice at
-            # the regex match, not at a literal "# pragma:": the regex also
-            # accepts "#pragma:" and "#  pragma:", and str.index would raise
-            # ValueError on those.
-            code_before_pragma = line[: match.start()].strip()
+            # Remove the pragma comment itself for cleaner display, cutting
+            # at the comment token's own column rather than searching the
+            # line for a literal "# pragma:" (the regex also accepts
+            # "#pragma:" and "#  pragma:").
+            code_before_pragma = line[:column].strip()
 
             entry = {
                 "line": i,
@@ -251,9 +295,13 @@ def main() -> int:
                 lines.append(f"**`{fi['path']}`**: {_group_lines(fi['missing_line_numbers'])}")
                 lines.append("")
 
-    # Collect pragma exclusions from source files
-    source_dir = Path("src/powerpetdoor")
-    pragma_exclusions = _collect_pragma_exclusions(source_dir) if source_dir.exists() else {}
+    # Collect pragma exclusions from every root inside the coverage gate.
+    # scripts/ joined coverage.run.source and has its own report category,
+    # so a pragma added there must show up here too (T1).
+    pragma_exclusions: dict[str, list[dict]] = {}
+    for source_dir in (Path(SOURCE_PREFIX), Path(SCRIPTS_PREFIX)):
+        if source_dir.exists():
+            pragma_exclusions.update(_collect_pragma_exclusions(source_dir, root=Path()))
 
     # Pragma exclusions section
     lines.append("## Coverage Exclusions")

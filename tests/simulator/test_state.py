@@ -226,6 +226,43 @@ class TestSchedule:
         )
         assert schedule.days_of_week == [True, False, True, False, True, False, True]
 
+    @pytest.mark.parametrize(
+        ("flag", "expected"),
+        [
+            ("1", True),
+            (1, True),
+            (True, True),
+            ("true", True),
+            ("yes", True),
+            ("on", True),
+            ("0", False),
+            (0, False),
+            (False, False),
+            ("false", False),
+            ("off", False),
+            (["what"], False),
+        ],
+        ids=repr,
+    )
+    def test_from_dict_reads_enabled_like_every_other_wire_flag(self, flag, expected):
+        """`enabled` is read the way its daysOfWeek sibling is (T3).
+
+        A bespoke `== "1"` read "true"/"yes"/"on" as *disabled*, and left an
+        integer 1/0 in a field declared `enabled: bool`.
+        """
+        schedule = Schedule.from_dict(
+            {
+                "index": 0,
+                "enabled": flag,
+                "inside": True,
+                "in_start_time": {"hour": 6, "min": 0},
+                "in_end_time": {"hour": 22, "min": 0},
+            }
+        )
+
+        assert schedule.enabled is expected
+        assert schedule.to_dict()["enabled"] == ("1" if expected else "0")
+
     @pytest.mark.parametrize("bad_day", ["", None, "maybe", [1], 1.5, {}])
     def test_from_dict_rejects_unreadable_day_flags(self, bad_day):
         """A day element that is not a 0/1 flag is rejected, not guessed at."""

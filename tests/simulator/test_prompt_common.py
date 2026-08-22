@@ -25,6 +25,7 @@ from powerpetdoor.simulator.prompt_common import (
     get_aliases,
     get_commands,
     init_command_sets,
+    render_result,
     unescape_message,
     use_prompt_toolkit,
 )
@@ -49,6 +50,48 @@ def pt_pipe(monkeypatch):
     with create_pipe_input() as pipe_input:
         with create_app_session(input=pipe_input, output=DummyOutput()):
             yield pipe_input
+
+
+class TestRenderResult:
+    """The single sanitizing renderer for everything printed to a terminal.
+
+    Its stated purpose is that network-poisoned state reaching a command's
+    own output (a hostile ``SET_TIMEZONE`` echoed by the ``timezone``
+    command) cannot inject terminal escapes. Deleting the ``sanitize_text``
+    call used to pass the whole suite (R4-M2).
+    """
+
+    def test_preserves_plain_text(self):
+        assert render_result("AC set to connected") == ">>> AC set to connected"
+
+    def test_escapes_the_ansi_clear_screen_sequence(self):
+        assert render_result("TZ: \x1b[2J") == ">>> TZ: \\x1b[2J"
+
+    def test_escapes_a_full_screen_forging_payload(self):
+        rendered = render_result("Timezone: \x1b[2J\x1b[1;1H*** PWNED ***\x07")
+        assert "\x1b" not in rendered
+        assert "\x07" not in rendered
+        assert rendered == ">>> Timezone: \\x1b[2J\\x1b[1;1H*** PWNED ***\\x07"
+
+    def test_escapes_carriage_return_so_output_cannot_be_overwritten(self):
+        assert render_result("ok\rPWNED") == ">>> ok\\x0dPWNED"
+
+    def test_non_string_results_are_rendered_not_raised(self):
+        assert render_result(42) == ">>> 42"
+
+
+class TestFormatOutputSanitizes:
+    """format_output must not be a second, unsanitized path (T2)."""
+
+    def test_plain_message_is_sanitized(self):
+        line = InputLine(original="timezone", resolved="timezone", was_history_recall=False)
+        assert InteractiveSession.format_output(None, line, "TZ: \x1b[2J") == ">>> TZ: \\x1b[2J"
+
+    def test_history_recall_prefix_is_sanitized_too(self):
+        line = InputLine(original="!1", resolved="tz \x1b[2J", was_history_recall=True)
+        rendered = InteractiveSession.format_output(None, line, "TZ: \x1b[2J")
+        assert "\x1b" not in rendered
+        assert rendered == ">>> !1 -> tz \\x1b[2J\n>>> TZ: \\x1b[2J"
 
 
 class TestEscapeUnescape:

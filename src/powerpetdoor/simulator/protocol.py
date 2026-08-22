@@ -124,8 +124,9 @@ from ..const import (
     SUCCESS_FALSE,
     SUCCESS_TRUE,
 )
-from ..framing import extract_frames
+from ..framing import FrameScanner
 from ..sanitize import sanitize_text
+from ..schedule import MAX_SCHEDULE_INDEX
 from ..tz_utils import get_posix_tz_string, is_cache_initialized
 from .engine import DoorMotionEngine
 from .state import DoorSimulatorState, Schedule
@@ -301,7 +302,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         self.broadcast_status = broadcast_status
         self.on_disconnect = on_disconnect
         self.transport: asyncio.Transport | None = None
-        self.buffer = ""
+        # One scanner per connection, carried across data_received() calls
+        # so an unauthenticated peer dribbling a never-terminated object
+        # cannot make the daemon re-scan its retained buffer every time (S1).
+        self._scanner = FrameScanner()
         self._tasks: set[asyncio.Task] = set()
         self._owns_engine = engine is None
         self.engine = engine or DoorMotionEngine(
@@ -309,6 +313,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             broadcast_status=self._broadcast_or_send_status,
             notify_sensor=self._send_sensor_notification,
         )
+
+    @property
+    def buffer(self) -> str:
+        """The framing scanner's un-parsed remainder (introspection hook)."""
+        return self._scanner.buffer
 
     def connection_made(self, transport):
         peername = transport.get_extra_info("peername")
@@ -361,13 +370,12 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Simulator RX: %s", sanitize_log_text(text))
 
-        frames, self.buffer, diag = extract_frames(self.buffer + text)
+        frames, diag = self._scanner.feed(text)
         if diag.overflow:
             logger.error(
                 "Simulator: receive buffer overflowed without a complete message; "
                 "dropping client connection"
             )
-            self.buffer = ""
             if self.transport:
                 self.transport.close()
             return
@@ -598,9 +606,29 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     async def _handle_get_schedule_list(self, msg: dict, response: dict) -> None:
         response[FIELD_SCHEDULES] = self.state.get_schedule_list()
 
+    @staticmethod
+    def _wire_schedule_index(msg: dict) -> int | None:
+        """Validate the untrusted ``index`` of an index-addressed command.
+
+        Used as a dict key, so a JSON container raises ``TypeError:
+        unhashable type`` and one packet becomes a full traceback at ERROR
+        plus a useless "Command failed" reason. The sibling ``msgID`` field
+        has been guarded since round 2 and every ``SET_*`` field since round
+        3; these two were the last unguarded wire values (L3/S2).
+
+        Returns:
+            The index, or None when the field is absent.
+
+        Raises:
+            WireValueError: If present but not an integer in range.
+        """
+        if FIELD_INDEX not in msg or msg[FIELD_INDEX] is None:
+            return None
+        return _coerce_wire_int(msg[FIELD_INDEX], FIELD_INDEX, 0, MAX_SCHEDULE_INDEX)
+
     @CommandRegistry.handler(CMD_GET_SCHEDULE)
     async def _handle_get_schedule(self, msg: dict, response: dict) -> None:
-        index = msg.get(FIELD_INDEX)
+        index = self._wire_schedule_index(msg)
         if index is not None and index in self.state.schedules:
             response[FIELD_SCHEDULE] = self.state.schedules[index].to_dict()
         else:
@@ -629,7 +657,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     @CommandRegistry.handler(CMD_DELETE_SCHEDULE)
     async def _handle_delete_schedule(self, msg: dict, response: dict) -> None:
-        index = msg.get(FIELD_INDEX)
+        index = self._wire_schedule_index(msg)
         if index is not None and index in self.state.schedules:
             del self.state.schedules[index]
             # The real device echoes the deleted index in the response

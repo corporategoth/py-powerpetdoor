@@ -452,7 +452,7 @@ class TestShutdownCommand:
         """`stop` stops the running script, never the whole simulator (M5)."""
         result = await command_handler.execute("stop")
         assert result.success is False
-        assert result.message == "No script is running"
+        assert result.message == "No script is running (use 'shutdown' to stop the simulator)"
         command_handler.stop_callback.assert_not_called()
 
 
@@ -502,7 +502,13 @@ class TestListCommand:
         for name, desc in scripts:
             assert f"  {name}: {desc}" in result.message
         assert result.message.endswith("\nScript: none running")
-        assert result.data == {"scripts": scripts, "running": None, "queued": 0}
+        assert result.data == {
+            "scripts": scripts,
+            "running": None,
+            "queued": 0,
+            "pending": [],
+            "stopping": False,
+        }
 
     async def test_aliases(self, command_handler):
         for alias in ("/", "scripts"):

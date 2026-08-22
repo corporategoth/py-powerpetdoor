@@ -203,6 +203,88 @@ class TestCollectPragmaExclusions:
 
         assert [(e["line"], e["end_line"]) for e in entries] == [(1, 1), (3, 3)]
 
+    @pytest.mark.parametrize(
+        ("comment", "reason"),
+        [
+            (
+                "# pragma: no branch (defensive: enable() always installs a handler)",
+                "defensive: enable() always installs a handler",
+            ),
+            ("# pragma: no branch (bound after start())", "bound after start()"),
+            ("# pragma: no cover (a (nested) reason)", "a (nested) reason"),
+        ],
+        ids=["call-mid-reason", "call-at-end", "nested-parens"],
+    )
+    def test_reason_containing_parentheses_is_not_truncated(self, tmp_path, comment, reason):
+        """Two of this project's own five pragmas hit this (R4-L2).
+
+        The non-greedy `([^)]+)` stopped at the first `)`, so the committed
+        TESTING_GAPS.md reported "defensive: enable(" and "bound after
+        start(" as the project's coverage-exclusion justifications.
+        """
+        source_dir = self._source_dir(tmp_path)
+        (source_dir / "mod.py").write_text(f"x = 1  {comment}\n")
+
+        entry = gaps._collect_pragma_exclusions(source_dir)["src/powerpetdoor/mod.py"][0]
+
+        assert entry["reason"] == reason
+        assert entry["code"] == "x = 1"
+
+    def test_trailing_text_after_the_reason_is_not_a_reason(self, tmp_path):
+        """The anchor requires the pragma comment to end the line."""
+        source_dir = self._source_dir(tmp_path)
+        (source_dir / "mod.py").write_text("x = 1  # pragma: no cover (why) and more\n")
+
+        entry = gaps._collect_pragma_exclusions(source_dir)["src/powerpetdoor/mod.py"][0]
+
+        assert entry["reason"] == ""
+
+    def test_pragma_text_inside_a_string_literal_is_not_a_pragma(self, tmp_path):
+        """The generator's own report body contains these words (R4-T1).
+
+        Scanning ``scripts/`` as well as ``src/`` means the generator scans
+        itself, and a raw line regex reported its markdown output strings as
+        the project's coverage exclusions.
+        """
+        source_dir = self._source_dir(tmp_path)
+        (source_dir / "mod.py").write_text(
+            'MESSAGE = "excluded via `# pragma: no cover` or `# pragma: no branch`"\n'
+            "REAL = 1  # pragma: no cover (the only real one)\n"
+        )
+
+        entries = gaps._collect_pragma_exclusions(source_dir)["src/powerpetdoor/mod.py"]
+
+        assert len(entries) == 1
+        assert entries[0]["line"] == 2
+        assert entries[0]["reason"] == "the only real one"
+
+    def test_untokenizable_file_reports_no_pragmas(self, tmp_path):
+        """A file that will not parse is skipped rather than guessed at."""
+        source_dir = self._source_dir(tmp_path)
+        (source_dir / "broken.py").write_text("def f(:\n    x = 1  # pragma: no cover (nope)\n")
+
+        assert gaps._collect_pragma_exclusions(source_dir) == {}
+
+    def test_scripts_root_is_scanned_too(self, tmp_path):
+        """scripts/ is inside the coverage gate, so its pragmas must show (R4-T1)."""
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        (scripts_dir / "tool.py").write_text("x = 1  # pragma: no cover (build-only)\n")
+
+        found = gaps._collect_pragma_exclusions(scripts_dir, root=tmp_path)
+
+        assert found == {
+            "scripts/tool.py": [
+                {
+                    "line": 1,
+                    "end_line": 1,
+                    "pragma_type": "cover",
+                    "reason": "build-only",
+                    "code": "x = 1",
+                }
+            ]
+        }
+
     def test_pragma_without_a_space_does_not_crash(self, tmp_path):
         """`#pragma:` matches the regex; a literal .index() would raise."""
         source_dir = self._source_dir(tmp_path)
@@ -336,8 +418,90 @@ class TestMain:
         assert "**`simulator/cli.py`**: 10-11, 40" in report
         assert "| Simulator CLI | 1 (1 with gaps) | 80.0% | :yellow_circle: |" in report
         assert "| Simulator Commands | 1 | 100.0% | :green_circle: |" in report
+        # The denominator is covered + missing. Using covered alone renders
+        # "8 / 8" on a project with 2 uncovered lines - a full denominator
+        # the report does not have (R4-L4), and only the all-zero fixture
+        # asserted this row.
+        assert "| Lines Covered | 8 / 10 |" in report
+        assert "| Branches Covered | 3 / 4 |" in report
+        assert "| Lines Missing | 2 |" in report
         # Not written to disk in --stdout mode
         assert not (workspace / "tests" / "TESTING_GAPS.md").exists()
+
+    def test_near_complete_files_are_still_listed_as_gaps(self, workspace, monkeypatch, capsys):
+        """A 99.5% file must appear in the report whose only job is gaps (R4-L4)."""
+        monkeypatch.setattr(sys, "argv", ["generate_gaps_report.py", "--stdout"])
+        write_coverage(
+            workspace,
+            {
+                "totals": {
+                    "percent_covered": 99.5,
+                    "covered_lines": 199,
+                    "missing_lines": 1,
+                    "covered_branches": 0,
+                    "missing_branches": 0,
+                },
+                "files": {
+                    "src/powerpetdoor/door.py": {
+                        "summary": {
+                            "percent_covered": 99.5,
+                            "num_statements": 200,
+                            "num_branches": 0,
+                            "covered_lines": 199,
+                            "missing_lines": 1,
+                        },
+                        "missing_lines": [42],
+                        "missing_branches": [],
+                    },
+                },
+            },
+        )
+
+        assert gaps.main() == 0
+
+        report = capsys.readouterr().out
+        assert "## Current Gaps (1 files)" in report
+        assert "| `door.py` | 200 | 1 | 99.5% |" in report
+
+    def test_gap_files_are_listed_worst_first(self, workspace, monkeypatch, capsys):
+        """Sorting is what puts the file that needs attention at the top (R4-L4)."""
+        monkeypatch.setattr(sys, "argv", ["generate_gaps_report.py", "--stdout"])
+
+        def _file(percent, statements, missing):
+            return {
+                "summary": {
+                    "percent_covered": percent,
+                    "num_statements": statements,
+                    "num_branches": 0,
+                    "covered_lines": statements - missing,
+                    "missing_lines": missing,
+                },
+                "missing_lines": [1] * missing,
+                "missing_branches": [],
+            }
+
+        write_coverage(
+            workspace,
+            {
+                "totals": {
+                    "percent_covered": 85.0,
+                    "covered_lines": 170,
+                    "missing_lines": 30,
+                    "covered_branches": 0,
+                    "missing_branches": 0,
+                },
+                "files": {
+                    # Declared best-first, so only the sort can reorder them.
+                    "src/powerpetdoor/door.py": _file(95.0, 100, 5),
+                    "src/powerpetdoor/client.py": _file(75.0, 100, 25),
+                },
+            },
+        )
+
+        assert gaps.main() == 0
+
+        report = capsys.readouterr().out
+        assert report.index("| `client.py` |") < report.index("| `door.py` |")
 
     def test_gap_file_with_no_missing_line_numbers_is_skipped_in_detail(
         self, workspace, monkeypatch, capsys

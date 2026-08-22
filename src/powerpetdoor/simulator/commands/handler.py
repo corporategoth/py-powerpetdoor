@@ -25,7 +25,7 @@ from .history import History
 from .info import InfoCommandsMixin
 from .notifications import NotifyCommandsMixin
 from .schedules import ScheduleCommandsMixin
-from .scripts import ScriptsCommandsMixin
+from .scripts import ScriptQueue, ScriptsCommandsMixin
 from .settings import SettingsCommandsMixin
 from .simulation import SimulationCommandsMixin
 
@@ -66,7 +66,7 @@ class CommandHandler(
         simulator: "DoorSimulator",
         script_runner: "ScriptRunner",
         stop_callback: Callable[[], None],
-        script_queue: asyncio.Queue | None = None,
+        script_queue: ScriptQueue | None = None,
         scripts_dir: str | None = None,
         allow_script_paths: bool = True,
     ):

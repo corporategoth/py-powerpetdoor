@@ -7,6 +7,7 @@
 
 from typing import TYPE_CHECKING
 
+from ...schedule import MAX_SCHEDULE_INDEX
 from .base import DAY_NAMES, ArgSpec, CommandResult, command, subcommand
 
 if TYPE_CHECKING:
@@ -118,11 +119,16 @@ class ScheduleCommandsMixin:
 
         start_h, start_m, end_h, end_m = time
 
-        # Find next available index
+        # Find next available index. Capped at the same bound the wire path
+        # enforces: an uncapped search silently created index 256, which
+        # to_dict() then put on the wire and the simulator would itself
+        # reject if a client sent it.
         existing = set(self.simulator.state.schedules.keys())
         idx = 0
         while idx in existing:
             idx += 1
+        if idx > MAX_SCHEDULE_INDEX:
+            return CommandResult(False, "No free schedule slots")
 
         # Create schedule
         schedule = self._Schedule(

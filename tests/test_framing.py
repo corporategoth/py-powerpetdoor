@@ -9,12 +9,37 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from powerpetdoor import framing
 from powerpetdoor.framing import (
     MAX_BUFFER_SIZE,
     FrameDiagnostics,
+    FrameScanner,
     extract_frames,
     find_frame_end,
 )
+
+
+@pytest.fixture
+def scan_counter(monkeypatch):
+    """Count the characters the brace scanner actually examines.
+
+    ``_BraceScanner.scan`` returns the index it stopped at, so the work it
+    did is exactly ``end - start``. Summing that across a whole delivery
+    is the direct measurement of the quadratic-rescan defect (S1).
+    """
+    examined = [0]
+    original = framing._BraceScanner.scan
+
+    def counting_scan(self, s, start):
+        end = original(self, s, start)
+        examined[0] += end - start
+        return end
+
+    monkeypatch.setattr(framing._BraceScanner, "scan", counting_scan)
+    return examined
+
 
 # ============================================================================
 # find_frame_end
@@ -223,3 +248,122 @@ class TestExtractFrames:
             assert diag.overflow is False
         assert collected == ['{"a": 1}', '{"b": 2}']
         assert buffer == ""
+
+
+# ============================================================================
+# FrameScanner (stateful, per-connection)
+# ============================================================================
+
+
+class TestFrameScanner:
+    """Tests for the resumable per-connection scanner."""
+
+    def test_single_frame_in_one_feed(self):
+        """A complete object in one chunk comes straight back out."""
+        scanner = FrameScanner()
+        frames, diag = scanner.feed('{"a": 1}')
+        assert frames == ['{"a": 1}']
+        assert scanner.buffer == ""
+        assert diag == FrameDiagnostics()
+
+    def test_frame_split_across_feeds_is_reassembled(self):
+        """A frame split across reads is joined, not lost."""
+        scanner = FrameScanner()
+        assert scanner.feed('{"CMD": "PO')[0] == []
+        assert scanner.buffer == '{"CMD": "PO'
+        assert scanner.feed('NG"}')[0] == ['{"CMD": "PONG"}']
+        assert scanner.buffer == ""
+
+    def test_brace_inside_a_string_split_across_feeds(self):
+        """The string state machine survives a chunk boundary."""
+        scanner = FrameScanner()
+        assert scanner.feed('{"a": "x}')[0] == []
+        assert scanner.feed('y"}')[0] == ['{"a": "x}y"}']
+        assert scanner.buffer == ""
+
+    def test_escaped_quote_split_across_feeds(self):
+        """A backslash escape split across chunks is still an escape."""
+        scanner = FrameScanner()
+        assert scanner.feed('{"a": "x\\')[0] == []
+        assert scanner.feed('"}"}')[0] == ['{"a": "x\\"}"}']
+        assert scanner.buffer == ""
+
+    def test_multiple_frames_and_whitespace(self):
+        """Several frames plus separators come out in order."""
+        scanner = FrameScanner()
+        frames, diag = scanner.feed('{"a": 1} \n\t{"b": 2}\r\n')
+        assert frames == ['{"a": 1}', '{"b": 2}']
+        assert scanner.buffer == ""
+        assert diag.discarded == 0
+
+    def test_garbage_between_frames_is_discarded(self):
+        """Non-JSON garbage resyncs to the next object."""
+        scanner = FrameScanner()
+        frames, diag = scanner.feed('{"a": 1}xx{"b": 2}')
+        assert frames == ['{"a": 1}', '{"b": 2}']
+        assert diag.discarded == 2
+        assert scanner.buffer == ""
+
+    def test_garbage_split_across_feeds(self):
+        """Garbage delivered in pieces is discarded in pieces."""
+        scanner = FrameScanner()
+        assert scanner.feed("gar")[1].discarded == 3
+        assert scanner.buffer == ""
+        frames, diag = scanner.feed('bage{"a": 1}')
+        assert frames == ['{"a": 1}']
+        assert diag.discarded == 4
+
+    def test_overflow_clears_buffer_and_scanner_state(self):
+        """Overflow resets the in-progress object, not just the buffer."""
+        scanner = FrameScanner(max_buffer=8)
+        frames, diag = scanner.feed('{"a": "xxxxxxxxxx')
+        assert frames == []
+        assert diag.overflow is True
+        assert scanner.buffer == ""
+        # The abandoned object must not swallow the next real frame: if the
+        # depth/in_string state survived, this would be treated as a
+        # continuation instead of a fresh object.
+        frames, diag = scanner.feed('{"b": 2}')
+        assert frames == ['{"b": 2}']
+        assert diag.overflow is False
+
+    def test_reset_drops_a_partial_frame(self):
+        """reset() forgets the retained remainder and the open object."""
+        scanner = FrameScanner()
+        scanner.feed('{"a": ')
+        assert scanner.buffer == '{"a": '
+        scanner.reset()
+        assert scanner.buffer == ""
+        assert scanner.feed('{"b": 2}')[0] == ['{"b": 2}']
+
+    def test_dribbled_object_examines_each_character_once(self, scan_counter):
+        """A byte-at-a-time unterminated object costs O(N), not O(N^2).
+
+        This is the CPU-exhaustion vector (S1): re-scanning the retained
+        buffer on every ``data_received`` cost ~N^2/2 character steps for
+        N delivered bytes. Each byte must be examined exactly once.
+        """
+        payload = '{"a": "' + "x" * 4000
+        scanner = FrameScanner()
+        for char in payload:
+            scanner.feed(char)
+        assert scanner.buffer == payload
+        assert scan_counter[0] == len(payload)
+
+    def test_scan_work_is_independent_of_chunking(self, scan_counter):
+        """Total scan work is the same whatever chunk size the peer picks."""
+        payload = '{"a": "' + "y" * 2000
+        for chunk_size in (1, 7, 256, len(payload)):
+            scan_counter[0] = 0
+            scanner = FrameScanner()
+            for start in range(0, len(payload), chunk_size):
+                scanner.feed(payload[start : start + chunk_size])
+            assert scan_counter[0] == len(payload)
+
+    def test_nested_braces_dribbled_are_still_linear(self, scan_counter):
+        """Nested braces defeat a '}'-lookahead shortcut but not state carry."""
+        payload = "{" * 3000
+        scanner = FrameScanner()
+        for char in payload:
+            scanner.feed(char)
+        assert scan_counter[0] == len(payload)

@@ -735,6 +735,31 @@ class TestCtlMain:
         out = capsys.readouterr().out
         assert "usage:" in out
         assert "Control a running Power Pet Door simulator" in out
+        # The epilog is what a bare invocation shows, so it must name the
+        # only exit-code-bearing form and the command whose meaning just
+        # changed (T3).
+        assert "run SCRIPT wait" in out
+        assert "exit code reflects PASSED/FAILED" in out
+        assert "Stop the running script (not the daemon)" in out
+        assert "Plain 'run SCRIPT' queues the script and always exits 0" in out
+
+    def test_main_forbids_script_path_completion(self, monkeypatch):
+        """ctl's daemon refuses script paths, so ctl must not complete them (M1)."""
+        from powerpetdoor.simulator import scripting
+
+        monkeypatch.setattr(scripting, "_script_paths_allowed", True)
+
+        def fake_send(host, port, command, timeout):
+            return True, "OK: fine"
+
+        monkeypatch.setattr(ctl, "send_command", fake_send)
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator-ctl", "status"])
+
+        with pytest.raises(SystemExit):
+            ctl.main()
+
+        assert scripting._script_paths_allowed is False
+        assert scripting.script_completer("./") == []
 
     def test_interactive_dispatch_defaults(self, monkeypatch):
         """-i runs the interactive loop; door port defaults to port - 1."""
@@ -872,6 +897,55 @@ class TestBasicReadline:
             assert sys.stdin.readline() == "later\n"
         finally:
             loop.set_exception_handler(old_handler)
+
+
+class TestEnableLineBuffering:
+    """ctl -i off a terminal was block-buffered: 12 s of live log, 0 bytes (M3)."""
+
+    def test_reconfigures_a_non_tty_stream(self):
+        calls = []
+
+        class FakeStream:
+            def isatty(self):
+                return False
+
+            def reconfigure(self, **kwargs):
+                calls.append(kwargs)
+
+        ctl._enable_line_buffering(FakeStream())
+
+        assert calls == [{"line_buffering": True}]
+
+    def test_leaves_a_terminal_alone(self):
+        """A TTY is already line-buffered; reconfiguring it would be noise."""
+
+        class FakeTty:
+            def isatty(self):
+                return True
+
+            def reconfigure(self, **kwargs):  # pragma: no cover (must not run)
+                raise AssertionError("a TTY must not be reconfigured")
+
+        ctl._enable_line_buffering(FakeTty())
+
+    def test_tolerates_a_stream_without_reconfigure(self):
+        """A StringIO test double, or an exotic redirect, must not crash ctl."""
+        ctl._enable_line_buffering(io.StringIO())
+
+    def test_tolerates_a_stream_without_isatty(self):
+        ctl._enable_line_buffering(object())
+
+    async def test_interactive_session_enables_it(self, monkeypatch, refused_port):
+        """The session must turn it on before anything is printed."""
+        seen = []
+        monkeypatch.setattr(ctl, "_enable_line_buffering", lambda stream: seen.append(stream))
+
+        with pytest.raises(SystemExit):
+            await ctl.interactive_mode_async(
+                "127.0.0.1", refused_port, refused_port - 1, 1.0, "none"
+            )
+
+        assert seen == [sys.stdout]
 
 
 # ============================================================================

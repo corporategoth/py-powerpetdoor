@@ -42,6 +42,7 @@ from .prompt_common import (
     render_result,
     unescape_message,
 )
+from .scripting import set_script_paths_allowed
 
 if TYPE_CHECKING:
     from .server import DoorSimulator
@@ -327,6 +328,20 @@ def check_connection(host: str, port: int, timeout: float = 2.0) -> tuple[bool, 
         return False, f"Connection error: {e}"
 
 
+def _enable_line_buffering(stream: object) -> None:
+    """Make ``stream`` flush every line, even when it is not a terminal.
+
+    A no-op on a TTY (already line-buffered) and on any stream that does
+    not support reconfiguration - a test double, or stdout already
+    redirected to something exotic.
+    """
+    if getattr(stream, "isatty", None) is not None and stream.isatty():  # type: ignore[attr-defined]
+        return
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(line_buffering=True)
+
+
 def _basic_readline(prompt_text: str) -> "asyncio.Future[str | None]":
     """Read one line from stdin without blocking the event loop.
 
@@ -361,6 +376,14 @@ async def interactive_mode_async(
     host: str, port: int, door_port: int, timeout: float, history_file: str | None
 ):
     """Run in interactive mode using asyncio with log streaming."""
+    # stdout is block-buffered whenever it is not a terminal, so `ctl -i >
+    # session.log`, `| tee`, `| grep`, a container capturing stdout or a
+    # supervisor saw nothing at all while a command was in flight - the
+    # streamed LOG: lines all landed at once at the next prompt, making
+    # "still running" and "hung" indistinguishable (M3). prompt_toolkit is
+    # not driving that case anyway.
+    _enable_line_buffering(sys.stdout)
+
     # Initialize timezone cache for completion
     await async_init_timezone_cache()
 
@@ -648,10 +671,14 @@ def main():
 Examples:
   %(prog)s status                  # Get simulator status
   %(prog)s inside                  # Trigger inside sensor
+  %(prog)s run SCRIPT wait         # Run a script; exit code reflects PASSED/FAILED
+  %(prog)s stop                    # Stop the running script (not the daemon)
   %(prog)s -i                      # Interactive mode
   %(prog)s shutdown                # Stop the daemon
 
-Use the 'help' command to see available simulator commands.
+Plain 'run SCRIPT' queues the script and always exits 0; only the 'wait'
+form reports the script's own result. Use the 'help' command to see
+available simulator commands.
 """,
     )
     parser.add_argument(
@@ -690,6 +717,12 @@ Use the 'help' command to see available simulator commands.
     )
 
     args = parser.parse_args()
+
+    # The daemon refuses script paths over the control channel, so this
+    # process must not complete them: offering `my_custom.yaml` steers the
+    # user to a command that always fails, while the name that works
+    # (`my_custom`) is one completion cannot offer (M1).
+    set_script_paths_allowed(False)
 
     # Determine door port for prompt display
     door_port = args.door_port if args.door_port is not None else args.port - 1

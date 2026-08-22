@@ -17,7 +17,7 @@ from .base import (
     get_command_registry,
     subcommand,
 )
-from .scripts import format_script_status
+from .scripts import ScriptStatus, format_script_status
 
 if TYPE_CHECKING:
     from ..server import DoorSimulator
@@ -29,7 +29,7 @@ class InfoCommandsMixin:
     simulator: "DoorSimulator"
     #: Supplied by ScriptsCommandsMixin on the full CommandHandler; `status`
     #: is never dispatched locally by ctl, whose handler lacks that mixin.
-    script_status: Callable[[], tuple[str | None, int]]
+    script_status: Callable[[], "ScriptStatus"]
     _history: Any  # prompt_toolkit history object
     _interactive_mode: bool  # Whether running in interactive mode
     _cli_mode: bool  # Whether running in CLI interactive mode (vs ctl/daemon)
@@ -133,7 +133,8 @@ class InfoCommandsMixin:
         num_clients = len(self.simulator.protocols)
         # Serialized script runs made "busy" a real state; without this the
         # operator watches the door move with no explanation (M5).
-        running_script, queued_scripts = self.script_status()
+        script = self.script_status()
+        running_script, queued_scripts = script.running, script.queued
         data = {
             "connected_clients": num_clients,
             "running_script": running_script,
@@ -221,7 +222,7 @@ class InfoCommandsMixin:
             f"  Schedules: {list(s.schedules.keys())}",
             f"  Open cycles: {s.total_open_cycles}",
             f"  Auto-retracts: {s.total_auto_retracts}",
-            f"  {format_script_status(running_script, queued_scripts)}",
+            f"  {format_script_status(script)}",
         ]
         return CommandResult(True, "\n".join(lines), data)
 

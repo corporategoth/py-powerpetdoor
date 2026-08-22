@@ -513,6 +513,41 @@ class TestCompressScheduleEdgeCases:
 
         assert result == []
 
+    @pytest.mark.parametrize("flag", ["0", 0, False, "false", "off", "no"], ids=repr)
+    def test_compress_reads_disabled_day_flags_with_make_bool(self, flag):
+        """bool("0") is True, so the expand step must use make_bool (L4/R4-M3).
+
+        This is the third site of the same fix (the other two are
+        ``door.Schedule.from_dict`` and the simulator's
+        ``coerce_schedule_day``): a firmware variant sending ``"0"`` day
+        flags would otherwise expand to every day of the week.
+        """
+        entry = self.create_schedule_entry(
+            0, [flag] * 7, inside=True, in_start=(6, 0), in_end=(22, 0)
+        )
+
+        assert compress_schedule([entry]) == []
+
+    @pytest.mark.parametrize("flag", ["1", 1, True, "true", "on", "yes"], ids=repr)
+    def test_compress_reads_enabled_day_flags_with_make_bool(self, flag):
+        """Every recognizable "on" spelling still activates the day."""
+        entry = self.create_schedule_entry(
+            0, [flag] * 7, inside=True, in_start=(6, 0), in_end=(22, 0)
+        )
+
+        result = compress_schedule([entry])
+
+        assert len(result) == 1
+        assert result[0][FIELD_DAYSOFWEEK] == [1] * 7
+
+    def test_compress_unreadable_day_flag_fails_closed(self):
+        """A day flag make_bool cannot read must not grant access."""
+        entry = self.create_schedule_entry(
+            0, ["maybe"] * 7, inside=True, in_start=(6, 0), in_end=(22, 0)
+        )
+
+        assert compress_schedule([entry]) == []
+
     def test_compress_outside_only_entry(self):
         """An outside-only entry keeps outside times and zeroes inside times."""
         entry = self.create_schedule_entry(

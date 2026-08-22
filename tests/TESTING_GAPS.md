@@ -2,7 +2,7 @@
 
 This file is **auto-generated** by CI after each test run. Do not edit manually.
 
-**Last updated:** 2026-08-22 04:09 UTC
+**Last updated:** 2026-08-22 06:21 UTC
 
 ## Summary
 
@@ -10,8 +10,8 @@ This file is **auto-generated** by CI after each test run. Do not edit manually.
 |--------|-------|
 | Line Coverage | 100.00% |
 | Branch Coverage | 100.00% |
-| Lines Covered | 6,062 / 6,062 |
-| Branches Covered | 2,190 / 2,190 |
+| Lines Covered | 6,279 / 6,279 |
+| Branches Covered | 2,254 / 2,254 |
 | Lines Missing | 0 |
 
 ## Coverage by Category
@@ -49,14 +49,14 @@ The following are excluded from coverage by configuration (`pyproject.toml`):
 
 | Lines | Type | Reason | Code |
 |-------|------|--------|------|
-| 99 | no branch | defensive: enable( | `if self._handler:` |
-| 636 | no branch | bound after start( | `if simulator.server and simulator.server.sockets:` |
+| 100 | no branch | defensive: enable() always installs a handler | `if self._handler:` |
+| 656 | no branch | bound after start() | `if simulator.server and simulator.server.sockets:` |
 
 #### `simulator/ctl.py` (3 lines)
 
 | Lines | Type | Reason | Code |
 |-------|------|--------|------|
-| 350 | no cover | defensive: Linux selectors swallow errors for dead fds, so this cannot be triggered deterministically | `except Exception:` |
-| 568 | no cover | defensive: both prompt paths signal EOF by returning None rather than raising | `except EOFError:` |
-| 619 | no cover | defensive: socket_reader swallows its own cancellation; only an outer cancel landing exactly on this await would raise | `except asyncio.CancelledError:` |
+| 365 | no cover | defensive: Linux selectors swallow errors for dead fds, so this cannot be triggered deterministically | `except Exception:` |
+| 591 | no cover | defensive: both prompt paths signal EOF by returning None rather than raising | `except EOFError:` |
+| 642 | no cover | defensive: socket_reader swallows its own cancellation; only an outer cancel landing exactly on this await would raise | `except asyncio.CancelledError:` |
 

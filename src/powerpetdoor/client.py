@@ -116,7 +116,7 @@ from .const import (
     PRIORITY_LOW,
     SUCCESS_TRUE,
 )
-from .framing import MAX_BUFFER_SIZE, extract_frames, find_frame_end
+from .framing import MAX_BUFFER_SIZE, FrameScanner, find_frame_end
 from .sanitize import sanitize_text
 
 _LOGGER = logging.getLogger(__name__)
@@ -183,13 +183,17 @@ class ResponseHandlerRegistry:
         return decorator
 
     @classmethod
-    def get(cls, cmd: str | None) -> Callable | None:
+    def get(cls, cmd: object) -> Callable | None:
         """Get the handler for a command, or None if not found.
 
-        Accepts None (a response envelope may omit CMD entirely) so callers
-        do not need to special-case malformed messages.
+        ``cmd`` comes straight off the wire. Anything that is not a string
+        matches no handler - including the JSON containers that are not
+        usable dict keys at all, which would otherwise raise ``TypeError:
+        unhashable type`` out of ``process_message`` and turn one ~40-byte
+        frame into a full traceback in the host application's log (D3).
+        A missing CMD (None) is normal: response envelopes may omit it.
         """
-        if cmd is None:
+        if not isinstance(cmd, str):
             return None
         return cls._handlers.get(cmd)
 
@@ -298,6 +302,12 @@ class PowerPetDoorClient(asyncio.Protocol):
         #: :meth:`connection_made`). asyncio still delivers their
         #: connection_lost() here, and it must not tear anything down.
         self._declined = 0
+        #: Transports adopted through the public :meth:`connection_made`
+        #: whose connection_lost() has not been delivered yet. More than
+        #: one outstanding means the loss now arriving belongs to a socket
+        #: that has already been superseded (L1) - asyncio passes no
+        #: transport identity, so this count is the only way to tell.
+        self._pending_direct_losses = 0
         self._keepalive = None
         self._check_receipt = None
         self._reconnect_task: asyncio.Task | None = None
@@ -311,7 +321,10 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._failed_msg = 0
         self._failed_pings = 0
         self._inflight_msg_id: int | None = None
-        self._buffer = ""
+        # One scanner per client, carried across data_received() calls: a
+        # peer that dribbles the bytes of a never-terminated object must not
+        # make us re-scan the retained buffer every time (S1).
+        self._scanner = FrameScanner()
         # Fire-and-forget work is tracked so failures are logged
         # immediately (L3). _tasks is connection-scoped work that
         # disconnect() cancels; _handler_tasks holds async lifecycle
@@ -1067,6 +1080,13 @@ class PowerPetDoorClient(asyncio.Protocol):
         for an embedding application: the handlers are given ``timeout``
         seconds to finish, and whatever is still running is cancelled.
 
+        Cancelling ``aclose()`` itself does not weaken the guarantee: the
+        cancel step runs from a ``finally``, so handlers are cancelled on
+        the way out rather than left running un-awaited (L2). That is the
+        normal shutdown shape - an embedding application wrapping
+        ``door.disconnect()`` in its own deadline, or being unloaded by a
+        host framework that cancels the task.
+
         Args:
             timeout: Seconds to wait for handlers; defaults to cfg_timeout.
         """
@@ -1075,12 +1095,16 @@ class PowerPetDoorClient(asyncio.Protocol):
         tasks = [task for task in self._handler_tasks if task is not current]
         if not tasks:
             return
-        _done, pending = await asyncio.wait(
-            tasks, timeout=self.cfg_timeout if timeout is None else timeout
-        )
-        for task in pending:
-            _LOGGER.warning("Cancelling a connection handler that did not finish in time")
-            task.cancel()
+        pending: set[asyncio.Task] = set(tasks)
+        try:
+            _done, pending = await asyncio.wait(
+                tasks, timeout=self.cfg_timeout if timeout is None else timeout
+            )
+        finally:
+            for task in pending:
+                if not task.done():
+                    _LOGGER.warning("Cancelling a connection handler that did not finish in time")
+                    task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
 
     def reset_shutdown(self) -> None:
@@ -1139,12 +1163,15 @@ class PowerPetDoorClient(asyncio.Protocol):
         """asyncio callback for a successful connection.
 
         ``PowerPetDoorClient`` is a public ``asyncio.Protocol``, so it may be
-        handed to ``create_connection()`` directly. A transport this client
-        will not adopt is aborted here, and the ``connection_lost()`` asyncio
-        then delivers *on this same object* is counted off rather than
-        allowed to tear down a healthy connection (L2).
+        handed to ``create_connection()`` directly. asyncio attaches no
+        identity to the ``connection_lost()`` it later delivers *on this same
+        object*, so both kinds of event that must not tear down a healthy
+        connection are counted here: a transport this client declined and
+        aborted (L2), and one it adopted and has since replaced (L1).
         """
-        if not self._adopt_transport(transport):
+        if self._adopt_transport(transport):
+            self._pending_direct_losses += 1
+        else:
             self._declined += 1
 
     def _adopt_transport(self, transport) -> bool:
@@ -1189,7 +1216,17 @@ class PowerPetDoorClient(asyncio.Protocol):
         return True
 
     def connection_lost(self, exc) -> None:
-        """asyncio callback for connection lost."""
+        """asyncio callback for connection lost (direct ``Protocol`` wiring).
+
+        This is the entry point for a client handed to
+        ``create_connection()`` directly. asyncio does not say *which*
+        transport was lost, so the two classes of event that must not reach
+        the teardown path are counted off first - a declined transport (L2)
+        and a superseded one (L1). :class:`_ConnectionAttempt` never comes
+        through here: it knows its own transport and calls
+        :meth:`_on_transport_lost` after making the equivalent checks by
+        identity.
+        """
         if self._declined:
             # A transport connection_made() refused and aborted. It never
             # drove any state, so its lifecycle event must not close the
@@ -1197,9 +1234,52 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._declined -= 1
             _LOGGER.debug("Ignoring connection_lost() from a declined transport")
             return
+        superseded = self._pending_direct_losses > 1
+        if self._pending_direct_losses:
+            self._pending_direct_losses -= 1
+        if superseded:
+            # More than one adopted transport is still awaiting its loss, so
+            # this one is an older socket disconnect() already dropped and a
+            # newer connection has replaced. Forwarding it would close the
+            # healthy transport, fail its outstanding futures and burn a
+            # reconnect (L1) - the direct-wiring twin of the shim's
+            # identity check.
+            _LOGGER.debug("Ignoring connection_lost() from a superseded transport")
+            return
+        self._on_transport_lost(exc)
+
+    def _on_transport_lost(self, exc) -> None:
+        """Handle the loss of the transport that was actually driving state.
+
+        Callers must already have established that the event belongs to the
+        live connection (by identity for :class:`_ConnectionAttempt`, by
+        counting for the direct ``Protocol`` path).
+        """
+        if not self._was_connected:
+            # A local teardown already ran - an explicit disconnect(), a
+            # keepalive give-up, a write failure or an overflow drop. The
+            # cleanup is done and whatever reconnect those paths wanted is
+            # already scheduled; asyncio simply delivers the socket's loss a
+            # loop iteration later. Reporting a server-side close nobody saw
+            # and burning a second reconnect is wrong (T1).
+            _LOGGER.debug("Ignoring connection_lost() for an already-closed connection")
+            return
         self.disconnect()
         if not self._shutdown:
             _LOGGER.error("The server closed the connection. Reconnecting...")
+            self._schedule_reconnect()
+
+    def _drop_connection(self) -> None:
+        """Tear down a connection that failed on this side, then reconnect.
+
+        The reconnect used to be an implicit side effect of the
+        ``connection_lost()`` that ``disconnect()`` provokes. Scheduling it
+        here makes the intent explicit, which is what lets
+        :meth:`_on_transport_lost` ignore the trailing loss event instead of
+        treating it as a fresh server-side close (T1).
+        """
+        self.disconnect()
+        if not self._shutdown:
             self._schedule_reconnect()
 
     def _next_reconnect_delay(self) -> float:
@@ -1250,7 +1330,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._failed_msg = 0
         self._failed_pings = 0
         self._inflight_msg_id = None
-        self._buffer = ""
+        self._scanner.reset()
         self._queue.clear()
         self._msg_sequence = 0  # Reset sequence counter
 
@@ -1316,7 +1396,7 @@ class PowerPetDoorClient(asyncio.Protocol):
                     )
                 else:
                     _LOGGER.error("Last PING not responded to %d times.", self._failed_pings)
-                    self.disconnect()
+                    self._drop_connection()
                     return
 
             # The wire token stays wall-clock milliseconds (device
@@ -1415,7 +1495,7 @@ class PowerPetDoorClient(asyncio.Protocol):
 
         except (RuntimeError, OSError) as err:
             _LOGGER.error("Failed to write to the stream. (%s)", err)
-            self.disconnect()
+            self._drop_connection()
 
     async def dequeue_data(self) -> None:
         """Send the next queued message, if the connection is idle."""
@@ -1478,9 +1558,12 @@ class PowerPetDoorClient(asyncio.Protocol):
 
         # Device bytes reach an operator's terminal through the host
         # application's log (`tail -f`, `journalctl`, `docker logs`), so ESC
-        # and friends must be escaped before they get there.
-        _LOGGER.debug("RX < %s", sanitize_text(decoded))
-        frames, self._buffer, diag = extract_frames(self._buffer + decoded)
+        # and friends must be escaped before they get there. Guarded like
+        # the simulator's identical line: sanitize_text is ~20x the cost of
+        # the suppressed logger.debug call it feeds (T2).
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug("RX < %s", sanitize_text(decoded))
+        frames, diag = self._scanner.feed(decoded)
 
         for frame in frames:
             try:
@@ -1495,7 +1578,7 @@ class PowerPetDoorClient(asyncio.Protocol):
                 "Receive buffer exceeded %d bytes without a complete message; disconnecting",
                 MAX_BUFFER_SIZE,
             )
-            self.disconnect()
+            self._drop_connection()
 
     async def process_message(self, msg) -> None:
         """Process an incoming message from the device.
@@ -1636,6 +1719,11 @@ class PowerPetDoorClient(asyncio.Protocol):
         return rv
 
     @property
+    def _buffer(self) -> str:
+        """The framing scanner's un-parsed remainder (introspection hook)."""
+        return self._scanner.buffer
+
+    @property
     def available(self) -> bool:
         """Whether the client is connected and available."""
         return bool(self._transport and not self._transport.is_closing())
@@ -1700,7 +1788,10 @@ class _ConnectionAttempt(asyncio.Protocol):
             # since been established; this event is stale (T1).
             _LOGGER.debug("Ignoring connection_lost() from a superseded transport")
             return
-        self._client.connection_lost(exc)
+        # Goes straight to the client's teardown: the identity checks above
+        # are this shim's equivalent of the counting the public
+        # connection_lost() has to do, and running both would double-count.
+        self._client._on_transport_lost(exc)
 
     def data_received(self, data: bytes) -> None:
         """Forward received bytes, unless this transport was declined."""

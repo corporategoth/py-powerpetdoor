@@ -223,6 +223,24 @@ class TestScheduleTime:
         assert time.minute == 45
 
 
+def _inside_payload(**overrides):
+    """A minimal well-formed inside-sensor schedule payload.
+
+    ``inside``/``outside`` entries must carry their own time window - the
+    parser refuses to invent one (L5) - so hostile-input tests that are
+    about some *other* field start from a complete payload.
+    """
+    payload = {
+        "index": 0,
+        "daysOfWeek": [1, 1, 1, 1, 1, 1, 1],
+        "inside": True,
+        "in_start_time": {"hour": 6, "min": 0},
+        "in_end_time": {"hour": 22, "min": 0},
+    }
+    payload.update(overrides)
+    return payload
+
+
 class TestSchedule:
     """Test Schedule dataclass."""
 
@@ -290,7 +308,9 @@ class TestSchedule:
 
     def test_from_dict_days_are_bools(self):
         """Wire 1/0 lists are converted to real booleans (L2)."""
-        restored = Schedule.from_dict({"daysOfWeek": [1, 0, 1, 0, 1, 0, 1], "inside": True})
+        restored = Schedule.from_dict(
+            _inside_payload(daysOfWeek=[1, 0, 1, 0, 1, 0, 1]),
+        )
 
         assert restored.days_of_week == [True, False, True, False, True, False, True]
         assert all(isinstance(day, bool) for day in restored.days_of_week)
@@ -298,7 +318,7 @@ class TestSchedule:
     def test_from_dict_legacy_bitmask(self):
         """A legacy int bitmask (bit 0 = Sunday) converts to booleans."""
         # 0b0111110 = 62: Monday through Friday
-        restored = Schedule.from_dict({"daysOfWeek": 62, "inside": True})
+        restored = Schedule.from_dict(_inside_payload(daysOfWeek=62))
 
         assert restored.days_of_week == [False, True, True, True, True, True, False]
         assert all(isinstance(day, bool) for day in restored.days_of_week)
@@ -309,6 +329,199 @@ class TestSchedule:
 
         assert restored.inside is False
         assert restored.outside is False
+        assert (restored.start.hour, restored.start.minute) == (0, 0)
+        assert (restored.end.hour, restored.end.minute) == (0, 0)
+
+    @pytest.mark.parametrize("flag", ["0", 0, False, "false", "off", "no"], ids=repr)
+    def test_from_dict_disabled_day_flags_are_read_as_disabled(self, flag):
+        """bool("0") is True, so day flags go through make_bool (L4/R4-M3).
+
+        This is the library-side twin of the simulator's
+        ``_coerce_schedule_day`` test: a firmware variant that sends
+        ``"0"``/``"1"`` day flags (as it already does for ``enabled``) must
+        not expand to every day of the week.
+        """
+        restored = Schedule.from_dict(_inside_payload(daysOfWeek=[flag] * 7))
+
+        assert restored.days_of_week == [False] * 7
+
+    @pytest.mark.parametrize("flag", ["0", 0, False, "false"], ids=repr)
+    def test_from_dict_disabled_enabled_flag_is_read_as_disabled(self, flag):
+        """``enabled`` is read the same way its daysOfWeek sibling is (T3)."""
+        restored = Schedule.from_dict(_inside_payload(enabled=flag))
+
+        assert restored.enabled is False
+
+    @pytest.mark.parametrize("flag", ["1", 1, True, "true", "yes", "on"], ids=repr)
+    def test_from_dict_enabled_accepts_every_flag_spelling(self, flag):
+        """A bespoke ``== "1"`` read "true"/"yes"/"on" as disabled (T3)."""
+        restored = Schedule.from_dict(_inside_payload(enabled=flag))
+
+        assert restored.enabled is True
+
+    def test_from_dict_enabled_is_always_a_real_bool(self):
+        """A field declared ``enabled: bool`` must never hold 1/0 (T3)."""
+        restored = Schedule.from_dict(_inside_payload(enabled=1))
+
+        assert restored.enabled is True
+        assert isinstance(restored.enabled, bool)
+        assert restored.to_dict()["enabled"] is True
+
+    def test_from_dict_unreadable_flag_fails_closed(self):
+        """An unrecognizable sensor flag disables the entry, never enables it."""
+        restored = Schedule.from_dict({"index": 0, "inside": ["yes"], "outside": {"a": 1}})
+
+        assert restored.inside is False
+        assert restored.outside is False
+
+
+class TestDoorScheduleFromDictRejectsHostileInput:
+    """The library's schedule parser reads bytes off the wire (R4-M1).
+
+    Every payload here used to raise TypeError/AttributeError out of a
+    documented public coroutine, or be swallowed by listener isolation and
+    silently freeze the cached schedule list. The contract is a
+    ``ValueError`` naming the offending field - the same contract the
+    simulator's twin parser has had since round 3.
+    """
+
+    @pytest.mark.parametrize(
+        "payload",
+        [["not", "a", "schedule"], "schedule", 5, None],
+        ids=["list", "string", "int", "null"],
+    )
+    def test_non_mapping_payload_rejected(self, payload):
+        with pytest.raises(ValueError, match="Schedule must be an object"):
+            Schedule.from_dict(payload)
+
+    @pytest.mark.parametrize(
+        "days",
+        [[1], [1, 1, 1, 1, 1, 1, 1, 1], "1111111", None, 1.5],
+        ids=["too-short", "too-long", "string", "null", "float"],
+    )
+    def test_wrong_shape_days_rejected(self, days):
+        with pytest.raises(ValueError, match="daysOfWeek must be a list of 7 values"):
+            Schedule.from_dict(_inside_payload(daysOfWeek=days))
+
+    def test_unreadable_day_flag_rejected(self):
+        with pytest.raises(ValueError, match=r"daysOfWeek\[3\] must be 0 or 1"):
+            Schedule.from_dict(_inside_payload(daysOfWeek=[1, 1, 1, "maybe", 1, 1, 1]))
+
+    @pytest.mark.parametrize(
+        ("index", "message"),
+        [
+            ("not-a-number", "index must be a number"),
+            (None, "index must be a number"),
+            ([0], "index must be a number"),
+            (float("inf"), "index must be a number"),
+            (-1, "index must be between 0 and 255"),
+            (256, "index must be between 0 and 255"),
+        ],
+        ids=["string", "null", "list", "inf", "negative", "too-large"],
+    )
+    def test_out_of_range_or_non_numeric_index_rejected(self, index, message):
+        with pytest.raises(ValueError, match=message):
+            Schedule.from_dict(_inside_payload(index=index))
+
+    @pytest.mark.parametrize(
+        "value",
+        [5, None, [6, 0], True, 1.5, "06:00"],
+        ids=["int", "null", "list", "bool", "float", "string"],
+    )
+    def test_non_mapping_time_rejected(self, value):
+        with pytest.raises(ValueError, match="start time must be an object"):
+            Schedule.from_dict(_inside_payload(in_start_time=value))
+
+    @pytest.mark.parametrize(
+        ("time_field", "message"),
+        [
+            ({"hour": "six", "min": 0}, "start time hour must be a number"),
+            ({"hour": 24, "min": 0}, "start time hour must be between 0 and 23"),
+            ({"hour": 6, "min": 60}, "start time minute must be between 0 and 59"),
+            ({"min": 0}, "start time must specify hour"),
+        ],
+        ids=["non-numeric-hour", "hour-too-large", "minute-too-large", "no-hour"],
+    )
+    def test_out_of_range_times_rejected(self, time_field, message):
+        with pytest.raises(ValueError, match=message):
+            Schedule.from_dict(_inside_payload(in_start_time=time_field))
+
+    def test_outside_entry_times_are_validated_too(self):
+        with pytest.raises(ValueError, match="end time hour must be between 0 and 23"):
+            Schedule.from_dict(
+                {
+                    "index": 0,
+                    "outside": True,
+                    "out_start_time": {"hour": 6, "min": 0},
+                    "out_end_time": {"hour": 99, "min": 0},
+                }
+            )
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            ({"index": 0, "inside": True}, "missing required field 'in_start_time'"),
+            (
+                {"index": 0, "inside": True, "in_start_time": {"hour": 6, "min": 0}},
+                "missing required field 'in_end_time'",
+            ),
+            (
+                {"index": 0, "outside": True, "out_end_time": {"hour": 22, "min": 0}},
+                "missing required field 'out_start_time'",
+            ),
+        ],
+        ids=["no-inside-start", "no-inside-end", "no-outside-start"],
+    )
+    def test_missing_time_window_is_rejected_not_invented(self, payload, message):
+        """A selected sensor with no window must fail, not get a free one (L5)."""
+        with pytest.raises(ValueError, match=message):
+            Schedule.from_dict(payload)
+
+    def test_valid_device_payload_still_parses(self):
+        """The hardening must not reject what a real device actually sends."""
+        restored = Schedule.from_dict(
+            {
+                "index": 3,
+                "enabled": "1",
+                "daysOfWeek": [1, 0, 0, 0, 0, 0, 1],
+                "inside": False,
+                "outside": True,
+                "in_start_time": {"hour": 0, "min": 0},
+                "in_end_time": {"hour": 0, "min": 0},
+                "out_start_time": {"hour": 7, "min": 30},
+                "out_end_time": {"hour": 21, "min": 15},
+            }
+        )
+
+        assert restored.index == 3
+        assert restored.enabled is True
+        assert restored.days_of_week == [True, False, False, False, False, False, True]
+        assert (restored.inside, restored.outside) == (False, True)
+        assert (restored.start.hour, restored.start.minute) == (7, 30)
+        assert (restored.end.hour, restored.end.minute) == (21, 15)
+
+    @pytest.mark.parametrize(
+        "schedule",
+        [
+            Schedule(index=0, inside=True, outside=False),
+            Schedule(index=1, inside=False, outside=True),
+            Schedule(index=2, inside=True, outside=True),
+        ],
+        ids=["inside", "outside", "both"],
+    )
+    def test_library_to_dict_output_round_trips(self, schedule):
+        """Anything this library emits must survive its own parser."""
+        assert Schedule.from_dict(schedule.to_dict()) == schedule
+
+    def test_neither_sensor_round_trips_to_the_zero_window(self):
+        """to_dict() writes zeroed windows when no sensor is selected.
+
+        The entry gates nothing, so the parser reads the zeros back rather
+        than the dataclass's 06:00-22:00 display default.
+        """
+        restored = Schedule.from_dict(Schedule(index=3).to_dict())
+
+        assert (restored.inside, restored.outside) == (False, False)
         assert (restored.start.hour, restored.start.minute) == (0, 0)
         assert (restored.end.hour, restored.end.minute) == (0, 0)
 
@@ -809,6 +1022,59 @@ class TestConnectLifecycle:
         await door.disconnect()
 
         assert door.connected is False
+
+    async def test_disconnect_awaits_an_async_disconnect_handler(self, simulator):
+        """door.disconnect() must go through aclose(), not bare shutdown().
+
+        Its docstring promises "nothing outlives this call": the
+        on_disconnect coroutine the call itself triggers is awaited. Every
+        test passed with the aclose() call reverted to shutdown() (R4-M4).
+        """
+        port = simulator.server.sockets[0].getsockname()[1]
+        door = PowerPetDoor("127.0.0.1", port=port, keepalive=0, timeout=5.0)
+        await door.connect()
+
+        finished: list[str] = []
+
+        async def slow_disconnect():
+            # One scheduling turn: enough that a shutdown()-only teardown
+            # returns before this ever runs.
+            await asyncio.sleep(0)
+            finished.append("done")
+
+        door._client.add_handlers("app", on_disconnect=slow_disconnect)
+
+        await door.disconnect()
+
+        assert finished == ["done"]
+        assert door._client._handler_tasks == set()
+
+    async def test_disconnect_cancels_a_handler_that_overruns_its_timeout(self, simulator):
+        """The overrun half of the same promise, bounded by default_timeout."""
+        port = simulator.server.sockets[0].getsockname()[1]
+        door = PowerPetDoor("127.0.0.1", port=port, keepalive=0, timeout=0.05)
+        await door.connect()
+        started = asyncio.Event()
+        cancelled: list[str] = []
+
+        async def wedged_disconnect():
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.append("cancelled")
+                raise
+
+        door._client.add_handlers("app", on_disconnect=wedged_disconnect)
+
+        # default_timeout is cfg_timeout * MAX_FAILED_MSG; the outer bound
+        # here is what proves disconnect() does not wait forever.
+        async with asyncio.timeout(door.default_timeout * 4):
+            await door.disconnect()
+
+        assert started.is_set()
+        assert cancelled == ["cancelled"]
+        assert door._client._handler_tasks == set()
 
     async def test_reconnect_after_disconnect(self, simulator):
         """connect() after disconnect() re-arms the client (M6)."""
@@ -1482,6 +1748,35 @@ class TestScheduleCacheMaintenance:
         assert len(door.schedules) == 1
         assert door.schedules[0].start.hour == 7
         assert door.schedules[0].start.minute == 30
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"daysOfWeek": None},
+            {"inside": True, "in_start_time": 5},
+            {"inside": True, "in_start_time": None},
+            {"index": "x"},
+            ["not", "a", "schedule"],
+        ],
+        ids=["null-days", "int-time", "null-time", "bad-index", "not-an-object"],
+    )
+    async def test_malformed_schedule_update_is_logged_and_dropped(self, payload, caplog):
+        """A bad device payload must not silently freeze the cache (R4-M1).
+
+        The client isolates listener exceptions, so the TypeError/
+        AttributeError this used to raise was swallowed: the cached
+        schedule list stopped tracking the device with nothing in the log
+        to say the update had been lost.
+        """
+        door = PowerPetDoor("127.0.0.1")
+        door._on_schedule_update(Schedule(index=1, inside=True).to_dict())
+        assert [s.index for s in door.schedules] == [1]
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            door._on_schedule_update(payload)
+
+        assert "Ignoring malformed schedule update from device" in caplog.text
+        assert [s.index for s in door.schedules] == [1]
 
     async def test_schedule_callback_exception_isolated(self):
         door = PowerPetDoor("127.0.0.1")

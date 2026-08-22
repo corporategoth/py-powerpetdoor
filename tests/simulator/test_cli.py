@@ -25,6 +25,7 @@ from powerpetdoor.simulator import (
 )
 from powerpetdoor.simulator.commands import CommandHandler
 from powerpetdoor.simulator.commands.base import get_command_registry
+from powerpetdoor.simulator.commands.scripts import ScriptQueue
 from powerpetdoor.simulator.prompt_common import (
     PROMPT_TOOLKIT_AVAILABLE,
     InteractiveSession,
@@ -496,6 +497,24 @@ class TestLogSanitization:
 class TestMainArguments:
     """Tests for the ppd-simulator entry point."""
 
+    @pytest.fixture(autouse=True)
+    def never_runs(self, monkeypatch):
+        """Reaching run_simulator here is a failure, not a 60 s hang (R4-L6).
+
+        Most of these tests call cli.main() directly and rely on an argparse
+        error (or --list-scripts) to exit first - which is exactly what they
+        assert, so it is exactly what a regression breaks. Without this they
+        fall through into a real ``asyncio.run(run_simulator(...))``, binding
+        the default simulator port inside a unit test and failing only via
+        the pytest-timeout cap, with a confusing cause. Tests that mean to
+        reach run_simulator patch over this afterwards.
+        """
+
+        async def _boom(**kwargs):
+            raise AssertionError("cli.main() reached run_simulator; it should have exited first")
+
+        monkeypatch.setattr(cli, "run_simulator", _boom)
+
     def _run_main(self, monkeypatch, argv, fake_run=None):
         captured = {}
 
@@ -570,7 +589,8 @@ class TestMainArguments:
         monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--list-scripts"])
         cli.main()
         out = capsys.readouterr().out
-        assert "Available built-in scripts:" in out
+        # Same header the `list` command prints (T1)
+        assert "Built-in scripts:" in out
         assert "  basic_cycle: " in out
         assert called == []
 
@@ -641,7 +661,8 @@ class TestMainArguments:
         )
         cli.main()
         out = capsys.readouterr().out
-        assert "Available built-in scripts:" in out
+        # Same header the `list` command prints (T1)
+        assert "Built-in scripts:" in out
         assert f"Scripts from {tmp_path}:" in out
         assert "  my_custom: Local extras" in out
 
@@ -668,6 +689,27 @@ class TestMainArguments:
     def test_daemon_explicit_control_port(self, monkeypatch):
         captured = self._run_main(monkeypatch, ["ppd-simulator", "--daemon", "4321"])
         assert captured["control_port"] == 4321
+
+    def test_default_log_handler_sanitizes(self, monkeypatch, root_logger_guard):
+        """--script (headless/CI) and --daemon kept the plain formatter (S3).
+
+        The two interactive paths install _SanitizingFormatter themselves,
+        so headless and daemon modes were the only ones with no terminal
+        escape protection at all - defence in depth for anything that is
+        not sanitized at its source.
+        """
+        self._run_main(monkeypatch, ["ppd-simulator", "--daemon"])
+
+        handlers = logging.getLogger().handlers
+        assert handlers
+        assert all(isinstance(h.formatter, cli._SanitizingFormatter) for h in handlers)
+
+        record = logging.LogRecord(
+            "test", logging.WARNING, __file__, 1, "evil \x1b[2J log", None, None
+        )
+        formatted = handlers[0].format(record)
+        assert "\x1b" not in formatted
+        assert "evil \\x1b[2J log" in formatted
 
     def test_firmware_parsed_to_tuple(self, monkeypatch):
         captured = self._run_main(monkeypatch, ["ppd-simulator", "--firmware", "2.5.7"])
@@ -1105,7 +1147,9 @@ class TestProcessScriptQueue:
                 raise load_error
             return SimpleNamespace(name=f"Script-{ref}")
 
-        async def run(script):
+        async def run(script, on_start=None):
+            if on_start is not None:
+                on_start()
             runs.append(script.name)
             ran.set()
             return run_result
@@ -1117,7 +1161,7 @@ class TestProcessScriptQueue:
     async def test_runs_queued_script_and_logs_pass(self, caplog):
         caplog.set_level(logging.INFO, logger="powerpetdoor.simulator.cli")
         handler, runner, ran, runs = self._stubs(run_result=True)
-        queue: asyncio.Queue[str] = asyncio.Queue()
+        queue = ScriptQueue()
         stop = asyncio.Event()
         task = asyncio.create_task(
             cli._process_script_queue(queue, stop, handler, runner, poll_interval=0.01)
@@ -1133,7 +1177,7 @@ class TestProcessScriptQueue:
     async def test_failed_script_logged(self, caplog):
         caplog.set_level(logging.INFO, logger="powerpetdoor.simulator.cli")
         handler, runner, ran, _ = self._stubs(run_result=False)
-        queue: asyncio.Queue[str] = asyncio.Queue()
+        queue = ScriptQueue()
         stop = asyncio.Event()
         task = asyncio.create_task(
             cli._process_script_queue(queue, stop, handler, runner, poll_interval=0.01)
@@ -1147,7 +1191,7 @@ class TestProcessScriptQueue:
     async def test_load_error_logged_and_loop_continues(self, caplog):
         caplog.set_level(logging.ERROR, logger="powerpetdoor.simulator.cli")
         handler, runner, _, runs = self._stubs(load_error=ValueError("nope"))
-        queue: asyncio.Queue[str] = asyncio.Queue()
+        queue = ScriptQueue()
         stop = asyncio.Event()
         task = asyncio.create_task(
             cli._process_script_queue(queue, stop, handler, runner, poll_interval=0.01)
@@ -1160,18 +1204,87 @@ class TestProcessScriptQueue:
         await asyncio.wait_for(task, 5)
         assert runs == []
 
+    async def test_claim_is_released_only_once_the_run_starts(self):
+        """A dequeued run stays counted until it actually starts (M2)."""
+        queue = ScriptQueue()
+        stop = asyncio.Event()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        depth_while_blocked = []
+
+        def load_script(ref):
+            return SimpleNamespace(name=f"Script-{ref}")
+
+        async def run(script, on_start=None):
+            # Stand in for waiting on the run lock: the entry is dequeued
+            # but has not started, so it must still be reported as pending.
+            depth_while_blocked.append(queue.qsize())
+            await release.wait()
+            if on_start is not None:
+                on_start()
+            started.set()
+            return True
+
+        task = asyncio.create_task(
+            cli._process_script_queue(
+                queue,
+                stop,
+                SimpleNamespace(load_script=load_script),
+                SimpleNamespace(run=run),
+                poll_interval=0.01,
+            )
+        )
+        await queue.put("waiting")
+        while not depth_while_blocked:
+            await asyncio.sleep(0)
+
+        assert depth_while_blocked == [1]
+        assert queue.pending() == ["waiting"]
+
+        release.set()
+        await asyncio.wait_for(started.wait(), 5)
+        assert queue.qsize() == 0
+
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
+    async def test_claim_is_released_when_loading_fails(self):
+        """A load failure never reaches on_start, so the finally must clear it."""
+        queue = ScriptQueue()
+        stop = asyncio.Event()
+
+        def load_script(ref):
+            raise ValueError("nope")
+
+        task = asyncio.create_task(
+            cli._process_script_queue(
+                queue,
+                stop,
+                SimpleNamespace(load_script=load_script),
+                SimpleNamespace(run=None),
+                poll_interval=0.01,
+            )
+        )
+        await queue.put("broken")
+        while queue.qsize():
+            await asyncio.sleep(0)
+
+        assert queue.pending() == []
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
     async def test_returns_immediately_when_already_stopped(self):
         handler, runner, _, runs = self._stubs()
         stop = asyncio.Event()
         stop.set()
-        await cli._process_script_queue(asyncio.Queue(), stop, handler, runner)
+        await cli._process_script_queue(ScriptQueue(), stop, handler, runner)
         assert runs == []
 
     async def test_poll_timeout_then_stop_exits_loop(self):
         handler, runner, _, runs = self._stubs()
         stop = asyncio.Event()
         task = asyncio.create_task(
-            cli._process_script_queue(asyncio.Queue(), stop, handler, runner, poll_interval=0.01)
+            cli._process_script_queue(ScriptQueue(), stop, handler, runner, poll_interval=0.01)
         )
         await asyncio.sleep(0)  # let the task enter its poll wait
         stop.set()
@@ -1183,7 +1296,7 @@ class TestProcessScriptQueue:
         handler, runner, _, _ = self._stubs()
         stop = asyncio.Event()
         task = asyncio.create_task(
-            cli._process_script_queue(asyncio.Queue(), stop, handler, runner, poll_interval=60)
+            cli._process_script_queue(ScriptQueue(), stop, handler, runner, poll_interval=60)
         )
         await asyncio.sleep(0)  # let the task enter its poll wait
         task.cancel()
@@ -1315,6 +1428,71 @@ class TestRunStartupScripts:
         assert result[0] is True
         assert stop.is_set()
         assert ">>> Client disconnected, stopping scripts" in capsys.readouterr().out
+
+    async def test_script_progress_lines_sanitize_the_script_name(self, capsys):
+        """The name comes out of an untrusted YAML file and hits a terminal (S3).
+
+        PyYAML rejects raw C0 bytes in a scalar but its ``\\e`` escape
+        produces a real ESC, so "the file looks clean" is not a defence.
+        """
+        poison = "\x1b[2J\x1b[1;1H*** PWNED ***\x07"
+        sim, handler, runner, stop, result, _runs, _ = self._make(run_results=[False])
+        handler.load_script = lambda ref: SimpleNamespace(name=poison)
+
+        await self._run(["evil"], sim, handler, runner, stop, result, oneshot=True)
+
+        out = capsys.readouterr().out
+        assert "\x1b" not in out
+        assert "\x07" not in out
+        assert ">>> Running script: \\x1b[2J\\x1b[1;1H*** PWNED ***\\x07" in out
+        assert ">>> Script FAILED: \\x1b[2J\\x1b[1;1H*** PWNED ***\\x07" in out
+
+    async def test_script_load_error_is_sanitized(self, capsys):
+        """Loader errors quote file-derived text straight back at the operator."""
+        sim, handler, runner, stop, result, _runs, _ = self._make()
+
+        def exploding_load(ref):
+            raise ValueError("bad \x1b[2J yaml")
+
+        handler.load_script = exploding_load
+
+        await self._run(["evil\x1b[2J"], sim, handler, runner, stop, result, oneshot=True)
+
+        out = capsys.readouterr().out
+        assert "\x1b" not in out
+        assert "Error running script 'evil\\x1b[2J': bad \\x1b[2J yaml" in out
+
+    async def test_inner_loop_disconnect_line_is_flushed(self, monkeypatch):
+        """The one progress line the flush fix missed (L1).
+
+        It is also the only line that explains why the remaining scripts
+        never ran, and off a terminal it died in the buffer - not even
+        SIGTERM got it out.
+        """
+        flushed: list[str] = []
+
+        class RecordingStdout(io.StringIO):
+            def flush(self):
+                flushed.append(self.getvalue())
+                super().flush()
+
+        async def disconnecting_run(script, sim):
+            sim.protocols.clear()
+            return True
+
+        sim, handler, runner, stop, result, runs, _ = self._make(side_effect=disconnecting_run)
+        sim.protocols.append("client")
+        stream = RecordingStdout()
+        monkeypatch.setattr(sys, "stdout", stream)
+
+        await self._run(
+            ["s1", "s2"], sim, handler, runner, stop, result, wait_for_client=True, oneshot=True
+        )
+
+        # A flush must land with this line as the newest output. Merely
+        # appearing in a later flush's snapshot is what a bare print()
+        # already achieved - and what died in the buffer for real.
+        assert any(text.endswith(">>> Client disconnected, stopping scripts\n") for text in flushed)
 
     async def test_loop_scripts_until_disconnect(self, capsys):
         calls = [0]
@@ -1494,6 +1672,24 @@ class TestBasicStdinInput:
         basic, prompt, _, _, _ = self._make(message="")
         await basic.process_command("clear")
         assert prompt.calls == ["show"]
+
+    async def test_process_command_sanitizes_network_poisoned_output(self):
+        """render_result is the ONLY sanitizer on this path (R4-M2).
+
+        A hostile SET_TIMEZONE stores a string the ``timezone`` command
+        echoes straight back, so the CLI's own print site must escape it.
+        """
+        basic, prompt, _, _, _ = self._make(message="Timezone: \x1b[2J\x1b[1;1H*** PWNED ***\x07")
+        await basic.process_command("timezone")
+        assert prompt.calls == [("output", ">>> Timezone: \\x1b[2J\\x1b[1;1H*** PWNED ***\\x07")]
+
+    async def test_process_command_shutdown_sanitizes_output(self, capsys):
+        """The shutdown branch prints through the same sanitizer (R4-M2)."""
+        basic, _, _, _, _ = self._make(message="Bye \x1b[2J", sets_stop=True)
+        await basic.process_command("shutdown")
+        out = capsys.readouterr().out
+        assert out == ">>> Bye \\x1b[2J\n"
+        assert "\x1b" not in out
 
 
 # ============================================================================
