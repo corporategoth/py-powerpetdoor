@@ -8,6 +8,7 @@ jobs:
   test:
     name: Pre-release Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Only run on GitHub, not Gitea — PyPI publishing uses GitHub OIDC.
     if: ${{ vars.GITEA_ACTIONS != 'true' }}
     strategy:
@@ -31,6 +32,7 @@ jobs:
     name: Publish to PyPI
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: ${{ vars.GITEA_ACTIONS != 'true' }}
     environment: pypi
     permissions:
