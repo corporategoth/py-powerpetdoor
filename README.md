@@ -131,11 +131,13 @@ powerpetdoor/
 ├── door.py            # PowerPetDoor high-level interface
 ├── client.py          # PowerPetDoorClient low-level client
 ├── const.py           # Protocol constants and commands
+├── framing.py         # Shared JSON frame scanner for the wire protocol
 ├── schedule.py        # Schedule utilities
 ├── tz_utils.py        # Timezone utilities
 └── simulator/         # Door simulator submodule
     ├── state.py           # Simulator state dataclasses
     ├── protocol.py        # Protocol handler (asyncio Protocol + command registry)
+    ├── engine.py          # DoorMotionEngine (shared door-motion state machine)
     ├── server.py          # DoorSimulator server
     ├── cli.py             # ppd-simulator CLI (interactive/script/daemon modes)
     ├── ctl.py             # ppd-simulator-ctl remote-control client

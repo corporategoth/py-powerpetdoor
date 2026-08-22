@@ -65,7 +65,6 @@ async def send_command_async(port: int, command: str, timeout: float = 2.0):
 class TestSendCommand:
     """Tests for one-shot command sending."""
 
-    @pytest.mark.asyncio
     async def test_parses_ok_response(self):
         server, port = await start_fake_daemon(make_line_responder(b"OK: hello\n"))
         try:
@@ -76,7 +75,6 @@ class TestSendCommand:
         assert success is True
         assert msg == "OK: hello"
 
-    @pytest.mark.asyncio
     async def test_skips_status_and_log_lines(self):
         """STATUS:/LOG: lines are not command responses."""
         payload = b"STATUS: clients=0\nLOG: some noise\nOK: done\n"
@@ -89,7 +87,6 @@ class TestSendCommand:
         assert success is True
         assert msg == "OK: done"
 
-    @pytest.mark.asyncio
     async def test_unterminated_line_is_not_a_success(self):
         """A response line without its trailing newline must not be treated
         as a complete successful response (truncation bug)."""
@@ -102,7 +99,6 @@ class TestSendCommand:
         assert success is False
         assert "OK: partial" in msg
 
-    @pytest.mark.asyncio
     async def test_unescape_order_preserves_literal_backslash_n(self):
         """Wire bytes 'scripts\\\\new.yaml' are a literal backslash + 'n',
         not a newline (unescape-order bug)."""
@@ -116,7 +112,6 @@ class TestSendCommand:
         assert msg == "OK: scripts\\new.yaml"
         assert "\n" not in msg[4:]
 
-    @pytest.mark.asyncio
     async def test_escaped_newlines_are_unescaped(self):
         server, port = await start_fake_daemon(make_line_responder(b"OK: line1\\nline2\n"))
         try:
@@ -127,7 +122,6 @@ class TestSendCommand:
         assert success is True
         assert msg == "OK: line1\nline2"
 
-    @pytest.mark.asyncio
     async def test_control_characters_are_sanitized(self):
         """ANSI escapes from the network must never reach the terminal raw."""
         server, port = await start_fake_daemon(make_line_responder(b"OK: \x1b[2Jboom\n"))
@@ -140,7 +134,6 @@ class TestSendCommand:
         assert "\x1b" not in msg
         assert "\\x1b" in msg
 
-    @pytest.mark.asyncio
     async def test_response_timeout_has_explicit_message(self):
         """A daemon that accepts but never responds must produce an
         explanatory message, not an empty line."""
@@ -159,17 +152,85 @@ class TestSendCommand:
         assert success is False
         assert "Response timeout after 0.3s" in msg
 
-    @pytest.mark.asyncio
-    async def test_connection_refused_message(self):
-        # Grab a port with no listener by binding then closing
-        server, port = await start_fake_daemon(make_line_responder(b""))
-        server.close()
-        await server.wait_closed()
-        success, msg = await send_command_async(port, "status")
-        assert success is False
-        assert msg == f"Connection refused to 127.0.0.1:{port}"
+    async def test_wait_run_ignores_the_response_timeout(self):
+        """`run <script> wait` has no deadline while the daemon is alive (M2).
 
-    @pytest.mark.asyncio
+        The daemon here stays silent for far longer than --timeout, exactly
+        like a long script with no logging; the answer must still arrive.
+        """
+        released = asyncio.Event()
+
+        async def slow_wait_run(reader, writer):
+            line = await reader.readline()
+            if line:
+                assert line == b"run full_test_suite wait\n"
+                released.set()
+                # Silence an order of magnitude longer than the timeout.
+                await asyncio.sleep(0.5)
+                writer.write(b"OK: Script PASSED: Full Test Suite\n")
+                await writer.drain()
+            writer.close()
+
+        server, port = await start_fake_daemon(slow_wait_run)
+        try:
+            success, msg = await send_command_async(port, "run full_test_suite wait", timeout=0.05)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert released.is_set()
+        assert success is True
+        assert msg == "OK: Script PASSED: Full Test Suite"
+
+    async def test_plain_run_still_honors_the_response_timeout(self):
+        """Only wait-runs drop the deadline; a queued run keeps it."""
+
+        async def silent_handler(reader, writer):
+            await reader.read()
+            writer.close()
+
+        server, port = await start_fake_daemon(silent_handler)
+        try:
+            success, msg = await send_command_async(port, "run full_test_suite", timeout=0.3)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert success is False
+        assert "Response timeout after 0.3s" in msg
+        assert "the command may still be running; raise --timeout" in msg
+
+    async def test_streaming_output_extends_the_response_deadline(self):
+        """Each received chunk restarts the silence timer for any command."""
+
+        async def chatty_handler(reader, writer):
+            line = await reader.readline()
+            if line:
+                # Four gaps, each just under the timeout: total elapsed is
+                # well past it, but no single gap is.
+                for _ in range(4):
+                    await asyncio.sleep(0.1)
+                    writer.write(b"LOG: still working\n")
+                    await writer.drain()
+                writer.write(b"OK: done\n")
+                await writer.drain()
+            writer.close()
+
+        server, port = await start_fake_daemon(chatty_handler)
+        try:
+            success, msg = await send_command_async(port, "status", timeout=0.3)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert success is True
+        assert msg == "OK: done"
+
+    async def test_connection_refused_message(self, refused_port):
+        success, msg = await send_command_async(refused_port, "status")
+        assert success is False
+        assert msg == f"Connection refused to 127.0.0.1:{refused_port}"
+
     async def test_error_response_is_parsed(self):
         server, port = await start_fake_daemon(make_line_responder(b"ERROR: bad thing\n"))
         try:
@@ -180,7 +241,6 @@ class TestSendCommand:
         assert success is False
         assert msg == "ERROR: bad thing"
 
-    @pytest.mark.asyncio
     async def test_connection_closed_without_any_response(self):
         """A daemon that reads the command and closes without replying must
         produce an explanatory message."""
@@ -226,7 +286,6 @@ class TestSendCommand:
 class TestCheckConnection:
     """Tests for the pre-session connectivity probe."""
 
-    @pytest.mark.asyncio
     async def test_listening_daemon_reports_connected(self):
         async def accept_only(reader, writer):
             await reader.read()
@@ -241,14 +300,10 @@ class TestCheckConnection:
         assert connected is True
         assert error == ""
 
-    @pytest.mark.asyncio
-    async def test_refused_reports_not_running(self):
-        server, port = await start_fake_daemon(make_line_responder(b""))
-        server.close()
-        await server.wait_closed()
-        connected, error = ctl.check_connection("127.0.0.1", port, timeout=2.0)
+    async def test_refused_reports_not_running(self, refused_port):
+        connected, error = ctl.check_connection("127.0.0.1", refused_port, timeout=2.0)
         assert connected is False
-        assert error == f"Connection refused - simulator not running on 127.0.0.1:{port}"
+        assert error == f"Connection refused - simulator not running on 127.0.0.1:{refused_port}"
 
     def test_timeout_reports_timed_out(self, monkeypatch):
         def timeout_connect(self, addr):
@@ -441,11 +496,24 @@ class TestLocalCommandDispatch:
         assert result.message == "No handler for: loctest_nohandler"
 
     def test_arg_command_help_request(self):
-        handler = LocalCommandHandler(history=None)
+        handler = LocalCommandHandler(history=History("none"))
         result = handler.execute("history help")
         assert result.success is True
         assert result.message.startswith("history [action]")
         assert "Arguments:" in result.message
+
+    def test_history_without_a_terminal_session_is_unknown(self):
+        """ctl answers exactly as the CLI does, not "install prompt_toolkit" (T4).
+
+        Under pytest stdin is not a tty, so no history object is registered
+        and history is genuinely unavailable for this session.
+        """
+        handler = LocalCommandHandler(history=None)
+
+        for name in ("history", "hist"):
+            result = handler.execute(name)
+            assert result.success is False
+            assert result.message == f"Unknown command: {name}"
 
     def test_arg_parse_error_includes_usage(self):
         handler = LocalCommandHandler(history=None)
@@ -454,7 +522,7 @@ class TestLocalCommandDispatch:
         assert result.message == "'frob' is not valid. Use on/off\nUsage: debug [on|off]"
 
     def test_extra_args_rejected_for_arg_command(self):
-        handler = LocalCommandHandler(history=None)
+        handler = LocalCommandHandler(history=History("none"))
         result = handler.execute("history 1 2")
         assert result.success is False
         assert result.message == "Unexpected argument(s): 2\nUsage: history [action]"
@@ -484,7 +552,6 @@ class TestInteractiveModePipedStdin:
     """Non-TTY stdin uses the plain-input fallback and still detects
     daemon disconnects immediately (no pending Enter required)."""
 
-    @pytest.mark.asyncio
     async def test_piped_session_runs_and_exits_on_daemon_close(self, monkeypatch, capsys):
         command_seen = asyncio.Event()
 
@@ -680,7 +747,6 @@ def pipe_stdin(monkeypatch):
 class TestBasicReadline:
     """Tests for the non-blocking stdin reader."""
 
-    @pytest.mark.asyncio
     async def test_returns_line_and_writes_prompt(self, pipe_stdin, capsys):
         fut = ctl._basic_readline("PROMPT> ")
         os.write(pipe_stdin, b"hello\n")
@@ -688,14 +754,12 @@ class TestBasicReadline:
         assert line == "hello\n"
         assert "PROMPT> " in capsys.readouterr().out
 
-    @pytest.mark.asyncio
     async def test_eof_returns_none(self, pipe_stdin, capsys):
         fut = ctl._basic_readline("> ")
         os.close(pipe_stdin)
         line = await asyncio.wait_for(fut, 5)
         assert line is None
 
-    @pytest.mark.asyncio
     async def test_cancel_does_not_consume_pending_input(self, pipe_stdin):
         """A cancelled prompt must leave buffered stdin data untouched and
         must not try to resolve the cancelled future."""
@@ -729,7 +793,6 @@ class TestBasicReadline:
 class TestOneShotEndToEnd:
     """send_command against the real daemon control channel."""
 
-    @pytest.mark.asyncio
     async def test_one_shot_roundtrip_and_shutdown(self):
         ready = asyncio.Event()
         ports: dict[str, int] = {}

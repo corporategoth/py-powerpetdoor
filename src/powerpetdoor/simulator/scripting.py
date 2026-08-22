@@ -230,19 +230,58 @@ class Script:
 
 
 class ScriptRunner:
-    """Executes scripts against a simulator."""
+    """Executes scripts against a simulator.
+
+    Runs are serialized: one simulator drives one script at a time. Two
+    scripts running concurrently would fight over the same door (a queued
+    script and a ``run ... wait`` used to interleave and fail each other's
+    assertions), and ``stop()``'s state is per-runner, not per-run.
+    """
 
     def __init__(self, simulator: "DoorSimulator"):
         self.simulator = simulator
         self.running = False
+        self.current_script: str | None = None
+        self._lock = asyncio.Lock()
         self._stop_requested = False
         self._stop_event = asyncio.Event()
 
-    async def run(self, script: Script, verbose: bool = True) -> bool:
-        """Execute a script.
+    @property
+    def busy(self) -> bool:
+        """Whether a script is currently executing."""
+        return self._lock.locked()
 
-        Returns True if all steps (including assertions) passed.
+    async def run(
+        self, script: Script, verbose: bool = True, *, queue_if_busy: bool = True
+    ) -> bool:
+        """Execute a script, waiting for any in-flight script to finish.
+
+        Args:
+            script: The script to run.
+            verbose: Log each step.
+            queue_if_busy: When True (the default, used by the script
+                queue), wait for the running script to finish. When False,
+                refuse immediately rather than queue - callers that report
+                a synchronous pass/fail must not silently block.
+
+        Returns:
+            True if all steps (including assertions) passed.
+
+        Raises:
+            ScriptError: If another script is running and ``queue_if_busy``
+                is False.
         """
+        if not queue_if_busy and self.busy:
+            raise ScriptError(f"Another script is already running: {self.current_script}")
+        async with self._lock:
+            self.current_script = script.name
+            try:
+                return await self._run_steps(script, verbose)
+            finally:
+                self.current_script = None
+
+    async def _run_steps(self, script: Script, verbose: bool) -> bool:
+        """Execute every step of ``script`` (caller holds the run lock)."""
         self.running = True
         self._stop_requested = False
         self._stop_event.clear()
@@ -498,7 +537,9 @@ class ScriptRunner:
         elif name == "battery":
             state.battery_percent = int(value)
         elif name == "hold_time":
-            state.hold_time = int(value)
+            # hold_time is a float everywhere else (the protocol carries
+            # centiseconds), so fractional values must be accepted here.
+            state.hold_time = float(value)
         elif name == "inside":
             state.inside = bool_value
         elif name == "outside":
@@ -579,26 +620,62 @@ class ScriptRunner:
 # Directory containing built-in script files
 SCRIPTS_DIR = Path(__file__).parent / "scripts"
 
+# Extra scripts directory registered by --scripts-dir. Module-level so the
+# name resolver, `list`, the unknown-script hint, and tab completion all
+# see the same set of runnable scripts (the completer is referenced from an
+# ArgSpec and has no handler context of its own).
+_extra_scripts_dir: Path | None = None
+
+
+def set_extra_scripts_dir(directory: str | Path | None) -> None:
+    """Register (or clear) the extra scripts directory from ``--scripts-dir``."""
+    global _extra_scripts_dir
+    _extra_scripts_dir = Path(directory) if directory else None
+
+
+def _script_files_in(directory: Path) -> dict[str, Path]:
+    """Map script name -> path for the YAML files directly in ``directory``."""
+    scripts: dict[str, Path] = {}
+    if directory.exists():
+        for pattern in ("*.yaml", "*.yml"):
+            for path in directory.glob(pattern):
+                scripts[path.stem] = path
+    return scripts
+
 
 def _get_script_files() -> dict[str, Path]:
-    """Get all available script files from the scripts directory."""
-    scripts = {}
-    if SCRIPTS_DIR.exists():
-        for path in SCRIPTS_DIR.glob("*.yaml"):
-            scripts[path.stem] = path
-        for path in SCRIPTS_DIR.glob("*.yml"):
-            scripts[path.stem] = path
-    return scripts
+    """Get all available script files from the built-in scripts directory."""
+    return _script_files_in(SCRIPTS_DIR)
+
+
+def get_extra_script_files() -> dict[str, Path]:
+    """Script name -> path for the registered ``--scripts-dir``, if any."""
+    return _script_files_in(_extra_scripts_dir) if _extra_scripts_dir else {}
+
+
+def _describe_scripts(script_files: dict[str, Path]) -> list[tuple[str, str]]:
+    """Build sorted (name, description) pairs for the given script files."""
+    result = []
+    for name, path in sorted(script_files.items()):
+        try:
+            script = Script.from_file(path)
+            result.append((name, script.description))
+        except Exception as e:
+            logger.warning(f"Failed to load script {name}: {e}")
+            result.append((name, f"(Error loading: {e})"))
+    return result
 
 
 def get_builtin_script(name: str) -> Script:
     """Get a built-in script by name.
 
-    Scripts are loaded from YAML files in the 'scripts' directory.
+    Scripts are loaded from YAML files in the 'scripts' directory. The
+    error for an unknown name also lists any ``--scripts-dir`` scripts, so
+    the hint matches what ``list`` shows.
     """
     script_files = _get_script_files()
     if name not in script_files:
-        available = ", ".join(sorted(script_files.keys()))
+        available = ", ".join(sorted({*script_files, *get_extra_script_files()}))
         raise ScriptError(f"Unknown built-in script: {name}. Available: {available}")
     return Script.from_file(script_files[name])
 
@@ -608,15 +685,12 @@ def list_builtin_scripts() -> list[tuple[str, str]]:
 
     Returns a list of (name, description) tuples.
     """
-    result = []
-    for name, path in sorted(_get_script_files().items()):
-        try:
-            script = Script.from_file(path)
-            result.append((name, script.description))
-        except Exception as e:
-            logger.warning(f"Failed to load script {name}: {e}")
-            result.append((name, f"(Error loading: {e})"))
-    return result
+    return _describe_scripts(_get_script_files())
+
+
+def list_extra_scripts() -> list[tuple[str, str]]:
+    """List the ``--scripts-dir`` scripts with descriptions."""
+    return _describe_scripts(get_extra_script_files())
 
 
 def script_completer(prefix: str = "") -> list[tuple[str, str]]:
@@ -677,19 +751,21 @@ def script_completer(prefix: str = "") -> list[tuple[str, str]]:
     else:
         # No specific directory - show builtin scripts and cwd files
 
-        # Add builtin scripts
-        script_files = _get_script_files()
-        if script_files:
+        # Add builtin scripts, then any registered --scripts-dir scripts
+        for script_files, label in (
+            (_get_script_files(), "(builtin)"),
+            (get_extra_script_files(), "(scripts-dir)"),
+        ):
             if YAML_AVAILABLE:
                 for name, path in sorted(script_files.items()):
                     try:
                         script = Script.from_file(path)
-                        result.append((name, script.description or "(builtin)"))
+                        result.append((name, script.description or label))
                     except Exception:
-                        result.append((name, "(builtin)"))
+                        result.append((name, label))
             else:
                 for name in sorted(script_files.keys()):
-                    result.append((name, "(builtin)"))
+                    result.append((name, label))
 
         # Add YAML files from current directory
         cwd = Path.cwd()

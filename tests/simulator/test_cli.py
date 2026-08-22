@@ -252,7 +252,6 @@ async def read_line_containing(reader, needle: str, timeout: float = 5.0) -> str
 class TestControlChannelProtocol:
     """Tests for the control-channel line protocol."""
 
-    @pytest.mark.asyncio
     async def test_initial_status_line_on_connect(self, control_setup):
         """Connecting clients immediately receive a structured STATUS line."""
         _, channel, _ = control_setup
@@ -264,7 +263,6 @@ class TestControlChannelProtocol:
             writer.close()
             await writer.wait_closed()
 
-    @pytest.mark.asyncio
     async def test_ok_response_is_single_escaped_line(self, control_setup):
         """Multi-line command output arrives as ONE line with \\n escapes."""
         _, channel, _ = control_setup
@@ -281,7 +279,6 @@ class TestControlChannelProtocol:
             writer.close()
             await writer.wait_closed()
 
-    @pytest.mark.asyncio
     async def test_error_response_for_unknown_command(self, control_setup):
         _, channel, _ = control_setup
         reader, writer = await asyncio.open_connection("127.0.0.1", channel.bound_port)
@@ -295,7 +292,6 @@ class TestControlChannelProtocol:
             writer.close()
             await writer.wait_closed()
 
-    @pytest.mark.asyncio
     async def test_log_broadcast_is_sanitized_and_single_line(self, control_setup):
         """Untrusted data in log records must not carry raw control characters
         or forge extra protocol lines."""
@@ -314,7 +310,6 @@ class TestControlChannelProtocol:
             writer.close()
             await writer.wait_closed()
 
-    @pytest.mark.asyncio
     async def test_status_broadcast_on_door_client_connect_and_disconnect(self, control_setup):
         """Door-client connects/disconnects produce STATUS lines - the
         structured signal ctl uses for prompt coloring."""
@@ -363,7 +358,6 @@ class TestControlChannelScriptRestrictions:
             writer.close()
             await writer.wait_closed()
 
-    @pytest.mark.asyncio
     async def test_absolute_path_rejected(self, control_setup, tmp_path):
         _, channel, _ = control_setup
         secret = tmp_path / "secret.yaml"
@@ -372,28 +366,24 @@ class TestControlChannelScriptRestrictions:
         assert response.startswith("ERROR:")
         assert "not allowed" in response
 
-    @pytest.mark.asyncio
     async def test_relative_traversal_rejected(self, control_setup):
         _, channel, _ = control_setup
         response = await self._run_over_channel(channel, "run ../../etc/passwd")
         assert response.startswith("ERROR:")
         assert "not allowed" in response
 
-    @pytest.mark.asyncio
     async def test_backslash_path_rejected(self, control_setup):
         _, channel, _ = control_setup
         response = await self._run_over_channel(channel, "run ..\\..\\secret")
         assert response.startswith("ERROR:")
         assert "not allowed" in response
 
-    @pytest.mark.asyncio
     async def test_dotfile_rejected(self, control_setup):
         _, channel, _ = control_setup
         response = await self._run_over_channel(channel, "run .hidden")
         assert response.startswith("ERROR:")
         assert "not allowed" in response
 
-    @pytest.mark.asyncio
     async def test_bare_name_resolves_in_scripts_dir(self, control_setup):
         """A bare name resolves against the configured scripts directory."""
         _, channel, scripts_dir = control_setup
@@ -402,7 +392,6 @@ class TestControlChannelScriptRestrictions:
         assert response.startswith("OK:")
         assert "PASSED" in response
 
-    @pytest.mark.asyncio
     async def test_unknown_bare_name_lists_builtins(self, control_setup):
         _, channel, _ = control_setup
         response = await self._run_over_channel(channel, "run no_such_script")
@@ -418,7 +407,6 @@ class TestControlChannelScriptRestrictions:
 class TestRunSimulatorDaemon:
     """End-to-end daemon-mode test of run_simulator."""
 
-    @pytest.mark.asyncio
     async def test_daemon_end_to_end_shutdown_via_control(self, capsys):
         ready = asyncio.Event()
         ports: dict[str, int | None] = {}
@@ -587,6 +575,61 @@ class TestMainArguments:
         err = capsys.readouterr().err
         assert "error: --script and --daemon are mutually exclusive" in err
 
+    @pytest.mark.parametrize(
+        ("flag", "message"),
+        [
+            (["--loop"], "error: --loop require --script"),
+            (["--script-delay", "1"], "error: --script-delay require --script"),
+            (["--oneshot"], "error: --oneshot require --script"),
+            (["--wait-for-client"], "error: --wait-for-client require --script"),
+        ],
+    )
+    def test_script_only_flags_rejected_without_script(self, capsys, monkeypatch, flag, message):
+        """Silently ignoring a mode-scoped flag is a CI repeatability trap (L2)."""
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", *flag])
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+        assert exc_info.value.code == 2
+        assert message in capsys.readouterr().err
+
+    def test_all_script_only_flags_listed_together(self, capsys, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--oneshot", "--loop"])
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+        assert exc_info.value.code == 2
+        assert "error: --loop, --oneshot require --script" in capsys.readouterr().err
+
+    def test_control_host_rejected_without_daemon(self, capsys, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--control-host", "0.0.0.0"])
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+        assert exc_info.value.code == 2
+        assert "error: --control-host requires --daemon" in capsys.readouterr().err
+
+    def test_script_only_flags_accepted_with_script(self, monkeypatch):
+        captured = self._run_main(
+            monkeypatch,
+            ["ppd-simulator", "-s", "basic_cycle", "--oneshot", "--loop", "--wait-for-client"],
+        )
+        assert captured["oneshot"] is True
+        assert captured["loop_scripts"] is True
+        assert captured["wait_for_client"] is True
+
+    def test_list_scripts_shows_scripts_dir_entries(self, capsys, monkeypatch, tmp_path):
+        """--list-scripts must show everything `run` can resolve (M4)."""
+        (tmp_path / "my_custom.yaml").write_text(
+            "name: My Custom Script\ndescription: Local extras\nsteps:\n  - action: log\n"
+            "    message: ok\n"
+        )
+        monkeypatch.setattr(
+            sys, "argv", ["ppd-simulator", "--list-scripts", "--scripts-dir", str(tmp_path)]
+        )
+        cli.main()
+        out = capsys.readouterr().out
+        assert "Available built-in scripts:" in out
+        assert f"Scripts from {tmp_path}:" in out
+        assert "  my_custom: Local extras" in out
+
     def test_daemon_explicit_control_port(self, monkeypatch):
         captured = self._run_main(monkeypatch, ["ppd-simulator", "--daemon", "4321"])
         assert captured["control_port"] == 4321
@@ -685,7 +728,9 @@ class TestInteractivePrompt:
         prompt.clear_line()
         assert capsys.readouterr().out == ""
 
-    def test_output_clears_line_prints_and_reshows_prompt(self, capsys):
+    def test_output_clears_line_prints_and_reshows_prompt(self, capsys, monkeypatch):
+        """On a terminal, output() erases the prompt line before printing."""
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
         prompt = cli.InteractivePrompt("$ ")
         prompt.enable()
         try:
@@ -694,6 +739,22 @@ class TestInteractivePrompt:
             prompt.disable()
         # enable() shows the prompt; output() clears the line, prints, reshows
         assert capsys.readouterr().out == "$ \r\033[Khello\n$ "
+
+    def test_output_emits_no_ansi_off_a_terminal(self, capsys):
+        """Piped output must stay free of escape sequences (T3).
+
+        pytest's capture replaces stdout with a non-tty, which is exactly
+        the piped/`TERM=dumb` case the fallback prompt exists for.
+        """
+        prompt = cli.InteractivePrompt("$ ")
+        prompt.enable()
+        try:
+            prompt.output("hello")
+        finally:
+            prompt.disable()
+        out = capsys.readouterr().out
+        assert out == "$ hello\n$ "
+        assert "\033" not in out
 
     def test_enable_twice_is_idempotent(self):
         root = logging.getLogger()
@@ -786,7 +847,6 @@ class TestControlChannelEdges:
     def test_bound_port_before_start_returns_configured_port(self):
         assert make_channel().bound_port == 4567
 
-    @pytest.mark.asyncio
     async def test_handle_client_skips_empty_lines(self, caplog):
         executed = []
 
@@ -804,7 +864,6 @@ class TestControlChannelEdges:
         assert writer.closed is True
         assert "Control connection closed" in caplog.text
 
-    @pytest.mark.asyncio
     async def test_handle_client_error_result(self):
         async def execute(cmd):
             return SimpleNamespace(success=False, message="no such thing")
@@ -814,7 +873,6 @@ class TestControlChannelEdges:
         await channel._handle_client(FakeStreamReader([b"bogus\n"]), writer)
         assert "ERROR: no such thing" in writer.lines()
 
-    @pytest.mark.asyncio
     async def test_handle_client_escapes_multiline_response(self):
         async def execute(cmd):
             return SimpleNamespace(success=True, message="line1\nline2")
@@ -824,7 +882,6 @@ class TestControlChannelEdges:
         await channel._handle_client(FakeStreamReader([b"status\n"]), writer)
         assert "OK: line1\\nline2" in writer.lines()
 
-    @pytest.mark.asyncio
     async def test_handle_client_stops_after_stop_event(self):
         stop_event = asyncio.Event()
         executed = []
@@ -841,7 +898,6 @@ class TestControlChannelEdges:
         assert executed == ["shutdown"]
         assert writer.closed is True
 
-    @pytest.mark.asyncio
     async def test_handle_client_exception_logged_and_connection_closed(self, caplog):
         async def execute(cmd):
             raise RuntimeError("kaboom")
@@ -854,7 +910,6 @@ class TestControlChannelEdges:
         assert writer.closed is True
         assert writer not in channel.clients
 
-    @pytest.mark.asyncio
     async def test_handle_client_wait_closed_error_swallowed(self, caplog):
         channel = make_channel()
         writer = FakeStreamWriter(fail_wait_closed=True)
@@ -871,14 +926,12 @@ class TestControlChannelEdges:
         channel.broadcast_status()
         assert good.data == b"STATUS: clients=0\n"
 
-    @pytest.mark.asyncio
     async def test_stop_twice_is_safe(self, control_setup):
         _, channel, _ = control_setup
         await channel.stop()
         await channel.stop()  # log_handler and server are both None now
         assert channel.server is None
 
-    @pytest.mark.asyncio
     async def test_stop_closes_lingering_clients(self, control_setup):
         _, channel, _ = control_setup
         reader, writer = await asyncio.open_connection("127.0.0.1", channel.bound_port)
@@ -941,7 +994,6 @@ class TestProcessScriptQueue:
         runner = SimpleNamespace(run=run)
         return handler, runner, ran, runs
 
-    @pytest.mark.asyncio
     async def test_runs_queued_script_and_logs_pass(self, caplog):
         caplog.set_level(logging.INFO, logger="powerpetdoor.simulator.cli")
         handler, runner, ran, runs = self._stubs(run_result=True)
@@ -958,7 +1010,6 @@ class TestProcessScriptQueue:
         assert "Running queued script: Script-good" in caplog.text
         assert "Script PASSED: Script-good" in caplog.text
 
-    @pytest.mark.asyncio
     async def test_failed_script_logged(self, caplog):
         caplog.set_level(logging.INFO, logger="powerpetdoor.simulator.cli")
         handler, runner, ran, _ = self._stubs(run_result=False)
@@ -973,7 +1024,6 @@ class TestProcessScriptQueue:
         await asyncio.wait_for(task, 5)
         assert "Script FAILED: Script-bad" in caplog.text
 
-    @pytest.mark.asyncio
     async def test_load_error_logged_and_loop_continues(self, caplog):
         caplog.set_level(logging.ERROR, logger="powerpetdoor.simulator.cli")
         handler, runner, _, runs = self._stubs(load_error=ValueError("nope"))
@@ -990,7 +1040,6 @@ class TestProcessScriptQueue:
         await asyncio.wait_for(task, 5)
         assert runs == []
 
-    @pytest.mark.asyncio
     async def test_returns_immediately_when_already_stopped(self):
         handler, runner, _, runs = self._stubs()
         stop = asyncio.Event()
@@ -998,7 +1047,6 @@ class TestProcessScriptQueue:
         await cli._process_script_queue(asyncio.Queue(), stop, handler, runner)
         assert runs == []
 
-    @pytest.mark.asyncio
     async def test_poll_timeout_then_stop_exits_loop(self):
         handler, runner, _, runs = self._stubs()
         stop = asyncio.Event()
@@ -1011,7 +1059,6 @@ class TestProcessScriptQueue:
         assert await asyncio.wait_for(task, 5) is None
         assert runs == []
 
-    @pytest.mark.asyncio
     async def test_cancelled_while_waiting_breaks_cleanly(self):
         handler, runner, _, _ = self._stubs()
         stop = asyncio.Event()
@@ -1074,7 +1121,6 @@ class TestRunStartupScripts:
             **defaults,
         )
 
-    @pytest.mark.asyncio
     async def test_single_passing_script_oneshot(self, capsys):
         sim, handler, runner, stop, result, runs, _ = self._make()
         await self._run(["s1"], sim, handler, runner, stop, result, oneshot=True)
@@ -1086,7 +1132,6 @@ class TestRunStartupScripts:
         assert ">>> Script PASSED: s1" in out
         assert ">>> All scripts PASSED" in out
 
-    @pytest.mark.asyncio
     async def test_failing_script_oneshot(self, capsys):
         sim, handler, runner, stop, result, runs, _ = self._make(run_results=[False])
         await self._run(["s1"], sim, handler, runner, stop, result, oneshot=True)
@@ -1096,7 +1141,6 @@ class TestRunStartupScripts:
         assert ">>> Script FAILED: s1" in out
         assert ">>> All scripts FAILED" in out
 
-    @pytest.mark.asyncio
     async def test_load_error_marks_failure(self, capsys):
         sim, handler, runner, stop, result, runs, _ = self._make(load_error=ValueError("nope"))
         await self._run(["s1"], sim, handler, runner, stop, result)
@@ -1104,7 +1148,6 @@ class TestRunStartupScripts:
         assert result[0] is False
         assert "Error running script 's1': nope" in capsys.readouterr().out
 
-    @pytest.mark.asyncio
     async def test_delay_between_scripts_not_oneshot(self, capsys):
         sim, handler, runner, stop, result, runs, _ = self._make()
         await self._run(["s1", "s2"], sim, handler, runner, stop, result, script_delay=0.01)
@@ -1115,7 +1158,6 @@ class TestRunStartupScripts:
         assert ">>> Waiting 0.01s before next script..." in out
         assert ">>> All scripts" not in out
 
-    @pytest.mark.asyncio
     async def test_wait_for_client_returns_early_when_stopped(self, capsys):
         sim, handler, runner, stop, result, runs, _ = self._make()
         stop.set()
@@ -1125,7 +1167,6 @@ class TestRunStartupScripts:
         assert result[0] is True
         assert ">>> Waiting for client connection..." in capsys.readouterr().out
 
-    @pytest.mark.asyncio
     async def test_wait_for_client_starts_after_connect(self, capsys):
         sim, handler, runner, stop, result, runs, _ = self._make()
         task = asyncio.create_task(
@@ -1140,7 +1181,6 @@ class TestRunStartupScripts:
         assert ">>> Waiting for client connection..." in out
         assert ">>> Client connected, starting scripts" in out
 
-    @pytest.mark.asyncio
     async def test_disconnect_between_scripts_stops_sequence(self, capsys):
         async def disconnecting_run(script, sim):
             sim.protocols.clear()
@@ -1156,7 +1196,6 @@ class TestRunStartupScripts:
         assert stop.is_set()
         assert ">>> Client disconnected, stopping scripts" in capsys.readouterr().out
 
-    @pytest.mark.asyncio
     async def test_loop_scripts_until_disconnect(self, capsys):
         calls = [0]
 
@@ -1187,7 +1226,6 @@ class TestRunStartupScripts:
         assert ">>> Waiting 0.01s before next loop..." in out
         assert ">>> Client disconnected, stopping scripts" in out
 
-    @pytest.mark.asyncio
     async def test_cancelled_mid_script_still_records_result(self):
         blocker = asyncio.Event()
 
@@ -1250,7 +1288,6 @@ class TestBasicStdinInput:
         basic = cli._BasicStdinInput(loop, prompt, handler, stop, stdin=stdin)
         return basic, prompt, stop, executed, done
 
-    @pytest.mark.asyncio
     async def test_start_enables_prompt_and_registers_reader(self):
         r_fd, w_fd = os.pipe()
         try:
@@ -1267,7 +1304,6 @@ class TestBasicStdinInput:
             os.close(r_fd)
             os.close(w_fd)
 
-    @pytest.mark.asyncio
     async def test_handle_input_ignored_when_stopped(self):
         def readline():
             pytest.fail("readline must not be called after stop_event is set")
@@ -1277,7 +1313,6 @@ class TestBasicStdinInput:
         basic.handle_input()
         assert prompt.calls == []
 
-    @pytest.mark.asyncio
     async def test_handle_input_ignored_after_reader_removed(self):
         def readline():
             pytest.fail("readline must not be called after stop()")
@@ -1287,7 +1322,6 @@ class TestBasicStdinInput:
         basic.handle_input()
         assert prompt.calls == []
 
-    @pytest.mark.asyncio
     async def test_stop_swallows_fileno_errors(self):
         def broken_fileno():
             raise ValueError("closed")
@@ -1296,7 +1330,6 @@ class TestBasicStdinInput:
         basic.stop()  # must not raise
         assert basic._reader_removed is True
 
-    @pytest.mark.asyncio
     async def test_handle_input_executes_command_and_prints_result(self):
         basic, prompt, _, executed, done = self._make(readline=lambda: "status\n", message="OK-MSG")
         basic.handle_input()
@@ -1304,14 +1337,12 @@ class TestBasicStdinInput:
         assert executed == ["status"]
         assert ("output", ">>> OK-MSG") in prompt.calls
 
-    @pytest.mark.asyncio
     async def test_handle_input_empty_line_reshows_prompt(self):
         basic, prompt, _, executed, _ = self._make(readline=lambda: "\n")
         basic.handle_input()
         assert prompt.calls == ["show"]
         assert executed == []
 
-    @pytest.mark.asyncio
     async def test_handle_input_readline_error_reported(self):
         def broken_readline():
             raise RuntimeError("boom")
@@ -1320,7 +1351,6 @@ class TestBasicStdinInput:
         basic.handle_input()
         assert prompt.calls == [("output", "Error: boom")]
 
-    @pytest.mark.asyncio
     async def test_process_command_shutdown_with_message(self, capsys):
         basic, prompt, stop, _, _ = self._make(message="Bye", sets_stop=True)
         await basic.process_command("shutdown")
@@ -1328,7 +1358,6 @@ class TestBasicStdinInput:
         assert basic._reader_removed is True
         assert capsys.readouterr().out == ">>> Bye\n"
 
-    @pytest.mark.asyncio
     async def test_process_command_shutdown_without_message(self, capsys):
         basic, prompt, stop, _, _ = self._make(message="", sets_stop=True)
         await basic.process_command("shutdown")
@@ -1336,13 +1365,11 @@ class TestBasicStdinInput:
         assert basic._reader_removed is True
         assert capsys.readouterr().out == ""
 
-    @pytest.mark.asyncio
     async def test_process_command_message_shown_via_prompt(self):
         basic, prompt, _, _, _ = self._make(message="hello")
         await basic.process_command("status")
         assert prompt.calls == [("output", ">>> hello")]
 
-    @pytest.mark.asyncio
     async def test_process_command_empty_message_reshows_prompt(self):
         basic, prompt, _, _, _ = self._make(message="")
         await basic.process_command("clear")
@@ -1355,7 +1382,6 @@ class TestBasicStdinInput:
 
 
 class TestRunSimulatorScripts:
-    @pytest.mark.asyncio
     async def test_oneshot_passing_script_returns_true(self, tmp_path, capsys):
         script = tmp_path / "pass.yaml"
         script.write_text(PASSING_SCRIPT)
@@ -1368,7 +1394,6 @@ class TestRunSimulatorScripts:
         assert ">>> Script PASSED: Passing Script" in out
         assert ">>> All scripts PASSED" in out
 
-    @pytest.mark.asyncio
     async def test_oneshot_failing_script_returns_false(self, tmp_path, capsys):
         script = tmp_path / "fail.yaml"
         script.write_text(FAILING_SCRIPT)
@@ -1381,7 +1406,6 @@ class TestRunSimulatorScripts:
         assert ">>> Script FAILED: Failing Script" in out
         assert ">>> All scripts FAILED" in out
 
-    @pytest.mark.asyncio
     async def test_oneshot_unknown_script_returns_false(self, capsys):
         result = await asyncio.wait_for(
             cli.run_simulator(
@@ -1392,7 +1416,6 @@ class TestRunSimulatorScripts:
         assert result is False
         assert "Error running script 'definitely_missing_script':" in capsys.readouterr().out
 
-    @pytest.mark.asyncio
     async def test_wait_for_client_starts_scripts_after_connect(self, tmp_path, capsys):
         script = tmp_path / "pass.yaml"
         script.write_text(PASSING_SCRIPT)
@@ -1455,7 +1478,6 @@ class TestRunSimulatorDaemonExtras:
         await asyncio.wait_for(ready.wait(), 10)
         return task, ports
 
-    @pytest.mark.asyncio
     async def test_door_client_events_broadcast_status(self):
         """run_simulator's own connect/disconnect callbacks notify ctl clients."""
         task, ports = await self._start_daemon()
@@ -1479,7 +1501,6 @@ class TestRunSimulatorDaemonExtras:
         finally:
             writer.close()
 
-    @pytest.mark.asyncio
     async def test_queued_script_runs_and_logs_over_control(self, tmp_path, caplog):
         """'run <name>' queues the script; the queue processor runs it and the
         result is broadcast as LOG lines."""
@@ -1505,7 +1526,6 @@ class TestRunSimulatorDaemonExtras:
         finally:
             writer.close()
 
-    @pytest.mark.asyncio
     async def test_stop_during_startup_cancels_queue_task_cleanly(self, monkeypatch):
         """A stop that fires before the event loop ever runs the script-queue
         task must not hang or leak (queue task is cancelled before starting)."""
@@ -1527,7 +1547,6 @@ class TestRunSimulatorDaemonExtras:
         )
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_external_cancel_shuts_down_cleanly(self):
         """Cancelling the run_simulator task performs full cleanup and returns."""
         task, ports = await self._start_daemon()
@@ -1556,7 +1575,6 @@ def _track_execute(monkeypatch):
 
 
 class TestRunSimulatorInteractive:
-    @pytest.mark.asyncio
     async def test_stdin_unavailable_falls_back_to_daemon_like_mode(self, caplog):
         """Under pytest, stdin has no usable fileno: interactive mode must warn
         and keep running (here bounded by run_for)."""
@@ -1566,10 +1584,9 @@ class TestRunSimulatorInteractive:
             10,
         )
         assert result is None
-        assert "stdin not available, running in daemon mode" in caplog.text
+        assert "stdin not available, running without interactive input" in caplog.text
         assert "Run time (0.05s) elapsed, shutting down" in caplog.text
 
-    @pytest.mark.asyncio
     async def test_stdin_none_falls_back_to_daemon_like_mode(self, monkeypatch, caplog):
         """sys.stdin can be None entirely (e.g. pythonw): same fallback."""
         caplog.set_level(logging.WARNING)
@@ -1579,9 +1596,8 @@ class TestRunSimulatorInteractive:
             10,
         )
         assert result is None
-        assert "stdin not available, running in daemon mode" in caplog.text
+        assert "stdin not available, running without interactive input" in caplog.text
 
-    @pytest.mark.asyncio
     async def test_basic_input_fallback_end_to_end(self, monkeypatch, capsys, root_logger_guard):
         """Non-TTY stdin drives the plain-input fallback: commands execute,
         output goes through the prompt, shutdown ends the run."""
@@ -1621,7 +1637,6 @@ class TestRunSimulatorInteractive:
         assert "Shutting down" in out
 
     @requires_prompt_toolkit
-    @pytest.mark.asyncio
     async def test_prompt_toolkit_end_to_end(self, monkeypatch, tmp_path, root_logger_guard):
         """Full prompt_toolkit session: command, history recall, prompt
         invalidation on door connect/disconnect, exit-as-shutdown, and
@@ -1701,7 +1716,6 @@ class TestRunSimulatorInteractive:
         assert entries == ["status", "clear", "status", "shutdown"]
 
     @requires_prompt_toolkit
-    @pytest.mark.asyncio
     async def test_prompt_toolkit_eof_ends_session(self, monkeypatch, root_logger_guard):
         """Closing the input (EOF, e.g. Ctrl-D) ends the interactive run."""
         from prompt_toolkit.application import create_app_session
@@ -1737,7 +1751,6 @@ class TestRunSimulatorInteractive:
             os.close(r_fd)
 
     @requires_prompt_toolkit
-    @pytest.mark.asyncio
     async def test_prompt_session_unavailable_degrades_to_immediate_eof(
         self, monkeypatch, root_logger_guard
     ):
@@ -1761,7 +1774,6 @@ class TestRunSimulatorInteractive:
         assert result is None
 
     @requires_prompt_toolkit
-    @pytest.mark.asyncio
     async def test_prompt_toolkit_run_for_cancels_input_loop(self, monkeypatch, root_logger_guard):
         """run_for expiry cancels the input task while it awaits the prompt."""
         from prompt_toolkit.application import create_app_session
@@ -1791,7 +1803,6 @@ class TestRunSimulatorInteractive:
         assert result is None
 
     @requires_prompt_toolkit
-    @pytest.mark.asyncio
     async def test_prompt_toolkit_stop_before_input_loop_starts(
         self, monkeypatch, root_logger_guard
     ):

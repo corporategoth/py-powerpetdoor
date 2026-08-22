@@ -10,11 +10,32 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..scripting import script_completer
+from ..scripting import list_extra_scripts, script_completer
 from .base import ArgSpec, CommandResult, command
 
 if TYPE_CHECKING:
     from ..scripting import Script, ScriptRunner
+
+#: The ``run`` command name and its aliases (single source of truth, also
+#: used by ctl to recognize a synchronous run).
+RUN_COMMAND = "run"
+RUN_ALIASES = ["r", "file"]
+#: Trailing keyword that makes ``run`` synchronous.
+RUN_WAIT_KEYWORD = "wait"
+
+
+def is_wait_run(command_line: str) -> bool:
+    """Whether ``command_line`` is a synchronous ``run <script> wait``.
+
+    A wait-run blocks for as long as the script takes, so ctl must not hold
+    it to the generic response timeout.
+    """
+    parts = command_line.split()
+    return (
+        len(parts) >= 3
+        and parts[0].lower() in (RUN_COMMAND, *RUN_ALIASES)
+        and parts[-1].lower() == RUN_WAIT_KEYWORD
+    )
 
 
 class ScriptsCommandsMixin:
@@ -63,18 +84,23 @@ class ScriptsCommandsMixin:
                     return self._Script.from_file(candidate)
         return self._get_builtin_script(name)
 
-    @command("list", ["/", "scripts"], "List built-in scripts", category="scripts")
+    @command("list", ["/", "scripts"], "List runnable scripts", category="scripts")
     def list_scripts(self) -> CommandResult:
-        """List available built-in scripts."""
+        """List available scripts (built-in plus any from --scripts-dir)."""
         scripts = list(self._list_builtin_scripts())
         lines = ["Built-in scripts:"]
         for name, desc in scripts:
             lines.append(f"  {name}: {desc}")
-        return CommandResult(True, "\n".join(lines), {"scripts": scripts})
+        extra = list_extra_scripts()
+        if extra:
+            lines.append(f"Scripts from {self._scripts_dir}:")
+            for name, desc in extra:
+                lines.append(f"  {name}: {desc}")
+        return CommandResult(True, "\n".join(lines), {"scripts": scripts + extra})
 
     @command(
-        "run",
-        ["r", "file"],
+        RUN_COMMAND,
+        RUN_ALIASES,
         "Run a script",
         category="scripts",
         args=[
@@ -88,27 +114,32 @@ class ScriptsCommandsMixin:
                 "mode",
                 "choice",
                 required=False,
-                choices=["wait"],
+                choices=[RUN_WAIT_KEYWORD],
                 description="'wait' to run synchronously and report PASSED/FAILED "
-                "(success reflects the script result)",
+                "(success reflects the script result; fails if another script is running)",
             ),
         ],
     )
     async def run(self, script_ref: str, mode: str | None = None) -> CommandResult:
         """Run a script (built-in name or file path).
 
+        Without 'wait' the script is queued and the result only reports the
+        queueing; a queued script waits for any in-flight script.
+
         With 'wait', the script runs synchronously and the result reflects
-        pass/fail - useful for scripting against the control channel where
-        the queued result would otherwise only appear in the daemon log.
+        pass/fail - useful for scripting against the control channel. A
+        wait-run never queues: if another script is already running it
+        fails immediately, so the reported pass/fail always belongs to the
+        script that was asked for.
         """
         try:
             script = self.load_script(script_ref)
-            if self.script_queue and mode != "wait":
+            if self.script_queue and mode != RUN_WAIT_KEYWORD:
                 await self.script_queue.put(script_ref)
                 return CommandResult(True, f"Queued script: {script.name}")
             else:
                 # Run directly (no queue configured, or 'wait' requested)
-                success = await self.script_runner.run(script)
+                success = await self.script_runner.run(script, queue_if_busy=False)
                 status = "PASSED" if success else "FAILED"
                 return CommandResult(success, f"Script {status}: {script.name}")
         except Exception as e:

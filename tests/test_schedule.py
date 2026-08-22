@@ -99,6 +99,40 @@ class TestValidateScheduleEntry:
         """Test valid schedule entry passes validation."""
         assert validate_schedule_entry(valid_schedule_entry) is True
 
+    def test_valid_outside_entry_passes(self, valid_schedule_entry):
+        """A valid outside-only entry passes through the outside time checks.
+
+        The negative outside cases below all short-circuit before the final
+        ``return True``; without this test the happy path through the
+        outside branch is only reached by the (excluded-from-coverage)
+        hypothesis suite.
+        """
+        valid_schedule_entry[FIELD_INSIDE] = False
+        valid_schedule_entry[FIELD_OUTSIDE] = True
+        valid_schedule_entry[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX] = {
+            FIELD_HOUR: 7,
+            FIELD_MINUTE: 30,
+        }
+        valid_schedule_entry[FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX] = {
+            FIELD_HOUR: 19,
+            FIELD_MINUTE: 15,
+        }
+        assert validate_schedule_entry(valid_schedule_entry) is True
+
+    def test_valid_inside_and_outside_entry_passes(self, valid_schedule_entry):
+        """An entry enabling both sensors validates both time pairs."""
+        valid_schedule_entry[FIELD_INSIDE] = True
+        valid_schedule_entry[FIELD_OUTSIDE] = True
+        valid_schedule_entry[FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX] = {
+            FIELD_HOUR: 6,
+            FIELD_MINUTE: 0,
+        }
+        valid_schedule_entry[FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX] = {
+            FIELD_HOUR: 20,
+            FIELD_MINUTE: 0,
+        }
+        assert validate_schedule_entry(valid_schedule_entry) is True
+
     def test_missing_index_fails(self, valid_schedule_entry):
         """Test entry without index fails validation."""
         del valid_schedule_entry[FIELD_INDEX]

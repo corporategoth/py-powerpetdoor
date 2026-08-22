@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 
 import pytest
 
@@ -39,6 +40,20 @@ def _managed_main_thread_event_loop():
     yield
     asyncio.set_event_loop(None)
     loop.close()
+
+
+@pytest.fixture(autouse=True)
+def _reset_extra_scripts_dir():
+    """Clear the module-level --scripts-dir registration between tests.
+
+    scripting.py publishes the configured extra scripts directory so the
+    name resolver, ``list``, the unknown-script hint, and tab completion
+    agree; a test that sets one must not leak it into the next.
+    """
+    yield
+    from powerpetdoor.simulator.scripting import set_extra_scripts_dir
+
+    set_extra_scripts_dir(None)
 
 
 # ============================================================================
@@ -104,6 +119,28 @@ class MockDeviceProtocol:
 
 
 # ============================================================================
+# Network Fixtures
+# ============================================================================
+
+
+@pytest.fixture
+def refused_port():
+    """A TCP port that refuses connections and cannot be re-assigned.
+
+    Binding without listening keeps the port reserved for the whole test -
+    a parallel xdist worker binding port 0 can never be handed the same
+    number - while connects to it still fail with ECONNREFUSED. This is
+    what "bind then close" was approximating, minus the reuse race.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        yield sock.getsockname()[1]
+    finally:
+        sock.close()
+
+
+# ============================================================================
 # Client Fixtures
 # ============================================================================
 
@@ -145,8 +182,8 @@ async def mock_client(
         loop=loop,
     )
 
-    # Simulate connection established
-    client._transport = mock_transport
+    # Simulate connection established (connection_made installs the
+    # transport; assigning it first would trip the double-connect guard)
     client.connection_made(mock_transport)
 
     # Create device protocol helper

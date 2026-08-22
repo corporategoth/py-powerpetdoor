@@ -166,13 +166,11 @@ def tracker():
 class TestClientConnection:
     """Test client connection to simulator."""
 
-    @pytest.mark.asyncio
     async def test_client_connects_to_simulator(self, client, simulator):
         """Client should successfully connect to the simulator."""
         assert client.available
         assert len(simulator.protocols) == 1
 
-    @pytest.mark.asyncio
     async def test_client_host_port(self, client, simulator):
         """Client should report correct host and port."""
         port = simulator.server.sockets[0].getsockname()[1]
@@ -188,7 +186,6 @@ class TestClientConnection:
 class TestQueryCommands:
     """Test query commands from client to simulator."""
 
-    @pytest.mark.asyncio
     async def test_get_door_status(self, client, simulator):
         """GET_DOOR_STATUS should return current door status."""
         future = client.send_message(CONFIG, CMD_GET_DOOR_STATUS, notify=True)
@@ -196,7 +193,6 @@ class TestQueryCommands:
 
         assert result == DOOR_STATE_CLOSED
 
-    @pytest.mark.asyncio
     async def test_get_settings(self, client, simulator):
         """GET_SETTINGS should return all settings."""
         future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
@@ -207,7 +203,6 @@ class TestQueryCommands:
         assert FIELD_INSIDE in result
         assert FIELD_OUTSIDE in result
 
-    @pytest.mark.asyncio
     async def test_get_power(self, client, simulator):
         """GET_POWER should return power state."""
         future = client.send_message(CONFIG, CMD_GET_POWER, notify=True)
@@ -215,7 +210,6 @@ class TestQueryCommands:
 
         assert result is True  # Default power is on
 
-    @pytest.mark.asyncio
     async def test_get_sensors(self, client, simulator):
         """GET_SENSORS should return sensor states."""
         future = client.send_message(CONFIG, CMD_GET_SENSORS, notify=True)
@@ -224,7 +218,6 @@ class TestQueryCommands:
         assert FIELD_INSIDE in result
         assert FIELD_OUTSIDE in result
 
-    @pytest.mark.asyncio
     async def test_get_hold_time(self, client, simulator):
         """GET_HOLD_TIME should return hold time in centiseconds."""
         future = client.send_message(CONFIG, CMD_GET_HOLD_TIME, notify=True)
@@ -233,7 +226,6 @@ class TestQueryCommands:
         # Protocol returns centiseconds, state stores seconds
         assert result == int(simulator.state.hold_time * 100)
 
-    @pytest.mark.asyncio
     async def test_get_battery(self, client, simulator):
         """GET_DOOR_BATTERY should return battery info."""
         future = client.send_message(CONFIG, CMD_GET_DOOR_BATTERY, notify=True)
@@ -243,7 +235,6 @@ class TestQueryCommands:
         assert "batteryPresent" in result
         assert "acPresent" in result
 
-    @pytest.mark.asyncio
     async def test_get_hw_info(self, client, simulator):
         """GET_HW_INFO should return hardware info."""
         future = client.send_message(CONFIG, CMD_GET_HW_INFO, notify=True)
@@ -260,7 +251,6 @@ class TestQueryCommands:
 class TestControlCommands:
     """Test control commands from client to simulator."""
 
-    @pytest.mark.asyncio
     async def test_open_door(self, client, simulator, tracker):
         """OPEN command should open the door."""
         callback = tracker.make_callback("door_status")
@@ -282,7 +272,6 @@ class TestControlCommands:
             s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP) for s in statuses
         )
 
-    @pytest.mark.asyncio
     async def test_close_door(self, client, simulator, tracker):
         """CLOSE command should close the door."""
         # First open the door
@@ -299,7 +288,6 @@ class TestControlCommands:
         await simulator.wait_for_status(DOOR_STATE_CLOSED, timeout=5.0)
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
-    @pytest.mark.asyncio
     async def test_power_off(self, client, simulator):
         """POWER_OFF should disable power."""
         future = client.send_message(COMMAND, CMD_POWER_OFF, notify=True)
@@ -308,7 +296,6 @@ class TestControlCommands:
         assert result is False
         assert simulator.state.power is False
 
-    @pytest.mark.asyncio
     async def test_power_on(self, client, simulator):
         """POWER_ON should enable power."""
         simulator.state.power = False
@@ -319,7 +306,6 @@ class TestControlCommands:
         assert result is True
         assert simulator.state.power is True
 
-    @pytest.mark.asyncio
     async def test_disable_inside_sensor(self, client, simulator):
         """DISABLE_INSIDE should disable inside sensor."""
         future = client.send_message(COMMAND, CMD_DISABLE_INSIDE, notify=True)
@@ -329,7 +315,6 @@ class TestControlCommands:
         assert result[FIELD_INSIDE] is False
         assert simulator.state.inside is False
 
-    @pytest.mark.asyncio
     async def test_enable_inside_sensor(self, client, simulator):
         """ENABLE_INSIDE should enable inside sensor."""
         simulator.state.inside = False
@@ -341,7 +326,6 @@ class TestControlCommands:
         assert result[FIELD_INSIDE] is True
         assert simulator.state.inside is True
 
-    @pytest.mark.asyncio
     async def test_set_hold_time(self, client, simulator):
         """SET_HOLD_TIME should update hold time (centiseconds in protocol)."""
         future = client.send_message(
@@ -365,7 +349,6 @@ class TestControlCommands:
 class TestClientCallbacks:
     """Test client callback system with simulator."""
 
-    @pytest.mark.asyncio
     async def test_door_status_callback(self, client, simulator, tracker):
         """Door status changes should trigger callback."""
         callback = tracker.make_callback("door_status")
@@ -380,7 +363,6 @@ class TestClientCallbacks:
         calls = tracker.get_calls("door_status")
         assert len(calls) > 0
 
-    @pytest.mark.asyncio
     async def test_sensor_callback(self, client, simulator, tracker):
         """Sensor state changes should trigger callback."""
         callback = tracker.make_callback("sensor")
@@ -394,7 +376,6 @@ class TestClientCallbacks:
         calls = tracker.get_calls("sensor")
         assert len(calls) > 0
 
-    @pytest.mark.asyncio
     async def test_sensor_callback_receives_field_and_value(self, client, simulator, tracker):
         """Sensor callback should receive both field_name and value arguments."""
         callback = tracker.make_callback("sensor")
@@ -412,7 +393,6 @@ class TestClientCallbacks:
         assert field_name == FIELD_INSIDE
         assert value is False
 
-    @pytest.mark.asyncio
     async def test_wildcard_sensor_listener(self, client, simulator, tracker):
         """Wildcard '*' sensor listener should receive callbacks for all sensor fields."""
         callback = tracker.make_callback("sensor")
@@ -430,7 +410,6 @@ class TestClientCallbacks:
         assert field_name == FIELD_INSIDE
         assert value is False
 
-    @pytest.mark.asyncio
     async def test_wildcard_sensor_listener_power(self, client, simulator, tracker):
         """Wildcard sensor listener should receive power state changes."""
         callback = tracker.make_callback("sensor")
@@ -448,7 +427,6 @@ class TestClientCallbacks:
         assert field_name == FIELD_POWER
         assert value is False
 
-    @pytest.mark.asyncio
     async def test_simulator_broadcast_triggers_wildcard_listener(self, client, simulator, tracker):
         """Simulator-initiated broadcasts should trigger wildcard sensor listeners.
 
@@ -470,7 +448,6 @@ class TestClientCallbacks:
         assert field_name == FIELD_POWER
         assert value is False
 
-    @pytest.mark.asyncio
     async def test_simulator_broadcast_inside_sensor(self, client, simulator, tracker):
         """Simulator broadcast for inside sensor should trigger listener."""
         callback = tracker.make_callback("sensor")
@@ -487,7 +464,6 @@ class TestClientCallbacks:
         assert field_name == FIELD_INSIDE
         assert value is False
 
-    @pytest.mark.asyncio
     async def test_multiple_listeners(self, client, simulator, tracker):
         """Multiple listeners should all receive callbacks."""
         callback1 = tracker.make_callback("listener1")
@@ -514,7 +490,6 @@ class TestClientCallbacks:
 class TestSettingsRoundTrips:
     """The simulator honors the exact wire formats the client/door send."""
 
-    @pytest.mark.asyncio
     async def test_door_set_notifications_round_trip(self, simulator):
         """door.set_notifications (top-level "1"/"0" fields) updates the simulator."""
         from powerpetdoor import PowerPetDoor
@@ -540,7 +515,6 @@ class TestSettingsRoundTrips:
         finally:
             await door.disconnect()
 
-    @pytest.mark.asyncio
     async def test_delete_schedule_response_echoes_index(self, client, simulator):
         """DELETE_SCHEDULE responses echo the deleted index to the client."""
         from powerpetdoor.const import CMD_DELETE_SCHEDULE, FIELD_INDEX
@@ -564,7 +538,6 @@ class TestSettingsRoundTrips:
 class TestNotificationEvents:
     """Simulator emits bare notification envelopes; client dispatches them."""
 
-    @pytest.mark.asyncio
     async def test_sensor_notification_round_trip(self, client, simulator, tracker):
         """Simulator sensor event -> client notification_event listener."""
         callback = tracker.make_callback("notify")
@@ -578,7 +551,6 @@ class TestNotificationEvents:
         calls = tracker.get_calls("notify")
         assert calls[0] == (NOTIFY_SENSOR_INDOOR, SENSOR_STATE_ON)
 
-    @pytest.mark.asyncio
     async def test_low_battery_notification_round_trip(self, client, simulator, tracker):
         """Simulator low-battery event -> client notification_event listener."""
         callback = tracker.make_callback("notify")
@@ -592,7 +564,6 @@ class TestNotificationEvents:
         # LOW_BATTERY carries no sensorState
         assert calls[0] == (NOTIFY_LOW_BATTERY, None)
 
-    @pytest.mark.asyncio
     async def test_disabled_sensor_notification_not_emitted(self, client, simulator, tracker):
         """No notification event reaches the client when the setting is off."""
         callback = tracker.make_callback("notify")
@@ -617,7 +588,6 @@ class TestNotificationEvents:
 class TestDoorCycles:
     """Test full door operation cycles."""
 
-    @pytest.mark.asyncio
     async def test_sensor_trigger_full_cycle(self, client, simulator, tracker):
         """Sensor trigger should cause full open/close cycle."""
         callback = tracker.make_callback("door_status")
@@ -641,7 +611,6 @@ class TestDoorCycles:
         calls = tracker.get_calls("door_status")
         assert len(calls) >= 2  # At least RISING and HOLDING
 
-    @pytest.mark.asyncio
     async def test_client_initiated_open_close(self, client, simulator):
         """Client-initiated open/close should work correctly."""
         # Open door (a plain OPEN parks in HOLDING until the hold expires)
@@ -663,7 +632,6 @@ class TestDoorCycles:
 class TestErrorHandling:
     """Test error handling between client and simulator."""
 
-    @pytest.mark.asyncio
     async def test_command_blocked_when_power_off(self, client, simulator):
         """Door commands should be blocked when power is off."""
         simulator.state.power = False
@@ -681,7 +649,6 @@ class TestErrorHandling:
         # The command was rejected: the door never moved
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
-    @pytest.mark.asyncio
     async def test_sensor_blocked_when_disabled(self, client, simulator):
         """Sensor trigger should be blocked when sensor is disabled."""
         simulator.state.inside = False
@@ -699,7 +666,6 @@ class TestErrorHandling:
 class TestScheduleCallbacks:
     """Test schedule callback system with simulator."""
 
-    @pytest.mark.asyncio
     async def test_schedule_update_callback(self, client, simulator, tracker):
         """Schedule add should trigger schedule_update callback."""
         callback = tracker.make_callback("schedule")
@@ -728,7 +694,6 @@ class TestScheduleCallbacks:
         assert schedule_data["index"] == 0
         assert schedule_data["enabled"] == "1"
 
-    @pytest.mark.asyncio
     async def test_schedule_delete_callback(self, client, simulator, tracker):
         """Schedule delete should trigger schedule_delete callback."""
         # First add a schedule
@@ -750,7 +715,6 @@ class TestScheduleCallbacks:
         deleted_index = calls[0][0]
         assert deleted_index == 0
 
-    @pytest.mark.asyncio
     async def test_schedule_modify_triggers_update(self, client, simulator, tracker):
         """Modifying a schedule should trigger schedule_update callback."""
         # First add a schedule directly to state (no broadcast)

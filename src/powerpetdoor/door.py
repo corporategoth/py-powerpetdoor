@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -441,6 +441,10 @@ class PowerPetDoor:
         and performs an initial refresh() so cached properties are valid
         when this returns. May be called again after disconnect().
 
+        Idempotent: calling connect() while already connected is a no-op,
+        so a defensive re-connect cannot open a second socket to the
+        single-connection device and orphan the live one (M2).
+
         Args:
             timeout: Seconds to wait for the connection to establish.
                 Defaults to default_timeout.
@@ -451,6 +455,10 @@ class PowerPetDoor:
                 background reconnect keeps running), so connect() may
                 safely be retried.
         """
+        if self.connected:
+            logger.warning("Ignoring connect(): already connected to %s", self._host)
+            return
+
         # Re-arm the client in case disconnect() was called earlier (M6).
         self._client.reset_shutdown()
         self._connected_event.clear()
@@ -1048,19 +1056,38 @@ class PowerPetDoor:
     # Refresh
     # =========================================================================
 
+    @staticmethod
+    def _log_refresh_failures(names: list[str], results: Sequence[Any]) -> None:
+        """Log each failed step of a gathered refresh (L5).
+
+        ``refresh()``/``refresh_settings()`` gather with
+        ``return_exceptions=True`` so one dead command cannot abort the
+        rest. Without this, a device NAK or a drop during connect() would
+        silently leave cached properties at their constructor defaults.
+        """
+        for name, result in zip(names, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning("Refresh step %s failed: %r", name, result)
+
     async def refresh(self, *, timeout: float | None = None) -> None:
         """Refresh all cached state from the door.
+
+        Individual step failures are logged and do not abort the rest;
+        properties whose refresh failed keep their previous cached value.
 
         Args:
             timeout: Seconds to wait for each response. Defaults to default_timeout.
         """
-        await asyncio.gather(
+        results = await asyncio.gather(
             self.refresh_status(timeout=timeout),
             self.refresh_settings(timeout=timeout),
             self.refresh_battery(timeout=timeout),
             self.refresh_stats(timeout=timeout),
             self.refresh_hardware_info(timeout=timeout),
             return_exceptions=True,
+        )
+        self._log_refresh_failures(
+            ["status", "settings", "battery", "stats", "hardware_info"], results
         )
 
     async def refresh_status(self, *, timeout: float | None = None) -> DoorStatus:
@@ -1079,13 +1106,16 @@ class PowerPetDoor:
     async def refresh_settings(self, *, timeout: float | None = None) -> None:
         """Refresh all settings from the door.
 
+        Individual step failures are logged and do not abort the other
+        step; settings whose refresh failed keep their cached value.
+
         Args:
             timeout: Seconds to wait for each response. Defaults to default_timeout.
         """
         effective_timeout = timeout if timeout is not None else self.default_timeout
         # GET_SETTINGS includes hold time, timezone, and sensor voltages
         # Notifications are separate
-        await asyncio.gather(
+        results = await asyncio.gather(
             asyncio.wait_for(
                 self._client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True),
                 timeout=effective_timeout,
@@ -1096,6 +1126,7 @@ class PowerPetDoor:
             ),
             return_exceptions=True,
         )
+        self._log_refresh_failures([CMD_GET_SETTINGS, CMD_GET_NOTIFICATIONS], results)
 
     async def refresh_battery(self, *, timeout: float | None = None) -> BatteryInfo:
         """Refresh and return battery info.

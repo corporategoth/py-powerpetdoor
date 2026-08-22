@@ -50,10 +50,13 @@ from .state import DoorSimulatorState
 
 logger = logging.getLogger(__name__)
 
-#: Minimum re-check interval (seconds) used while a sensor blocks closing.
-#: Sensor changes made through the simulator APIs wake the hold loop
-#: immediately; this bounds how long an out-of-band state mutation (one
-#: that bypasses the simulator APIs) can go unnoticed.
+#: Floor (seconds) on the blocked-sensor re-check wait. While a sensor
+#: blocks closing the engine waits ``max(hold_time, MIN_BLOCKED_RECHECK)``;
+#: this constant only stops a near-zero ``hold_time`` from turning that
+#: wait into a busy loop. Sensor changes made through the simulator APIs
+#: wake the hold loop immediately, so this is not a staleness bound: an
+#: out-of-band state mutation (one that bypasses the simulator APIs) can go
+#: unnoticed for up to ``hold_time``.
 MIN_BLOCKED_RECHECK = 0.1
 
 
@@ -81,6 +84,12 @@ class DoorMotionEngine:
         self._task: asyncio.Task | None = None
         self._retired: set[asyncio.Task] = set()
         self._aux_tasks: set[asyncio.Task] = set()
+        self._sensor_timers: dict[str, asyncio.Task] = {}
+        #: Non-zero while status callbacks are running inside the owner
+        #: task; sequence starts requested from there are deferred.
+        self._dispatch_depth = 0
+        self._pending_sequence: tuple[str, bool] = (DOOR_STATE_CLOSED, False)
+        self._restart_handle: asyncio.Handle | None = None
         self._hold_mode = False
         self._hold_deadline = 0.0
         self._wake = asyncio.Event()
@@ -97,6 +106,10 @@ class DoorMotionEngine:
 
         The callback receives the new status string. Returns an unsubscribe
         function. Callback exceptions are logged and isolated.
+
+        A callback may command the door (``open()``/``close()``): the new
+        sequence is deferred until the current callback dispatch unwinds,
+        so it replaces the running sequence rather than racing it.
         """
         self._status_listeners.append(callback)
 
@@ -141,18 +154,30 @@ class DoorMotionEngine:
             self._status_waiters = [(s, f) for s, f in self._status_waiters if f is not future]
 
     def _set_status(self, status: str) -> None:
-        """Set the door status, broadcast it, and fire status hooks."""
+        """Set the door status, broadcast it, and fire status hooks.
+
+        The broadcast callback and status listeners run synchronously, and
+        usually inside the sequence owner task. ``_dispatch_depth`` marks
+        that window so a callback that commands the door (``open()``/
+        ``close()``) defers its sequence start instead of spawning a second
+        runner alongside the one dispatching to it (see
+        :meth:`_start_sequence`).
+        """
         self.state.door_status = status
-        if self.broadcast_status:
-            try:
-                self.broadcast_status()
-            except Exception:
-                logger.exception("Simulator: door status broadcast failed")
-        for callback in list(self._status_listeners):
-            try:
-                callback(status)
-            except Exception:
-                logger.exception("Simulator: door status listener failed")
+        self._dispatch_depth += 1
+        try:
+            if self.broadcast_status:
+                try:
+                    self.broadcast_status()
+                except Exception:
+                    logger.exception("Simulator: door status broadcast failed")
+            for callback in list(self._status_listeners):
+                try:
+                    callback(status)
+                except Exception:
+                    logger.exception("Simulator: door status listener failed")
+        finally:
+            self._dispatch_depth -= 1
         for statuses, future in list(self._status_waiters):
             if status in statuses and not future.done():
                 future.set_result(status)
@@ -232,12 +257,40 @@ class DoorMotionEngine:
         return True
 
     def _start_sequence(self, start_state: str, hold: bool) -> None:
-        """Replace the current sequence task with a new one from start_state."""
+        """Start a sequence from ``start_state``, replacing any current one.
+
+        A request made from a status listener or the broadcast callback
+        arrives *inside* the owner task's call stack, where the owner is
+        still mid-loop and cannot be cancelled. Such re-entrant requests are
+        recorded and applied from a ``call_soon`` callback instead, once the
+        owner task is suspended again — so exactly one ``_run`` task can ever
+        exist. Repeat requests within one dispatch coalesce (last one wins).
+        """
+        if self._dispatch_depth:
+            self._pending_sequence = (start_state, hold)
+            if self._restart_handle is None:
+                self._restart_handle = asyncio.get_running_loop().call_soon(
+                    self._start_pending_sequence
+                )
+            return
+        self._replace_sequence(start_state, hold)
+
+    def _start_pending_sequence(self) -> None:
+        """Apply a sequence start deferred out of a status-callback stack."""
+        self._restart_handle = None
+        start_state, hold = self._pending_sequence
+        self._replace_sequence(start_state, hold)
+
+    def _replace_sequence(self, start_state: str, hold: bool) -> None:
+        """Replace the current sequence task with a new one from start_state.
+
+        Only ever called from outside the owner task (``_start_sequence``
+        defers re-entrant calls), so cancelling the current task is safe:
+        it is suspended at an await point and can no longer change status.
+        It is awaited in :meth:`stop`.
+        """
         task = self._task
-        if task is not None and not task.done() and task is not asyncio.current_task():
-            # Cancelling from outside the owner task is safe; the retired
-            # task can no longer change status once cancelled here (it is
-            # suspended at an await point). It is awaited in stop().
+        if task is not None and not task.done():
             task.cancel()
             self._retired.add(task)
             task.add_done_callback(self._retired.discard)
@@ -329,6 +382,11 @@ class DoorMotionEngine:
         """
         state = self.state
 
+        # Re-activating a sensor restarts its window: drop any pending
+        # deactivation timer so a stale one cannot cut the new duration
+        # short.
+        self._cancel_sensor_timer(sensor)
+
         # Mutually exclusive - clear the other sensor
         if sensor == "inside":
             state.outside_sensor_active = False
@@ -341,7 +399,7 @@ class DoorMotionEngine:
             else:
                 state.inside_sensor_active = True
                 logger.info("Simulator: Inside sensor activated for %ss", duration)
-                self._track_aux(self._deactivate_sensor_after(sensor, duration))
+                self._arm_sensor_timer(sensor, duration)
         elif sensor == "outside":
             state.inside_sensor_active = False
             if duration == 0:
@@ -353,7 +411,7 @@ class DoorMotionEngine:
             else:
                 state.outside_sensor_active = True
                 logger.info("Simulator: Outside sensor activated for %ss", duration)
-                self._track_aux(self._deactivate_sensor_after(sensor, duration))
+                self._arm_sensor_timer(sensor, duration)
         self.notify_sensors_changed()
 
         # If door is closed and sensor should trigger, open the door
@@ -370,9 +428,22 @@ class DoorMotionEngine:
                 logger.info("Simulator: %s sensor triggering door cycle", sensor.capitalize())
                 self.open(hold=False)
 
+    def _cancel_sensor_timer(self, sensor: str) -> None:
+        """Cancel a pending auto-deactivation timer for ``sensor``, if any."""
+        task = self._sensor_timers.pop(sensor, None)
+        if task is not None:
+            task.cancel()
+
+    def _arm_sensor_timer(self, sensor: str, duration: float) -> None:
+        """Start the auto-deactivation timer for ``sensor``."""
+        self._sensor_timers[sensor] = self._track_aux(
+            self._deactivate_sensor_after(sensor, duration)
+        )
+
     async def _deactivate_sensor_after(self, sensor: str, duration: float) -> None:
         """Deactivate sensor after specified duration."""
         await asyncio.sleep(duration)
+        self._sensor_timers.pop(sensor, None)
         state = self.state
         if sensor == "inside" and state.inside_sensor_active:
             state.inside_sensor_active = False
@@ -484,9 +555,11 @@ class DoorMotionEngine:
         self._hold_deadline = loop.time() + float(self.state.hold_time)
         while True:
             if self.state.is_sensor_blocking_close():
-                # Blocked: wait for a sensor change (with a bounded re-check
-                # in case state was mutated without notifying the engine),
-                # then grant a full hold_time from when the block clears.
+                # Blocked: wait for a sensor change, then grant a full
+                # hold_time from when the block clears. The wait is one
+                # hold_time long (MIN_BLOCKED_RECHECK is only a floor that
+                # keeps a near-zero hold_time from spinning), so an
+                # out-of-band mutation is noticed within one hold_time.
                 logger.debug("Simulator: Sensor blocking close, resetting hold timer")
                 await self._wait_for_wake(max(float(self.state.hold_time), MIN_BLOCKED_RECHECK))
                 self._hold_deadline = loop.time() + float(self.state.hold_time)
@@ -542,17 +615,26 @@ class DoorMotionEngine:
             if task is not None and not task.done()
         ]
 
+    def _cancel_deferred_restart(self) -> None:
+        """Drop a sequence start deferred by a re-entrant status callback."""
+        handle = self._restart_handle
+        self._restart_handle = None
+        if handle is not None:
+            handle.cancel()
+
     def cancel_nowait(self) -> None:
         """Cancel all engine tasks without awaiting them.
 
         For synchronous contexts (e.g. ``connection_lost``); prefer
         :meth:`stop` wherever awaiting is possible.
         """
+        self._cancel_deferred_restart()
         for task in self._pending_tasks():
             task.cancel()
 
     async def stop(self) -> None:
         """Cancel and await all engine tasks and fail pending waiters."""
+        self._cancel_deferred_restart()
         tasks = self._pending_tasks()
         for task in tasks:
             task.cancel()
@@ -561,6 +643,7 @@ class DoorMotionEngine:
         self._task = None
         self._retired.clear()
         self._aux_tasks.clear()
+        self._sensor_timers.clear()
         for _, future in self._status_waiters:
             if not future.done():
                 future.cancel()

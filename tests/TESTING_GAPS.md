@@ -2,7 +2,7 @@
 
 This file is **auto-generated** by CI after each test run. Do not edit manually.
 
-**Last updated:** 2026-08-21 22:19 UTC
+**Last updated:** 2026-08-22 00:00 UTC
 
 ## Summary
 
@@ -10,8 +10,8 @@ This file is **auto-generated** by CI after each test run. Do not edit manually.
 |--------|-------|
 | Line Coverage | 100.00% |
 | Branch Coverage | 100.00% |
-| Lines Covered | 5,535 / 5,535 |
-| Branches Covered | 2,004 / 2,004 |
+| Lines Covered | 5,712 / 5,712 |
+| Branches Covered | 2,074 / 2,074 |
 | Lines Missing | 0 |
 
 ## Coverage by Category
@@ -49,13 +49,13 @@ The following are excluded from coverage by configuration (`pyproject.toml`):
 | Lines | Type | Reason | Code |
 |-------|------|--------|------|
 | 97 | no branch | defensive: enable( | `if self._handler:` |
-| 593 | no branch | bound after start( | `if simulator.server and simulator.server.sockets:` |
+| 598 | no branch | bound after start( | `if simulator.server and simulator.server.sockets:` |
 
 #### `simulator/ctl.py` (3 lines)
 
 | Lines | Type | Reason | Code |
 |-------|------|--------|------|
-| 319 | no cover | defensive: Linux selectors swallow errors for dead fds, so this cannot be triggered deterministically | `except Exception:` |
-| 498 | no cover | defensive: both prompt paths signal EOF by returning None rather than raising | `except EOFError:` |
-| 549 | no cover | defensive: socket_reader swallows its own cancellation; only an outer cancel landing exactly on this await would raise | `except asyncio.CancelledError:` |
+| 337 | no cover | defensive: Linux selectors swallow errors for dead fds, so this cannot be triggered deterministically | `except Exception:` |
+| 555 | no cover | defensive: both prompt paths signal EOF by returning None rather than raising | `except EOFError:` |
+| 606 | no cover | defensive: socket_reader swallows its own cancellation; only an outer cancel landing exactly on this await would raise | `except asyncio.CancelledError:` |
 

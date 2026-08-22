@@ -157,6 +157,10 @@ client.disconnect()
 - `connect()` returns once the TCP connection is established
   (`client.available` is `True`) or the attempt failed (a background
   reconnect is then scheduled). It only raises `asyncio.CancelledError`.
+- `connect()` is idempotent: while already connected, or while another
+  `connect()` is still in flight, it logs a warning and returns. A second
+  TCP connection is never opened - the device has a single connection slot,
+  and a leaked socket would lock everyone else out until the device drops it.
 - On connection loss the client automatically reconnects (see below)
   unless `shutdown()`/`stop()` was called.
 - `shutdown()`/`stop()` cancel any pending reconnect attempt - the

@@ -94,6 +94,11 @@ cannot be established in time - in that case the underlying client is
 fully shut down first (no reconnect attempts keep running in the
 background), so `connect()` may safely be retried.
 
+`connect()` is idempotent: called while already connected it logs a
+warning and returns without touching the connection. The device accepts a
+single connection, so a defensive re-connect must never open a second
+socket - that would orphan the live one and hog the device's only slot.
+
 `disconnect()` stops automatic reconnection and closes the connection.
 It is idempotent: calling it twice, or before `connect()`, is safe.
 After `disconnect()`, calling `connect()` again re-arms the client.
@@ -405,6 +410,13 @@ await door.refresh_stats()
 hw_info = await door.refresh_hardware_info()
 schedules = await door.refresh_schedules()
 ```
+
+`refresh()` and `refresh_settings()` never raise for a single failed step:
+each step is gathered independently and a failure is logged as
+`Refresh step <name> failed: ...` (logger `powerpetdoor.door`). Properties
+whose refresh failed keep their previous cached value, so a device NAK or a
+drop during `connect()` leaves a partial cache rather than an exception -
+check the log if a property looks stale.
 
 ## Supporting Types
 

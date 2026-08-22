@@ -519,7 +519,6 @@ class TestCompleterInternals:
     def test_run_uses_prefix_aware_script_completer(self):
         assert "basic_cycle" in self._completions("run ")
 
-    @pytest.mark.asyncio
     async def test_timezone_uses_zero_arg_completer(self):
         from powerpetdoor.tz_utils import async_init_timezone_cache
 
@@ -570,19 +569,16 @@ class TestCompleterInternals:
 
 @requires_prompt_toolkit
 class TestPromptAsync:
-    @pytest.mark.asyncio
     async def test_returns_stripped_line(self, pt_pipe):
         session = InteractiveSession(history_file="none")
         pt_pipe.send_text("  status  \r")
         assert await asyncio.wait_for(session.prompt_async(), 5) == "status"
 
-    @pytest.mark.asyncio
     async def test_empty_line_returns_empty_string(self, pt_pipe):
         session = InteractiveSession(history_file="none")
         pt_pipe.send_text("\r")
         assert await asyncio.wait_for(session.prompt_async(), 5) == ""
 
-    @pytest.mark.asyncio
     async def test_uses_get_prompt_callable(self, pt_pipe):
         session = InteractiveSession.create(
             host="h", port=1, history_file="none", is_connected=lambda: True
@@ -590,19 +586,16 @@ class TestPromptAsync:
         pt_pipe.send_text("power\r")
         assert await asyncio.wait_for(session.prompt_async(), 5) == "power"
 
-    @pytest.mark.asyncio
     async def test_keyboard_interrupt_returns_empty_string(self, pt_pipe):
         session = InteractiveSession(history_file="none")
         pt_pipe.send_text("\x03")  # Ctrl-C
         assert await asyncio.wait_for(session.prompt_async(), 5) == ""
 
-    @pytest.mark.asyncio
     async def test_eof_returns_none(self, pt_pipe):
         session = InteractiveSession(history_file="none")
         pt_pipe.close()
         assert await asyncio.wait_for(session.prompt_async(), 5) is None
 
-    @pytest.mark.asyncio
     async def test_without_session_returns_none(self):
         # Non-TTY stdin: no PromptSession was created
         session = InteractiveSession(history_file="none")
@@ -612,7 +605,6 @@ class TestPromptAsync:
 
 @requires_prompt_toolkit
 class TestInputLoop:
-    @pytest.mark.asyncio
     async def test_yields_lines_then_stops_on_eof(self, pt_pipe):
         session = InteractiveSession(history_file="none")
         pt_pipe.send_text("status\rpower\r")
@@ -623,13 +615,11 @@ class TestInputLoop:
             ("power", False),
         ]
 
-    @pytest.mark.asyncio
     async def test_stop_check_stops_before_prompting(self, pt_pipe):
         session = InteractiveSession(history_file="none")
         lines = [line async for line in session.input_loop(stop_check=lambda: True)]
         assert lines == []
 
-    @pytest.mark.asyncio
     async def test_empty_lines_are_skipped(self, pt_pipe):
         session = InteractiveSession(history_file="none")
         pt_pipe.send_text("\rstatus\r")
@@ -637,7 +627,6 @@ class TestInputLoop:
         lines = [line.resolved async for line in session.input_loop()]
         assert lines == ["status"]
 
-    @pytest.mark.asyncio
     async def test_recall_resolves_previous_command(self, pt_pipe):
         session = InteractiveSession(history_file="none")
         pt_pipe.send_text("status\r!1\r")
@@ -648,7 +637,6 @@ class TestInputLoop:
             ("!1", "status", True),
         ]
 
-    @pytest.mark.asyncio
     async def test_recall_error_printed_and_loop_continues(self, pt_pipe, capsys):
         session = InteractiveSession(history_file="none")
         # "!99" is itself added to history and excluded from recall - with
@@ -659,7 +647,6 @@ class TestInputLoop:
         assert lines == ["status"]
         assert ">>> No history" in capsys.readouterr().out
 
-    @pytest.mark.asyncio
     async def test_keyboard_interrupt_at_yield_continues_loop(self, pt_pipe):
         """A KeyboardInterrupt delivered while suspended at the yield point
         (Ctrl-C during command execution) continues the loop."""
@@ -673,7 +660,6 @@ class TestInputLoop:
         assert nxt.resolved == "power"
         await gen.aclose()
 
-    @pytest.mark.asyncio
     async def test_eof_error_at_yield_stops_loop(self, pt_pipe):
         session = InteractiveSession(history_file="none")
         pt_pipe.send_text("status\r")
@@ -835,7 +821,6 @@ class TestPromptFormatting:
 
 
 class TestWithoutPromptToolkit:
-    @pytest.mark.asyncio
     async def test_module_degrades_gracefully(self):
         """With prompt_toolkit unimportable the module must still load and
         every entry point must degrade instead of raising."""

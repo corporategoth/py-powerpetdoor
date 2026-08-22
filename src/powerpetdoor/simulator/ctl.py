@@ -28,6 +28,7 @@ from .commands.base import (
 from .commands.control import ControlCommandsMixin
 from .commands.history import History
 from .commands.info import InfoCommandsMixin
+from .commands.scripts import is_wait_run
 from .prompt_common import (
     CTL_HISTORY_FILE as HISTORY_FILE,
 )
@@ -134,6 +135,12 @@ class LocalCommandHandler(InfoCommandsMixin, ControlCommandsMixin):
         if cmd not in registry:
             return LocalCommandResult(False, f"Unknown command: {cmd}")
 
+        # History needs a real terminal session. Answer exactly as the CLI
+        # does (and as ctl's own help already implies by hiding it) rather
+        # than blaming a missing prompt_toolkit that may well be installed.
+        if cmd in ("history", "hist") and not self._is_history_available():
+            return LocalCommandResult(False, f"Unknown command: {cmd}")
+
         info: SubcommandInfo = registry[cmd]
         cmd_path = [info.name]
 
@@ -225,11 +232,17 @@ def send_command(
 ) -> tuple[bool, str]:
     """Send a command to the simulator control port (one-shot mode).
 
+    ``timeout`` bounds a *gap* in daemon traffic, not the total wait: each
+    received chunk restarts it, so a chatty command never times out. For
+    ``run <script> wait`` there is no deadline at all - the script's
+    duration is unbounded and arbitrarily quiet, and the live connection is
+    the liveness signal.
+
     Args:
         host: Simulator host address
         port: Control port number
         command: Command to send
-        timeout: Socket timeout in seconds
+        timeout: Seconds of silence tolerated while waiting for a response
 
     Returns:
         Tuple of (success, response_message)
@@ -239,6 +252,8 @@ def send_command(
             sock.settimeout(timeout)
             sock.connect((host, port))
             sock.sendall(f"{command}\n".encode())
+            if is_wait_run(command):
+                sock.settimeout(None)
 
             # Read response - only complete (newline-terminated) lines are
             # parsed so a response spanning TCP segments is never truncated
@@ -247,7 +262,10 @@ def send_command(
                 try:
                     chunk = sock.recv(4096)
                 except TimeoutError:
-                    return False, (f"Response timeout after {timeout}s waiting for {host}:{port}")
+                    return False, (
+                        f"Response timeout after {timeout}s waiting for {host}:{port} "
+                        "(the command may still be running; raise --timeout)"
+                    )
                 if not chunk:
                     break
                 buffer += chunk.decode(errors="replace")
@@ -369,6 +387,11 @@ async def interactive_mode_async(
     # Create local command handler with history from interactive session
     local_handler = LocalCommandHandler(history=interactive.history)
 
+    # Set on every line received from the daemon. A command still waiting
+    # for its OK:/ERROR: treats any traffic as proof of life and restarts
+    # its silence deadline (streaming LOG: output must not time out).
+    activity = asyncio.Event()
+
     async def socket_reader():
         """Single task that reads all messages from the socket.
 
@@ -390,6 +413,7 @@ async def interactive_mode_async(
                         stop_event.set()
                         break
                     decoded = line.decode(errors="replace").strip()
+                    activity.set()
                     if decoded.startswith("STATUS:"):
                         # Structured door-client status from the daemon
                         payload = decoded[7:].strip()
@@ -420,6 +444,43 @@ async def interactive_mode_async(
                 print(f"\n>>> Connection error: {e}")
                 stop_event.set()
 
+    async def await_response(silence_timeout: float | None) -> tuple[bool, str]:
+        """Wait for the next OK:/ERROR:, bounded by silence, not total time.
+
+        ``silence_timeout`` bounds a *gap* in daemon traffic: any line
+        received (typically streaming LOG: output) restarts it. None waits
+        indefinitely - used for ``run <script> wait``, whose duration is the
+        script's, not the command's. Either way a dropped connection
+        (stop_event) ends the wait.
+        """
+        response_task = asyncio.ensure_future(response_queue.get())
+        stop_task = asyncio.ensure_future(stop_event.wait())
+        try:
+            while True:
+                activity.clear()
+                activity_task = asyncio.ensure_future(activity.wait())
+                try:
+                    done, _pending = await asyncio.wait(
+                        [response_task, stop_task, activity_task],
+                        timeout=silence_timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    activity_task.cancel()
+                if response_task in done:
+                    return response_task.result()
+                if stop_task in done:
+                    return False, "Simulator disconnected before responding"
+                if not done:
+                    return False, (
+                        f"Response timeout after {silence_timeout}s of silence "
+                        "(the command may still be running; raise --timeout)"
+                    )
+                # Only activity fired: the daemon is alive, keep waiting.
+        finally:
+            for task in (response_task, stop_task):
+                task.cancel()
+
     async def send_command_async(cmd: str) -> tuple[bool, str]:
         """Send a command and wait for response from the queue."""
         try:
@@ -433,12 +494,8 @@ async def interactive_mode_async(
             writer.write(f"{cmd}\n".encode())
             await writer.drain()
 
-            # Wait for response from the reader task
-            try:
-                success, response = await asyncio.wait_for(response_queue.get(), timeout=timeout)
-                return success, response
-            except TimeoutError:
-                return False, "Response timeout"
+            # A synchronous script run takes as long as the script does.
+            return await await_response(None if is_wait_run(cmd) else timeout)
         except Exception as e:
             return False, f"Error: {e}"
 

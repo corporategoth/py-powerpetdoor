@@ -19,9 +19,13 @@ from powerpetdoor.const import (
     CMD_OPEN,
     CONFIG,
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
+    DOOR_STATE_SLOWING,
+    DOOR_STATUS,
     FIELD_DOOR_STATUS,
     FIELD_SUCCESS,
     PING,
@@ -32,6 +36,16 @@ from powerpetdoor.simulator import (
     DoorSimulatorState,
     DoorTimingConfig,
 )
+
+#: The exact DOOR_STATUS broadcast sequence for an open that runs to
+#: HOLDING, and for a complete open/hold/close cycle.
+OPENING_SEQUENCE = [DOOR_STATE_RISING, DOOR_STATE_SLOWING, DOOR_STATE_HOLDING]
+FULL_CYCLE = [
+    *OPENING_SEQUENCE,
+    DOOR_STATE_CLOSING_TOP_OPEN,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    DOOR_STATE_CLOSED,
+]
 
 # ============================================================================
 # Test Fixtures
@@ -146,6 +160,25 @@ class MessageCapture:
         """Find all door status update messages."""
         return [msg for msg in self.messages if FIELD_DOOR_STATUS in msg]
 
+    def get_status_sequence(self) -> list[str]:
+        """The exact sequence of unsolicited DOOR_STATUS broadcasts.
+
+        Command responses (OPEN, CLOSE, GET_DOOR_STATUS) also carry a
+        doorStatus field; only ``CMD: DOOR_STATUS`` frames are broadcasts.
+        """
+        return [msg[FIELD_DOOR_STATUS] for msg in self.messages if msg.get("CMD") == DOOR_STATUS]
+
+    async def receive_status_sequence(self, expected: list[str], timeout: float = 5.0) -> list[str]:
+        """Receive until the broadcast status sequence equals ``expected``.
+
+        Returns the captured sequence; on timeout the caller's assertion
+        reports the mismatch.
+        """
+        await self.receive_until(
+            lambda _msg: self.get_status_sequence() == expected, timeout=timeout
+        )
+        return self.get_status_sequence()
+
     async def close(self):
         """Close the connection."""
         self.writer.close()
@@ -170,7 +203,6 @@ async def capture(simulator) -> MessageCapture:
 class TestBasicProtocol:
     """Test basic protocol message handling."""
 
-    @pytest.mark.asyncio
     async def test_ping_pong(self, capture):
         """PING should receive PONG response."""
         await capture.send({PING: "test123"})
@@ -182,7 +214,6 @@ class TestBasicProtocol:
         assert pong[PONG] == "test123"
         assert pong[FIELD_SUCCESS] == "true"
 
-    @pytest.mark.asyncio
     async def test_get_door_status(self, capture, simulator):
         """GET_DOOR_STATUS should return current status."""
         await capture.send({CONFIG: CMD_GET_DOOR_STATUS, "msgId": 1})
@@ -202,34 +233,17 @@ class TestBasicProtocol:
 class TestDoorOperationMessages:
     """Test messages sent during door operations."""
 
-    @pytest.mark.asyncio
     async def test_open_door_sends_status_updates(self, capture, simulator):
-        """Opening door should send status update messages."""
-        # Send OPEN command
+        """Opening the door broadcasts the exact opening sequence."""
         await capture.send({CONFIG: CMD_OPEN, "msgId": 1})
 
-        # Wait for door to start rising
-        await capture.receive_until(
-            lambda m: (
-                m.get(FIELD_DOOR_STATUS)
-                in (DOOR_STATE_RISING, DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP)
-            ),
-            timeout=2.0,
-        )
+        statuses = await capture.receive_status_sequence(OPENING_SEQUENCE, timeout=3.0)
 
-        # Receive any remaining messages (command response might arrive after status)
-        await capture.receive_all(timeout=0.2)
-
-        # Should have received open response
+        assert statuses == OPENING_SEQUENCE
         open_response = capture.find_message(CMD_OPEN)
         assert open_response is not None
         assert open_response[FIELD_SUCCESS] == "true"
 
-        # Should have received status updates
-        status_updates = capture.find_status_updates()
-        assert len(status_updates) > 0
-
-    @pytest.mark.asyncio
     async def test_close_door_sends_status_updates(self, capture, simulator):
         """Closing door should send status update messages."""
         # First open the door
@@ -253,47 +267,21 @@ class TestDoorOperationMessages:
         assert close_response is not None
         assert close_response[FIELD_SUCCESS] == "true"
 
-    @pytest.mark.asyncio
     async def test_sensor_trigger_sends_status_updates(self, capture, simulator):
-        """Sensor trigger should send door status updates."""
-        # Trigger inside sensor
+        """A sensor trigger broadcasts the exact opening sequence."""
         simulator.trigger_sensor("inside")
 
-        # Wait for door to start opening
-        await capture.receive_until(
-            lambda m: m.get(FIELD_DOOR_STATUS) in (DOOR_STATE_RISING, DOOR_STATE_HOLDING),
-            timeout=2.0,
-        )
+        statuses = await capture.receive_status_sequence(OPENING_SEQUENCE, timeout=3.0)
 
-        # Should have received status updates with door opening
-        status_updates = capture.find_status_updates()
-        assert len(status_updates) > 0
+        assert statuses == OPENING_SEQUENCE
 
-        # At least one should show door not closed
-        door_opening = any(msg[FIELD_DOOR_STATUS] != DOOR_STATE_CLOSED for msg in status_updates)
-        assert door_opening, "Should see door status change from closed"
-
-    @pytest.mark.asyncio
     async def test_full_door_cycle_messages(self, capture, simulator):
-        """Full door cycle should send complete status sequence."""
-        # Trigger sensor to start a full cycle
+        """A sensor-driven cycle broadcasts every state, in order."""
         simulator.trigger_sensor("inside")
 
-        # Wait for door to close again (full cycle)
-        await capture.receive_until(
-            lambda m: (
-                m.get(FIELD_DOOR_STATUS) == DOOR_STATE_CLOSED
-                and any(msg.get(FIELD_DOOR_STATUS) != DOOR_STATE_CLOSED for msg in capture.messages)
-            ),
-            timeout=5.0,
-        )
+        statuses = await capture.receive_status_sequence(FULL_CYCLE, timeout=6.0)
 
-        status_updates = capture.find_status_updates()
-        statuses = [msg[FIELD_DOOR_STATUS] for msg in status_updates]
-
-        # Should see progression: some non-closed states, then closed
-        non_closed = [s for s in statuses if s != DOOR_STATE_CLOSED]
-        assert len(non_closed) > 0, "Should see door open before closing"
+        assert statuses == FULL_CYCLE
 
 
 # ============================================================================
@@ -304,7 +292,6 @@ class TestDoorOperationMessages:
 class TestMultiClient:
     """Test simulator behavior with multiple clients."""
 
-    @pytest.mark.asyncio
     async def test_multiple_clients_receive_broadcasts(self, simulator):
         """Multiple clients should receive status broadcasts."""
         port = simulator.server.sockets[0].getsockname()[1]
@@ -344,7 +331,6 @@ class TestMultiClient:
             await cap1.close()
             await cap2.close()
 
-    @pytest.mark.asyncio
     async def test_command_from_one_client_broadcasts(self, simulator):
         """Command from one client should broadcast status to all."""
         port = simulator.server.sockets[0].getsockname()[1]

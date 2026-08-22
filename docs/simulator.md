@@ -75,6 +75,10 @@ Then connect your client to `localhost:3000`.
 
 `--script` and `--daemon` are mutually exclusive.
 
+Mode-scoped flags are rejected outside their mode rather than silently
+ignored: `--loop`, `--script-delay`, `--oneshot` and `--wait-for-client`
+require `--script`, and `--control-host` requires `--daemon`.
+
 ### Options
 
 | Option | Description |
@@ -87,11 +91,12 @@ Then connect your client to `localhost:3000`.
 | `--script-delay` `SECONDS` | Delay between scripts and loop iterations (default: 0) |
 | `--oneshot` | Exit after scripts complete (useful for CI/CD). Takes precedence over `--run-for`. |
 | `--wait-for-client`, `-w` | Wait for a client to connect before starting scripts; scripts stop if the client disconnects |
-| `--list-scripts`, `-l` | List available built-in scripts and exit |
+| `--list-scripts`, `-l` | List runnable scripts (built-in, plus `--scripts-dir` if given) and exit |
 | `--daemon`, `-D` `[CONTROL_PORT]` | Run in daemon mode with a control channel (default control port: door port + 1) |
-| `--control-host` `ADDR` | Bind address for the daemon control channel (default: `127.0.0.1`). See the [security note](#daemon-mode) before widening this. |
+| `--control-host` `ADDR` | Bind address for the daemon control channel (default: `127.0.0.1`). Requires `--daemon`. See the [security note](#daemon-mode) before widening this. |
+| `--scripts-dir` `DIR` | Directory of extra YAML scripts runnable by bare name, in addition to the built-ins. They appear in `list`, in `--list-scripts`, in unknown-script errors, and in tab completion. |
 | `--run-for`, `-r` `SECONDS` | Maximum run time in seconds (`--oneshot` can exit earlier) |
-| `--history` `FILE` | Prompt history file, or `none` to disable (default: `~/.powerpetdoor_simulator_history`; only present when prompt_toolkit is installed) |
+| `--history` `FILE` | Prompt history file, or `none` to disable (default: `~/.powerpetdoor_simulator_history`; ignored when prompt_toolkit is not installed) |
 | `--firmware`, `-f` `VERSION` | Firmware version to report as `major.minor.patch` (default: 1.2.3) |
 | `--hardware` `VERSION` | Hardware version to report as `ver.rev` (default: 1.1) |
 
@@ -167,7 +172,7 @@ arguments and subcommands. Extra arguments in `[brackets]` are optional.
 | Command | Aliases | Action |
 |---------|---------|--------|
 | `obstruction` | `x` | Simulate an obstruction during close (triggers auto-retract if enabled) |
-| `pet arrive` / `pet depart` | | Simulate a pet standing in (or leaving) the doorway. A present pet keeps the door open — the same mechanism as the `pet_presence`/`pet_on`/`pet_off` script actions |
+| `pet [on\|off]` | `d` | Pet standing in the doorway (a present pet keeps the door open). Bare `pet` toggles, and a `toggle`/`t` subcommand is also available — the same mechanism as the `pet_presence`/`pet_on`/`pet_off` script actions |
 
 ### Physical Buttons
 
@@ -189,8 +194,9 @@ available):
 | `safety [on\|off]` | `s` | Outside sensor safety lock (toggle if bare) |
 | `lockout [on\|off]` | `l` | Command lockout (toggle if bare) |
 | `autoretract [on\|off]` | `a` | Auto-retract on obstruction (toggle if bare) |
-| `holdtime <seconds>` | `t` | Set hold time (0.1–900 seconds) |
-| `battery [percent]` | `b` | Set battery level 0–100 (random 10–100 if omitted) |
+| `holdtime [seconds]` | `t` | Set hold time (0.1–900 seconds); bare shows the current hold time |
+| `battery [percent]` | `b` | Set battery level 0–100; bare shows the current level |
+| `battery random` | | Set a random battery level (10–100) |
 | `ac [connect\|disconnect\|toggle]` | | AC power connection (toggle if bare) |
 | `battery_present [on\|off]` | `bp` | Battery installed/removed (toggle if bare) |
 | `charge_rate [rate]` | `cr` | Set battery charge rate in %/min (`0` disables); bare shows the current rate |
@@ -227,8 +233,9 @@ The `schedule` command (alias `sched`) manages schedule entries:
 
 | Command | Aliases | Action |
 |---------|---------|--------|
-| `run <script>` | `r`, `file` | Run a script — built-in name or YAML file path. Scripts are queued and run in the background; the PASSED/FAILED result is logged |
-| `list` | `/`, `scripts` | List available built-in scripts |
+| `run <script>` | `r`, `file` | Queue a script — built-in name, `--scripts-dir` name, or YAML file path. The command returns as soon as the script is queued; the PASSED/FAILED result is only logged. A queued script waits for any script already running |
+| `run <script> wait` | `r`, `file` | Run the script synchronously and report `Script PASSED`/`Script FAILED` as the command result. Fails immediately with `Another script is already running: <name>` rather than queueing, so the result always belongs to the script you asked for. Over ctl this is the only form whose exit code reflects the script |
+| `list` | `/`, `scripts` | List runnable scripts (built-in, plus any from `--scripts-dir`) |
 
 ### Info
 
@@ -237,7 +244,7 @@ The `schedule` command (alias `sched`) manages schedule entries:
 | `status` | `state`, `info`, `v` | Show the full simulator state (connected clients, door, power, sensors, settings, battery, notifications, schedules, statistics) |
 | `help` | `?` | Show all available commands |
 | `broadcast <what>` | `bc` | Push an unsolicited update to connected door clients. `<what>` is one of `status`, `settings`, `battery`, `hwinfo`, `stats`, `schedules`, `notifications`, `all`. Errors if no client is connected |
-| `history [N\|clear]` | `hist` | Show the last N commands (default 20) or clear history (interactive prompt only; requires prompt_toolkit) |
+| `history [N\|clear]` | `hist` | Show the last N commands (default 20) or clear history. Needs an interactive terminal session with prompt_toolkit installed; otherwise the command is hidden and reported as unknown |
 
 ### Control
 
@@ -262,10 +269,26 @@ ppd-simulator --daemon 4001
 ```
 
 The control channel accepts the same commands as the interactive prompt,
-newline-terminated. Each command gets a single response line — `OK: <message>`
-or `ERROR: <message>` (embedded newlines are escaped as `\n`) — and simulator
-log output is streamed to every connected control client as `LOG: <line>`
-messages.
+newline-terminated. Every line the daemon sends is one of four kinds:
+
+| Line | Meaning |
+|------|---------|
+| `OK: <message>` | The command succeeded |
+| `ERROR: <message>` | The command failed |
+| `LOG: <line>` | A simulator log record, broadcast to every connected control client |
+| `STATUS: clients=<n>` | Number of connected **door** clients. Sent immediately on connect, then again whenever a door client connects or disconnects. `ppd-simulator-ctl` uses it to color the prompt |
+
+Only `OK:`/`ERROR:` are command responses; a client must skip `LOG:` and
+`STATUS:` lines while waiting for one. `STATUS:` arrives before any command
+is sent, so a client that assumes the first line is a response will misparse
+it.
+
+`OK:`/`ERROR:`/`LOG:` message text is escaped so one protocol line is always
+one physical line: **backslashes are doubled first (`\` → `\\`), then
+newlines become `\n`**. Unescape in the reverse order (split on `\\`
+first, then replace `\n` with a newline inside each piece) — a client that
+only handles `\n` corrupts messages containing literal backslashes, such as
+Windows-style script paths.
 
 > **Security note**: the control channel is **unauthenticated** — anyone who
 > can connect to it can drive the simulator, run scripts, and shut it down.
@@ -277,9 +300,15 @@ messages.
 > reachable from the network.
 
 Over the control channel, `run` accepts only **bare script names** (no path
-separators or traversal), resolved against the known script locations.
-Running an arbitrary YAML file path is only possible locally, via the
-interactive CLI or `--script`.
+separators or traversal). A bare name resolves against the `--scripts-dir`
+directory first (if one was given), then the built-in scripts. Running an
+arbitrary YAML file path is only possible locally, via the interactive CLI or
+`--script`.
+
+Start the daemon with `--scripts-dir DIR` to make your own YAML scripts
+runnable by bare name. They then show up in `list`, in `--list-scripts`, in
+the "Available:" hint of an unknown-script error, and in tab completion, so a
+ctl user who did not start the daemon can still discover them.
 
 ## Remote Control (ppd-simulator-ctl)
 
@@ -288,17 +317,36 @@ interactive CLI or `--script`.
 ### One-Shot Commands
 
 ```bash
-ppd-simulator-ctl status            # Show simulator state
-ppd-simulator-ctl inside            # Trigger the inside sensor
-ppd-simulator-ctl holdtime 2        # Change a setting
-ppd-simulator-ctl run basic_cycle   # Run a script (waits for the result)
-ppd-simulator-ctl shutdown          # Stop the daemon
+ppd-simulator-ctl status                  # Show simulator state
+ppd-simulator-ctl inside                  # Trigger the inside sensor
+ppd-simulator-ctl holdtime 2              # Change a setting
+ppd-simulator-ctl run basic_cycle wait    # Run a script and wait for its result
+ppd-simulator-ctl run basic_cycle         # Queue a script (returns immediately)
+ppd-simulator-ctl shutdown                # Stop the daemon
 ```
 
 The exit code is **0** on success and **1** on error (unknown command,
 validation failure, or connection failure), so one-shot commands are
-scriptable. For `run`, the exit code reflects the **script result**: 0 if the
-script passed, 1 if it failed.
+scriptable.
+
+**For `run`, only `run <script> wait` reflects the script result** (0 passed,
+1 failed). Plain `run <script>` just queues the script and exits **0** as soon
+as it is queued — a CI job that omits `wait` always sees success, whatever the
+script does:
+
+```bash
+ppd-simulator-ctl run full_test_suite wait || echo "Tests failed!"
+```
+
+A wait-run is deliberately **not** bound by `--timeout`: the script's runtime
+is unbounded and may be entirely silent, so ctl waits for as long as the
+daemon connection is alive. For every other command `--timeout` bounds a *gap*
+in daemon traffic rather than the total wait, so streaming `LOG:` output keeps
+a long-running command alive.
+
+Only one script runs at a time. A wait-run issued while another script is
+running fails immediately with `Another script is already running: <name>`
+instead of interleaving; a plain (queued) `run` waits its turn.
 
 ### Interactive Mode
 
@@ -326,8 +374,8 @@ daemon itself.
 | `--port`, `-p` `PORT` | Control port (default: 3001) |
 | `--door-port`, `-d` `PORT` | Door port shown in the prompt (default: control port − 1) |
 | `--interactive`, `-i` | Run in interactive mode |
-| `--timeout`, `-t` `SECONDS` | Command timeout (default: 5) |
-| `--history` `FILE` | History file path, or `none` to disable (default: `~/.powerpetdoor_ctl_history`; only present when prompt_toolkit is installed) |
+| `--timeout`, `-t` `SECONDS` | Seconds of daemon silence tolerated while waiting for a response (default: 5). Restarted by any received line; ignored entirely for `run <script> wait` |
+| `--history` `FILE` | History file path, or `none` to disable (default: `~/.powerpetdoor_ctl_history`; ignored when prompt_toolkit is not installed) |
 
 ## Programmatic Usage
 
@@ -701,7 +749,7 @@ Settings that can be used with `set` and `toggle`:
 | `autoretract` | boolean | Auto-retract on obstruction |
 | `safety_lock` | boolean | Outside sensor safety lock |
 | `cmd_lockout` | boolean | Command lockout |
-| `hold_time` | integer | Seconds door stays open |
+| `hold_time` | number | Seconds door stays open (fractional values allowed, e.g. `1.5`) |
 | `battery` | integer | Battery percentage (0-100) |
 
 Boolean values accept: `true`, `false`, `on`, `off`, `yes`, `no`, `1`, `0`, `enabled`, `disabled`
@@ -710,17 +758,20 @@ Boolean values accept: `true`, `false`, `on`, `off`, `yes`, `no`, `1`, `0`, `ena
 
 The simulator includes several built-in test scripts:
 
+These descriptions are the scripts' own `description` fields; `--list-scripts`
+prints the authoritative list.
+
 | Script | Description |
 |--------|-------------|
 | `basic_cycle` | Pet triggers inside sensor, door opens, holds, then closes |
-| `obstruction_test` | Tests auto-retract when obstruction detected |
-| `pet_presence_test` | Tests that pet in doorway keeps door open |
-| `power_lockout_test` | Tests that door doesn't respond when power off |
-| `safety_lock_test` | Tests outside sensor safety lock feature |
-| `schedule_test` | Tests schedule add/remove functionality |
+| `obstruction_test` | Tests that door auto-retracts when obstruction detected |
+| `pet_presence_test` | Tests that pet in doorway keeps the door open past its hold time |
+| `power_lockout_test` | Tests that commands are blocked when power off or lockout enabled |
+| `safety_lock_test` | Tests that outside sensor is blocked when safety lock enabled |
+| `schedule_test` | Tests that sensors respect schedule time windows |
 | `full_test_suite` | Comprehensive test of all simulator features |
 
-List available scripts:
+List available scripts (including any from `--scripts-dir`):
 ```bash
 python -m powerpetdoor.simulator --list-scripts
 ```
@@ -830,6 +881,9 @@ powerpetdoor/simulator/
 ├── protocol.py      # Protocol handler
 │   ├── CommandRegistry    # @handler decorator registry
 │   └── DoorSimulatorProtocol  # asyncio Protocol
+├── engine.py        # Door-motion state machine
+│   └── DoorMotionEngine   # Single open/hold/close/retract runner shared
+│                          # by the protocol and no-client paths
 ├── server.py        # Main simulator class
 │   └── DoorSimulator      # Server lifecycle & control
 ├── cli.py           # ppd-simulator command-line interface
@@ -844,7 +898,7 @@ powerpetdoor/simulator/
 ├── scripting.py     # Script execution
 │   ├── Script            # Script container
 │   ├── ScriptStep        # Single step
-│   └── ScriptRunner      # Executor
+│   └── ScriptRunner      # Executor (serialized: one script at a time)
 └── scripts/         # Built-in YAML scripts
     ├── basic_cycle.yaml
     ├── full_test_suite.yaml

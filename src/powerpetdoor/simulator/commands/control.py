@@ -86,10 +86,15 @@ class ControlCommandsMixin:
         local_only=True,
     )
     def clear(self) -> CommandResult:
-        """Clear the terminal screen."""
+        """Clear the terminal screen.
+
+        A no-op off a terminal: writing the escape sequence to a pipe or a
+        dumb terminal only injects literal garbage into the output (T3).
+        """
         # Use __stdout__ to bypass prompt_toolkit's patch_stdout
-        # ANSI escape sequence: \033[2J clears screen, \033[H moves cursor to top-left
         out = sys.__stdout__ if sys.__stdout__ else sys.stdout
-        out.write("\033[2J\033[H")
-        out.flush()
+        if out.isatty():
+            # ANSI escape: \033[2J clears the screen, \033[H homes the cursor
+            out.write("\033[2J\033[H")
+            out.flush()
         return CommandResult(True, "")

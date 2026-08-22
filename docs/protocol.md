@@ -433,6 +433,14 @@ Response:
 
 See [Schedule Format](#schedule-format) for the schedule object structure.
 
+The simulator validates schedules coming off the wire before storing them:
+`index` must be an integer in 0-255, `daysOfWeek` must be a 7-element list
+(or the legacy integer bitmask), and `hour`/`min` must be integers in 0-23 /
+0-59. A malformed schedule is rejected with the standard error envelope
+(`"success": "false"` plus a `reason` naming the offending field) and nothing
+is stored; `SET_SCHEDULE_LIST` rejects the whole batch rather than loading it
+partially.
+
 ### Diagnostic Commands
 
 | Command | Type | Description |

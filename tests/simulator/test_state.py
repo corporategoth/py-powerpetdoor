@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
     FIELD_AUTO,
@@ -195,6 +197,32 @@ class TestSchedule:
         # Bitmask 0b0011111 = 31 converts to list [1, 1, 1, 1, 1, 0, 0]
         assert schedule.days_of_week == [1, 1, 1, 1, 1, 0, 0]
 
+    def test_from_dict_normalizes_days_to_seven_bools(self):
+        """Wire days become exactly 7 booleans, whatever their input type."""
+        schedule = Schedule.from_dict(
+            {"index": 0, "inside": True, "daysOfWeek": [1, 0, "yes", "", None, 2, True]}
+        )
+        assert schedule.days_of_week == [True, False, True, False, False, True, True]
+        assert all(isinstance(day, bool) for day in schedule.days_of_week)
+
+    def test_to_dict_writes_wire_ints_for_bool_days(self):
+        """Booleans in memory are written back to the wire as 1/0."""
+        schedule = Schedule(index=0, inside=True, days_of_week=[True, False] * 3 + [True])
+        assert schedule.to_dict()["daysOfWeek"] == [1, 0, 1, 0, 1, 0, 1]
+
+    def test_from_dict_coerces_numeric_strings(self):
+        """Numeric strings from a sloppy client are coerced, not stored raw."""
+        schedule = Schedule.from_dict(
+            {
+                "index": "3",
+                "inside": True,
+                "in_start_time": {"hour": "7", "min": "5"},
+                "in_end_time": {"hour": 19, "min": 0},
+            }
+        )
+        assert schedule.index == 3
+        assert (schedule.start_hour, schedule.start_min) == (7, 5)
+
     def test_roundtrip_conversion(self):
         """to_dict and from_dict should be inverses."""
         original = Schedule(
@@ -308,6 +336,68 @@ class TestSchedule:
         assert schedule.is_sensor_allowed("inside", 2, 0, 0) is True
         # 12:00 should NOT be allowed
         assert schedule.is_sensor_allowed("inside", 12, 0, 0) is False
+
+
+class TestScheduleFromDictRejectsHostileInput:
+    """Wire schedules are untrusted: malformed ones must never be stored.
+
+    A stored malformed schedule used to raise IndexError/TypeError later,
+    during sensor evaluation - a quiet, persistent denial of the
+    sensor-trigger feature (security round-2 finding 1).
+    """
+
+    def test_non_mapping_payload_rejected(self):
+        with pytest.raises(ValueError, match="Schedule must be an object"):
+            Schedule.from_dict(["not", "a", "schedule"])
+
+    @pytest.mark.parametrize(
+        "days",
+        [[1], [1, 1, 1, 1, 1, 1, 1, 1], "1111111", None],
+        ids=["too-short", "too-long", "string", "null"],
+    )
+    def test_wrong_length_days_rejected(self, days):
+        with pytest.raises(ValueError, match="daysOfWeek must be a list of 7 values"):
+            Schedule.from_dict({"index": 0, "inside": True, "daysOfWeek": days})
+
+    def test_truncated_days_cannot_reach_is_day_active(self):
+        """The exact reproduction: a 1-element daysOfWeek is refused."""
+        with pytest.raises(ValueError):
+            Schedule.from_dict({"index": 0, "inside": True, "daysOfWeek": [1]})
+
+    @pytest.mark.parametrize(
+        ("index", "message"),
+        [
+            ("not-a-number", "index must be a number"),
+            (None, "index must be a number"),
+            (-1, "index must be between 0 and 255"),
+            (256, "index must be between 0 and 255"),
+        ],
+    )
+    def test_out_of_range_or_non_numeric_index_rejected(self, index, message):
+        with pytest.raises(ValueError, match=message):
+            Schedule.from_dict({"index": index, "inside": True})
+
+    def test_non_mapping_time_rejected(self):
+        with pytest.raises(ValueError, match="start time must be an object"):
+            Schedule.from_dict({"index": 0, "inside": True, "in_start_time": [6, 0]})
+
+    @pytest.mark.parametrize(
+        ("time_field", "message"),
+        [
+            ({"hour": "six", "min": 0}, "start time hour must be a number"),
+            ({"hour": 24, "min": 0}, "start time hour must be between 0 and 23"),
+            ({"hour": 6, "min": 60}, "start time minute must be between 0 and 59"),
+        ],
+    )
+    def test_out_of_range_times_rejected(self, time_field, message):
+        with pytest.raises(ValueError, match=message):
+            Schedule.from_dict({"index": 0, "inside": True, "in_start_time": time_field})
+
+    def test_outside_entry_times_are_validated_too(self):
+        with pytest.raises(ValueError, match="end time hour must be between 0 and 23"):
+            Schedule.from_dict(
+                {"index": 0, "outside": True, "out_end_time": {"hour": 99, "min": 0}}
+            )
 
 
 # ============================================================================

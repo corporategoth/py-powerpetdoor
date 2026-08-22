@@ -46,9 +46,20 @@ class ScriptedDaemon:
     def __init__(self):
         self.greeting: bytes = b"STATUS: clients=0\n"
         self.responses: dict[str, bytes] = {}
+        #: command -> [(delay_seconds, payload), ...] for replies that need
+        #: to arrive in timed pieces (streaming LOG:, slow script runs).
+        self.chunked: dict[str, list[tuple[float, bytes]]] = {}
+        #: Commands after which the daemon hangs up without replying.
+        self.disconnect_after: set[str] = set()
         self.received: asyncio.Queue[str] = asyncio.Queue()
+        self.connections: list[asyncio.StreamWriter] = []
         self.server: asyncio.Server | None = None
         self.port: int = 0
+
+    def hangup(self) -> None:
+        """Drop every open client connection (the daemon dying)."""
+        for writer in self.connections:
+            writer.close()
 
     async def start(self) -> None:
         self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
@@ -64,6 +75,7 @@ class ScriptedDaemon:
                 await self.server.wait_closed()
 
     async def _handle(self, reader, writer) -> None:
+        self.connections.append(writer)
         try:
             writer.write(self.greeting)
             await writer.drain()
@@ -73,6 +85,12 @@ class ScriptedDaemon:
                     break
                 cmd = line.decode().strip()
                 await self.received.put(cmd)
+                if cmd in self.disconnect_after:
+                    break
+                for delay, payload in self.chunked.get(cmd, []):
+                    await asyncio.sleep(delay)
+                    writer.write(payload)
+                    await writer.drain()
                 response = self.responses.get(cmd)
                 if response:
                     writer.write(response)
@@ -189,21 +207,17 @@ def prompt_for(daemon: ScriptedDaemon) -> str:
 class TestInteractiveConnectFailures:
     """Failure paths before the interactive loop begins."""
 
-    @pytest.mark.asyncio
-    async def test_connection_refused_exits_1(self, capsys):
-        # Grab a port with no listener by binding then closing
-        server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
-        port = server.sockets[0].getsockname()[1]
-        server.close()
-        await server.wait_closed()
-
+    async def test_connection_refused_exits_1(self, capsys, refused_port):
         with pytest.raises(SystemExit) as exc_info:
-            await ctl.interactive_mode_async("127.0.0.1", port, port - 1, 1.0, "none")
+            await ctl.interactive_mode_async(
+                "127.0.0.1", refused_port, refused_port - 1, 1.0, "none"
+            )
         assert exc_info.value.code == 1
         out = capsys.readouterr().out
-        assert f"Error: Connection refused - simulator not running on 127.0.0.1:{port}" in out
+        assert (
+            f"Error: Connection refused - simulator not running on 127.0.0.1:{refused_port}" in out
+        )
 
-    @pytest.mark.asyncio
     async def test_open_connection_failure_exits_1(self, daemon, monkeypatch, capsys):
         """A failure between the probe and the persistent connect is reported."""
         await daemon.start()
@@ -226,7 +240,6 @@ class TestInteractiveConnectFailures:
 class TestFallbackSession:
     """Full sessions over the add_reader stdin fallback."""
 
-    @pytest.mark.asyncio
     async def test_full_session_flow(self, daemon, piped_stdin, recorded_stdout, start_session):
         """STATUS routing, LOG sanitization, OK/ERROR responses, empty lines,
         local commands, and exit - in one scripted session."""
@@ -281,7 +294,6 @@ class TestFallbackSession:
         # Only the two daemon commands ever reached the daemon
         assert daemon.drain_received() == ["status", "bad"]
 
-    @pytest.mark.asyncio
     async def test_response_timeout_message(
         self, daemon, piped_stdin, recorded_stdout, start_session
     ):
@@ -294,14 +306,107 @@ class TestFallbackSession:
         task = start_session(daemon, timeout=0.3)
         await recorder.wait_for(prompt, count=1)
         os.write(stdin_fd, b"slow\n")  # no scripted response
-        await recorder.wait_for(">>> Response timeout")
+        await recorder.wait_for(">>> Response timeout after 0.3s of silence")
 
         await recorder.wait_for(prompt, count=2)
         os.write(stdin_fd, b"exit\n")
         await asyncio.wait_for(task, 10)
         assert daemon.drain_received() == ["slow"]
+        assert "the command may still be running; raise --timeout" in recorder.text
 
-    @pytest.mark.asyncio
+    async def test_wait_run_has_no_response_deadline(
+        self, daemon, piped_stdin, recorded_stdout, start_session
+    ):
+        """`run <script> wait` waits as long as the script takes (M2).
+
+        The daemon stays silent for far longer than --timeout, exactly like
+        a long script that logs nothing.
+        """
+        daemon.chunked = {
+            "run full_test_suite wait": [(0.5, b"OK: Script PASSED: Full Test Suite\n")]
+        }
+        await daemon.start()
+        stdin_fd = piped_stdin()
+        recorder = recorded_stdout()
+        prompt = prompt_for(daemon)
+
+        task = start_session(daemon, timeout=0.05)
+        await recorder.wait_for(prompt, count=1)
+        os.write(stdin_fd, b"run full_test_suite wait\n")
+        await recorder.wait_for(">>> Script PASSED: Full Test Suite")
+
+        await recorder.wait_for(prompt, count=2)
+        os.write(stdin_fd, b"exit\n")
+        await asyncio.wait_for(task, 10)
+
+        assert "Response timeout" not in recorder.text
+        assert daemon.drain_received() == ["run full_test_suite wait"]
+
+    async def test_streaming_logs_extend_the_response_deadline(
+        self, daemon, piped_stdin, recorded_stdout, start_session
+    ):
+        """Any traffic restarts the silence timer, for any command."""
+        daemon.chunked = {
+            "status": [
+                (0.1, b"LOG: working 1\n"),
+                (0.1, b"LOG: working 2\n"),
+                (0.1, b"LOG: working 3\n"),
+                (0.1, b"LOG: working 4\n"),
+            ]
+        }
+        daemon.responses = {"status": b"OK: done\n"}
+        await daemon.start()
+        stdin_fd = piped_stdin()
+        recorder = recorded_stdout()
+        prompt = prompt_for(daemon)
+
+        # Total elapsed (~0.4s) far exceeds the timeout; no single gap does.
+        task = start_session(daemon, timeout=0.25)
+        await recorder.wait_for(prompt, count=1)
+        os.write(stdin_fd, b"status\n")
+        await recorder.wait_for(">>> done")
+
+        await recorder.wait_for(prompt, count=2)
+        os.write(stdin_fd, b"exit\n")
+        await asyncio.wait_for(task, 10)
+
+        assert "Response timeout" not in recorder.text
+
+    async def test_disconnect_while_waiting_reports_the_disconnect(
+        self, daemon, piped_stdin, recorded_stdout, start_session
+    ):
+        """A daemon that hangs up mid-wait ends the wait immediately."""
+        daemon.disconnect_after = {"run full_test_suite wait"}
+        await daemon.start()
+        stdin_fd = piped_stdin()
+        recorder = recorded_stdout()
+        prompt = prompt_for(daemon)
+
+        task = start_session(daemon, timeout=0.05)
+        await recorder.wait_for(prompt, count=1)
+        os.write(stdin_fd, b"run full_test_suite wait\n")
+
+        # A deadline-free wait must still end when the connection dies.
+        await recorder.wait_for(">>> Simulator disconnected before responding")
+        await asyncio.wait_for(task, 10)
+
+    async def test_daemon_hangup_while_idle_ends_the_session(
+        self, daemon, piped_stdin, recorded_stdout, start_session
+    ):
+        """A daemon that dies while the user sits at the prompt ends it."""
+        await daemon.start()
+        piped_stdin()  # kept open: only the disconnect may end the session
+        recorder = recorded_stdout()
+        prompt = prompt_for(daemon)
+
+        task = start_session(daemon)
+        await recorder.wait_for(prompt, count=1)
+
+        daemon.hangup()
+
+        await asyncio.wait_for(task, 10)
+        assert ">>> Simulator disconnected." in recorder.text
+
     async def test_stale_responses_dropped_before_next_command(
         self, daemon, piped_stdin, recorded_stdout, start_session
     ):
@@ -332,7 +437,6 @@ class TestFallbackSession:
         os.write(stdin_fd, b"exit\n")
         await asyncio.wait_for(task, 10)
 
-    @pytest.mark.asyncio
     async def test_stdin_eof_ends_session(
         self, daemon, piped_stdin, recorded_stdout, start_session
     ):
@@ -424,7 +528,6 @@ class TestSessionFaults:
     """Mid-session failures must be reported and end or continue the session
     exactly as designed."""
 
-    @pytest.mark.asyncio
     async def test_send_failure_is_reported_and_close_errors_swallowed(
         self, daemon, piped_stdin, recorded_stdout, monkeypatch, start_session
     ):
@@ -458,7 +561,6 @@ class TestSessionFaults:
         await asyncio.wait_for(task, 10)
         assert daemon.drain_received() == ["status"]
 
-    @pytest.mark.asyncio
     async def test_reader_failure_ends_session(
         self, daemon, piped_stdin, recorded_stdout, monkeypatch, start_session
     ):
@@ -486,7 +588,6 @@ class TestSessionFaults:
         # The empty OK response must not produce an empty '>>> ' line
         assert ">>> \n" not in out
 
-    @pytest.mark.asyncio
     async def test_reader_error_during_shutdown_is_silent(
         self, daemon, piped_stdin, recorded_stdout, monkeypatch, start_session
     ):
@@ -518,7 +619,6 @@ class TestSessionFaults:
 
 
 class TestInterruptsAndCancellation:
-    @pytest.mark.asyncio
     async def test_ctrl_c_at_prompt_continues_session(
         self, daemon, piped_stdin, recorded_stdout, monkeypatch, start_session
     ):
@@ -546,7 +646,6 @@ class TestInterruptsAndCancellation:
         await asyncio.wait_for(task, 10)
         assert daemon.drain_received() == []
 
-    @pytest.mark.asyncio
     async def test_ctrl_c_during_command_prints_exiting(
         self, daemon, piped_stdin, recorded_stdout, monkeypatch, start_session
     ):
@@ -566,7 +665,6 @@ class TestInterruptsAndCancellation:
         await asyncio.wait_for(task, 10)
         assert "Exiting." in recorder.text
 
-    @pytest.mark.asyncio
     async def test_task_cancellation_breaks_cleanly(
         self, daemon, piped_stdin, recorded_stdout, start_session
     ):
@@ -591,7 +689,6 @@ class TestInterruptsAndCancellation:
 class TestPromptToolkitSession:
     """Drive the prompt_toolkit branch with a pipe input and dummy output."""
 
-    @pytest.mark.asyncio
     async def test_toolkit_session_with_history_recall(self, daemon, monkeypatch, start_session):
         from prompt_toolkit.application import create_app_session
         from prompt_toolkit.input import create_pipe_input

@@ -239,7 +239,6 @@ class TestDoorSimulatorProtocol:
         proto.connection_made(mock_transport)
         assert proto.transport is mock_transport
 
-    @pytest.mark.asyncio
     async def test_connection_lost_cancels_own_engine(self, state, mock_transport):
         """connection_lost should cancel the door engine it owns."""
         proto = DoorSimulatorProtocol(state)
@@ -253,7 +252,6 @@ class TestDoorSimulatorProtocol:
         await asyncio.gather(task, return_exceptions=True)
         assert task.cancelled()
 
-    @pytest.mark.asyncio
     async def test_connection_lost_leaves_shared_engine_running(self, state, mock_transport):
         """connection_lost must NOT stop a server-shared engine."""
         engine = DoorMotionEngine(state)
@@ -271,7 +269,6 @@ class TestDoorSimulatorProtocol:
         assert await engine.wait_for_status(DOOR_STATE_HOLDING, timeout=2.0) == DOOR_STATE_HOLDING
         await engine.stop()
 
-    @pytest.mark.asyncio
     async def test_ping_response(self, protocol, mock_transport):
         """Should respond to PING with PONG."""
         await dispatch(protocol, {PING: "test123"})
@@ -282,7 +279,6 @@ class TestDoorSimulatorProtocol:
         assert response[PONG] == "test123"
         assert response[FIELD_SUCCESS] == "true"
 
-    @pytest.mark.asyncio
     async def test_get_door_status(self, protocol, mock_transport):
         """Should respond to GET_DOOR_STATUS."""
         await dispatch(protocol, {CONFIG: CMD_GET_DOOR_STATUS, "msgId": 1})
@@ -292,7 +288,6 @@ class TestDoorSimulatorProtocol:
         assert response[FIELD_CMD] == CMD_GET_DOOR_STATUS
         assert response[FIELD_DOOR_STATUS] == DOOR_STATE_CLOSED
 
-    @pytest.mark.asyncio
     async def test_get_settings(self, protocol, mock_transport):
         """Should respond to GET_SETTINGS."""
         await dispatch(protocol, {CONFIG: CMD_GET_SETTINGS, "msgId": 1})
@@ -302,7 +297,6 @@ class TestDoorSimulatorProtocol:
         assert response[FIELD_CMD] == CMD_GET_SETTINGS
         assert FIELD_SETTINGS in response
 
-    @pytest.mark.asyncio
     async def test_get_battery(self, protocol, mock_transport, state):
         """Should respond to GET_DOOR_BATTERY."""
         state.battery_percent = 75
@@ -312,7 +306,6 @@ class TestDoorSimulatorProtocol:
         response = last_response(mock_transport)
         assert response[FIELD_BATTERY_PERCENT] == 75
 
-    @pytest.mark.asyncio
     async def test_power_on_off(self, protocol, mock_transport, state):
         """Should handle POWER_ON and POWER_OFF commands."""
         # Power off
@@ -324,7 +317,6 @@ class TestDoorSimulatorProtocol:
         await dispatch(protocol, {CONFIG: CMD_POWER_ON, "msgId": 2})
         assert state.power is True
 
-    @pytest.mark.asyncio
     async def test_power_off_closes_open_door(self, protocol, mock_transport, state):
         """POWER_OFF while the door is open should start closing it."""
         protocol.engine.open()
@@ -338,7 +330,6 @@ class TestDoorSimulatorProtocol:
             == DOOR_STATE_CLOSED
         )
 
-    @pytest.mark.asyncio
     async def test_enable_disable_inside(self, protocol, mock_transport, state):
         """Should handle ENABLE/DISABLE_INSIDE commands."""
         state.inside = True
@@ -348,7 +339,6 @@ class TestDoorSimulatorProtocol:
         await dispatch(protocol, {CONFIG: CMD_ENABLE_INSIDE, "msgId": 2})
         assert state.inside is True
 
-    @pytest.mark.asyncio
     async def test_set_hold_time(self, protocol, mock_transport, state):
         """Should handle SET_HOLD_TIME command (centiseconds)."""
         await dispatch(
@@ -362,7 +352,6 @@ class TestDoorSimulatorProtocol:
         # State stores seconds, protocol uses centiseconds
         assert state.hold_time == 30.0
 
-    @pytest.mark.asyncio
     async def test_door_command_blocked_when_power_off(self, protocol, mock_transport, state):
         """Door commands should fail when power is off."""
         state.power = False
@@ -372,7 +361,6 @@ class TestDoorSimulatorProtocol:
         assert response[FIELD_SUCCESS] == "false"
         assert "Power" in response.get(FIELD_REASON, "")
 
-    @pytest.mark.asyncio
     async def test_door_command_blocked_when_cmd_lockout(self, protocol, mock_transport, state):
         """Door commands should fail when command lockout is enabled."""
         state.power = True
@@ -383,7 +371,6 @@ class TestDoorSimulatorProtocol:
         assert response[FIELD_SUCCESS] == "false"
         assert "lockout" in response.get(FIELD_REASON, "").lower()
 
-    @pytest.mark.asyncio
     async def test_open_command_starts_door_sequence(self, protocol, mock_transport, state):
         """OPEN should start the door rising and echo the new status."""
         await dispatch(protocol, {CONFIG: CMD_OPEN, "msgId": 1})
@@ -399,7 +386,6 @@ class TestDoorSimulatorProtocol:
             == DOOR_STATE_HOLDING
         )
 
-    @pytest.mark.asyncio
     async def test_schedule_crud(self, protocol, mock_transport, state):
         """Should handle schedule CRUD operations."""
         # Create schedule
@@ -426,7 +412,6 @@ class TestDoorSimulatorProtocol:
         await dispatch(protocol, {CONFIG: CMD_DELETE_SCHEDULE, FIELD_INDEX: 0, "msgId": 3})
         assert 0 not in state.schedules
 
-    @pytest.mark.asyncio
     async def test_set_notifications_top_level_fields(self, protocol, mock_transport, state):
         """SET_NOTIFICATIONS uses top-level "1"/"0" fields (docs/protocol.md)."""
         assert state.sensor_on_indoor is False
@@ -455,7 +440,6 @@ class TestDoorSimulatorProtocol:
         assert response[FIELD_NOTIFICATIONS][FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS] == "1"
         assert response[FIELD_NOTIFICATIONS][FIELD_LOW_BATTERY_NOTIFICATIONS] == "0"
 
-    @pytest.mark.asyncio
     async def test_set_notifications_nested_dict_still_accepted(
         self, protocol, mock_transport, state
     ):
@@ -470,7 +454,6 @@ class TestDoorSimulatorProtocol:
         )
         assert state.sensor_on_indoor is True
 
-    @pytest.mark.asyncio
     async def test_delete_schedule_echoes_index(self, protocol, mock_transport, state):
         """DELETE_SCHEDULE echoes the deleted index (real device behavior)."""
         from powerpetdoor.simulator import Schedule
@@ -483,7 +466,6 @@ class TestDoorSimulatorProtocol:
         assert response[FIELD_INDEX] == 3
         assert 3 not in state.schedules
 
-    @pytest.mark.asyncio
     async def test_buffered_messages(self, protocol, mock_transport):
         """Should buffer and process partial messages."""
         # Send partial message
@@ -508,7 +490,6 @@ class TestDoorSimulatorProtocol:
 class TestFraming:
     """Negative and resync tests for the receive framing."""
 
-    @pytest.mark.asyncio
     async def test_garbage_bytes_discarded(self, protocol, mock_transport):
         """Pure garbage must not wedge the buffer or produce a response."""
         protocol.data_received(b"garbage not json")
@@ -522,7 +503,6 @@ class TestFraming:
         response = last_response(mock_transport)
         assert response[PONG] == "after-garbage"
 
-    @pytest.mark.asyncio
     async def test_garbage_prefix_resyncs_to_next_object(self, protocol, mock_transport):
         """Garbage before a valid object is discarded, the object parsed."""
         protocol.data_received(b'junk-bytes{"PING": "t1"}')
@@ -533,7 +513,6 @@ class TestFraming:
         assert response[PONG] == "t1"
         assert protocol.buffer == ""
 
-    @pytest.mark.asyncio
     async def test_brace_inside_string_value(self, protocol, mock_transport):
         """Braces inside JSON string values must not break framing."""
         await dispatch(protocol, {PING: "a}{b"})
@@ -542,7 +521,6 @@ class TestFraming:
         assert response[PONG] == "a}{b"
         assert protocol.buffer == ""
 
-    @pytest.mark.asyncio
     async def test_split_frames_across_many_chunks(self, protocol, mock_transport):
         """A message split byte-by-byte must produce exactly one response."""
         payload = json.dumps({PING: "split"}).encode("ascii")
@@ -554,7 +532,6 @@ class TestFraming:
         assert len(responses) == 1
         assert responses[0][PONG] == "split"
 
-    @pytest.mark.asyncio
     async def test_multiple_messages_in_one_chunk(self, protocol, mock_transport):
         """Multiple whitespace-separated messages in one chunk all handled."""
         chunk = json.dumps({PING: "one"}) + " \n " + json.dumps({PING: "two"})
@@ -564,7 +541,6 @@ class TestFraming:
         pongs = [r[PONG] for r in all_responses(mock_transport)]
         assert pongs == ["one", "two"]
 
-    @pytest.mark.asyncio
     async def test_invalid_json_with_balanced_braces_skipped(self, protocol, mock_transport):
         """Balanced-brace but invalid JSON is skipped, later messages work."""
         protocol.data_received(b'{"a" broken}')
@@ -574,7 +550,6 @@ class TestFraming:
         await dispatch(protocol, {PING: "ok"})
         assert last_response(mock_transport)[PONG] == "ok"
 
-    @pytest.mark.asyncio
     async def test_oversized_buffer_drops_connection(self, protocol, mock_transport):
         """An unterminated frame beyond the cap clears the buffer and drops the client."""
         oversized = b'{"a": "' + b"x" * (MAX_BUFFER_SIZE + 1024)
@@ -585,15 +560,29 @@ class TestFraming:
         mock_transport.close.assert_called_once()
         assert mock_transport.write.call_count == 0
 
-    @pytest.mark.asyncio
     async def test_non_ascii_data_dropped_without_poisoning(self, protocol, mock_transport):
-        """Undecodable bytes are dropped; later messages still work."""
+        """Undecodable bytes are escaped, framed as garbage, then discarded."""
         protocol.data_received(b"\xff\xfe\xfd")
         await protocol.drain()
         assert protocol.buffer == ""
 
         await dispatch(protocol, {PING: "still-alive"})
         assert last_response(mock_transport)[PONG] == "still-alive"
+
+    async def test_non_ascii_byte_mid_frame_does_not_desync(self, protocol, mock_transport):
+        """One bad byte kills only its own frame, never the framing (L2)."""
+        # Half a PING arrives, then its tail carrying a stray byte.
+        protocol.data_received(
+            b'{"PING": "bad',
+        )
+        protocol.data_received(b'\xff"}')
+        # Three well-formed PINGs follow in the same connection.
+        for token in ("one", "two", "three"):
+            protocol.data_received(json.dumps({PING: token}).encode("ascii"))
+        await protocol.drain()
+
+        assert [msg[PONG] for msg in all_responses(mock_transport)] == ["one", "two", "three"]
+        assert protocol.buffer == ""
 
 
 # ============================================================================
@@ -604,7 +593,6 @@ class TestFraming:
 class TestProtocolViolations:
     """Unknown commands and malformed messages get the error envelope."""
 
-    @pytest.mark.asyncio
     async def test_unknown_command_answers_failure(self, protocol, mock_transport):
         """Unknown commands must answer success:"false" with a reason."""
         await dispatch(protocol, {CONFIG: "NO_SUCH_COMMAND", "msgId": 7})
@@ -615,7 +603,6 @@ class TestProtocolViolations:
         assert response[FIELD_REASON] == "Unknown command"
         assert response[FIELD_MSG_ID_RESPONSE] == 7
 
-    @pytest.mark.asyncio
     async def test_non_string_command_answers_failure(self, protocol, mock_transport):
         """A non-string command value must not crash and answers failure."""
         await dispatch(protocol, {CONFIG: 123, "msgId": 8})
@@ -625,7 +612,6 @@ class TestProtocolViolations:
         assert response[FIELD_REASON] == "Unknown command"
         assert response[FIELD_MSG_ID_RESPONSE] == 8
 
-    @pytest.mark.asyncio
     async def test_msgid_zero_echoed(self, protocol, mock_transport):
         """msgId 0 must be echoed back (0 is a valid message id)."""
         await dispatch(protocol, {CONFIG: CMD_GET_POWER, "msgId": 0})
@@ -633,7 +619,6 @@ class TestProtocolViolations:
         response = last_response(mock_transport)
         assert response[FIELD_MSG_ID_RESPONSE] == 0
 
-    @pytest.mark.asyncio
     async def test_handler_exception_answers_command_failed(self, protocol, mock_transport, state):
         """A handler crash must answer the error envelope, not go silent."""
         # holdTime as a string makes the handler's arithmetic raise TypeError
@@ -649,15 +634,81 @@ class TestProtocolViolations:
         # State was not corrupted
         assert state.hold_time == 1
 
-    @pytest.mark.asyncio
     async def test_set_schedule_missing_payload_fails(self, protocol, mock_transport):
-        """CMD_SET_SCHEDULE without a schedule payload answers failure."""
+        """CMD_SET_SCHEDULE without a schedule payload answers failure + reason."""
         await dispatch(protocol, {CONFIG: CMD_SET_SCHEDULE, "msgId": 4})
 
         response = last_response(mock_transport)
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == "Missing schedule"
 
-    @pytest.mark.asyncio
+    async def test_set_schedule_with_truncated_days_is_rejected(
+        self, protocol, mock_transport, state
+    ):
+        """A hostile daysOfWeek is refused at the wire, not stored (security 1)."""
+        await dispatch(
+            protocol,
+            {
+                CONFIG: CMD_SET_SCHEDULE,
+                FIELD_SCHEDULE: {FIELD_INDEX: 0, FIELD_INSIDE: True, "daysOfWeek": [1]},
+                "msgId": 11,
+            },
+        )
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == ("Schedule daysOfWeek must be a list of 7 values, got [1]")
+        assert response[FIELD_MSG_ID_RESPONSE] == 11
+        # Nothing was stored, so schedule evaluation can never trip over it.
+        assert state.schedules == {}
+
+    async def test_set_schedule_with_bad_hour_is_rejected(self, protocol, mock_transport, state):
+        """A non-numeric hour is refused with the standard error envelope."""
+        await dispatch(
+            protocol,
+            {
+                CONFIG: CMD_SET_SCHEDULE,
+                FIELD_SCHEDULE: {
+                    FIELD_INDEX: 0,
+                    FIELD_INSIDE: True,
+                    "in_start_time": {"hour": "noon", "min": 0},
+                },
+                "msgId": 12,
+            },
+        )
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == "Schedule start time hour must be a number, got 'noon'"
+        assert state.schedules == {}
+
+    async def test_set_schedule_list_rejects_the_whole_list_atomically(
+        self, protocol, mock_transport, state
+    ):
+        """One malformed entry rejects the batch and keeps the old schedules."""
+        from powerpetdoor.simulator import Schedule
+
+        state.schedules[0] = Schedule(index=0, inside=True)
+
+        await dispatch(
+            protocol,
+            {
+                CONFIG: CMD_SET_SCHEDULE_LIST,
+                FIELD_SCHEDULES: [
+                    {FIELD_INDEX: 1, FIELD_INSIDE: True},
+                    {FIELD_INDEX: 2, FIELD_INSIDE: True, "daysOfWeek": "everyday"},
+                ],
+                "msgId": 13,
+            },
+        )
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == (
+            "Schedule daysOfWeek must be a list of 7 values, got 'everyday'"
+        )
+        assert list(state.schedules) == [0]
+
     async def test_get_schedule_unknown_index_fails(self, protocol, mock_transport):
         """GET_SCHEDULE for a missing index answers failure with a reason."""
         await dispatch(protocol, {CONFIG: CMD_GET_SCHEDULE, FIELD_INDEX: 99, "msgId": 5})
@@ -666,7 +717,6 @@ class TestProtocolViolations:
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
         assert response[FIELD_REASON] == "Schedule not found"
 
-    @pytest.mark.asyncio
     async def test_delete_schedule_unknown_index_fails(self, protocol, mock_transport):
         """DELETE_SCHEDULE for a missing index answers failure with a reason."""
         await dispatch(protocol, {CONFIG: CMD_DELETE_SCHEDULE, FIELD_INDEX: 42, "msgId": 6})
@@ -700,7 +750,6 @@ class TestLogSanitization:
         """Non-string values are coerced, never raise."""
         assert sanitize_log_text(123) == "123"
 
-    @pytest.mark.asyncio
     async def test_unknown_command_log_is_sanitized(self, protocol, mock_transport, caplog):
         """The unknown-command warning must not contain raw ESC bytes."""
         import logging
@@ -755,7 +804,6 @@ class TestSensorNotifications:
         # All notification settings default to disabled in the state fixture
         assert make_sensor_notification(state, sensor, sensor_state) is None
 
-    @pytest.mark.asyncio
     async def test_send_sensor_notification_writes_bare_envelope(
         self, protocol, mock_transport, state
     ):
@@ -766,7 +814,6 @@ class TestSensorNotifications:
         response = last_response(mock_transport)
         assert response == {NOTIFY_SENSOR_INDOOR: "", FIELD_SENSOR_STATE: SENSOR_STATE_ON}
 
-    @pytest.mark.asyncio
     async def test_send_sensor_notification_disabled_writes_nothing(
         self, protocol, mock_transport, state
     ):
@@ -833,7 +880,6 @@ class TestHoldTimeCentiseconds:
     These tests verify the conversion is correct in all code paths.
     """
 
-    @pytest.mark.asyncio
     async def test_get_hold_time_returns_centiseconds(self, protocol, mock_transport, state):
         """GET_HOLD_TIME should return hold time in centiseconds."""
         # Set state to 5 seconds
@@ -845,7 +891,6 @@ class TestHoldTimeCentiseconds:
         # Should return 500 centiseconds
         assert response[FIELD_HOLD_TIME] == 500
 
-    @pytest.mark.asyncio
     async def test_set_hold_time_converts_to_seconds(self, protocol, mock_transport, state):
         """SET_HOLD_TIME should convert centiseconds to seconds in state."""
         # Send 1500 centiseconds (15 seconds)
@@ -854,7 +899,6 @@ class TestHoldTimeCentiseconds:
         # State should store 15.0 seconds
         assert state.hold_time == 15.0
 
-    @pytest.mark.asyncio
     async def test_set_hold_time_response_is_centiseconds(self, protocol, mock_transport, state):
         """SET_HOLD_TIME response should echo back centiseconds."""
         await dispatch(protocol, {CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: 2500, "msgId": 1})
@@ -863,7 +907,6 @@ class TestHoldTimeCentiseconds:
         # Response should contain centiseconds
         assert response[FIELD_HOLD_TIME] == 2500
 
-    @pytest.mark.asyncio
     async def test_get_settings_hold_time_is_centiseconds(self, protocol, mock_transport, state):
         """GET_SETTINGS should return hold time in centiseconds."""
         # Set state to 7.5 seconds
@@ -876,7 +919,6 @@ class TestHoldTimeCentiseconds:
         # Should return 750 centiseconds
         assert settings[FIELD_HOLD_OPEN_TIME] == 750
 
-    @pytest.mark.asyncio
     async def test_hold_time_round_trip(self, protocol, mock_transport, state):
         """Setting then getting hold time should preserve the value."""
         # Set to 4200 centiseconds (42 seconds)
@@ -888,7 +930,6 @@ class TestHoldTimeCentiseconds:
         response = last_response(mock_transport)
         assert response[FIELD_HOLD_TIME] == 4200
 
-    @pytest.mark.asyncio
     async def test_hold_time_fractional_seconds(self, protocol, mock_transport, state):
         """Should handle fractional second values correctly."""
         # 50 centiseconds = 0.5 seconds
@@ -902,13 +943,11 @@ class TestHoldTimeCentiseconds:
         response = last_response(mock_transport)
         assert response[FIELD_HOLD_TIME] == 50
 
-    @pytest.mark.asyncio
     async def test_default_hold_time(self, state):
         """Default hold time should be 1 second."""
         # The fixture creates state with hold_time=1
         assert state.hold_time == 1.0
 
-    @pytest.mark.asyncio
     async def test_hold_time_in_settings_matches_dedicated_command(
         self, protocol, mock_transport, state
     ):
@@ -936,7 +975,6 @@ class TestHoldTimeCentiseconds:
 class TestGetCommandHandlers:
     """Each query command answers its exact response field."""
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(("enabled", "value"), [(True, "1"), (False, "0")])
     async def test_get_auto(self, protocol, mock_transport, state, enabled, value):
         """GET_AUTO reports the timers flag."""
@@ -944,7 +982,6 @@ class TestGetCommandHandlers:
         await dispatch(protocol, {CONFIG: CMD_GET_AUTO, "msgId": 1})
         assert last_response(mock_transport)[FIELD_AUTO] == value
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(("enabled", "value"), [(True, "1"), (False, "0")])
     async def test_get_safety_lock(self, protocol, mock_transport, state, enabled, value):
         """GET_OUTSIDE_SENSOR_SAFETY_LOCK reports via a settings dict."""
@@ -953,7 +990,6 @@ class TestGetCommandHandlers:
         response = last_response(mock_transport)
         assert response[FIELD_SETTINGS] == {FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: value}
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(("enabled", "value"), [(True, "1"), (False, "0")])
     async def test_get_cmd_lockout(self, protocol, mock_transport, state, enabled, value):
         """GET_CMD_LOCKOUT reports via a settings dict."""
@@ -961,7 +997,6 @@ class TestGetCommandHandlers:
         await dispatch(protocol, {CONFIG: CMD_GET_CMD_LOCKOUT, "msgId": 1})
         assert last_response(mock_transport)[FIELD_SETTINGS] == {FIELD_CMD_LOCKOUT: value}
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(("enabled", "value"), [(True, "1"), (False, "0")])
     async def test_get_autoretract(self, protocol, mock_transport, state, enabled, value):
         """GET_AUTORETRACT reports via a settings dict."""
@@ -969,13 +1004,11 @@ class TestGetCommandHandlers:
         await dispatch(protocol, {CONFIG: CMD_GET_AUTORETRACT, "msgId": 1})
         assert last_response(mock_transport)[FIELD_SETTINGS] == {FIELD_AUTORETRACT: value}
 
-    @pytest.mark.asyncio
     async def test_get_notifications(self, protocol, mock_transport, state):
         """GET_NOTIFICATIONS returns the notification settings dict."""
         await dispatch(protocol, {CONFIG: CMD_GET_NOTIFICATIONS, "msgId": 1})
         assert last_response(mock_transport)[FIELD_NOTIFICATIONS] == state.get_notifications()
 
-    @pytest.mark.asyncio
     async def test_get_sensors(self, protocol, mock_transport, state):
         """GET_SENSORS reports both sensor enable flags."""
         state.inside = True
@@ -985,7 +1018,6 @@ class TestGetCommandHandlers:
         assert response[FIELD_INSIDE] == "1"
         assert response[FIELD_OUTSIDE] == "0"
 
-    @pytest.mark.asyncio
     async def test_get_hw_info(self, protocol, mock_transport, state):
         """GET_HW_INFO reports the firmware/hardware identity."""
         await dispatch(protocol, {CONFIG: CMD_GET_HW_INFO, "msgId": 1})
@@ -998,7 +1030,6 @@ class TestGetCommandHandlers:
             FIELD_HW_REVISION: state.hw_rev,
         }
 
-    @pytest.mark.asyncio
     async def test_get_door_open_stats(self, protocol, mock_transport, state):
         """GET_DOOR_OPEN_STATS reports both counters."""
         state.total_open_cycles = 11
@@ -1008,21 +1039,18 @@ class TestGetCommandHandlers:
         assert response[FIELD_TOTAL_OPEN_CYCLES] == 11
         assert response[FIELD_TOTAL_AUTO_RETRACTS] == 4
 
-    @pytest.mark.asyncio
     async def test_get_sensor_trigger_voltage(self, protocol, mock_transport, state):
         """GET_SENSOR_TRIGGER_VOLTAGE returns the stored value."""
         state.sensor_trigger_voltage = 123
         await dispatch(protocol, {CONFIG: CMD_GET_SENSOR_TRIGGER_VOLTAGE, "msgId": 1})
         assert last_response(mock_transport)[FIELD_SENSOR_TRIGGER_VOLTAGE] == 123
 
-    @pytest.mark.asyncio
     async def test_get_sleep_sensor_trigger_voltage(self, protocol, mock_transport, state):
         """GET_SLEEP_SENSOR_TRIGGER_VOLTAGE returns the stored value."""
         state.sleep_sensor_trigger_voltage = 45
         await dispatch(protocol, {CONFIG: CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE, "msgId": 1})
         assert last_response(mock_transport)[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE] == 45
 
-    @pytest.mark.asyncio
     async def test_get_schedule_list(self, protocol, mock_transport, state):
         """GET_SCHEDULE_LIST returns the schedule indices."""
         from powerpetdoor.simulator import Schedule
@@ -1031,7 +1059,6 @@ class TestGetCommandHandlers:
         await dispatch(protocol, {CONFIG: CMD_GET_SCHEDULE_LIST, "msgId": 1})
         assert last_response(mock_transport)[FIELD_SCHEDULES] == [2]
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(("has", "value"), [(True, "1"), (False, "0")])
     async def test_has_remote_id(self, protocol, mock_transport, state, has, value):
         """HAS_REMOTE_ID reports the stored flag."""
@@ -1039,7 +1066,6 @@ class TestGetCommandHandlers:
         await dispatch(protocol, {CONFIG: CMD_HAS_REMOTE_ID, "msgId": 1})
         assert last_response(mock_transport)[FIELD_HAS_REMOTE_ID] == value
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(("has", "value"), [(True, "1"), (False, "0")])
     async def test_has_remote_key(self, protocol, mock_transport, state, has, value):
         """HAS_REMOTE_KEY reports the stored flag."""
@@ -1047,7 +1073,6 @@ class TestGetCommandHandlers:
         await dispatch(protocol, {CONFIG: CMD_HAS_REMOTE_KEY, "msgId": 1})
         assert last_response(mock_transport)[FIELD_HAS_REMOTE_KEY] == value
 
-    @pytest.mark.asyncio
     async def test_check_reset_reason(self, protocol, mock_transport, state):
         """CHECK_RESET_REASON reports the stored reason."""
         await dispatch(protocol, {CONFIG: CMD_CHECK_RESET_REASON, "msgId": 1})
@@ -1057,7 +1082,6 @@ class TestGetCommandHandlers:
 class TestGetTimezone:
     """GET_TIMEZONE converts IANA to POSIX like the real hardware."""
 
-    @pytest.mark.asyncio
     async def test_returns_posix_when_cache_ready(self, protocol, mock_transport, state):
         """With the tz cache initialized, the POSIX rule is returned."""
         from powerpetdoor import tz_utils
@@ -1067,7 +1091,6 @@ class TestGetTimezone:
         await dispatch(protocol, {CONFIG: CMD_GET_TIMEZONE, "msgId": 1})
         assert last_response(mock_transport)[FIELD_TZ] == "EST5EDT,M3.2.0,M11.1.0"
 
-    @pytest.mark.asyncio
     async def test_returns_raw_when_cache_uninitialized(
         self, protocol, mock_transport, state, monkeypatch
     ):
@@ -1076,7 +1099,6 @@ class TestGetTimezone:
         await dispatch(protocol, {CONFIG: CMD_GET_TIMEZONE, "msgId": 1})
         assert last_response(mock_transport)[FIELD_TZ] == state.timezone
 
-    @pytest.mark.asyncio
     async def test_returns_raw_when_unconvertible(
         self, protocol, mock_transport, state, monkeypatch
     ):
@@ -1095,7 +1117,6 @@ class TestGetTimezone:
 class TestEnableDisableHandlers:
     """Enable/disable commands mutate state and echo the new value."""
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("cmd", "attr", "expected", "field", "value"),
         [
@@ -1119,7 +1140,6 @@ class TestEnableDisableHandlers:
         assert response[FIELD_CMD] == cmd
         assert response[field] == value
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("cmd", "attr", "expected", "field", "value"),
         [
@@ -1155,7 +1175,6 @@ class TestEnableDisableHandlers:
         assert response[FIELD_CMD] == cmd
         assert response[FIELD_SETTINGS] == {field: value}
 
-    @pytest.mark.asyncio
     async def test_close_command_reverses_open_door(self, protocol, mock_transport, state):
         """CLOSE while open starts closing and echoes the new status."""
         protocol.engine.open()
@@ -1171,7 +1190,6 @@ class TestEnableDisableHandlers:
             == DOOR_STATE_CLOSED
         )
 
-    @pytest.mark.asyncio
     async def test_open_and_hold_parks_in_keepup(self, protocol, mock_transport, state):
         """OPEN_AND_HOLD starts the door and ends in KEEPUP."""
         await dispatch(protocol, {CONFIG: CMD_OPEN_AND_HOLD, "msgId": 1})
@@ -1189,7 +1207,6 @@ class TestEnableDisableHandlers:
 class TestSetHandlers:
     """SET commands store values and echo them; without a value they echo only."""
 
-    @pytest.mark.asyncio
     async def test_set_timezone_stores_wire_value(self, protocol, mock_transport, state):
         """SET_TIMEZONE stores the wire value as-is and echoes it."""
         await dispatch(
@@ -1198,14 +1215,12 @@ class TestSetHandlers:
         assert state.timezone == "EST5EDT,M3.2.0,M11.1.0"
         assert last_response(mock_transport)[FIELD_TZ] == "EST5EDT,M3.2.0,M11.1.0"
 
-    @pytest.mark.asyncio
     async def test_set_timezone_without_value_echoes_current(self, protocol, mock_transport, state):
         """SET_TIMEZONE without a tz field changes nothing."""
         await dispatch(protocol, {CONFIG: CMD_SET_TIMEZONE, "msgId": 1})
         assert state.timezone == "America/New_York"
         assert last_response(mock_transport)[FIELD_TZ] == "America/New_York"
 
-    @pytest.mark.asyncio
     async def test_set_hold_time_without_value_echoes_current(
         self, protocol, mock_transport, state
     ):
@@ -1214,7 +1229,6 @@ class TestSetHandlers:
         assert state.hold_time == 1
         assert last_response(mock_transport)[FIELD_HOLD_TIME] == 100
 
-    @pytest.mark.asyncio
     async def test_set_notifications_without_fields_changes_nothing(
         self, protocol, mock_transport, state
     ):
@@ -1224,7 +1238,6 @@ class TestSetHandlers:
         assert state.get_notifications() == before
         assert last_response(mock_transport)[FIELD_NOTIFICATIONS] == before
 
-    @pytest.mark.asyncio
     async def test_set_sensor_trigger_voltage(self, protocol, mock_transport, state):
         """SET_SENSOR_TRIGGER_VOLTAGE stores and echoes the value."""
         await dispatch(
@@ -1234,13 +1247,11 @@ class TestSetHandlers:
         assert state.sensor_trigger_voltage == 150
         assert last_response(mock_transport)[FIELD_SENSOR_TRIGGER_VOLTAGE] == 150
 
-    @pytest.mark.asyncio
     async def test_set_sensor_trigger_voltage_without_value(self, protocol, mock_transport, state):
         """Without a value the current voltage is echoed unchanged."""
         await dispatch(protocol, {CONFIG: CMD_SET_SENSOR_TRIGGER_VOLTAGE, "msgId": 1})
         assert last_response(mock_transport)[FIELD_SENSOR_TRIGGER_VOLTAGE] == 100
 
-    @pytest.mark.asyncio
     async def test_set_sleep_sensor_trigger_voltage(self, protocol, mock_transport, state):
         """SET_SLEEP_SENSOR_TRIGGER_VOLTAGE stores and echoes the value."""
         await dispatch(
@@ -1254,7 +1265,6 @@ class TestSetHandlers:
         assert state.sleep_sensor_trigger_voltage == 75
         assert last_response(mock_transport)[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE] == 75
 
-    @pytest.mark.asyncio
     async def test_set_sleep_sensor_trigger_voltage_without_value(
         self, protocol, mock_transport, state
     ):
@@ -1262,7 +1272,6 @@ class TestSetHandlers:
         await dispatch(protocol, {CONFIG: CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE, "msgId": 1})
         assert last_response(mock_transport)[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE] == 50
 
-    @pytest.mark.asyncio
     async def test_set_schedule_list_replaces_schedules(self, protocol, mock_transport, state):
         """SET_SCHEDULE_LIST clears existing schedules and loads the new list."""
         from powerpetdoor.simulator import Schedule
@@ -1279,7 +1288,6 @@ class TestSetHandlers:
         assert sorted(state.schedules.keys()) == [1, 2]
         assert last_response(mock_transport)[FIELD_SCHEDULES] == [1, 2]
 
-    @pytest.mark.asyncio
     async def test_set_schedule_list_non_list_leaves_schedules(
         self, protocol, mock_transport, state
     ):
@@ -1303,13 +1311,11 @@ class TestSetHandlers:
 class TestMessageEnvelopeEdgeCases:
     """Dispatcher behavior around optional fields and callbacks."""
 
-    @pytest.mark.asyncio
     async def test_message_without_command_is_ignored(self, protocol, mock_transport):
         """A message with neither config nor cmd gets no response."""
         await dispatch(protocol, {"foo": "bar", "msgId": 1})
         assert mock_transport.write.call_count == 0
 
-    @pytest.mark.asyncio
     async def test_response_without_msgid(self, protocol, mock_transport):
         """A command without msgId is answered without a msgID echo."""
         await dispatch(protocol, {CONFIG: CMD_GET_POWER})
@@ -1317,7 +1323,6 @@ class TestMessageEnvelopeEdgeCases:
         assert response[FIELD_POWER] == "1"
         assert FIELD_MSG_ID_RESPONSE not in response
 
-    @pytest.mark.asyncio
     async def test_handler_crash_without_msgid(self, protocol, mock_transport, state):
         """The error envelope also omits msgID when the request had none."""
         await dispatch(protocol, {CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: "bad"})
@@ -1326,7 +1331,6 @@ class TestMessageEnvelopeEdgeCases:
         assert response[FIELD_REASON] == "Command failed"
         assert FIELD_MSG_ID_RESPONSE not in response
 
-    @pytest.mark.asyncio
     async def test_ping_answered_even_when_power_off(self, protocol, mock_transport, state):
         """PING is connectivity, not a door command - it works with power off."""
         state.power = False
@@ -1335,7 +1339,6 @@ class TestMessageEnvelopeEdgeCases:
         assert response[PONG] == "still-here"
         assert response[FIELD_SUCCESS] == "true"
 
-    @pytest.mark.asyncio
     async def test_on_command_callback_invoked(self, state, mock_transport):
         """The on_command hook sees every dispatched command."""
         seen: list[tuple[str, dict]] = []
@@ -1348,7 +1351,6 @@ class TestMessageEnvelopeEdgeCases:
 
         assert seen == [(CMD_GET_POWER, {CONFIG: CMD_GET_POWER, "msgId": 5})]
 
-    @pytest.mark.asyncio
     async def test_invalid_frame_then_valid_frame_same_chunk(self, protocol, mock_transport):
         """A bad-JSON frame is skipped; the next frame in the chunk is handled."""
         chunk = b'{"a" broken}' + json.dumps({PING: "ok"}).encode("ascii")
@@ -1359,7 +1361,6 @@ class TestMessageEnvelopeEdgeCases:
         assert len(responses) == 1
         assert responses[0][PONG] == "ok"
 
-    @pytest.mark.asyncio
     async def test_debug_logging_sanitizes_rx_and_tx(self, protocol, mock_transport, caplog):
         """RX/TX debug logs are emitted (sanitized) at DEBUG level."""
         import logging
@@ -1371,14 +1372,12 @@ class TestMessageEnvelopeEdgeCases:
         assert any(m.startswith("Simulator RX: ") for m in messages)
         assert any(m.startswith("Simulator TX: ") for m in messages)
 
-    @pytest.mark.asyncio
     async def test_send_without_transport_is_noop(self, state):
         """_send with no transport must not raise."""
         proto = DoorSimulatorProtocol(state)
         proto._send({PING: "nobody-home"})  # no connection_made
         await proto.aclose()
 
-    @pytest.mark.asyncio
     async def test_task_failure_is_logged(self, protocol, mock_transport, caplog):
         """A handler task crashing outside the dispatcher is logged."""
         import logging
@@ -1399,7 +1398,6 @@ class TestMessageEnvelopeEdgeCases:
 class TestProtocolLifecycle:
     """Task management on disconnect and close."""
 
-    @pytest.mark.asyncio
     async def test_connection_lost_cancels_inflight_tasks(self, state, mock_transport):
         """Handler tasks pending at disconnect are cancelled."""
         proto = DoorSimulatorProtocol(state)
@@ -1412,7 +1410,6 @@ class TestProtocolLifecycle:
         await asyncio.gather(*tasks, return_exceptions=True)
         assert tasks[0].cancelled()
 
-    @pytest.mark.asyncio
     async def test_aclose_cancels_inflight_tasks_and_closes_transport(self, state, mock_transport):
         """aclose() cancels pending handler tasks and closes the transport."""
         proto = DoorSimulatorProtocol(state)
@@ -1425,14 +1422,12 @@ class TestProtocolLifecycle:
         assert tasks[0].cancelled()
         mock_transport.close.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_aclose_without_transport(self, state):
         """aclose() on a never-connected protocol is a clean no-op."""
         proto = DoorSimulatorProtocol(state)
         await proto.aclose()
         assert proto.transport is None
 
-    @pytest.mark.asyncio
     async def test_aclose_leaves_shared_engine_running(self, state, mock_transport):
         """aclose() must not stop an engine owned by the server."""
         engine = DoorMotionEngine(state)
@@ -1446,7 +1441,6 @@ class TestProtocolLifecycle:
         assert await engine.wait_for_status(DOOR_STATE_HOLDING, timeout=2.0) == DOOR_STATE_HOLDING
         await engine.stop()
 
-    @pytest.mark.asyncio
     async def test_overflow_without_transport_clears_buffer(self, state):
         """Buffer overflow on a transportless protocol still resets cleanly."""
         proto = DoorSimulatorProtocol(state)
@@ -1454,19 +1448,16 @@ class TestProtocolLifecycle:
         assert proto.buffer == ""
         await proto.aclose()
 
-    @pytest.mark.asyncio
     async def test_trigger_sensor_delegates_to_engine(self, protocol, state):
         """protocol.trigger_sensor drives the shared engine."""
         protocol.trigger_sensor("inside")
         assert state.door_status == DOOR_STATE_RISING
 
-    @pytest.mark.asyncio
     async def test_simulate_obstruction_delegates_to_engine(self, protocol, state):
         """protocol.simulate_obstruction arms the inside sensor."""
         protocol.simulate_obstruction()
         assert state.inside_sensor_active is True
 
-    @pytest.mark.asyncio
     async def test_broadcast_or_send_status_prefers_broadcast(self, state, mock_transport):
         """With a broadcast callback, status goes through it, not _send."""
         broadcasts: list[str] = []

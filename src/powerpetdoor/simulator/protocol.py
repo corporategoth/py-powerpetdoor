@@ -282,11 +282,13 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             await asyncio.gather(*pending, return_exceptions=True)
 
     def data_received(self, data: bytes):
-        try:
-            text = data.decode("ascii")
-        except UnicodeDecodeError:
-            logger.warning("Simulator: Dropping %d bytes of undecodable data", len(data))
-            return
+        # Escape non-ASCII bytes instead of dropping the chunk: dropping it
+        # would strand a half-buffered frame and wedge framing until the
+        # 64 KiB overflow disconnect. The affected frame fails json.loads
+        # and is skipped on its own; later frames still arrive (L2).
+        text = data.decode("ascii", errors="backslashreplace")
+        if len(text) != len(data):
+            logger.warning("Simulator: escaped non-ASCII bytes in %d received bytes", len(data))
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Simulator RX: %s", sanitize_log_text(text))
@@ -526,13 +528,22 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     @CommandRegistry.handler(CMD_SET_SCHEDULE)
     async def _handle_set_schedule(self, msg: dict, response: dict) -> None:
         schedule_data = msg.get(FIELD_SCHEDULE)
-        if schedule_data:
-            schedule = Schedule.from_dict(schedule_data)
-            self.state.schedules[schedule.index] = schedule
-            response[FIELD_SCHEDULE] = schedule.to_dict()
-            logger.info("Simulator: Schedule %s saved", sanitize_log_text(schedule.index))
-        else:
+        if not schedule_data:
             response[FIELD_SUCCESS] = SUCCESS_FALSE
+            response[FIELD_REASON] = "Missing schedule"
+            return
+        try:
+            schedule = Schedule.from_dict(schedule_data)
+        except ValueError as err:
+            # Untrusted wire data: reject malformed schedules rather than
+            # storing something that raises later during evaluation.
+            logger.warning("Simulator: Rejected schedule: %s", sanitize_log_text(err))
+            response[FIELD_SUCCESS] = SUCCESS_FALSE
+            response[FIELD_REASON] = str(err)
+            return
+        self.state.schedules[schedule.index] = schedule
+        response[FIELD_SCHEDULE] = schedule.to_dict()
+        logger.info("Simulator: Schedule %s saved", sanitize_log_text(schedule.index))
 
     @CommandRegistry.handler(CMD_DELETE_SCHEDULE)
     async def _handle_delete_schedule(self, msg: dict, response: dict) -> None:
@@ -550,10 +561,18 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     async def _handle_set_schedule_list(self, msg: dict, response: dict) -> None:
         schedules_data = msg.get(FIELD_SCHEDULES, [])
         if isinstance(schedules_data, list):
+            try:
+                parsed = [Schedule.from_dict(sched_data) for sched_data in schedules_data]
+            except ValueError as err:
+                # Reject the whole list atomically: a partial load would
+                # leave the simulator in a state no client asked for.
+                logger.warning("Simulator: Rejected schedule list: %s", sanitize_log_text(err))
+                response[FIELD_SUCCESS] = SUCCESS_FALSE
+                response[FIELD_REASON] = str(err)
+                return
             # Clear existing and load new schedules
             self.state.schedules.clear()
-            for sched_data in schedules_data:
-                schedule = Schedule.from_dict(sched_data)
+            for schedule in parsed:
                 self.state.schedules[schedule.index] = schedule
             logger.info("Simulator: Loaded %d schedules", len(schedules_data))
         response[FIELD_SCHEDULES] = self.state.get_schedule_list()

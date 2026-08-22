@@ -49,6 +49,56 @@ logger = logging.getLogger(__name__)
 # 1. Settings fields for sensor enable/disable (string "0"/"1")
 # 2. Schedule entry fields for which sensor the entry applies to (bool)
 
+#: Highest schedule slot index accepted from the wire. Also bounds the
+#: number of slots a hostile SET_SCHEDULE stream can allocate.
+MAX_SCHEDULE_INDEX = 255
+
+
+def _coerce_schedule_int(value: object, name: str, maximum: int) -> int:
+    """Coerce an untrusted wire value to an int in ``0..maximum``.
+
+    Raises:
+        ValueError: If the value is not numeric or is out of range.
+    """
+    try:
+        result: int = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        raise ValueError(f"Schedule {name} must be a number, got {value!r}") from None
+    if not 0 <= result <= maximum:
+        raise ValueError(f"Schedule {name} must be between 0 and {maximum}, got {result}")
+    return result
+
+
+def _coerce_schedule_days(value: object) -> list[bool]:
+    """Coerce an untrusted ``daysOfWeek`` value to exactly 7 booleans.
+
+    Accepts the protocol's 7-element list (any truthy element means the
+    day is active) or the legacy integer bitmask.
+
+    Raises:
+        ValueError: If the value is neither of those shapes.
+    """
+    if isinstance(value, int):
+        # Legacy bitmask -> [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+        return [bool((value >> i) & 1) for i in range(7)]
+    if isinstance(value, list) and len(value) == 7:
+        return [bool(day) for day in value]
+    raise ValueError(f"Schedule daysOfWeek must be a list of 7 values, got {value!r}")
+
+
+def _coerce_schedule_time(value: object, name: str, default_hour: int) -> tuple[int, int]:
+    """Coerce an untrusted ``{hour, min}`` mapping to a valid (hour, minute).
+
+    Raises:
+        ValueError: If the value is not a mapping or the fields are not
+            valid times.
+    """
+    if not isinstance(value, dict):
+        raise ValueError(f"Schedule {name} must be an object, got {value!r}")
+    hour = _coerce_schedule_int(value.get(FIELD_HOUR, default_hour), f"{name} hour", 23)
+    minute = _coerce_schedule_int(value.get(FIELD_MINUTE, 0), f"{name} minute", 59)
+    return hour, minute
+
 
 @dataclass
 class DoorTimingConfig:
@@ -104,7 +154,9 @@ class Schedule:
 
     index: int
     enabled: bool = True
-    # List of 7 values [Sun, Mon, Tue, Wed, Thu, Fri, Sat] where 1=active
+    # List of exactly 7 truthy/falsy values [Sun, Mon, Tue, Wed, Thu, Fri,
+    # Sat]. from_dict() normalizes wire data to booleans; to_dict() always
+    # writes 1/0 back onto the wire.
     days_of_week: list = field(default_factory=lambda: [1, 1, 1, 1, 1, 1, 1])
     # Which sensor this entry is for
     inside: bool = False
@@ -120,7 +172,8 @@ class Schedule:
         result: dict = {
             FIELD_INDEX: self.index,
             FIELD_ENABLED: "1" if self.enabled else "0",
-            FIELD_DAYSOFWEEK: self.days_of_week.copy(),
+            # The wire carries 1/0, whatever the in-memory representation.
+            FIELD_DAYSOFWEEK: [1 if day else 0 for day in self.days_of_week],
             FIELD_INSIDE: self.inside,
             FIELD_OUTSIDE: self.outside,
         }
@@ -169,39 +222,57 @@ class Schedule:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Schedule":
-        """Create from protocol dict format."""
-        inside = data.get(FIELD_INSIDE, False)
-        outside = data.get(FIELD_OUTSIDE, False)
+        """Create from protocol dict format.
+
+        Everything here comes off the wire and is therefore untrusted: each
+        field is validated and coerced so a stored schedule can never raise
+        later, when a sensor trigger evaluates it (``is_day_active`` indexes
+        ``days_of_week``; ``is_sensor_allowed`` does arithmetic on the
+        times).
+
+        Raises:
+            ValueError: If the payload is not a schedule-shaped mapping, or
+                a field is not coercible / out of its protocol range. The
+                SET_SCHEDULE handler turns this into the standard error
+                envelope.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(f"Schedule must be an object, got {data!r}")
+
+        inside = bool(data.get(FIELD_INSIDE, False))
+        outside = bool(data.get(FIELD_OUTSIDE, False))
 
         # Get time from the appropriate prefix
         if inside:
-            start = data.get(f"{FIELD_INSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}", {})
-            end = data.get(f"{FIELD_INSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}", {})
+            prefix = FIELD_INSIDE_PREFIX
         elif outside:
-            start = data.get(f"{FIELD_OUTSIDE_PREFIX}{FIELD_START_TIME_SUFFIX}", {})
-            end = data.get(f"{FIELD_OUTSIDE_PREFIX}{FIELD_END_TIME_SUFFIX}", {})
+            prefix = FIELD_OUTSIDE_PREFIX
         else:
-            start = {}
-            end = {}
+            prefix = ""
 
-        # Handle daysOfWeek - could be list or legacy bitmask
-        days = data.get(FIELD_DAYSOFWEEK, [1, 1, 1, 1, 1, 1, 1])
-        if isinstance(days, int):
-            # Convert bitmask to list [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
-            days = [(days >> i) & 1 for i in range(7)]
+        if prefix:
+            start_hour, start_min = _coerce_schedule_time(
+                data.get(f"{prefix}{FIELD_START_TIME_SUFFIX}", {}), "start time", 6
+            )
+            end_hour, end_min = _coerce_schedule_time(
+                data.get(f"{prefix}{FIELD_END_TIME_SUFFIX}", {}), "end time", 22
+            )
+        else:
+            start_hour, start_min = 6, 0
+            end_hour, end_min = 22, 0
+
+        enabled_raw = data.get(FIELD_ENABLED, True)
 
         return cls(
-            index=data.get(FIELD_INDEX, 0),
-            enabled=data.get(FIELD_ENABLED, "1") == "1"
-            if isinstance(data.get(FIELD_ENABLED), str)
-            else bool(data.get(FIELD_ENABLED, True)),
-            days_of_week=days,
+            index=_coerce_schedule_int(data.get(FIELD_INDEX, 0), "index", MAX_SCHEDULE_INDEX),
+            enabled=enabled_raw == "1" if isinstance(enabled_raw, str) else bool(enabled_raw),
+            days_of_week=_coerce_schedule_days(data.get(FIELD_DAYSOFWEEK, [1, 1, 1, 1, 1, 1, 1])),
             inside=inside,
             outside=outside,
-            start_hour=start.get(FIELD_HOUR, 6),
-            start_min=start.get(FIELD_MINUTE, 0),
-            end_hour=end.get(FIELD_HOUR, 22),
-            end_min=end.get(FIELD_MINUTE, 0),
+            start_hour=start_hour,
+            start_min=start_min,
+            end_hour=end_hour,
+            end_min=end_min,
         )
 
     def is_day_active(self, weekday: int) -> bool:

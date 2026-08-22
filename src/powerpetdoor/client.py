@@ -288,6 +288,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         self.cfg_reconnect = reconnect
 
         self._shutdown = False
+        self._connecting = False
         self._ownLoop = False
         self._eventLoop: asyncio.AbstractEventLoop | None = None
         self._transport = None
@@ -305,7 +306,15 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._failed_pings = 0
         self._inflight_msg_id: int | None = None
         self._buffer = ""
-        self._outstanding: dict[int, asyncio.Future] = {}
+        # Fire-and-forget work is tracked so failures are logged
+        # immediately (L3). _tasks is connection-scoped work that
+        # disconnect() cancels; _handler_tasks holds async lifecycle
+        # handlers, which must survive the teardown that triggered them.
+        self._tasks: set[asyncio.Task] = set()
+        self._handler_tasks: set[asyncio.Task] = set()
+        # Keyed by the msgID echoed back by the device; the client always
+        # sends ints, but a response may echo a string (D3 tolerance).
+        self._outstanding: dict[int | str, asyncio.Future] = {}
         # Plain heapq: the client is loop-thread-only (see class docstring),
         # so a lock-based queue.PriorityQueue would only imply a thread
         # safety the rest of the class does not provide (L20).
@@ -375,6 +384,33 @@ class PowerPetDoorClient(asyncio.Protocol):
     # These functions wrap asyncio but ensure the loop is correct!
     def ensure_future(self, *args: Any, **kwargs: Any):
         return asyncio.ensure_future(*args, loop=self._get_loop(), **kwargs)
+
+    def _track_task(self, coro: Awaitable[Any], *, transient: bool = True) -> asyncio.Task:
+        """Schedule fire-and-forget work as a tracked task (L3).
+
+        Mirrors the simulator's pattern: the task is held in a set so an
+        escaping exception is reported immediately by a done-callback,
+        instead of whenever the garbage collector happens to reap the task.
+
+        Args:
+            coro: The coroutine to schedule.
+            transient: True for connection-scoped work (message processing,
+                queue kicks) which :meth:`disconnect` cancels; False for
+                lifecycle handlers, which must still run once the
+                connection is gone.
+        """
+        task: asyncio.Task = self.ensure_future(coro)
+        registry = self._tasks if transient else self._handler_tasks
+        registry.add(task)
+        task.add_done_callback(self._on_task_done)
+        return task
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        """Untrack a finished task, logging any exception it escaped with."""
+        self._tasks.discard(task)
+        self._handler_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            _LOGGER.error("Background client task failed", exc_info=task.exception())
 
     def run_coroutine_threadsafe(self, coro: Coroutine[Any, Any, Any]) -> concurrent.futures.Future:
         if self._eventLoop is None:
@@ -961,7 +997,7 @@ class PowerPetDoorClient(asyncio.Protocol):
             _LOGGER.exception("Connection handler %r raised", name)
             return
         if inspect.isawaitable(result):
-            self.ensure_future(result)
+            self._track_task(result, transient=False)
 
     def start(self) -> None:
         """Start the client and initiate connection.
@@ -1020,6 +1056,11 @@ class PowerPetDoorClient(asyncio.Protocol):
     async def connect(self) -> None:
         """Establish connection to the device.
 
+        Idempotent: a call made while already connected, or while another
+        connect() is still in flight, is a no-op — the device accepts a
+        single connection, so a second socket would orphan the first and
+        hog the device's only slot (M2).
+
         On failure (unreachable/refused/timeout) the error is logged and a
         reconnect attempt is scheduled with backoff; this method only
         raises asyncio.CancelledError. No-op after shutdown()/stop().
@@ -1027,10 +1068,17 @@ class PowerPetDoorClient(asyncio.Protocol):
         if self._shutdown:
             _LOGGER.debug("Ignoring connect() while shut down")
             return
+        if self._transport is not None:
+            _LOGGER.warning("Ignoring connect(): already connected to %s", self.cfg_host)
+            return
+        if self._connecting:
+            _LOGGER.warning("Ignoring connect(): a connection attempt is already in progress")
+            return
         loop = self._get_loop()
         _LOGGER.info(
             "Started to connect to Power Pet Door... at %s:%s", self.cfg_host, self.cfg_port
         )
+        self._connecting = True
         try:
             async with asyncio.timeout(self.cfg_timeout):
                 await loop.create_connection(lambda: self, self.cfg_host, self.cfg_port)
@@ -1042,9 +1090,17 @@ class PowerPetDoorClient(asyncio.Protocol):
                 err,
             )
             self.handle_connect_failure()
+        finally:
+            self._connecting = False
 
     def connection_made(self, transport) -> None:
         """asyncio callback for a successful connection."""
+        if self._transport is not None:
+            # Belt and braces behind connect()'s guard: never let a second
+            # transport orphan the live one (M2).
+            _LOGGER.warning("Rejecting a second connection; one is already established")
+            transport.close()
+            return
         _LOGGER.info("Connection Successful!")
         self._transport = transport
         self._was_connected = True
@@ -1057,7 +1113,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         # otherwise open the dequeue gate for the next enqueue.
         if self._queue:
             self._can_dequeue = False
-            self.ensure_future(self.dequeue_data())
+            self._track_task(self.dequeue_data())
         else:
             self._can_dequeue = True
 
@@ -1101,11 +1157,11 @@ class PowerPetDoorClient(asyncio.Protocol):
         """Close connection and cleanup.
 
         Safe to call at any time - including before connect() and multiple
-        times. Pending reconnect attempts are cancelled, outstanding
-        notify futures are failed with ConnectionError (never cancelled,
-        so callers can distinguish disconnection from task cancellation),
-        and on_disconnect handlers fire only if a connection actually
-        existed (L2).
+        times. Pending reconnect attempts and tracked background work are
+        cancelled, outstanding notify futures are failed with
+        ConnectionError (never cancelled, so callers can distinguish
+        disconnection from task cancellation), and on_disconnect handlers
+        fire only if a connection actually existed (L2).
         """
         was_connected = self._was_connected
         self._was_connected = False
@@ -1128,15 +1184,25 @@ class PowerPetDoorClient(asyncio.Protocol):
         if self._check_receipt:
             self._check_receipt.cancel()
             self._check_receipt = None
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+
         if self._reconnect_task is not None:
             task = self._reconnect_task
             self._reconnect_task = None
-            try:
-                current = asyncio.current_task()
-            except RuntimeError:
-                current = None
             if task is not current:
                 task.cancel()
+
+        # Cancel fire-and-forget work still in flight (L3). The caller's own
+        # task is skipped: disconnect() is reachable from inside one (a
+        # failed write), and self-cancelling it there would surface as a
+        # spurious CancelledError in unrelated code.
+        for task in list(self._tasks):
+            if task is not current:
+                task.cancel()
+
         if self._transport:
             self._transport.close()
             self._transport = None
@@ -1239,7 +1305,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         heapq.heappush(self._queue, msg)
         if self._transport and self._can_dequeue:
             self._can_dequeue = False
-            self.ensure_future(self.dequeue_data())
+            self._track_task(self.dequeue_data())
 
     async def _send_data(self, rawdata) -> None:
         if not self._transport:
@@ -1311,20 +1377,28 @@ class PowerPetDoorClient(asyncio.Protocol):
     def data_received(self, data) -> None:
         """asyncio callback for any data received from the power pet door.
 
-        All received bytes are untrusted. The stream is framed by the
-        shared scanner (:mod:`powerpetdoor.framing`): garbage is discarded
-        with a warning, malformed JSON frames are logged and skipped, and
-        exceeding the un-parsed buffer cap drops the connection. This
-        callback never raises on arbitrary input.
+        All received bytes are untrusted. Non-ASCII bytes are escaped
+        rather than dropped, so a single bad byte corrupts only the frame
+        that contains it instead of desynchronizing the stream (L2). The
+        stream is then framed by the shared scanner
+        (:mod:`powerpetdoor.framing`): garbage is discarded with a warning,
+        malformed JSON frames are logged and skipped, and exceeding the
+        un-parsed buffer cap drops the connection. This callback never
+        raises on arbitrary input.
         """
         if not data:
             return
 
-        try:
-            decoded = data.decode("ascii")
-        except UnicodeDecodeError as err:
-            _LOGGER.error("Received non-ASCII data from device (%s); discarding chunk", err)
-            return
+        # Decoding per chunk and dropping the chunk on error would strand a
+        # half-buffered frame forever (framing never completes again until
+        # the 64 KiB overflow disconnect). backslashreplace keeps every byte
+        # position accounted for: the offending frame simply fails
+        # json.loads and is skipped on its own.
+        decoded = data.decode("ascii", errors="backslashreplace")
+        if len(decoded) != len(data):
+            _LOGGER.error(
+                "Received non-ASCII bytes from device; escaped them (affected frames are dropped)"
+            )
 
         _LOGGER.debug("RX < %s", decoded)
         frames, self._buffer, diag = extract_frames(self._buffer + decoded)
@@ -1335,7 +1409,7 @@ class PowerPetDoorClient(asyncio.Protocol):
             except json.JSONDecodeError as err:
                 _LOGGER.error("Failed to decode JSON frame (%s): %s", err, frame)
                 continue
-            self.ensure_future(self.process_message(msg))
+            self._track_task(self.process_message(msg))
 
         if diag.overflow:
             _LOGGER.error(
@@ -1374,9 +1448,18 @@ class PowerPetDoorClient(asyncio.Protocol):
         reply_msg_id = msg.get(FIELD_MSG_ID_RESPONSE)
         if reply_msg_id is not None:
             self.replyMsgId = reply_msg_id
-            outstanding = self._outstanding.get(reply_msg_id)
-            if outstanding is not None and not outstanding.done():
-                future = outstanding
+            # The device supplies this; anything that is not a usable dict
+            # key (a list, a dict, ...) must not raise here - it simply
+            # matches no outstanding future (D3).
+            if isinstance(reply_msg_id, (int, str)):
+                outstanding = self._outstanding.get(reply_msg_id)
+                if outstanding is not None and not outstanding.done():
+                    future = outstanding
+            else:
+                _LOGGER.warning(
+                    "Ignoring unusable msgID %r in device response; no future to resolve",
+                    reply_msg_id,
+                )
 
         # Acknowledge the in-flight command so the retry timer stops, but
         # defer dequeuing the next message until after the handler has run.

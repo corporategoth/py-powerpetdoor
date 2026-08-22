@@ -131,6 +131,9 @@ The project supports a declared matrix of CPython versions (currently
 Before committing, verify:
 - [ ] `uv run pytest` passes
 - [ ] `uv run pytest --cov` shows 100% for modified files
+- [ ] `uv run pytest --ignore=tests/fuzz --cov` **also** reaches 100% — this is
+      what CI's unit matrix runs, so the deterministic suite must never lean on
+      randomized fuzz coverage to pass the gate
 - [ ] `uv run ruff check src tests` and `uv run ruff format --check src tests` pass
 - [ ] `uv run mypy src` passes
 - [ ] New code has corresponding tests following existing patterns in `tests/`

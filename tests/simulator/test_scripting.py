@@ -787,6 +787,12 @@ class TestSetValueMatrix:
         runner._set_value(name, value)
         assert getattr(runner.simulator.state, attr) == expected
 
+    def test_set_hold_time_accepts_fractional_seconds(self):
+        """hold_time is a float everywhere else, so 1.5 must work (L6)."""
+        runner = make_runner()
+        runner._set_value("hold_time", "1.5")
+        assert runner.simulator.state.hold_time == 1.5
+
     def test_set_unknown_raises(self):
         """Unknown settings raise the exact error."""
         runner = make_runner()
@@ -1026,3 +1032,81 @@ class TestScriptCompleter:
         monkeypatch.setattr(scripting.Script, "from_file", raise_load)
         result = dict(script_completer(""))
         assert result["basic_cycle"] == "(builtin)"
+
+
+# ============================================================================
+# Concurrent Script Execution (frontend round-2 M3)
+# ============================================================================
+
+
+class TestScriptSerialization:
+    """One simulator runs one script at a time.
+
+    Two concurrent runs used to drive the same door and fail each other's
+    assertions, and they shared ``_stop_requested``/``_stop_event``.
+    """
+
+    @staticmethod
+    def _blocking_runner(simulator) -> tuple[ScriptRunner, asyncio.Event, asyncio.Event]:
+        """A runner whose steps block until ``release`` is set."""
+        runner = ScriptRunner(simulator)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking_step(step):
+            entered.set()
+            await release.wait()
+
+        runner._execute_step = blocking_step
+        return runner, entered, release
+
+    @staticmethod
+    def _script(name: str) -> Script:
+        return Script(name=name, steps=[ScriptStep(action="open", params={}, line_number=1)])
+
+    async def test_wait_run_is_refused_while_another_script_runs(self, simulator):
+        """queue_if_busy=False fails fast, naming the script that holds the door."""
+        runner, entered, release = self._blocking_runner(simulator)
+        first = asyncio.ensure_future(runner.run(self._script("First")))
+        async with asyncio.timeout(2.0):
+            await entered.wait()
+
+        assert runner.busy is True
+        assert runner.current_script == "First"
+
+        with pytest.raises(ScriptError, match="Another script is already running: First"):
+            await runner.run(self._script("Second"), queue_if_busy=False)
+
+        release.set()
+        assert await asyncio.wait_for(first, 2.0) is True
+        assert runner.busy is False
+        assert runner.current_script is None
+
+    async def test_queued_run_waits_for_the_running_script(self, simulator):
+        """The default (queue) path blocks instead of interleaving."""
+        runner, entered, release = self._blocking_runner(simulator)
+        first = asyncio.ensure_future(runner.run(self._script("First")))
+        async with asyncio.timeout(2.0):
+            await entered.wait()
+
+        second = asyncio.ensure_future(runner.run(self._script("Second")))
+        # Give the queued run every chance to barge in.
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert second.done() is False
+        assert runner.current_script == "First"
+
+        release.set()
+        assert await asyncio.wait_for(first, 2.0) is True
+        assert await asyncio.wait_for(second, 2.0) is True
+
+    async def test_wait_run_after_the_first_finishes_is_allowed(self, simulator):
+        """The busy guard is not sticky - it clears when the run ends."""
+        runner, entered, release = self._blocking_runner(simulator)
+        first = asyncio.ensure_future(runner.run(self._script("First")))
+        async with asyncio.timeout(2.0):
+            await entered.wait()
+        release.set()
+        await asyncio.wait_for(first, 2.0)
+
+        assert await runner.run(self._script("Second"), queue_if_busy=False) is True

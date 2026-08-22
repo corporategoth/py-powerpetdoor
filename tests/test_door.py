@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -19,8 +20,11 @@ from powerpetdoor import (
     Schedule,
     ScheduleTime,
 )
+from powerpetdoor.client import CommandError
 from powerpetdoor.const import (
+    CMD_GET_NOTIFICATIONS,
     CMD_GET_SCHEDULE_LIST,
+    CMD_GET_SETTINGS,
     DOOR_STATE_CLOSED,
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
@@ -161,15 +165,6 @@ class TestNotificationSettings:
         assert settings.outside_on is False
         assert settings.outside_off is False
         assert settings.low_battery is False
-
-    def test_custom_values(self):
-        """Custom values should be stored correctly."""
-        settings = NotificationSettings(inside_on=True, outside_off=True, low_battery=True)
-        assert settings.inside_on is True
-        assert settings.inside_off is False
-        assert settings.outside_on is False
-        assert settings.outside_off is True
-        assert settings.low_battery is True
 
 
 class TestBatteryInfo:
@@ -336,6 +331,32 @@ class TestPowerPetDoorConnection:
         port = simulator.server.sockets[0].getsockname()[1]
         assert door.host == "127.0.0.1"
         assert door.port == port
+
+    async def test_second_connect_does_not_open_a_second_connection(self, door, simulator, caplog):
+        """connect() while connected is a no-op, not a leaked socket (M2)."""
+        transport = door._client._transport
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            await door.connect()
+
+        assert door.connected is True
+        assert door._client._transport is transport
+        assert len(simulator.protocols) == 1
+        assert "already connected" in caplog.text
+
+    async def test_disconnect_after_double_connect_closes_everything(self, door, simulator):
+        """One disconnect() leaves the device with no connections at all."""
+        await door.connect()  # defensive re-connect
+
+        gone = asyncio.Event()
+        simulator._on_disconnect = gone.set
+
+        await door.disconnect()
+
+        async with asyncio.timeout(5.0):
+            await gone.wait()
+        assert door.connected is False
+        assert simulator.protocols == []
 
 
 # ============================================================================
@@ -754,22 +775,18 @@ class TestConnectLifecycle:
         finally:
             await door.disconnect()
 
-    async def test_connect_failure_raises_connection_error(self, unused_tcp_port):
+    async def test_connect_failure_raises_connection_error(self, refused_port):
         """connect() to a dead port raises ConnectionError, not silence (M10)."""
-        door = PowerPetDoor(
-            "127.0.0.1", port=unused_tcp_port, keepalive=0, timeout=0.2, reconnect=0.1
-        )
+        door = PowerPetDoor("127.0.0.1", port=refused_port, keepalive=0, timeout=0.2, reconnect=0.1)
 
         with pytest.raises(ConnectionError):
             await door.connect(timeout=0.5)
 
         assert door.connected is False
 
-    async def test_connect_failure_leaves_no_reconnect_zombie(self, unused_tcp_port):
+    async def test_connect_failure_leaves_no_reconnect_zombie(self, refused_port):
         """After a raised connect(), the client must not keep reconnecting."""
-        door = PowerPetDoor(
-            "127.0.0.1", port=unused_tcp_port, keepalive=0, timeout=0.2, reconnect=0.1
-        )
+        door = PowerPetDoor("127.0.0.1", port=refused_port, keepalive=0, timeout=0.2, reconnect=0.1)
 
         with pytest.raises(ConnectionError):
             await door.connect(timeout=0.5)
@@ -989,6 +1006,44 @@ class TestSetNotifications:
             FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: "0",
             FIELD_LOW_BATTERY_NOTIFICATIONS: "1",  # Explicitly set
         }
+
+    async def test_custom_cached_settings_drive_the_wire_payload(self, door):
+        """Every field of a custom NotificationSettings reaches the wire.
+
+        This replaces the old dataclass read-back test: it pins the same
+        five fields, but through the merge that actually uses them.
+        """
+        from powerpetdoor.const import (
+            FIELD_LOW_BATTERY_NOTIFICATIONS,
+            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
+            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
+            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
+            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
+        )
+
+        door._notifications = NotificationSettings(
+            inside_on=True, outside_off=True, low_battery=True
+        )
+        sent = {}
+
+        def fake_send(msg_type, cmd, notify=False, **kwargs):
+            sent.update(kwargs)
+            future = asyncio.get_running_loop().create_future()
+            future.set_result({})
+            return future
+
+        door._client.send_message = fake_send
+
+        await door.set_notifications()  # no overrides: pure cache passthrough
+
+        assert sent == {
+            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: "1",
+            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: "0",
+            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: "0",
+            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: "1",
+            FIELD_LOW_BATTERY_NOTIFICATIONS: "1",
+        }
+        assert door.notifications is door._notifications
 
 
 # ============================================================================
@@ -1223,6 +1278,43 @@ class TestDoorUnitEdges:
 
         assert schedules == []
         assert door.schedules == []
+
+    async def test_refresh_names_each_failed_step_in_the_log(self, caplog):
+        """A dead refresh step is reported at the door layer, not swallowed (L5)."""
+        door = PowerPetDoor("127.0.0.1")
+
+        def fake_send(msg_type, cmd, notify=False, **kwargs):
+            future = asyncio.get_running_loop().create_future()
+            future.set_exception(CommandError(cmd, "NAK"))
+            return future
+
+        door._client.send_message = fake_send
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            await door.refresh()
+
+        # refresh_settings() reports its own two sub-steps and returns
+        # normally, so "settings" itself is not a failed step here.
+        for step in ("status", "battery", "stats", "hardware_info"):
+            assert f"Refresh step {step} failed" in caplog.text
+        assert "Refresh step settings failed" not in caplog.text
+
+    async def test_refresh_settings_names_each_failed_step_in_the_log(self, caplog):
+        """Both settings sub-steps are named when they fail (L5)."""
+        door = PowerPetDoor("127.0.0.1")
+
+        def fake_send(msg_type, cmd, notify=False, **kwargs):
+            future = asyncio.get_running_loop().create_future()
+            future.set_exception(CommandError(cmd, "NAK"))
+            return future
+
+        door._client.send_message = fake_send
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            await door.refresh_settings()
+
+        assert f"Refresh step {CMD_GET_SETTINGS} failed" in caplog.text
+        assert f"Refresh step {CMD_GET_NOTIFICATIONS} failed" in caplog.text
 
     async def test_refresh_hardware_info_keeps_cache_on_empty_result(self):
         """An empty hw-info payload leaves the cached info in place."""

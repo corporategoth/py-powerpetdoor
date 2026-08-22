@@ -829,11 +829,11 @@ class TestReconnectBehavior:
             server.close()
             await server.wait_closed()
 
-    async def test_connect_failure_schedules_retry(self, client_config, unused_tcp_port):
+    async def test_connect_failure_schedules_retry(self, client_config, refused_port):
         """A refused connection schedules a backoff retry, not an exception."""
         client = PowerPetDoorClient(
             host="127.0.0.1",
-            port=unused_tcp_port,
+            port=refused_port,
             keepalive=0,
             timeout=1.0,
             reconnect=0.05,
@@ -873,6 +873,7 @@ class TestReconnectBehavior:
     async def test_successful_connection_resets_backoff(self, mock_client):
         """connection_made resets the reconnect attempt counter (L1)."""
         client, transport, _ = mock_client
+        client.disconnect()  # release the fixture's connection first
         client._reconnect_attempts = 7
 
         client.connection_made(transport)
@@ -1131,7 +1132,7 @@ def _capture_messages(client) -> list[dict]:
         return _noop()
 
     client.process_message = _record
-    client.ensure_future = lambda coro: coro.close()
+    client._track_task = lambda coro: coro.close()
     return received
 
 
@@ -1167,12 +1168,35 @@ class TestClientProtocolViolations:
         assert received == [{"success": "true", "CMD": "PONG", "PONG": "2"}]
 
     def test_non_ascii_bytes_skipped(self, mock_client):
-        """Non-ASCII data is discarded without raising."""
+        """Non-ASCII data is escaped, then discarded as garbage, not fatal."""
         client, _, _ = mock_client
 
         client.data_received(b"\xff\xfe")
 
         assert client._buffer == ""
+
+    def test_non_ascii_byte_mid_frame_does_not_desync_framing(self, mock_client, caplog):
+        """One bad byte drops only its own frame; later frames arrive (L2).
+
+        Dropping the whole chunk on UnicodeDecodeError used to strand the
+        half-buffered head of a frame, so framing never completed again
+        until the 64 KiB overflow disconnect.
+        """
+        client, _, _ = mock_client
+        received = _capture_messages(client)
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            # A frame arrives split, and its tail carries a stray byte.
+            client.data_received(b'{"success": "true", "CMD": "A", ')
+            client.data_received(b'"msgID": 1, "note": "\xff"}')
+            # Three well-formed frames follow.
+            for msg_id in (2, 3, 4):
+                frame = json.dumps({"success": "true", "CMD": "B", "msgID": msg_id})
+                client.data_received(frame.encode("ascii"))
+
+        assert [msg["msgID"] for msg in received] == [2, 3, 4]
+        assert client._buffer == ""
+        assert "Received non-ASCII bytes from device" in caplog.text
 
     def test_brace_in_string_value_framed_correctly(self, mock_client):
         """A brace inside a JSON string value does not corrupt framing (C5)."""
@@ -1265,6 +1289,35 @@ class TestProcessMessageDefensive:
         client, _, _ = mock_client
 
         await client.process_message("not a dict")
+
+    @pytest.mark.parametrize("bad_id", [[1, 2], {"nested": "id"}])
+    async def test_unhashable_msg_id_resolves_no_future(self, mock_client, bad_id, caplog):
+        """An unusable msgID is logged and ignored, never a dict lookup (L1)."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            await client.process_message(
+                {"success": "true", "CMD": CMD_GET_SETTINGS, "msgID": bad_id, "settings": {}}
+            )
+
+        assert "Ignoring unusable msgID" in caplog.text
+        assert future.done() is False
+        assert client.replyMsgId == bad_id
+        future.cancel()
+
+    async def test_unhashable_msg_id_does_not_kill_the_receive_task(self, mock_client):
+        """The whole receive path survives a list msgID off the wire (L1)."""
+        client, _, _ = mock_client
+
+        client.data_received(b'{"success": "true", "CMD": "PONG", "msgID": [1, 2]}')
+
+        tasks = list(client._tasks)
+        assert len(tasks) == 1
+        # Before the fix this raised TypeError: unhashable type: 'list'
+        await asyncio.gather(*tasks)
+        assert client.replyMsgId == [1, 2]
 
     async def test_message_missing_success_fails_future(self, mock_client):
         """A response without success fails the matched future (typed)."""
@@ -2107,6 +2160,22 @@ class TestKeepaliveReceiptEdges:
 class TestDequeueData:
     """dequeue_data guards and command-type classification."""
 
+    async def test_dequeue_without_transport_warns_and_sends_nothing(
+        self, disconnected_client, caplog
+    ):
+        """A dequeue that outlives the connection drops the message safely."""
+        client = disconnected_client
+        heapq.heappush(
+            client._queue,
+            PrioritizedMessage(priority=PRIORITY_LOW, sequence=0, data={CONFIG: CMD_GET_SETTINGS}),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            await client.dequeue_data()
+
+        assert "without a connection active" in caplog.text
+        assert len(client._queue) == 1
+
     async def test_dequeue_blocked_while_receipt_outstanding(self, mock_client, caplog):
         """A pending receipt blocks dequeuing the next message."""
         client, transport, _ = mock_client
@@ -2412,3 +2481,202 @@ class TestConcurrency:
             assert order == [PING, CMD_OPEN, CMD_GET_SETTINGS]
         finally:
             client.disconnect()
+
+
+# ============================================================================
+# Connect Idempotence Tests (M2)
+# ============================================================================
+
+
+class TestConnectIdempotence:
+    """connect() must never open a second socket to the one-slot device."""
+
+    @staticmethod
+    async def _echo_server() -> tuple[asyncio.Server, int, list, asyncio.Event]:
+        """Start a server that records every accepted connection."""
+        accepted: list[asyncio.StreamWriter] = []
+        first_accepted = asyncio.Event()
+        first_closed = asyncio.Event()
+
+        async def handle(reader, writer):
+            accepted.append(writer)
+            first_accepted.set()
+            try:
+                await reader.read()
+            finally:
+                first_closed.set()
+                writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        return server, server.sockets[0].getsockname()[1], accepted, first_accepted, first_closed
+
+    async def test_second_connect_is_a_no_op_and_disconnect_kills_everything(self):
+        """A second connect() reuses the live connection; disconnect ends it."""
+        server, port, accepted, first_accepted, first_closed = await self._echo_server()
+        client = PowerPetDoorClient(
+            host="127.0.0.1",
+            port=port,
+            keepalive=30.0,
+            timeout=2.0,
+            reconnect=0.05,
+            loop=asyncio.get_running_loop(),
+        )
+        try:
+            await client.connect()
+            async with asyncio.timeout(2.0):
+                await first_accepted.wait()
+
+            transport = client._transport
+            keepalive = client._keepalive
+            assert transport is not None
+            assert keepalive is not None
+
+            await client.connect()  # defensive re-connect
+
+            assert client._transport is transport  # same socket
+            assert client._keepalive is keepalive  # no orphaned keepalive
+            assert len(accepted) == 1  # device sees one connection
+
+            client.shutdown()
+
+            async with asyncio.timeout(2.0):
+                await first_closed.wait()
+            assert client._transport is None
+            assert transport.is_closing()
+            await asyncio.gather(keepalive, return_exceptions=True)
+            assert keepalive.cancelled()
+        finally:
+            client.shutdown()
+            # Close every accepted peer explicitly: a leaked client socket
+            # would otherwise keep a handler (and wait_closed) alive forever.
+            for writer in accepted:
+                writer.close()
+            server.close()
+            await server.wait_closed()
+
+    async def test_connect_while_an_attempt_is_in_flight_is_a_no_op(self):
+        """Two concurrent connect() calls still produce one connection."""
+        server, port, accepted, first_accepted, _ = await self._echo_server()
+        client = PowerPetDoorClient(
+            host="127.0.0.1",
+            port=port,
+            keepalive=0,
+            timeout=2.0,
+            reconnect=0.05,
+            loop=asyncio.get_running_loop(),
+        )
+        try:
+            await asyncio.gather(client.connect(), client.connect())
+            async with asyncio.timeout(2.0):
+                await first_accepted.wait()
+
+            assert client.available is True
+            assert len(accepted) == 1
+            assert client._connecting is False
+        finally:
+            client.shutdown()
+            for writer in accepted:
+                writer.close()
+            server.close()
+            await server.wait_closed()
+
+    def test_connection_made_rejects_a_second_transport(self, mock_client, caplog):
+        """Belt and braces: a second transport is closed, not installed."""
+        from tests.conftest import MockTransport
+
+        client, transport, _ = mock_client
+        intruder = MockTransport()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            client.connection_made(intruder)
+
+        assert client._transport is transport
+        assert intruder.is_closing() is True
+        assert transport.is_closing() is False
+        assert "Rejecting a second connection" in caplog.text
+
+
+# ============================================================================
+# Background Task Tracking Tests (L3)
+# ============================================================================
+
+
+class TestBackgroundTaskTracking:
+    """Fire-and-forget work is tracked, logged, and torn down."""
+
+    async def test_message_processing_is_tracked(self, mock_client):
+        """data_received schedules processing into the tracked set."""
+        client, _, _ = mock_client
+
+        client.data_received(b'{"success": "true", "CMD": "PONG", "PONG": "1"}')
+
+        tasks = list(client._tasks)
+        assert len(tasks) == 1
+        await asyncio.gather(*tasks)
+        assert client._tasks == set()
+
+    async def test_failing_task_is_logged_immediately(self, mock_client, caplog):
+        """An escaping exception is reported by the done-callback, not at GC."""
+        client, _, _ = mock_client
+
+        async def boom():
+            raise RuntimeError("kaboom")
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            task = client._track_task(boom())
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert "Background client task failed" in caplog.text
+        assert client._tasks == set()
+
+    async def test_disconnect_cancels_in_flight_processing(self, mock_client):
+        """Connection-scoped work is cancelled when the connection drops."""
+        client, _, _ = mock_client
+        started = asyncio.Event()
+
+        async def slow():
+            started.set()
+            await asyncio.sleep(60)
+
+        task = client._track_task(slow())
+        async with asyncio.timeout(2.0):
+            await started.wait()
+
+        client.disconnect()
+
+        await asyncio.gather(task, return_exceptions=True)
+        assert task.cancelled()
+        assert client._tasks == set()
+
+    async def test_disconnect_from_inside_a_tracked_task_does_not_self_cancel(self, mock_client):
+        """disconnect() is reachable from a tracked task (a failed write)."""
+        client, _, _ = mock_client
+        finished = []
+
+        async def worker():
+            client.disconnect()
+            finished.append("ran to completion")
+
+        task = client._track_task(worker())
+        await task
+
+        assert finished == ["ran to completion"]
+        assert task.cancelled() is False
+
+    async def test_async_lifecycle_handlers_survive_disconnect(self, mock_client):
+        """on_disconnect coroutines are not cancelled by the disconnect."""
+        client, _, _ = mock_client
+        ran = asyncio.Event()
+
+        async def on_disconnect():
+            await asyncio.sleep(0)
+            ran.set()
+
+        client.add_handlers("late", on_disconnect=on_disconnect)
+        client.disconnect()
+        client.disconnect()  # a second teardown must not kill the first handler
+
+        async with asyncio.timeout(2.0):
+            await ran.wait()
+        await asyncio.sleep(0)  # let the done-callback untrack the task
+        assert client._handler_tasks == set()

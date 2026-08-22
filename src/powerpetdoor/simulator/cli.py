@@ -110,8 +110,13 @@ class InteractivePrompt:
             sys.stdout.flush()
 
     def clear_line(self):
-        """Clear the current line (prompt and any partial input)."""
-        if self._enabled:
+        """Clear the current line (prompt and any partial input).
+
+        Only emits the ANSI erase sequence on a real terminal: on a pipe or
+        a dumb terminal it would render as literal garbage in the output
+        (T3), and there is no cursor to rewind anyway.
+        """
+        if self._enabled and sys.stdout.isatty():
             # Move to start of line and clear to end
             sys.stdout.write("\r\033[K")
             sys.stdout.flush()
@@ -750,7 +755,9 @@ async def run_simulator(
                 basic_input = _BasicStdinInput(loop, prompt, cmd_handler, stop_event)
                 basic_input.start()
         else:
-            logger.warning("stdin not available, running in daemon mode")
+            # Not daemon mode as the docs define it (no control channel is
+            # started on this path) - just headless (T5).
+            logger.warning("stdin not available, running without interactive input")
 
     # Handle run_for timeout
     if run_for:
@@ -908,11 +915,17 @@ def main():
 
     # List scripts and exit
     if args.list_scripts:
-        from .scripting import list_builtin_scripts
+        from .scripting import list_builtin_scripts, list_extra_scripts, set_extra_scripts_dir
 
         print("Available built-in scripts:")
         for name, desc in list_builtin_scripts():
             print(f"  {name}: {desc}")
+        set_extra_scripts_dir(args.scripts_dir)
+        extra = list_extra_scripts()
+        if extra:
+            print(f"Scripts from {args.scripts_dir}:")
+            for name, desc in extra:
+                print(f"  {name}: {desc}")
         return
 
     # Determine daemon mode and control port
@@ -921,6 +934,22 @@ def main():
     # Validate mutually exclusive options
     if args.scripts and daemon:
         parser.error("--script and --daemon are mutually exclusive")
+
+    # Mode-scoped flags: silently ignoring them is a repeatability trap in
+    # CI wrappers (e.g. `ppd-simulator --oneshot` with no script exits 0
+    # having run nothing but an interactive session).
+    script_only_flags = [
+        ("--loop", args.loop),
+        ("--script-delay", bool(args.script_delay)),
+        ("--oneshot", args.oneshot),
+        ("--wait-for-client", args.wait_for_client),
+    ]
+    if not args.scripts:
+        unusable = [name for name, given in script_only_flags if given]
+        if unusable:
+            parser.error(f"{', '.join(unusable)} require --script")
+    if not daemon and args.control_host != DEFAULT_CONTROL_HOST:
+        parser.error("--control-host requires --daemon")
 
     if daemon:
         # -1 means use default (port+1), otherwise use specified port

@@ -40,6 +40,9 @@ _garbage = st.text(
     alphabet=st.characters(blacklist_characters="{", blacklist_categories=("Cs",)), max_size=10
 )
 
+# Individual bytes that cannot be decoded as ASCII.
+_non_ascii_bytes = st.integers(min_value=0x80, max_value=0xFF)
+
 
 def _feed_chunks(chunks: list[str]) -> tuple[list[str], str, bool]:
     """Feed chunks through extract_frames the way a receiver would."""
@@ -54,14 +57,40 @@ def _feed_chunks(chunks: list[str]) -> tuple[list[str], str, bool]:
     return collected, buffer, overflow
 
 
-def _split_at(stream: str, cuts: list[int]) -> list[str]:
-    """Split a stream into chunks at the given cut points."""
+def _split_at(stream, cuts: list[int]) -> list:
+    """Split a str or bytes stream into chunks at the given cut points."""
     chunks = []
     prev = 0
     for cut in [*sorted(cuts), len(stream)]:
         chunks.append(stream[prev:cut])
         prev = cut
     return chunks
+
+
+def _capture_client() -> tuple[PowerPetDoorClient, list[dict]]:
+    """Build a client whose dispatched messages are recorded synchronously."""
+    client = PowerPetDoorClient(
+        host="127.0.0.1",
+        port=3000,
+        keepalive=30.0,
+        timeout=5.0,
+        reconnect=5.0,
+        # Any truthy object prevents the constructor from creating a
+        # private event loop; dispatch is captured synchronously below.
+        loop=SimpleNamespace(),
+    )
+    received: list[dict] = []
+
+    async def _noop() -> None:
+        pass
+
+    def _record(msg):
+        received.append(msg)
+        return _noop()
+
+    client.process_message = _record
+    client._track_task = lambda coro: coro.close()
+    return client, received
 
 
 class TestFramingProperties:
@@ -128,32 +157,40 @@ class TestClientFramingProperties:
     @given(objs=st.lists(_json_objects, min_size=1, max_size=4), data=st.data())
     def test_data_received_round_trip_any_chunking(self, objs, data):
         """client.data_received reassembles any chunking into the same messages."""
-        client = PowerPetDoorClient(
-            host="127.0.0.1",
-            port=3000,
-            keepalive=30.0,
-            timeout=5.0,
-            reconnect=5.0,
-            # Any truthy object prevents the constructor from creating a
-            # private event loop; dispatch is captured synchronously below.
-            loop=SimpleNamespace(),
-        )
-        received: list[dict] = []
-
-        async def _noop() -> None:
-            pass
-
-        def _record(msg):
-            received.append(msg)
-            return _noop()
-
-        client.process_message = _record
-        client.ensure_future = lambda coro: coro.close()
+        client, received = _capture_client()
 
         stream = "".join(json.dumps(o) for o in objs)
         cuts = data.draw(st.lists(st.integers(min_value=0, max_value=len(stream)), max_size=6))
         for chunk in _split_at(stream, cuts):
             client.data_received(chunk.encode("ascii"))
+
+        assert received == objs
+        assert client._buffer == ""
+
+    @settings(max_examples=50, deadline=None)
+    @given(
+        objs=st.lists(_json_objects, min_size=1, max_size=4),
+        bad=st.lists(_non_ascii_bytes, min_size=1, max_size=4),
+        data=st.data(),
+    )
+    def test_non_ascii_bytes_between_frames_lose_nothing(self, objs, bad, data):
+        """Non-ASCII bytes between frames must not desync the stream (L2).
+
+        Dropping the whole chunk on UnicodeDecodeError stranded whatever
+        was already buffered, so every later message went unprocessed until
+        the 64 KiB overflow disconnect.
+        """
+        client, received = _capture_client()
+
+        parts: list[bytes] = []
+        for obj in objs:
+            parts.append(bytes(bad))
+            parts.append(json.dumps(obj).encode("ascii"))
+        stream = b"".join(parts)
+
+        cuts = data.draw(st.lists(st.integers(min_value=0, max_value=len(stream)), max_size=6))
+        for chunk in _split_at(stream, cuts):
+            client.data_received(chunk)
 
         assert received == objs
         assert client._buffer == ""

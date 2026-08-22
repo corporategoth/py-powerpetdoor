@@ -94,8 +94,17 @@ class CommandHandler(
         self._cli_mode = False  # Set by cli.py for CLI interactive mode (vs ctl/daemon)
 
         # Import here to avoid circular imports
-        from ..scripting import Script, get_builtin_script, list_builtin_scripts
+        from ..scripting import (
+            Script,
+            get_builtin_script,
+            list_builtin_scripts,
+            set_extra_scripts_dir,
+        )
         from ..state import Schedule
+
+        # Publish the extra scripts dir so `list`, the unknown-script hint,
+        # and tab completion all see the same runnable set.
+        set_extra_scripts_dir(scripts_dir)
 
         self._Script = Script
         self._get_builtin_script = get_builtin_script
