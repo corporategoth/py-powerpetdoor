@@ -2,7 +2,7 @@
 
 This file is **auto-generated** by CI after each test run. Do not edit manually.
 
-**Last updated:** 2026-08-22 19:06 UTC
+**Last updated:** 2026-08-22 22:27 UTC
 
 ## Summary
 
@@ -10,8 +10,8 @@ This file is **auto-generated** by CI after each test run. Do not edit manually.
 |--------|-------|
 | Line Coverage | 100.00% |
 | Branch Coverage | 100.00% |
-| Lines Covered | 6,775 / 6,775 |
-| Branches Covered | 2,410 / 2,410 |
+| Lines Covered | 6,902 / 6,902 |
+| Branches Covered | 2,448 / 2,448 |
 | Lines Missing | 0 |
 
 ## Coverage by Category
@@ -30,6 +30,14 @@ All code is covered by tests. No gaps to report.
 
 ## Coverage Exclusions
 
+### Gate Configuration
+
+What the 100% gate measures, read from `pyproject.toml` (`tests/test_gaps_report.py` asserts each value):
+
+- Measured roots (`coverage.run.source`): `src/powerpetdoor`, `scripts`
+- Branch coverage (`coverage.run.branch`): `true`
+- Gate threshold (`coverage.report.fail_under`): `100`
+
 ### Automatic Exclusions
 
 The following are excluded from coverage by configuration (`pyproject.toml`):
@@ -43,10 +51,11 @@ The following are excluded from coverage by configuration (`pyproject.toml`):
 - `^\s*if __name__ == .__main__.:` - Script entry-point guards
 - `^\s*@overload\s*$` - Typing overload declarations
 - `(^\s*\.\.\.\s*$)|(:\s*\.\.\.\s*$)` - Ellipsis stub bodies
+- `#\s*pragma:\s*no\s+branch\s*($|\()` - Explicitly annotated partial branches (see Pragma Exclusions below)
 
 ### Prose-Triggered Exclusions
 
-None. Every `exclude_lines` pattern above matches only the construct it names, never a string literal on a line carrying a statement.
+None. Every `exclude_lines` and `partial_branches` pattern above matches only the construct it names, never a string literal on a line carrying a statement.
 
 ### Pragma Exclusions
 
@@ -56,8 +65,8 @@ None. Every `exclude_lines` pattern above matches only the construct it names, n
 
 | Lines | Type | Reason | Code |
 |-------|------|--------|------|
-| 100 | no branch | defensive: enable() always installs a handler | `if self._handler:` |
-| 689 | no branch | bound after start() | `if simulator.server and simulator.server.sockets:` |
+| 127 | no branch | defensive: enable() always installs a handler | `if self._handler:` |
+| 797 | no branch | bound after start() | `if simulator.server and simulator.server.sockets:` |
 
 #### `simulator/ctl.py` (1 lines)
 

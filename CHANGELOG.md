@@ -45,8 +45,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documentation-only annotations on **any** step, and are read by nothing. They
   give annotated scripts a spelling that is guaranteed not to collide with a
   parameter name, now that an unrecognised parameter is an error (see Changed)
+- `py.typed` (PEP 561): the library's annotations are now visible to downstream
+  type checkers. Without the marker every one of the 121 exported names was
+  `Any` to a consumer — `await door.set_hold_time("banana")` was silently
+  accepted by mypy in a downstream repo
+- A `MANIFEST.in`, so the sdist ships the whole test suite (`conftest.py`,
+  `tests/__init__.py`, `tests/fuzz/`, `tests/simulator/`, `scripts/`, `docs/`)
+  rather than 9 loose modules and none of the machinery to run them. `pytest`
+  in the unpacked sdist now runs the same suite CI does
+- CI: a `packaging` job that builds the artifacts and asserts both — the wheel
+  carries `py.typed`, and the unpacked sdist's suite actually runs
+- `docs/door.md`: a "Behaviour While Disconnected" section, and a warning on
+  the `PowerPetDoor` class docstring. A command issued while disconnected is
+  **queued and executes on the next connection** — on a physical pet door that
+  needs to be conspicuous. The behaviour itself is unchanged and deliberate
 
 ### Changed
+
 - Schedule serialization is now a single, explicitly-marked boundary
   (`SCHEDULE_WIRE_TO_DEVICE` / `SCHEDULE_WIRE_FROM_DEVICE` in
   `powerpetdoor/schedule.py`). The Python API is strict (`enabled: bool`,
@@ -130,6 +145,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Linux/macOS classifiers — the simulator's plain-stdin prompt fallback uses
   `loop.add_reader()`, which Windows' ProactorEventLoop does not implement
 
+#### Breaking (simulator CLI)
+- `ppd-simulator --script … --oneshot` interrupted by Ctrl-C now exits **130**
+  and prints `>>> Interrupted after N of M script(s)` instead of exiting **0**
+  with `>>> All scripts PASSED`. `--oneshot` that produced no verdict at all is
+  now exit 1 rather than 0. *Remedy:* none needed for an uninterrupted run;
+  a wrapper that treated 0-on-interrupt as success was reading a false green
+- `ppd-simulator --daemon` interrupted by Ctrl-C now exits 130 (was 0), matching
+  `ppd-simulator-ctl`
+- A misspelled **top-level** script key is now a load error
+  (`Unknown top-level key(s): stpes. Use: description, name, steps`). `stpes:`
+  used to produce a zero-step script that reported `PASSED` and exited 0 — the
+  whole file silently became a no-op that still reported success.
+  *Remedy:* fix the spelling; `steps: []` is still legal and still means
+  "no steps"
+- `ppd-simulator-ctl --timeout` must be greater than 0, and an empty or
+  whitespace-only command is refused with a usage line at rc 2 instead of
+  hanging for the full timeout. *Remedy:* `run <script> wait` is the spelling
+  for "wait as long as it takes"
+- `ppd-simulator --run-for` must be greater than 0 (`--run-for -5` used to be
+  accepted and mean "shut down immediately")
+- `--port`, `--daemon PORT`, `--host` and `--control-host` are validated in the
+  parser: out of range or unresolvable now exits 2 with a usage line instead of
+  an `OverflowError`/`gaierror` traceback
+
 #### Breaking (simulator script DSL)
 
 Both of these used to be silently ignored, which is what made them worth
@@ -173,6 +212,71 @@ accepted, and the run still exited 0.
   cost ~600 ms of the door server's own event loop per Tab; it is now ~4 ms
 
 ### Fixed
+- `ppd-simulator` no longer swallows the cancellation `asyncio.Runner` uses to
+  deliver Ctrl-C, so `main()`'s `KeyboardInterrupt` handler is actually
+  entered; the startup-script task is held and cancelled inside
+  `run_simulator`'s cleanup, so its result is authoritative before it is read
+- `sanitize_text` escapes unpaired surrogates (`\ud800`-`\udfff`) as well as
+  C0/C1/DEL, with a width-aware `\xNN`/`\uNNNN` escape. A lone surrogate is
+  legal JSON, arrives as pure ASCII on the wire, and cannot be encoded to
+  UTF-8 — so the "sanitized" record was exactly what a
+  `logging.FileHandler(encoding="utf-8")` could not write: 200 hostile frames
+  produced **0** log lines and 359 KB of logging-internal tracebacks on stderr,
+  from a code path outside every `EventThrottle`
+- Four per-frame log sites in the shipped library and facade are now throttled
+  and length-capped like their four siblings: the unusable-`msgID` warning
+  (`client.py`), the unknown-door-status, non-mapping-hardware-info and
+  malformed-schedule warnings (`door.py`), plus the previously capped-but-
+  unthrottled non-mapping `fwInfo` warning. Measured at 20,000 frames:
+  **20,032 records → 64**, and a single **65,638-byte** record from one frame
+  → 332. `door.py`'s unknown-status site needs no attack at all — a firmware
+  revision reporting a status this library does not know produced one uncapped
+  WARNING per status update
+- `FrameDispatcher._pump()` re-arms the pump *and* updates flow control in a
+  `finally`, so no raising dispatch callback can leave the transport paused
+  with an undrainable backlog. (Round 8 moved only the flow-control update,
+  which closed the wedge for a backlog at or below `pause_at` and
+  re-established it above — measured at `backlog=934 inflight=0 paused=True`
+  forever on a 1000-frame burst.)
+- The malformed-message and device-error throttles record the bytes the peer
+  actually sent instead of `len(json.dumps(msg))`. A `{}` padded with 60,000
+  spaces was reported as "2 bytes" — a 30,001x under-report in the number an
+  operator reads to decide whether a peer is worth investigating — and a
+  compact 29-byte envelope over-reported by 12%
+- `PowerPetDoor`'s command timeouts carry a message. `asyncio.wait_for` raises
+  a bare `TimeoutError()` whose `repr` is literally `TimeoutError()`; it now
+  names the command, the wait, the endpoint, and — when there is no connection
+  — that the command is queued rather than lost
+- `--history <unusable path>` falls back to in-memory history instead of
+  handing the same path to `FileHistory` anyway, which raised inside the
+  running prompt on every load and every store and put up a modal
+  "Press ENTER to continue" for the rest of the session
+- A bind failure at startup prints one operator sentence naming the role of
+  the port that failed (`door`/`control`) and which flag changes it, instead of
+  a 30-line asyncio traceback with build-machine paths in it; the traceback
+  stays available behind `--debug`. A failed control-channel bind also brings
+  the door server back down
+- The daemon answers a blank control-channel line (`ERROR: Empty command`)
+  instead of dropping it unanswerably, and refuses an over-long line with
+  `ERROR: Command line too long (max 65536 bytes)` at INFO instead of logging
+  an asyncio internal at ERROR into every other operator's `ctl` session
+- Simulator: `DoorMotionEngine.activate_sensor` applies the same gate
+  `trigger_sensor` does. It had no command-lockout check and no schedule check,
+  so a script step `- action: inside` opened the door while command lockout was
+  on and while every schedule window was closed — which `docs/operation.md`
+  ("Outside scheduled windows, sensor triggers are ignored") says a real door
+  would not. Both now share one predicate,
+  `DoorMotionEngine.sensor_open_block_reason`
+- CI: the changelog guard covers a whole multi-commit push
+  (`github.event.before`, not just `HEAD^`), and an unresolvable base ref now
+  fails the job instead of printing `OK: 0 file(s)` and exiting 0
+- Coverage: `partial_branches` is configured and anchored, so the branch half
+  of the exclusion mechanism is no longer coverage's own bare, unanchored
+  default; the prose sweep is fed both halves. `tests/test_gaps_report.py`
+  asserts the *values* of `branch`, `source`, `omit`, `exclude_lines` and
+  `partial_branches`, and `TESTING_GAPS.md` discloses the gate's configuration
+  — four one-line edits to `pyproject.toml` each shrank the gate silently while
+  it still printed `100.00%`
 - The 64 KiB framing cap bounds memory again, not just a character count: the
   retained remainder is coalesced once it grows past `MAX_RETAINED_PIECES`
   pieces (measured: 512 KiB/connection → 67 KiB at 1-byte chunks, for under 4%
@@ -371,8 +475,12 @@ accepted, and the run still exited 0.
   descriptor and the connection slot after the peer had closed its socket.
   Both frames now take the same throttled bad-frame path an unparseable frame
   already took; nothing that decoded before is refused now
-- `FrameDispatcher._pump()` updates flow control in a `finally`, so no raising
-  dispatch callback can leave the transport paused with an undrainable backlog
+- `FrameDispatcher._pump()` re-arms the pump *and* updates flow control in a
+  `finally`, so no raising dispatch callback can leave the transport paused
+  with an undrainable backlog. (Round 8 moved only the flow-control update,
+  which closed the wedge for a backlog at or below `pause_at` and
+  re-established it above — measured at `backlog=934 inflight=0 paused=True`
+  forever on a 1000-frame burst. Both lines moved in round 9.)
 - Simulator: the interactive completer runs off the event loop
   (`ThreadedCompleter`), so no completer can stall the emulated door
 

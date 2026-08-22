@@ -103,14 +103,50 @@ class TestConstruction:
         History(hist_file)
         assert stat.S_IMODE(os.stat(hist_file).st_mode) == 0o600
 
-    def test_unwritable_path_logs_warning_and_continues(self, tmp_path, caplog):
-        bad_path = tmp_path / "missing_dir" / "history"
+    @pytest.mark.parametrize(
+        "make_bad_path",
+        [
+            pytest.param(lambda tmp: tmp / "missing_dir" / "history", id="missing-parent"),
+            pytest.param(
+                lambda tmp: (tmp / "is_a_dir").mkdir() or (tmp / "is_a_dir"), id="a-directory"
+            ),
+        ],
+    )
+    def test_an_unusable_path_falls_back_to_memory(self, tmp_path, caplog, make_bad_path):
+        """The code already *knew* the path was unusable and used it anyway.
+
+        `_create_private_file` raised, a correct warning was logged, and the
+        same path was then handed to `FileHistory` two lines later - so
+        prompt_toolkit raised inside the running application on every load
+        and every store, dumping a traceback and a modal "Press ENTER to
+        continue" the operator had to dismiss for the rest of the session.
+        `InMemoryHistory` was already the fallback two lines above
+        (round-9 frontend L2).
+        """
+        from prompt_toolkit.history import InMemoryHistory
+
+        bad_path = make_bad_path(tmp_path)
         with caplog.at_level("WARNING"):
             history = History(bad_path)
-        assert f"Could not create history file {bad_path}" in caplog.text
-        # History object still usable (FileHistory is lazy)
+
+        assert f"Could not use history file {bad_path}" in caplog.text
+        assert "history is in-memory for this session" in caplog.text
+        assert isinstance(history.prompt_toolkit_history, InMemoryHistory)
         assert history.available is True
         assert history.get_entries() == []
+        # ...and it is actually usable, which is the point of falling back.
+        history.prompt_toolkit_history.append_string("status")
+        assert history.get_entries() == ["status"]
+
+    def test_a_usable_path_still_gets_a_file_history(self, hist_file, caplog):
+        """The control: nothing degrades when the path works."""
+        from prompt_toolkit.history import FileHistory
+
+        with caplog.at_level("WARNING"):
+            history = History(hist_file)
+
+        assert caplog.text == ""
+        assert isinstance(history.prompt_toolkit_history, FileHistory)
 
     def test_prompt_toolkit_missing_disables_history(self, disabled_history):
         assert disabled_history.available is False

@@ -80,13 +80,36 @@ jobs:
       - name: CHANGELOG.md moves whenever src/ does
         env:
           BASE_REF: ${{ github.base_ref }}
+          # `HEAD^` inspects only the *tip* commit of a push, so a src/
+          # change in any earlier commit of a multi-commit push was missed.
+          # `github.event.before` is the ref's previous tip, i.e. the whole
+          # push. It is all-zeroes for a newly created branch, where there
+          # is no previous tip to diff against, and can point at a commit
+          # this shallow clone lacks - both fall back to HEAD^.
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
           if [ -n "$BASE_REF" ]; then
             base="origin/$BASE_REF"
+          elif [ -n "$PUSH_BEFORE" ] \
+            && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
+            base="$PUSH_BEFORE"
           else
             base="HEAD^"
           fi
-          changed="$(git diff --name-only "$base"...HEAD 2>/dev/null || git diff --name-only "$base" HEAD)"
+          # An unresolvable base used to leave `changed` empty, so the job
+          # printed "OK: 0 file(s) under src/ changed" and exited 0 - a
+          # silent pass on a guard whose entire job is not to have one.
+          if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+            echo "::error::changelog guard cannot resolve base ref '$base'; refusing to pass."
+            exit 1
+          fi
+          if ! changed="$(git diff --name-only "$base"...HEAD 2>/dev/null)"; then
+            if ! changed="$(git diff --name-only "$base" HEAD)"; then
+              echo "::error::changelog guard could not diff '$base'..HEAD; refusing to pass."
+              exit 1
+            fi
+          fi
           if echo "$changed" | grep -q '^src/' && ! echo "$changed" | grep -q '^CHANGELOG\.md$'; then
             echo "::error::src/ changed but CHANGELOG.md did not."
             echo "Add an entry under [Unreleased], or explain why the change is not user-visible."
@@ -95,6 +118,60 @@ jobs:
             exit 1
           fi
           echo "OK: $(echo "$changed" | grep -c '^src/' || true) file(s) under src/ changed"
+
+  # The published artifacts, asserted rather than assumed.
+  #
+  # The sdist used to carry 9 test modules and none of the machinery that
+  # runs them, so `pytest` in the unpacked artifact collected nothing and
+  # errored - it advertised a suite it could not execute, which is worse
+  # than shipping none (round-9 security informational 1). And the wheel
+  # shipped 121 annotated, CI-gated names with no PEP 561 marker, so every
+  # downstream consumer type-checked the whole library as `Any` (round-9
+  # frontend M1). Both are invisible to every other job here, because both
+  # are properties of the *built* artifact.
+  packaging:
+    name: Packaging
+    needs: [cache-actions]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-uv-with-retry
+        with:
+          python-version: ${{ env.REFERENCE_PYTHON }}
+      - name: Install dependencies
+        run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+      - name: Build the artifacts
+        run: uv build
+      - name: The wheel carries the PEP 561 marker
+        run: |
+          wheel="$(echo dist/*.whl)"
+          if ! unzip -l "$wheel" | grep -q ' powerpetdoor/py.typed$'; then
+            echo "::error::py.typed is missing from $wheel; downstream mypy sees this library as Any."
+            unzip -l "$wheel"
+            exit 1
+          fi
+          echo "OK: py.typed present in $wheel"
+      - name: The sdist ships a suite that actually runs
+        run: |
+          rm -rf /tmp/sdist && mkdir -p /tmp/sdist
+          tar xzf dist/*.tar.gz -C /tmp/sdist
+          root="$(echo /tmp/sdist/*/)"
+          for required in \
+            tests/conftest.py tests/__init__.py tests/fuzz/__init__.py \
+            tests/simulator/__init__.py tests/TESTING_GAPS.md \
+            scripts/generate_gaps_report.py docs/protocol.md
+          do
+            if [ ! -e "$root$required" ]; then
+              echo "::error::$required is missing from the sdist."
+              exit 1
+            fi
+          done
+          cd "$root"
+          # The same interpreter and the same `dev` extra a third party gets
+          # from `pip install .[dev]`; PYTHONPATH stands in for the install
+          # so this measures the *artifact*, not the checkout.
+          PYTHONPATH="$PWD:$PWD/src" pytest -q --timeout=180
 
   # Unit tests run the FULL Python matrix and every matrix entry uploads its
   # coverage data. Version-specific code paths (sys.version_info branches,

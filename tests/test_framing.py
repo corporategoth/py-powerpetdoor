@@ -984,6 +984,64 @@ class TestFrameDispatcher:
         await asyncio.sleep(0)
         assert len(started) == 4
 
+    async def test_the_inflight_cap_still_holds_when_a_done_callback_repumps(self):
+        """The cap on the *re-entrant* path, which is the only one it works on.
+
+        `test_concurrency_is_bounded_by_max_inflight` cannot see the
+        `self._inflight < self._max_inflight` comparison at all: on the
+        *first* pump the separate `budget = self._max_inflight` counter caps
+        the loop at four iterations whatever the comparison says. Relaxing
+        it to `<=` therefore survived the whole suite, while a direct probe
+        measured a peak of **5** with `max_inflight=4` (round-9 test-fanatic
+        L1). The comparison only becomes decisive when `_on_dispatched_done`
+        re-enters `_pump` with `_inflight` already at the cap - which is the
+        steady state of a busy connection, and the only state in which the
+        concurrency bound does any work.
+        """
+        max_inflight = 4
+        gates: list[asyncio.Event] = []
+        tasks: list[asyncio.Task] = []
+
+        async def handler(gate):
+            await gate.wait()
+
+        def dispatch(frame):
+            gate = asyncio.Event()
+            gates.append(gate)
+            task = asyncio.ensure_future(handler(gate))
+            tasks.append(task)
+            return task
+
+        dispatcher = framing.FrameDispatcher(dispatch, max_inflight=max_inflight, pause_at=1000)
+        try:
+            dispatcher.submit([f"{{{i}}}" for i in range(50)], RecordingTransport())
+            assert dispatcher.inflight == max_inflight
+
+            peak = dispatcher.inflight
+            released = 0
+            # Release one handler at a time, so every subsequent pump is the
+            # re-entrant one, and watch the peak on every loop turn.
+            for _ in range(20000):
+                if not dispatcher.backlog and not dispatcher.inflight:
+                    break
+                if released < len(gates):
+                    gates[released].set()
+                    released += 1
+                await asyncio.sleep(0)
+                peak = max(peak, dispatcher.inflight)
+                assert dispatcher.inflight <= max_inflight
+
+            assert dispatcher.backlog == 0
+            assert dispatcher.inflight == 0
+            assert released == 50
+            # The bound was actually exercised, not merely never approached.
+            assert peak == max_inflight
+        finally:
+            dispatcher.reset()
+            for gate in gates:
+                gate.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def test_the_whole_backlog_still_runs(self, dispatchers):
         started: list[str] = []
         dispatcher = dispatchers(started, max_inflight=4, pause_at=1000)
@@ -1276,6 +1334,65 @@ class TestPumpYieldsBetweenBatches:
         # ...and the next read drains what the raise left behind.
         dispatcher.submit(["{g}"], transport)
         assert dispatcher.backlog == 0
+
+    async def test_a_raising_dispatch_above_pause_at_still_drains(self, request):
+        """The half round 8's `finally` did not close.
+
+        Round 8 moved only `_update_flow()` into the `finally`; the re-arm
+        stayed inside the `try`. That closes the wedge for a backlog at or
+        *below* `pause_at` (the case the test above builds, with
+        `pause_at=1` and one frame left over), and re-establishes it above:
+        `_update_flow()`'s job up there is to **pause**, so the `finally`
+        left `backlog>0, inflight=0, paused=True` with no pump scheduled,
+        nothing in flight to deliver a done-callback and reading paused so
+        no further `submit` could ever arrive. Measured on the shipped tree
+        at `backlog=934` forever (round-9 backend F1 / security L1).
+
+        A one-read burst puts every frame in the backlog at once, so this
+        is the branch nearly the whole drain window sits in - the shipped
+        test above happens to sit in the other one.
+        """
+        loop = asyncio.get_running_loop()
+        escaped: list[BaseException | None] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, ctx: escaped.append(ctx.get("exception")))
+        request.addfinalizer(lambda: loop.set_exception_handler(previous_handler))
+
+        seen = 0
+
+        def dispatch(frame):
+            nonlocal seen
+            seen += 1
+            # The first frame of the SECOND pump, i.e. the `call_soon`
+            # re-arm the docstring names as the wedging path.
+            if seen == framing.MAX_INFLIGHT_FRAMES + 1:
+                raise RuntimeError("callback is not total")
+            return None  # unparseable frame: no task, so the pump re-arms
+
+        transport = RecordingTransport()
+        dispatcher = framing.FrameDispatcher(dispatch)
+        # The first pump drains `max_inflight` of them, so the remainder has
+        # to still be over `pause_at` for this to be the *paused* branch.
+        total = framing.MAX_FRAME_BACKLOG + framing.MAX_INFLIGHT_FRAMES + 44
+        dispatcher.submit([f"{{x{i}}}" for i in range(total)], transport)
+
+        # One read, so the whole burst is in the backlog at once: over
+        # `pause_at`, reading paused, and nothing further can be submitted.
+        assert dispatcher.backlog == framing.MAX_FRAME_BACKLOG + 44
+        assert dispatcher.paused is True
+        assert transport.pause_calls == 1
+
+        for _ in range(20000):
+            if not dispatcher.backlog and not dispatcher.inflight:
+                break
+            await asyncio.sleep(0)
+
+        assert [type(exc) for exc in escaped] == [RuntimeError]
+        assert dispatcher.backlog == 0
+        assert dispatcher.paused is False
+        assert transport.resume_calls == 1
+        # Exactly one frame lost - what the docstring promises, per raise.
+        assert seen == total
 
     async def test_a_reset_while_a_pump_is_pending_is_safe(self):
         """Fix interaction: the deferred pump meets `connection_lost`.

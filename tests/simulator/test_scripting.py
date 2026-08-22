@@ -1316,6 +1316,30 @@ class TestDescriptionsAreCachedPerFileVersion:
 
         assert list_builtin_scripts() == [("one", "bbbbb")]
 
+    def test_a_same_mtime_edit_still_reparses(self, tmp_path, monkeypatch):
+        """...and the mirror image: `st_mtime_ns` alone is not enough either.
+
+        The key's `st_size` component is what covers a filesystem with
+        coarse `mtime` granularity, and `os.utime`-preserving tooling -
+        exactly the cases it exists for. Dropping it survived the whole
+        suite (round-9 test-fanatic L3), and `os.utime(path, ns=...)` makes
+        the collision deterministic rather than a race.
+        """
+        script = tmp_path / "one.yaml"
+        script.write_text("name: One\ndescription: FIRST\nsteps:\n  - close\n")
+        monkeypatch.setattr(scripting, "SCRIPTS_DIR", tmp_path)
+        before = script.stat()
+        assert list_builtin_scripts() == [("one", "FIRST")]
+
+        script.write_text("name: One\ndescription: SECOND-and-longer\nsteps:\n  - close\n")
+        os.utime(script, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = script.stat()
+        # The premise: identical mtime, different size.
+        assert after.st_mtime_ns == before.st_mtime_ns
+        assert after.st_size != before.st_size
+
+        assert list_builtin_scripts() == [("one", "SECOND-and-longer")]
+
     def test_a_broken_script_is_reported_on_every_listing(self, tmp_path, monkeypatch, caplog):
         """The cache is a *parse* cache, not a report cache."""
         (tmp_path / "broken.yaml").write_text("steps: [unclosed")
@@ -2227,3 +2251,71 @@ class TestTheAnnotationKeysAreDocumented:
         for key in scripting.STEP_ANNOTATION_KEYS:
             assert f"`{key}`" in section
         assert "accepted on any step and are read by nothing" in section
+
+
+class TestUnknownTopLevelKeysAreRefused:
+    """The last silent misspelling class in this DSL (round-9 frontend M3).
+
+    `Script.from_yaml` read exactly three keys with `data.get(...)` defaults
+    and never looked at what else was in the mapping, so `stpes:` produced a
+    zero-step script that printed `>>> Script PASSED` and exited **0** - the
+    whole file silently became a no-op that still reported success. Every
+    other misspelling class (action, sensor, condition, setting, step
+    parameter) fails loudly by deliberate decision across rounds 7 and 8.
+    """
+
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [
+            (
+                "name: Door cycle regression test\nstpes:\n  - action: log\n    message: x\n",
+                "Unknown top-level key(s): stpes. Use: description, name, steps",
+            ),
+            (
+                "nmae: Door cycle\nsteps:\n  - action: log\n    message: x\n",
+                "Unknown top-level key(s): nmae. Use: description, name, steps",
+            ),
+            (
+                "name: X\nsteps: []\nzzz: 1\naaa: 2\n",
+                "Unknown top-level key(s): aaa, zzz. Use: description, name, steps",
+            ),
+            # A non-string key stringifies rather than raising in the join.
+            (
+                "name: X\nsteps: []\n1: 2\n",
+                "Unknown top-level key(s): 1. Use: description, name, steps",
+            ),
+        ],
+        ids=["steps-typo", "name-typo", "two-unknowns", "non-string-key"],
+    )
+    def test_an_unknown_top_level_key_is_a_load_error(self, content, expected):
+        with pytest.raises(ScriptError) as exc_info:
+            Script.from_yaml(content)
+
+        assert str(exc_info.value) == expected
+
+    def test_an_empty_steps_list_is_still_legal(self):
+        """`steps: []` legitimately means "no steps", so the check has to be
+        on unknown keys and not on emptiness."""
+        script = Script.from_yaml("name: Empty\ndescription: nothing\nsteps: []\n")
+
+        assert script.name == "Empty"
+        assert script.steps == []
+
+    def test_every_shipped_script_still_loads(self):
+        """The control: a new refusal must not refuse the built-ins."""
+        for name, _description in list_builtin_scripts():
+            assert get_builtin_script(name).steps
+
+    def test_the_refusal_surfaces_through_the_listing(self, tmp_path, monkeypatch):
+        """A load-time failure, so `list` / `--list-scripts` report it via the
+        existing `(Error loading: ...)` path rather than showing a script that
+        would silently pass."""
+        (tmp_path / "broken.yaml").write_text("name: Broken\nstpes:\n  - action: log\n")
+        scripting.set_extra_scripts_dir(str(tmp_path))
+        monkeypatch.setattr(scripting, "_description_cache", {})
+
+        lines = scripting.render_script_listing(str(tmp_path)).lines
+
+        assert any(
+            "broken: (Error loading: Unknown top-level key(s): stpes." in line for line in lines
+        )

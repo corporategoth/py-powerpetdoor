@@ -21,8 +21,10 @@ from powerpetdoor import (
     Schedule,
     ScheduleTime,
 )
+from powerpetdoor import door as door_module
 from powerpetdoor.client import CommandError
 from powerpetdoor.const import (
+    CMD_GET_DOOR_BATTERY,
     CMD_GET_NOTIFICATIONS,
     CMD_GET_SCHEDULE_LIST,
     CMD_GET_SETTINGS,
@@ -43,6 +45,7 @@ from powerpetdoor.const import (
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
 )
+from powerpetdoor.sanitize import MAX_LOGGED_LENGTH, sanitize_text
 from powerpetdoor.simulator import (
     DoorSimulator,
     DoorSimulatorState,
@@ -1979,7 +1982,9 @@ class TestFacadeRejectsMalformedDevicePayloads:
         assert door.hardware_info == {"ver": "1"}
         assert door.firmware_version == "0.0.0"
         assert [record.getMessage() for record in caplog.records] == [
-            "Ignoring non-mapping hardware info: 1.2.3"
+            "Ignored 1 non-mapping hardware info payload(s) from device (5 bytes) "
+            "on this connection",
+            "Ignoring non-mapping hardware info: 1.2.3",
         ]
 
     async def test_hw_info_listener_still_caches_a_mapping(self):
@@ -2203,8 +2208,8 @@ class TestFacadeCacheIsTypeGuarded:
 
     @pytest.mark.parametrize(
         "value",
-        ["200", None, float("nan"), True, [200], 10**400],
-        ids=["str", "null", "nan", "bool", "list", "huge-int"],
+        ["200", None, float("nan"), True, [200], 10**400, -(10**400)],
+        ids=["str", "null", "nan", "bool", "list", "huge-int", "huge-negative-int"],
     )
     @pytest.mark.parametrize("cached", [4.0, 0.29], ids=["exact-round-trip", "lossy-round-trip"])
     async def test_a_bad_hold_time_keeps_the_cached_value_without_raising(
@@ -2222,6 +2227,12 @@ class TestFacadeCacheIsTypeGuarded:
 
         ``10**400`` is the round-8 backend L1 / security L2 case: legal
         JSON, an ``int``, and ``value / 100.0`` raises ``OverflowError``.
+        ``-(10**400)`` is the same case on the other side of zero, and it is
+        the half the magnitude guard's ``-maximum <=`` operand is the only
+        thing stopping - a device sending a negative arbitrary-precision
+        integer is no less plausible than a positive one, and
+        ``docs/protocol.md`` is reverse-engineered and constrains neither
+        (round-9 test-fanatic M3).
         """
         door._hold_time = cached
 
@@ -2234,8 +2245,13 @@ class TestFacadeCacheIsTypeGuarded:
 
         assert door.hold_time == 15.0
 
-    async def test_an_unrepresentable_hold_time_is_rejected_at_the_representability_bound(
-        self, door, caplog
+    @pytest.mark.parametrize(
+        ("sign", "offset", "accepted"),
+        [(1, 0, True), (1, 1, False), (-1, 0, True), (-1, 1, False)],
+        ids=["+limit", "+limit+1", "-limit", "-limit-1"],
+    )
+    async def test_the_representability_bound_is_exact_on_both_signs(
+        self, door, caplog, sign, offset, accepted
     ):
         """The bound is what ``float`` can hold, not what a protocol says.
 
@@ -2244,19 +2260,28 @@ class TestFacadeCacheIsTypeGuarded:
         It refuses it only when the arithmetic downstream (``/ 100.0``)
         physically cannot be performed - which is exactly
         ``sys.float_info.max``.
+
+        It is a *magnitude* bound, so CLAUDE.md rule 8 has four points, not
+        two. Only the two positive ones were pinned, and dropping the
+        ``-maximum <=`` half survived the whole suite: shipped,
+        ``-(10**400)`` is rejected and the cache kept; without that operand
+        it reaches ``centiseconds / 100.0`` and raises ``OverflowError``,
+        which is the exact failure round 8 was raised for (round-9
+        test-fanatic M3).
         """
         door._hold_time = 4.0
         limit = int(sys.float_info.max)
+        value = sign * (limit + offset)
 
         with caplog.at_level(logging.DEBUG, logger="powerpetdoor.door"):
-            door._on_hold_time_update(limit)
-            assert door.hold_time == limit / 100.0
+            door._on_hold_time_update(value)
 
-            door._hold_time = 4.0
-            door._on_hold_time_update(limit + 1)
-
-        assert door.hold_time == 4.0
-        assert any("keeping the cached value" in r.getMessage() for r in caplog.records)
+        if accepted:
+            assert door.hold_time == value / 100.0
+            assert not any("keeping the cached value" in r.getMessage() for r in caplog.records)
+        else:
+            assert door.hold_time == 4.0
+            assert any("keeping the cached value" in r.getMessage() for r in caplog.records)
 
     async def test_the_representability_bound_is_not_applied_to_the_other_int_fields(self, door):
         """Only the consumer that does float arithmetic passes ``maximum``.
@@ -2275,3 +2300,257 @@ class TestFacadeCacheIsTypeGuarded:
         assert door.battery_percent == huge
         assert door.total_open_cycles == huge
         assert door.total_auto_retracts == huge
+
+
+# ============================================================================
+# The facade's per-frame log sites (round-9 security M1)
+# ============================================================================
+
+
+class TestTheFacadePerFrameLogSitesAreThrottledAndCapped:
+    """Three facade sites fired once per device frame with neither an
+    ``EventThrottle`` nor ``MAX_LOGGED_LENGTH``.
+
+    Measured on the shipped facade before the fix: 20,000 frames produced
+    **20,000** records at each of them, against 10 for the client's
+    round-7-fixed sibling, and one frame just under the 64 KiB framing cap
+    produced a single **65,086-byte** record. ``door.py:264`` is the worst
+    of the three because it needs no attack at all - a firmware revision
+    reporting a status string this library does not know produces one
+    uncapped WARNING per status update on a correctly-functioning
+    installation (round-9 security M1).
+    """
+
+    def test_unknown_statuses_are_summarized(self, caplog):
+        door = PowerPetDoor("127.0.0.1")
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            for _ in range(200):
+                door._on_door_status("SOME_NEWER_FIRMWARE_STATE")
+
+        details = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Unknown door status")
+        ]
+        # 1, 2, 4, ... 128 - logarithmic in 200 frames, not linear.
+        assert len(details) == 8
+        assert door._unknown_statuses.count == 200
+        assert details[0] == "Unknown door status from device: SOME_NEWER_FIRMWARE_STATE"
+
+    def test_a_direct_call_without_a_throttle_always_warns(self, caplog):
+        """`DoorStatus.from_string` is public and its contract is "never
+        silently claim a possibly-open door is closed" (L16). The throttle
+        is the facade's, not the classmethod's."""
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            for _ in range(5):
+                assert DoorStatus.from_string("INVALID") is DoorStatus.UNKNOWN
+
+        assert len(caplog.records) == 5
+
+    def test_the_echoed_status_is_bounded(self, caplog):
+        """One frame with a 65,000-character `door_status` produced one
+        65,086-byte record."""
+        door = PowerPetDoor("127.0.0.1")
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            door._on_door_status("A" * 5000)
+
+        detail = next(
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Unknown door status")
+        )
+        assert detail.endswith("...(truncated)")
+        assert len(detail) < 400
+
+    def test_malformed_schedule_updates_are_summarized_and_bounded(self, caplog):
+        """`err` embeds `{value!r}` of the untrusted payload."""
+        door = PowerPetDoor("127.0.0.1")
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            for _ in range(200):
+                door._on_schedule_update({"index": "B" * 5000})
+
+        details = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Ignoring malformed schedule update")
+        ]
+        assert len(details) == 8
+        assert door._bad_schedule_updates.count == 200
+        assert details[0].endswith("...(truncated)")
+        assert len(details[0]) < 400
+
+    def test_non_mapping_hardware_info_is_summarized(self, caplog):
+        """Capped since round 6, throttled only now."""
+        door = PowerPetDoor("127.0.0.1")
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            for _ in range(200):
+                door._on_hw_info_update("1.2.3")
+
+        details = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Ignoring non-mapping hardware info")
+        ]
+        assert len(details) == 8
+        assert door._bad_hw_info.count == 200
+
+    async def test_the_facade_throttles_are_connection_scoped(self, caplog):
+        """Like the client's six: report the tail at teardown, then start the
+        next connection's count clean."""
+        door = PowerPetDoor("127.0.0.1")
+        for _ in range(3):
+            door._on_door_status("NOPE")
+            door._on_hw_info_update("scalar")
+            door._on_schedule_update({"index": "x"})
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            await door._on_disconnect()
+
+        tallies = [record.getMessage() for record in caplog.records]
+        assert any(t.startswith("Received 3 unknown door status(es) from device") for t in tallies)
+        assert any(
+            t.startswith("Ignored 3 non-mapping hardware info payload(s) from device")
+            for t in tallies
+        )
+        assert any(
+            t.startswith("Ignored 3 malformed schedule update(s) from device") for t in tallies
+        )
+        assert door._unknown_statuses.count == 0
+        assert door._bad_hw_info.count == 0
+        assert door._bad_schedule_updates.count == 0
+
+
+class TestTheRejectionLogSaysWhatWasExpected:
+    """`_log_rejected`'s third argument was asserted nowhere, for any field.
+
+    The only assertion on this line anywhere was the substring
+    `"keeping the cached value"`, which is identical for every rejection
+    reason - so dropping the `"int" if maximum is None else f"int of
+    magnitude <= {maximum:g}"` ternary survived the whole suite, and a
+    `-10**400` rejected for *magnitude* logged `expected int` for a value
+    that **is** an `int` (round-9 test-fanatic L2). That is the one
+    diagnostic an operator reaches for when a firmware variant is
+    misbehaving, and error text is part of the contract.
+    """
+
+    @pytest.mark.parametrize(
+        ("update", "value", "field", "expected"),
+        [
+            pytest.param(
+                lambda door, value: door._on_total_cycles_update(FIELD_TOTAL_OPEN_CYCLES, value),
+                "55",
+                FIELD_TOTAL_OPEN_CYCLES,
+                "int",
+                id="int-unbounded",
+            ),
+            pytest.param(
+                lambda door, value: door._on_hold_time_update(value),
+                -(10**400),
+                "hold_time",
+                "int of magnitude <= 1.79769e+308",
+                id="int-bounded",
+            ),
+        ],
+    )
+    async def test_the_expected_text_names_the_real_constraint(
+        self, door, caplog, update, value, field, expected
+    ):
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.door"):
+            update(door, value)
+
+        rendered = sanitize_text(value, MAX_LOGGED_LENGTH)
+        assert (
+            f"Ignoring {rendered} from device for {field} (expected {expected}); "
+            "keeping the cached value"
+        ) in [record.getMessage() for record in caplog.records]
+
+    @pytest.mark.parametrize(
+        ("helper", "value", "expected"),
+        [
+            (door_module._keep_bool, "1", "bool"),
+            (door_module._keep_str, 7, "str"),
+            (door_module._keep_int, "9", "int"),
+        ],
+        ids=["bool", "str", "int"],
+    )
+    def test_every_expected_spelling_is_pinned(self, caplog, helper, value, expected):
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.door"):
+            helper(value, "cached", "some_field")
+
+        assert [record.getMessage() for record in caplog.records] == [
+            f"Ignoring {value} from device for some_field (expected {expected}); "
+            "keeping the cached value"
+        ]
+
+    def test_the_rejected_value_is_sanitized_and_bounded(self, caplog):
+        """The value comes off the wire, so the line is a log sink like any
+        other: control characters escaped, length capped."""
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.door"):
+            door_module._keep_int("\x1b[2J" + "A" * 5000, 0, "some_field")
+
+        message = caplog.records[0].getMessage()
+        assert "\x1b" not in message
+        assert "\\x1b[2JAAA" in message
+        assert "...(truncated)" in message
+        assert len(message) < 400
+
+
+class TestTheFacadeTimeoutSaysWhatTimedOut:
+    """`asyncio.wait_for` raises a bare `TimeoutError()`.
+
+    Its `repr()` is literally `TimeoutError()`, so a developer saw an empty
+    exception after a 20-second stall with no way to tell "the door is
+    wedged" from "you never called connect()" - the least actionable
+    exception this API can produce (round-9 frontend M2). The queue-on-
+    reconnect behaviour it hides is deliberate and documented, so the fix
+    is the message, not the behaviour.
+    """
+
+    async def test_a_disconnected_setter_names_the_command_and_the_queue(self):
+        door = PowerPetDoor("10.0.0.5", port=3000, timeout=0.01, reconnect=0)
+
+        with pytest.raises(TimeoutError) as exc_info:
+            await door.set_hold_time(5, timeout=0.01)
+
+        message = str(exc_info.value)
+        assert message != ""
+        assert message.startswith("SET_HOLD_TIME timed out after 0.01s waiting for 10.0.0.5:3000")
+        assert "the command is queued and will be sent" in message
+
+    async def test_a_connected_timeout_does_not_blame_the_connection(self, mock_client):
+        """The control: connected, so the queue sentence must *not* appear -
+        that is the half that distinguishes "wedged" from "never connected"."""
+        door = PowerPetDoor("10.0.0.5", port=3000)
+        door._client = mock_client[0]
+
+        assert door.connected is True
+        with pytest.raises(TimeoutError) as exc_info:
+            await door.set_hold_time(5, timeout=0.01)
+
+        message = str(exc_info.value)
+        assert message == "SET_HOLD_TIME timed out after 0.01s waiting for 10.0.0.5:3000"
+
+    async def test_the_default_timeout_is_reported_when_none_is_given(self, mock_client):
+        door = PowerPetDoor("10.0.0.5", port=3000)
+        door._client = mock_client[0]
+        door._client.cfg_timeout = 0.01
+
+        with pytest.raises(TimeoutError) as exc_info:
+            await door.refresh_battery()
+
+        assert str(exc_info.value) == (
+            f"{CMD_GET_DOOR_BATTERY} timed out after {door.default_timeout}s "
+            "waiting for 10.0.0.5:3000"
+        )
+
+    async def test_a_response_that_arrives_is_returned_unchanged(self, door, simulator):
+        """The control for the wrapper itself: against the real simulator,
+        the happy path returns exactly what it always did."""
+        simulator.state.door_status = DOOR_STATE_HOLDING
+
+        assert await door.refresh_status() is DoorStatus.HOLDING
+        assert await door.refresh_hardware_info() == door.hardware_info

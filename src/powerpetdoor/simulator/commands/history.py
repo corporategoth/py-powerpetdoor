@@ -103,8 +103,20 @@ class History:
                 try:
                     _create_private_file(history_file)
                 except OSError as e:
-                    logger.warning(f"Could not create history file {history_file}: {e}")
-                self._history = FileHistory(str(history_file))
+                    # ...and then *fall back*. Handing the same path to
+                    # FileHistory after establishing it is unusable made
+                    # prompt_toolkit raise inside the running application on
+                    # every load and every store, so a one-character typo in
+                    # `--history` bought a traceback and a modal "Press ENTER
+                    # to continue" the operator had to dismiss, repeatedly,
+                    # for the life of the session (round-9 frontend L2).
+                    logger.warning(
+                        f"Could not use history file {history_file}: {e}; "
+                        "history is in-memory for this session"
+                    )
+                    self._history = InMemoryHistory()
+                else:
+                    self._history = FileHistory(str(history_file))
         except ImportError:
             # prompt_toolkit not available
             pass

@@ -89,7 +89,8 @@ def _capture_client() -> tuple[PowerPetDoorClient, list[dict]]:
     async def _noop() -> None:
         pass
 
-    def _record(msg):
+    def _record(msg, **_kwargs):
+        # `**_kwargs` absorbs `frame_size=` (round-9 backend F2).
         received.append(msg)
         return _noop()
 

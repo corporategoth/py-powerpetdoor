@@ -58,6 +58,33 @@ class _SanitizingFormatter(logging.Formatter):
         return sanitize_text(super().format(record))
 
 
+class SimulatorStartupError(OSError):
+    """A bind or resolve failure while starting one of the two servers.
+
+    The mirror-image failure on the client half of this product answers
+    ``Connection refused to 127.0.0.1:39999``; the server half answered a
+    30-line traceback through asyncio internals in which the one useful
+    line was last, printed absolute paths from the machine that built the
+    venv, and - when only the derived ``--daemon`` control port collided -
+    left stdout completely empty, so nothing said which of the two ports
+    was the problem (round-9 frontend L1).
+
+    Carrying the *role* is the whole point: `('0.0.0.0', 3861) in use` does
+    not tell an operator which flag to change.
+    """
+
+    def __init__(self, role: str, host: str, port: int, cause: OSError):
+        self.role = role
+        self.host = host
+        self.port = port
+        self.cause = cause
+        flag = "--port" if role == "door" else "--daemon PORT"
+        super().__init__(
+            f"Cannot start: {role} server cannot use {host}:{port} "
+            f"({cause.strerror or cause}); change it with {flag}"
+        )
+
+
 class InteractivePrompt:
     """Manages interactive prompt with proper output handling.
 
@@ -162,9 +189,45 @@ def status_print(message: str = "") -> None:
 # Default control port offset from simulator port
 CONTROL_PORT_OFFSET = 1
 
+#: `--daemon` with no argument. Not a valid port, so it cannot collide with
+#: one an operator actually typed.
+DAEMON_DEFAULT_CONTROL_PORT = -1
+
+#: Longest control-channel command line accepted, in bytes. Explicit rather
+#: than asyncio's implicit default so the refusal can name it (round-9
+#: frontend L4).
+MAX_CONTROL_LINE = 64 * 1024
+
+#: Inclusive TCP port range. Checked in the parser rather than at bind time,
+#: where it surfaced as `OverflowError: bind(): port must be 0-65535` under
+#: 30 lines of asyncio traceback (round-9 frontend L1).
+MIN_PORT = 0
+MAX_PORT = 65535
+
+
 # Default bind address for the (unauthenticated) daemon control channel.
 # Loopback by default; widening requires an explicit --control-host.
 DEFAULT_CONTROL_HOST = "127.0.0.1"
+
+
+def _validate_port(parser, flag: str, value: int) -> None:
+    """Refuse an out-of-range port with a usage line, like every other flag."""
+    if not MIN_PORT <= value <= MAX_PORT:
+        parser.error(f"{flag} {value}: port must be {MIN_PORT}-{MAX_PORT}")
+
+
+def _validate_host(parser, flag: str, value: str) -> None:
+    """Refuse an unresolvable bind address with a usage line.
+
+    The bind is going to resolve it anyway; doing it here means the failure
+    is an argument error at rc 2 rather than a `socket.gaierror` traceback.
+    """
+    import socket
+
+    try:
+        socket.getaddrinfo(value, None, type=socket.SOCK_STREAM)
+    except OSError as err:
+        parser.error(f"{flag} {value}: {err.strerror or err}")
 
 
 class _ControlLogHandler(logging.Handler):
@@ -276,7 +339,9 @@ class ControlChannel:
 
     async def start(self):
         """Start the control server and install the log broadcast handler."""
-        self.server = await asyncio.start_server(self._handle_client, self.host, self.port)
+        self.server = await asyncio.start_server(
+            self._handle_client, self.host, self.port, limit=MAX_CONTROL_LINE
+        )
         logger.info(f"Control server listening on {self.host}:{self.bound_port}")
 
         self.log_handler = _ControlLogHandler(self.clients)
@@ -327,11 +392,33 @@ class ControlChannel:
             await writer.drain()
 
             while True:
-                line = await reader.readline()
+                try:
+                    line = await reader.readline()
+                except ValueError:
+                    # asyncio's readline() raises this when a line exceeds
+                    # `limit`; it has already consumed through the newline,
+                    # so the connection stays usable. Before, it escaped to
+                    # the generic handler below and logged an asyncio
+                    # internal ("Separator is found, but chunk is longer
+                    # than limit") at ERROR - which _ControlLogHandler then
+                    # broadcast into every other operator's ctl session
+                    # (round-9 frontend L4).
+                    logger.info("Control client %s sent an over-long command line", addr)
+                    writer.write(
+                        f"ERROR: Command line too long (max {MAX_CONTROL_LINE} bytes)\n".encode()
+                    )
+                    await writer.drain()
+                    continue
                 if not line:
                     break
                 cmd = line.decode(errors="replace").strip()
                 if not cmd:
+                    # Answering costs one line and removes an unanswerable
+                    # request from the protocol: silently skipping it meant
+                    # `ppd-simulator-ctl ""` waited out the full --timeout
+                    # and then blamed the daemon (round-9 frontend L4).
+                    writer.write(b"ERROR: Empty command\n")
+                    await writer.drain()
                     continue
 
                 result = await self.cmd_handler.execute(cmd)
@@ -452,9 +539,18 @@ async def _run_startup_scripts(
 
     Sets ``script_result[0]`` to the overall pass/fail result and, in oneshot
     mode, sets ``stop_event`` once the scripts complete.
+
+    An **interrupted** run establishes no result: ``script_result[0]`` is left
+    at ``None`` and no PASSED/FAILED verdict is printed. ``all_success`` at the
+    moment of a cancellation means "nothing has failed *yet*", which is not the
+    same thing as "every assertion ran and passed" - printing
+    ``>>> All scripts PASSED`` for a run cut off before its ``assert`` step is
+    a false green on the documented CI command (F-H1).
     """
     all_success = True
     run_count = 0
+    completed = 0
+    interrupted = False
     try:
         # Wait for client connection if requested
         if wait_for_client:
@@ -472,6 +568,7 @@ async def _run_startup_scripts(
                 break
 
             run_count += 1
+            completed = 0
             if loop_scripts:
                 status_print(f"\n>>> Script run #{run_count}")
 
@@ -508,6 +605,7 @@ async def _run_startup_scripts(
                         f"Error running script '{sanitize_text(script_ref)}': {sanitize_text(e)}"
                     )
                     all_success = False
+                completed += 1
             else:
                 # Loop completed without break (no disconnect)
                 if not loop_scripts:
@@ -523,12 +621,19 @@ async def _run_startup_scripts(
             break
 
     except asyncio.CancelledError:
-        pass
+        interrupted = True
+        raise
     finally:
-        script_result[0] = all_success
-        if oneshot:
-            status_print(f"\n>>> All scripts {'PASSED' if all_success else 'FAILED'}")
-            stop_event.set()
+        if interrupted:
+            # No verdict: leave script_result[0] at None so main() exits
+            # non-zero, and report what actually happened instead (F-H1).
+            if oneshot:
+                status_print(f"\n>>> Interrupted after {completed} of {len(scripts)} script(s)")
+        else:
+            script_result[0] = all_success
+            if oneshot:
+                status_print(f"\n>>> All scripts {'PASSED' if all_success else 'FAILED'}")
+                stop_event.set()
 
 
 class _BasicStdinInput:
@@ -681,7 +786,10 @@ async def run_simulator(
         on_connect=on_client_connect,
         on_disconnect=on_client_disconnect,
     )
-    await simulator.start()
+    try:
+        await simulator.start()
+    except OSError as err:
+        raise SimulatorStartupError("door", host, port, err) from err
 
     # The actual bound port (differs from `port` when an ephemeral port 0 was
     # requested, e.g. in tests)
@@ -736,7 +844,11 @@ async def run_simulator(
             stop_event=stop_event,
             client_count=lambda: len(simulator.protocols),
         )
-        await control_channel.start()
+        try:
+            await control_channel.start()
+        except OSError as err:
+            await simulator.stop()
+            raise SimulatorStartupError("control", control_host, control_port, err) from err
         channel_holder[0] = control_channel
 
     # Print startup info
@@ -757,9 +869,15 @@ async def run_simulator(
         _process_script_queue(script_queue, stop_event, cmd_handler, script_runner)
     )
 
-    # Run startup scripts if specified
+    # Run startup scripts if specified. The task reference is held (and the
+    # task cancelled in the cleanup below) so that `_run_startup_scripts`'
+    # `finally` always runs *before* `script_result[0]` is read. As a bare
+    # `create_task` it was instead reaped by `asyncio.run`'s shutdown, i.e.
+    # after main() had already read `None` and fallen through to exit 0
+    # (F-H1) - and an un-referenced task is eligible for garbage collection.
+    startup_task: asyncio.Task | None = None
     if scripts:
-        asyncio.create_task(
+        startup_task = asyncio.create_task(
             _run_startup_scripts(
                 scripts,
                 simulator=simulator,
@@ -871,13 +989,24 @@ async def run_simulator(
 
         asyncio.create_task(timeout_shutdown())
 
-    # Wait for stop signal
+    # Wait for stop signal.
+    #
+    # A cancellation here is how `asyncio.Runner` delivers Ctrl-C: it cancels
+    # the main task and only turns that back into `KeyboardInterrupt` if the
+    # cancellation actually propagates. Swallowing it made `asyncio.run()`
+    # return normally, so main()'s `except KeyboardInterrupt` never fired and
+    # an interrupted `--oneshot` run exited 0 (F-H1). Clean up in the
+    # `finally` and let the cancellation through.
     try:
         await stop_event.wait()
-    except asyncio.CancelledError:
-        pass
     finally:
         # Cleanup
+        if startup_task:
+            startup_task.cancel()
+            try:
+                await startup_task
+            except asyncio.CancelledError:
+                pass
         if input_task:
             input_task.cancel()
             try:
@@ -956,7 +1085,7 @@ def main():
         "-D",
         nargs="?",
         type=int,
-        const=-1,  # Sentinel: use default (port+1)
+        const=DAEMON_DEFAULT_CONTROL_PORT,  # Sentinel: use default (port+1)
         default=None,
         metavar="CONTROL_PORT",
         help="Run in daemon mode (no interactive input, no scripts). "
@@ -1019,6 +1148,24 @@ def main():
     if args.scripts_dir is not None and not Path(args.scripts_dir).is_dir():
         parser.error(f"--scripts-dir {args.scripts_dir}: not a directory")
 
+    # Bind-time values were the one class of bad argument this parser did
+    # not check, so `--port 99999` reached socket.bind() and exited with a
+    # 30-line `OverflowError: bind(): port must be 0-65535` through asyncio
+    # internals, and `--host 300.1.1.1` with a `socket.gaierror` (round-9
+    # frontend L1). Everything else here already answers with a usage line
+    # at rc 2; these now do too.
+    _validate_port(parser, "--port", args.port)
+    if args.daemon is not None and args.daemon != DAEMON_DEFAULT_CONTROL_PORT:
+        _validate_port(parser, "--daemon", args.daemon)
+    _validate_host(parser, "--host", args.host)
+    _validate_host(parser, "--control-host", args.control_host)
+
+    # `--run-for -5` was accepted and silently meant "shut down
+    # immediately", logging `Run time (-5.0s) elapsed, shutting down` as if
+    # five negative seconds had passed (round-9 frontend T1).
+    if args.run_for is not None and args.run_for <= 0:
+        parser.error(f"--run-for {args.run_for:g}: must be greater than 0")
+
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -1077,7 +1224,11 @@ def main():
         # port given. The offset was a named constant *and* inlined here,
         # so nothing read the constant and the documented default had no
         # executable pin (round-7 test-fanatic L2).
-        control_port = args.port + CONTROL_PORT_OFFSET if args.daemon == -1 else args.daemon
+        control_port = (
+            args.port + CONTROL_PORT_OFFSET
+            if args.daemon == DAEMON_DEFAULT_CONTROL_PORT
+            else args.daemon
+        )
     else:
         control_port = None
 
@@ -1121,9 +1272,24 @@ def main():
             )
         )
 
-        # Exit with appropriate code for CI/CD
-        if args.oneshot and result is not None:
+        # Exit with appropriate code for CI/CD. `result is None` means the run
+        # never established a verdict - it was interrupted before the scripts
+        # finished - which can never legitimately mean success. `--oneshot`
+        # without `--script` is already refused above at rc 2, so there is no
+        # other way to reach this with no result (F-H1).
+        if args.oneshot:
             sys.exit(0 if result else 1)
+
+    except SimulatorStartupError as err:
+        # One operator sentence naming the role of the port that failed,
+        # not 30 lines of asyncio internals with build-machine paths in
+        # them. The traceback stays available behind --debug (L1).
+        print(err, file=sys.stderr)
+        if args.debug:
+            import traceback
+
+            traceback.print_exc()
+        sys.exit(1)
 
     except KeyboardInterrupt:
         print("\nSimulator stopped.")

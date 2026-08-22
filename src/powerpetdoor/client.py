@@ -258,6 +258,23 @@ def make_bool(v: str | int | bool | None) -> bool | None:
         return v
 
 
+def _recorded_size(msg, frame_size: int | None) -> int:
+    """Magnitude for a per-frame throttle: real wire bytes when known.
+
+    The fallback exists only for a direct ``process_message`` caller (a
+    test, a third-party subclass) that has no frame. On the receive path
+    ``frame_size`` is always supplied, so the ``json.dumps`` here does not
+    run per frame - which was the other half of the defect: it was executed
+    on **every** occurrence purely to measure one, and discarded on ~99.9%
+    of them (32,768 serializations, ~35 ms, per 64 KiB read of ``{}``;
+    ~1.2 us/call in isolation). The byte-total accuracy is the reason for
+    the change, not the CPU (round-9 backend F2).
+    """
+    if frame_size is not None:
+        return frame_size
+    return len(json.dumps(msg))
+
+
 class PowerPetDoorClient(asyncio.Protocol):
     """Client for communicating with Power Pet Door devices.
 
@@ -364,6 +381,23 @@ class PowerPetDoorClient(asyncio.Protocol):
             _LOGGER,
             logging.WARNING,
             "Device reported %d error response(s) (%d bytes) on this connection",
+        )
+        # The two per-frame sites the round-6/7 sweeps missed. `msgID` is
+        # echoed on every response, so a peer answering `{"CMD":0,"msgID":[]}`
+        # in a tight loop bought one uncapped WARNING per frame - measured at
+        # 20,032 records for 20,000 frames, x5.27 the wire bytes, and a
+        # single 65,638-byte record from one frame just under the framing cap
+        # (round-9 security M1). The `fwInfo` site was already capped but
+        # never throttled, which is the same class one control short.
+        self._bad_msg_ids = EventThrottle(
+            _LOGGER,
+            logging.WARNING,
+            "Ignored %d unusable msgID(s) in device responses (%d bytes) on this connection",
+        )
+        self._bad_hw_payloads = EventThrottle(
+            _LOGGER,
+            logging.WARNING,
+            f"Device sent %d non-mapping {FIELD_FWINFO} payload(s) (%d bytes) on this connection",
         )
         # One task per framed message, created synchronously per read, was
         # unbounded: one 256 KiB read of `{}` admitted 131,072 live tasks
@@ -968,11 +1002,16 @@ class PowerPetDoorClient(asyncio.Protocol):
         if fw_info is not None:
             self._notify_listeners(self.hw_info_listeners, fw_info)
         else:
-            _LOGGER.warning(
-                "Device sent a non-mapping %s payload; not notifying hw_info listeners: %s",
-                FIELD_FWINFO,
-                sanitize_text(msg[FIELD_FWINFO], MAX_LOGGED_LENGTH),
-            )
+            # Per-frame and peer-controlled: capped since round 6, throttled
+            # since round 9 (security M1) - a cap alone still buys one
+            # WARNING per frame.
+            rendered = sanitize_text(msg[FIELD_FWINFO], MAX_LOGGED_LENGTH)
+            if self._bad_hw_payloads.record(len(rendered)):
+                _LOGGER.warning(
+                    "Device sent a non-mapping %s payload; not notifying hw_info listeners: %s",
+                    FIELD_FWINFO,
+                    rendered,
+                )
         self._resolve_future(future, msg[FIELD_FWINFO])
 
     @ResponseHandlerRegistry.handler(CMD_GET_DOOR_BATTERY)
@@ -1459,6 +1498,8 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._bad_frames,
             self._bad_messages,
             self._device_errors,
+            self._bad_msg_ids,
+            self._bad_hw_payloads,
         ):
             throttle.flush()
             throttle.reset()
@@ -1752,9 +1793,9 @@ class PowerPetDoorClient(asyncio.Protocol):
                     sanitize_text(frame, MAX_LOGGED_LENGTH),
                 )
             return None
-        return self._track_task(self.process_message(msg))
+        return self._track_task(self.process_message(msg, frame_size=len(frame)))
 
-    async def process_message(self, msg) -> None:
+    async def process_message(self, msg, *, frame_size: int | None = None) -> None:
         """Process an incoming message from the device.
 
         Uses the ResponseHandlerRegistry to dispatch to the appropriate
@@ -1763,6 +1804,22 @@ class PowerPetDoorClient(asyncio.Protocol):
         cannot kill the receive path, and a future paired with the message
         is always completed (result or :class:`CommandError`) rather than
         left hanging.
+
+        Args:
+            msg: The decoded message.
+            frame_size: Bytes this message occupied on the wire, for the
+                two per-frame throttles below. Both used to hand
+                ``len(json.dumps(msg))`` to ``record()``, which is neither
+                the received size nor free: every sibling throttle on this
+                path records real received bytes
+                (``self._non_ascii.record(len(data))``,
+                ``self._bad_frames.record(len(frame))``), and a peer that
+                pads its frames controls the re-serialized size
+                independently of what it actually sent - 60,002 wire bytes
+                were reported as "2 bytes", a 30,001x under-report, in the
+                number an operator reads to decide whether a peer is worth
+                investigating (round-9 backend F2). Optional so that direct
+                callers - tests, third-party subclasses - keep working.
         """
         if not isinstance(msg, dict):
             _LOGGER.warning("Ignoring non-object message from device: %r", msg)
@@ -1780,11 +1837,10 @@ class PowerPetDoorClient(asyncio.Protocol):
             # Per-frame and peer-controlled, exactly like the JSON decode
             # failure above: `{}` is two bytes of legal JSON and bought a
             # ~100-byte WARNING each (round-6 security finding 2).
-            rendered = json.dumps(msg)
-            if self._bad_messages.record(len(rendered)):
+            if self._bad_messages.record(_recorded_size(msg, frame_size)):
                 _LOGGER.warning(
                     "Ignoring malformed message from device: %s",
-                    sanitize_text(rendered, MAX_LOGGED_LENGTH),
+                    sanitize_text(json.dumps(msg), MAX_LOGGED_LENGTH),
                 )
             return
 
@@ -1800,10 +1856,15 @@ class PowerPetDoorClient(asyncio.Protocol):
                 if outstanding is not None and not outstanding.done():
                     future = outstanding
             else:
-                _LOGGER.warning(
-                    "Ignoring unusable msgID %r in device response; no future to resolve",
-                    reply_msg_id,
-                )
+                # Every response echoes a msgID, so this is a per-frame site
+                # with a peer-chosen value: capped and throttled like its
+                # four siblings in this file (round-9 security M1).
+                rendered = sanitize_text(reply_msg_id, MAX_LOGGED_LENGTH)
+                if self._bad_msg_ids.record(len(rendered)):
+                    _LOGGER.warning(
+                        "Ignoring unusable msgID %s in device response; no future to resolve",
+                        rendered,
+                    )
 
         # Acknowledge the in-flight command so the retry timer stops, but
         # defer dequeuing the next message until after the handler has run.
@@ -1827,7 +1888,18 @@ class PowerPetDoorClient(asyncio.Protocol):
                     try:
                         handler(self, msg, future)
                     except Exception:
-                        _LOGGER.exception("Error handling %s response: %s", cmd, json.dumps(msg))
+                        # Unreachable from any frame constructed in rounds
+                        # 7-9 (every registered handler's payload access is
+                        # guarded), so this is not throttled - but the frame
+                        # is still peer-chosen and can run to the 64 KiB
+                        # framing cap, so the *constant* is bounded like
+                        # every other per-frame line (round-9 security M1,
+                        # recommendation 3).
+                        _LOGGER.exception(
+                            "Error handling %s response: %s",
+                            cmd,
+                            sanitize_text(json.dumps(msg), MAX_LOGGED_LENGTH),
+                        )
                         if future is not None and not future.done():
                             future.set_exception(CommandError(cmd, "Malformed response"))
                     # A handler that ran but could not resolve its future
@@ -1851,11 +1923,10 @@ class PowerPetDoorClient(asyncio.Protocol):
                 # instance's log. Throttled and length-capped like the
                 # three sibling sites; the first occurrence is still
                 # reported immediately and in full context.
-                reported = json.dumps(msg)
-                if self._device_errors.record(len(reported)):
+                if self._device_errors.record(_recorded_size(msg, frame_size)):
                     _LOGGER.warning(
                         "Error reported by device: %s",
-                        sanitize_text(reported, MAX_LOGGED_LENGTH),
+                        sanitize_text(json.dumps(msg), MAX_LOGGED_LENGTH),
                     )
                 if future is not None and not future.done():
                     future.set_exception(CommandError(cmd, reason))

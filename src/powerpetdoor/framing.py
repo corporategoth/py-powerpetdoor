@@ -606,15 +606,27 @@ class FrameDispatcher:
         dispatch slots free - if we stopped because ``max_inflight`` is
         reached, the running handlers' done-callbacks pump the rest.
 
-        ``_update_flow()`` runs in a ``finally`` because a raising
-        ``_dispatch`` used to skip it: the transport stayed paused with
-        ``_inflight`` at 0 (so no done-callback would ever fire) and
-        ``_pump_scheduled`` already cleared by ``_resume_pump``, so nothing
-        could drain the backlog and the peer's FIN was never read - a
-        permanent wedge, holding an fd and a connection slot, for one
-        raising callback (round-8 security M1). This dispatcher is a
-        shared component and must not depend on its callback being total;
-        with the ``finally`` the worst case is one frame lost.
+        **Both** the re-arm and ``_update_flow()`` run in a ``finally``,
+        because a raising ``_dispatch`` used to skip them: the transport
+        stayed paused with ``_inflight`` at 0 (so no done-callback would
+        ever fire) and ``_pump_scheduled`` already cleared by
+        ``_resume_pump``, so nothing could drain the backlog and the peer's
+        FIN was never read - a permanent wedge, holding an fd and a
+        connection slot, for one raising callback (round-8 security M1).
+
+        Round 8 moved only ``_update_flow()``, which closed the wedge just
+        for a backlog at or below ``pause_at``. Above it ``_update_flow()``'s
+        job is to *pause*, so the ``finally`` re-established exactly the
+        wedged state: measured at ``backlog=934 inflight=0 paused=True`` with
+        no pump scheduled, forever, on a 1000-frame burst - and a one-read
+        burst puts every frame in the backlog at once, so that is the branch
+        almost the whole drain window sits in (round-9 backend F1 / security
+        L1). ``_schedule_pump()`` is idempotent via ``_pump_scheduled``, so
+        the non-raising path is unchanged.
+
+        This dispatcher is a shared component and must not depend on its
+        callback being total; with both lines in the ``finally`` the worst
+        case really is one frame lost *per raise*.
         """
         try:
             budget = self._max_inflight
@@ -624,9 +636,9 @@ class FrameDispatcher:
                 if task is not None:
                     self._inflight += 1
                     task.add_done_callback(self._on_dispatched_done)
+        finally:
             if self._backlog and self._inflight < self._max_inflight:
                 self._schedule_pump()
-        finally:
             self._update_flow()
 
     def _schedule_pump(self) -> None:

@@ -734,6 +734,19 @@ command to see available simulator commands.
 
     args = parser.parse_args()
 
+    # `--timeout 0` reads to a user as "no timeout"; it actually put the
+    # socket in non-blocking mode and yielded `Error: [Errno 115] Operation
+    # now in progress`, and `-t -1` leaked `settimeout`'s own ValueError
+    # text - an errno no operator should have to decode from a CLI flag
+    # (round-9 frontend T1). `run <script> wait` is the documented spelling
+    # for "wait as long as it takes", so a sentinel here would be a second
+    # one.
+    if args.timeout <= 0:
+        parser.error(
+            f"--timeout {args.timeout:g}: must be greater than 0 "
+            "(use 'run <script> wait' to wait as long as a script takes)"
+        )
+
     # The daemon refuses script paths over the control channel, so this
     # process must not complete them: offering `my_custom.yaml` steers the
     # user to a command that always fails, while the name that works
@@ -751,6 +764,15 @@ command to see available simulator commands.
             interactive_mode(args.host, args.port, door_port, args.timeout, history_file)
         elif args.command:
             command = " ".join(args.command)
+            if not command.strip():
+                # The daemon skips blank lines by design, so no answer can
+                # ever come: `ppd-simulator-ctl ""` sat out the whole
+                # --timeout and then advised raising it, which is wrong in
+                # both halves - the command was never a command, and raising
+                # the timeout only makes the hang longer. A shell wrapper
+                # expanding an unset variable lands here immediately
+                # (round-9 frontend L4).
+                parser.error("empty command")
             success, response = send_command(args.host, args.port, command, args.timeout)
             print(response)
             sys.exit(0 if success else 1)

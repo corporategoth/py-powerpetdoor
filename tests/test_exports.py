@@ -204,3 +204,41 @@ class TestDocImports:
     def test_doc_import_statement_executes(self, doc_path, statement):
         namespace: dict = {}
         exec(statement, namespace)  # Raises ImportError on any stale name
+
+
+class TestThePep561Marker:
+    """121 exported, annotated, CI-gated names were inert downstream.
+
+    PEP 561 says an installed package's annotations are ignored unless it
+    ships a `py.typed` marker. Measured on an installed copy with a control
+    (round-9 frontend M1): without the marker, mypy reports *"Skipping
+    analyzing powerpetdoor: module is installed, but missing library stubs
+    or py.typed marker"* and sees the whole API as `Any`; with it, the same
+    consumer's `await door.set_hold_time("banana")` is an `arg-type` error.
+
+    The marker is included in the wheel by setuptools automatically -
+    verified against a control file in the same directory, which is **not**
+    included - so it deliberately does not appear in
+    `[tool.setuptools.package-data]`. The wheel assertion lives in CI
+    (`.github/workflows/test.yml`, the `packaging` job), because that is
+    where the artifact is built.
+    """
+
+    def test_the_marker_exists_and_is_empty(self):
+        marker = Path(powerpetdoor.__file__).parent / "py.typed"
+
+        assert marker.is_file()
+        assert marker.read_bytes() == b""
+
+    def test_the_marker_is_not_listed_as_package_data(self):
+        """Its rationale was false and must not be repeated: setuptools ships
+        it without being told to."""
+        import tomllib
+
+        pyproject = tomllib.loads(
+            (Path(powerpetdoor.__file__).parents[2] / "pyproject.toml").read_text()
+        )
+        package_data = pyproject["tool"]["setuptools"]["package-data"]
+
+        assert "powerpetdoor" not in package_data
+        assert package_data == {"powerpetdoor.simulator": ["scripts/*.yaml", "scripts/*.yml"]}

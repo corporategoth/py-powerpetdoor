@@ -662,14 +662,13 @@ class TestAgainstTheRealRepository:
         one removing a whole production method from the gate (round-6
         test-fanatic M2).
         """
-        omit, exclude = gaps.coverage_config()
+        settings = gaps.coverage_config()
         bullets = gaps.render_automatic_exclusions()
 
-        assert omit, "coverage.run.omit went missing from pyproject.toml"
-        assert exclude, "coverage.report.exclude_lines went missing from pyproject.toml"
+        configured = settings.omit + settings.exclude_lines + settings.partial_branches
         # Exactly one bullet per configured pattern, in configuration order.
-        assert len(bullets) == len(omit) + len(exclude)
-        for pattern, bullet in zip(omit + exclude, bullets, strict=True):
+        assert len(bullets) == len(configured)
+        for pattern, bullet in zip(configured, bullets, strict=True):
             assert bullet.startswith(f"- `{pattern}`")
 
     def test_every_configured_exclusion_reaches_the_rendered_report(self, workspace, monkeypatch):
@@ -681,19 +680,135 @@ class TestAgainstTheRealRepository:
         gaps.main()
         rendered = (workspace / "tests" / "TESTING_GAPS.md").read_text()
 
-        omit, exclude = gaps.coverage_config()
-        for pattern in omit + exclude:
+        settings = gaps.coverage_config()
+        for pattern in settings.omit + settings.exclude_lines + settings.partial_branches:
             assert f"- `{pattern}`" in rendered
 
     def test_coverage_config_is_empty_without_a_pyproject(self, workspace, monkeypatch):
         """Rendering must not explode outside a checkout."""
         monkeypatch.setattr(gaps, "PYPROJECT", workspace / "pyproject.toml")
 
-        assert gaps.coverage_config() == ([], [])
+        assert gaps.coverage_config() == gaps.CoverageSettings()
         assert gaps.render_automatic_exclusions() == []
+        assert gaps.render_gate_configuration() == []
 
 
-GATED_SOURCE_DIRS = (REPO_ROOT / "src" / "powerpetdoor", REPO_ROOT / "scripts")
+#: Derived from `coverage.run.source`, never hard-coded. The hard-coded
+#: pair drifted in the direction that looks safe: dropping `"scripts"` from
+#: `source` removed 310 statements and 108 branch destinations from the
+#: gate while this sweep carried on scanning a directory the gate no longer
+#: measured, and the build stayed green at 100.00% (round-9 test-fanatic
+#: H1, e02).
+GATED_SOURCE_DIRS = tuple(REPO_ROOT / entry for entry in gaps.coverage_config().source)
+
+
+class TestTheCoverageGateIsWhatItClaims:
+    """The coverage configuration was the one piece of test infrastructure
+    with no test.
+
+    Four independent one-line edits to `pyproject.toml` each shrink the
+    gate and still print `100.00%` under the real CI invocation
+    (`coverage report --fail-under=100`), measured (round-9 test-fanatic H1
+    as adjusted by the round-9 refutation):
+
+    | edit | effect | gate |
+    |---|---|---|
+    | `omit += "*/tz_utils.py"` | -93 stmts / -32 branches | exit 0 |
+    | `source` drops `"scripts"` | -310 stmts / -108 branches | exit 0 |
+    | `branch = true -> false` | **all 2410 branch destinations** | exit 0 |
+    | `exclude_lines += "^\\s*def _keep_int"` | -11 stmts / -8 branches | exit 0 |
+
+    The old guard asserted only that `omit` was *non-empty*
+    (`assert omit, "coverage.run.omit went missing"`), which every one of
+    those edits satisfies. These assert the values.
+
+    The `fail_under` edit is deliberately **not** claimed to guard CI: CI
+    runs `coverage report --fail-under=100`, and a command-line option
+    overrides the config file (proven on a 67%-coverage control: config-only
+    exits 0, the CLI flag exits 2). It is asserted because CLAUDE.md's
+    pre-commit checklist mandates a local `uv run pytest --cov`, which reads
+    the config and nothing else - hence the test name.
+    """
+
+    def test_branch_coverage_is_on(self):
+        """`branch = false` is the worst of the four: it stops measuring all
+        2410 branch destinations and drops the Branch/BrPart columns from the
+        report, while the gate still prints 100.00% and exits 0. Every "100%
+        branch coverage" claim in CLAUDE.md, README.md and TESTING_GAPS.md
+        becomes false from a one-word edit."""
+        assert gaps.coverage_config().branch is True
+
+    def test_source_is_exactly_the_two_gated_roots(self):
+        """`scripts/` is in the gate on purpose: `generate_gaps_report.py`
+        produces the artifact this project uses to report its own testing
+        gaps. That sentence lives in a `pyproject.toml` comment; this is what
+        enforces it."""
+        assert gaps.coverage_config().source == ["src/powerpetdoor", "scripts"]
+
+    def test_omit_is_exactly_init_and_main(self):
+        """Non-emptiness was all the old guard asserted, and one added glob
+        removes a whole module from the gate."""
+        assert gaps.coverage_config().omit == ["*/__init__.py", "*/__main__.py"]
+
+    def test_the_local_pre_commit_gate_threshold_is_100(self):
+        """CLAUDE.md's pre-commit checklist is `uv run pytest --cov`, which
+        gets its threshold from here and nowhere else.
+
+        This does **not** guard CI: `.github/workflows/test.yml` runs
+        `coverage report --fail-under=100`, and an explicit command-line
+        option overrides the config file.
+        """
+        assert gaps.coverage_config().fail_under == 100
+
+    def test_exclude_lines_is_exactly_the_seven_vetted_patterns(self):
+        """A literal, so an eighth pattern is a two-file diff with a
+        rationale rather than a one-line change that quietly removes a
+        function. `^\\s*def _keep_int` deletes 11 statements and 8 branch
+        destinations and the sweep cannot see it - by construction, because
+        it matches *code*, which is what an exclusion pattern is for."""
+        assert gaps.coverage_config().exclude_lines == [
+            "#\\s*pragma:\\s*no\\s+cover\\s*($|\\()",
+            "^\\s*def __repr__",
+            "^\\s*raise NotImplementedError",
+            "^\\s*if TYPE_CHECKING:",
+            "^\\s*if __name__ == .__main__.:",
+            "^\\s*@overload\\s*$",
+            "(^\\s*\\.\\.\\.\\s*$)|(:\\s*\\.\\.\\.\\s*$)",
+        ]
+
+    def test_partial_branches_is_set_and_anchored(self):
+        """Unset does not mean "no branch exclusions": it means coverage's
+        own bare, unanchored default, which forgives a missing arc on any
+        line that merely mentions the phrase (round-9 test-fanatic M1)."""
+        assert gaps.coverage_config().partial_branches == [
+            "#\\s*pragma:\\s*no\\s+branch\\s*($|\\()"
+        ]
+
+    def test_every_gated_root_exists_and_is_swept(self):
+        """The derivation, not the literal: `GATED_SOURCE_DIRS` is now read
+        from `coverage.run.source`, so the sweep cannot outlive the gate."""
+        assert GATED_SOURCE_DIRS == (REPO_ROOT / "src/powerpetdoor", REPO_ROOT / "scripts")
+        for directory in GATED_SOURCE_DIRS:
+            assert directory.is_dir()
+
+    def test_the_report_discloses_all_three_gate_dimensions(self, workspace, monkeypatch):
+        """`TESTING_GAPS.md` disclosed two of the gate's six dimensions.
+
+        `branch`, `source` and `fail_under` decide what 100% *means* and
+        appeared nowhere in the artifact whose stated job is disclosing the
+        perimeter, so `branch = false` changed nothing in the document.
+        """
+        write_coverage(workspace, FULL_COVERAGE)
+        monkeypatch.setattr(gaps, "PYPROJECT", REPO_ROOT / "pyproject.toml")
+        monkeypatch.setattr(sys, "argv", ["generate_gaps_report.py"])
+
+        gaps.main()
+        rendered = (workspace / "tests" / "TESTING_GAPS.md").read_text()
+
+        assert "### Gate Configuration" in rendered
+        assert "Measured roots (`coverage.run.source`): `src/powerpetdoor`, `scripts`" in rendered
+        assert "Branch coverage (`coverage.run.branch`): `true`" in rendered
+        assert "Gate threshold (`coverage.report.fail_under`): `100`" in rendered
 
 
 class TestTheCoverageConfigDoesNotExcludeProse:
@@ -713,14 +828,19 @@ class TestTheCoverageConfigDoesNotExcludeProse:
     """
 
     def test_no_configured_pattern_matches_prose_in_a_gated_file(self):
-        _, patterns = gaps.coverage_config()
-        assert patterns, "coverage.report.exclude_lines went missing from pyproject.toml"
+        settings = gaps.coverage_config()
+        # Both halves of the mechanism. `partial_branches` is the identical
+        # bare-`re.search` hazard applied to branch arcs and the sweep was
+        # never handed it (round-9 test-fanatic M1).
+        patterns = settings.exclude_lines + settings.partial_branches
+        assert settings.exclude_lines, "coverage.report.exclude_lines went missing"
+        assert settings.partial_branches, "coverage.report.partial_branches went missing"
 
         found = gaps.find_prose_exclusions(GATED_SOURCE_DIRS, patterns)
 
         assert found == [], (
-            "an exclude_lines pattern matched a string literal on a line carrying a "
-            "statement, silently removing it from the 100% gate: "
+            "an exclude_lines/partial_branches pattern matched a string literal on a "
+            "line carrying a statement, silently removing it from the 100% gate: "
             + "; ".join(f"{e['file']}:{e['line']} via {e['pattern']!r}" for e in found)
         )
 
@@ -746,6 +866,29 @@ class TestTheCoverageConfigDoesNotExcludeProse:
         assert {entry["pattern"] for entry in found} == set(bare)
         assert {Path(entry["file"]).name for entry in found} == {"generate_gaps_report.py"}
 
+    def test_the_sweep_catches_the_bare_branch_default_round_9_replaced(self):
+        """Falsifiability twin for the branch half (round-9 test-fanatic M1).
+
+        Coverage's own `partial_branches` default is a bare, unanchored
+        `re.search`, so leaving `partial_branches` unset forgave a missing
+        branch arc on any line that merely *mentions* the phrase - including
+        the two lines in this repository's own gap-reporting script whose job
+        is to describe it. Neither is a branch point today, so nothing was
+        lost; it becomes live the first time one of those strings shares a
+        line with a conditional, which is exactly how rounds 6, 7 and 8
+        happened.
+        """
+        bare_default = "#\\s*(pragma|PRAGMA)[:\\s]?\\s*(no|NO)\\s*(branch|BRANCH)"
+
+        found = gaps.find_prose_exclusions((REPO_ROOT / "scripts",), [bare_default])
+
+        assert {Path(entry["file"]).name for entry in found} == {"generate_gaps_report.py"}
+        assert [entry["pattern"] for entry in found] == [bare_default] * len(found)
+        assert len(found) >= 2
+        # ...and the anchored replacement finds neither of them.
+        anchored = gaps.coverage_config().partial_branches
+        assert gaps.find_prose_exclusions((REPO_ROOT / "scripts",), anchored) == []
+
     def test_the_sweep_catches_the_bare_ellipsis_round_6_replaced(self):
         """...and the first instance of the class, in the shipped library."""
         found = gaps.find_prose_exclusions((REPO_ROOT / "src" / "powerpetdoor",), ["\\.\\.\\."])
@@ -769,14 +912,45 @@ class TestTheCoverageConfigDoesNotExcludeProse:
 
         assert [(entry["line"], entry["pattern"]) for entry in found] == [(2, "pragma: no cover")]
 
-    def test_a_real_pragma_comment_is_not_reported(self, tmp_path):
-        """The anchored pattern's legitimate use must stay legitimate."""
-        _, patterns = gaps.coverage_config()
+    @pytest.mark.parametrize(
+        ("attribute", "annotation"),
+        [
+            ("exclude_lines", "X = 1  # pragma: no cover (deliberate)"),
+            ("partial_branches", "if X:  # pragma: no branch (deliberate)"),
+        ],
+        ids=["no-cover", "no-branch"],
+    )
+    def test_a_real_pragma_comment_is_not_reported(self, tmp_path, attribute, annotation):
+        """The anchored patterns' legitimate use must stay legitimate."""
+        patterns = getattr(gaps.coverage_config(), attribute)
         pragma_pattern = next(p for p in patterns if "pragma" in p)
         module = tmp_path / "m.py"
-        module.write_text("X = 1  # pragma: no cover (deliberate)\n")
+        module.write_text(f"X = 1\n{annotation}\n    pass\n")
 
         assert gaps.find_prose_exclusions((tmp_path,), [pragma_pattern]) == []
+
+    def test_a_match_beginning_where_a_string_ends_is_code_not_prose(self, tmp_path):
+        """The span end is exclusive, and that is what separates the two.
+
+        `_string_spans` for line 2 below is `{2: [(4, 7), (29, 32)]}`, so a
+        match starting at column 7 - immediately after the closing quote of
+        `"a"` - is **code**. Making the comparison inclusive turns the sweep
+        into a false-positive reporter that fails the build over a line it
+        excludes nothing on; it survived the whole suite (round-9
+        test-fanatic L3).
+        """
+        module = tmp_path / "m.py"
+        module.write_text('TYPE_CHECKING = True\nX = "a"if TYPE_CHECKING else "b"\n')
+
+        assert gaps._string_spans(module.read_text())[2] == [(4, 7), (29, 32)]
+        assert gaps.find_prose_exclusions((tmp_path,), ["if TYPE_CHECKING"]) == []
+
+        # ...and a match that really is inside the literal is still reported.
+        module.write_text(
+            'TYPE_CHECKING = True\nX = "if TYPE_CHECKING" if TYPE_CHECKING else "b"\n'
+        )
+        found = gaps.find_prose_exclusions((tmp_path,), ["if TYPE_CHECKING"])
+        assert [entry["line"] for entry in found] == [2]
 
     def test_an_unparseable_file_contributes_nothing(self, tmp_path):
         """Same contract as the pragma scanner's untokenizable case."""
@@ -808,7 +982,7 @@ class TestTheCoverageConfigDoesNotExcludeProse:
         rendered = (workspace / "tests" / "TESTING_GAPS.md").read_text()
 
         assert "### Prose-Triggered Exclusions" in rendered
-        assert "None. Every `exclude_lines` pattern above matches only" in rendered
+        assert "None. Every `exclude_lines` and `partial_branches` pattern above" in rendered
 
     def test_the_report_names_every_prose_exclusion_it_finds(self, workspace, monkeypatch):
         """...and it renders them, pipes escaped, when there are any.
@@ -821,13 +995,15 @@ class TestTheCoverageConfigDoesNotExcludeProse:
         source_dir.mkdir(parents=True)
         (source_dir / "m.py").write_text('X = "mentions ham|eggs here"\n')
         monkeypatch.setattr(gaps, "PYPROJECT", REPO_ROOT / "pyproject.toml")
-        monkeypatch.setattr(gaps, "coverage_config", lambda: ([], ["ham|eggs"]))
+        monkeypatch.setattr(
+            gaps, "coverage_config", lambda: gaps.CoverageSettings(exclude_lines=["ham|eggs"])
+        )
         monkeypatch.setattr(sys, "argv", ["generate_gaps_report.py"])
 
         gaps.main()
         rendered = (workspace / "tests" / "TESTING_GAPS.md").read_text()
 
-        assert "**1 statement(s)** are excluded because an `exclude_lines` pattern" in rendered
+        assert "**1 statement(s)** are excluded because an `exclude_lines`" in rendered
         assert (
             '| `src/powerpetdoor/m.py` | 1 | `ham\\|eggs` | `X = "mentions ham\\|eggs here"` |'
         ) in rendered

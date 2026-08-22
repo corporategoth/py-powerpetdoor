@@ -11,7 +11,11 @@ import asyncio
 import io
 import logging
 import os
+import signal
+import socket
+import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -162,14 +166,21 @@ class FakeStreamWriter:
 
 
 class FakeStreamReader:
-    """Feeds a scripted list of lines, then EOF (b'')."""
+    """Feeds a scripted list of lines, then EOF (b'').
 
-    def __init__(self, lines: list[bytes]):
+    A ``ValueError`` in the list is *raised* rather than returned, which is
+    what asyncio's ``readline()`` does for a line longer than ``limit``.
+    """
+
+    def __init__(self, lines: list[bytes | ValueError]):
         self._lines = list(lines)
 
     async def readline(self) -> bytes:
         if self._lines:
-            return self._lines.pop(0)
+            item = self._lines.pop(0)
+            if isinstance(item, ValueError):
+                raise item
+            return item
         return b""
 
 
@@ -533,7 +544,10 @@ class TestMainArguments:
         monkeypatch.setattr(cli, "run_simulator", _boom)
 
     def _run_main(self, monkeypatch, argv, fake_run=None):
-        captured = {}
+        captured: dict = {}
+        # Also exposed on the instance so a caller that has to catch main()'s
+        # SystemExit (every --oneshot invocation does) can still read it.
+        self._captured = captured
 
         if fake_run is None:
 
@@ -582,8 +596,14 @@ class TestMainArguments:
         captured = self._run_main(monkeypatch, ["ppd-simulator", "--daemon", "--history", "none"])
         assert captured["history_file"] is None
 
-    def test_keyboard_interrupt_exits_130(self, monkeypatch):
-        """An interrupted run must not report success to CI."""
+    def test_a_keyboard_interrupt_reaching_main_exits_130(self, monkeypatch, capsys):
+        """main()'s handler, in isolation.
+
+        On its own this asserts nothing about the shipped binary - the
+        binary swallowed the cancellation so this handler was never entered
+        (F-H1). `TestTheRealBinaryUnderSIGINT` is what pins that half; this
+        pins the exit code the handler chooses.
+        """
 
         async def interrupted_run(**kwargs):
             raise KeyboardInterrupt
@@ -594,6 +614,26 @@ class TestMainArguments:
         with pytest.raises(SystemExit) as exc_info:
             cli.main()
         assert exc_info.value.code == 130
+        assert "Simulator stopped." in capsys.readouterr().out
+
+    def test_oneshot_without_a_verdict_exits_one(self, monkeypatch):
+        """`--oneshot` that produced no result is a failure, not a success.
+
+        `result is None` means the run never reached the end of its scripts.
+        The old `and result is not None` guard fell through to exit **0**,
+        which is what made an interrupted CI run report success (F-H1).
+        `--oneshot` without `--script` is refused at rc 2, so this state has
+        no legitimate meaning other than "interrupted".
+        """
+
+        async def fake_run(**kwargs):
+            return None
+
+        monkeypatch.setattr(cli, "run_simulator", fake_run)
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "-s", "x", "--oneshot"])
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+        assert exc_info.value.code == 1
 
     def test_list_scripts_prints_builtins_without_running(self, capsys, monkeypatch):
         called = []
@@ -659,10 +699,14 @@ class TestMainArguments:
         assert "error: --control-host requires --daemon" in capsys.readouterr().err
 
     def test_script_only_flags_accepted_with_script(self, monkeypatch):
-        captured = self._run_main(
-            monkeypatch,
-            ["ppd-simulator", "-s", "basic_cycle", "--oneshot", "--loop", "--wait-for-client"],
-        )
+        # `--oneshot` always exits explicitly now (the stub run returns no
+        # verdict, so that is rc 1); the point here is the plumbing.
+        with pytest.raises(SystemExit):
+            captured = self._run_main(
+                monkeypatch,
+                ["ppd-simulator", "-s", "basic_cycle", "--oneshot", "--loop", "--wait-for-client"],
+            )
+        captured = self._captured
         assert captured["oneshot"] is True
         assert captured["loop_scripts"] is True
         assert captured["wait_for_client"] is True
@@ -1046,7 +1090,15 @@ class TestControlChannelEdges:
     def test_bound_port_before_start_returns_configured_port(self):
         assert make_channel().bound_port == 4567
 
-    async def test_handle_client_skips_empty_lines(self, caplog):
+    async def test_handle_client_answers_empty_lines(self, caplog):
+        """A blank line is refused, not dropped.
+
+        Skipping it meant no answer could ever come, so
+        `ppd-simulator-ctl ""` sat out the whole `--timeout` and then
+        advised raising it - advice that is wrong in both halves. A shell
+        wrapper expanding an unset variable lands here (round-9 frontend
+        L4). One line closes it.
+        """
         executed = []
 
         async def execute(cmd):
@@ -1059,9 +1111,54 @@ class TestControlChannelEdges:
         with caplog.at_level(logging.INFO, logger="powerpetdoor.simulator.cli"):
             await channel._handle_client(reader, writer)
         assert executed == ["ping"]
-        assert writer.lines() == ["STATUS: clients=0", "OK: ran ping"]
+        assert writer.lines() == [
+            "STATUS: clients=0",
+            "ERROR: Empty command",
+            "ERROR: Empty command",
+            "OK: ran ping",
+        ]
         assert writer.closed is True
         assert "Control connection closed" in caplog.text
+
+    async def test_handle_client_refuses_an_over_long_line_without_an_error_record(self, caplog):
+        """asyncio's `readline()` raises `ValueError` past `limit`.
+
+        It used to escape to the generic `except Exception` below and log
+        "Control client error: Separator is found, but chunk is longer than
+        limit" at **ERROR** - which `_ControlLogHandler` then broadcast into
+        every other operator's `ctl` session, while the sender saw only
+        "Connection closed without response" (round-9 frontend L4).
+        asyncio consumes through the newline before raising, so the
+        connection is still usable and the next command is answered.
+        """
+        executed = []
+
+        async def execute(cmd):
+            executed.append(cmd)
+            return SimpleNamespace(success=True, message=f"ran {cmd}")
+
+        channel = make_channel(execute)
+        reader = FakeStreamReader(
+            [ValueError("Separator is found, but chunk is longer than limit"), b"ping\n"]
+        )
+        writer = FakeStreamWriter()
+        with caplog.at_level(logging.INFO, logger="powerpetdoor.simulator.cli"):
+            await channel._handle_client(reader, writer)
+
+        assert executed == ["ping"]
+        assert writer.lines() == [
+            "STATUS: clients=0",
+            f"ERROR: Command line too long (max {cli.MAX_CONTROL_LINE} bytes)",
+            "OK: ran ping",
+        ]
+        assert [r.levelno for r in caplog.records if "over-long" in r.getMessage()] == [
+            logging.INFO
+        ]
+        assert "Control client error" not in caplog.text
+
+    def test_the_control_line_limit_is_64_kib(self):
+        """Pinned by value: relaxing a resource cap must be argued for."""
+        assert cli.MAX_CONTROL_LINE == 64 * 1024
 
     async def test_handle_client_error_result(self):
         async def execute(cmd):
@@ -1731,21 +1828,88 @@ class TestRunStartupScripts:
         assert runs == ["s1"]
         assert "before next script" not in capsys.readouterr().out
 
-    async def test_cancelled_mid_script_still_records_result(self):
+    async def _cancel_mid_script(self, stop, result, *, scripts=("s1",), **kwargs):
+        """Start a run that blocks inside its first script, then cancel it."""
         blocker = asyncio.Event()
 
         async def blocking_run(script, sim):
             await blocker.wait()
             return True
 
-        sim, handler, runner, stop, result, runs, started = self._make(side_effect=blocking_run)
-        task = asyncio.create_task(self._run(["s1"], sim, handler, runner, stop, result))
+        sim, handler, runner, _stop, _result, runs, started = self._make(side_effect=blocking_run)
+        task = asyncio.create_task(
+            self._run(list(scripts), sim, handler, runner, stop, result, **kwargs)
+        )
         await asyncio.wait_for(started.wait(), 5)
         task.cancel()
-        # CancelledError is swallowed; the finally block records the result
-        assert await asyncio.wait_for(task, 5) is None
-        assert result[0] is True
+        return task, runs
+
+    async def test_a_cancelled_run_records_no_verdict_and_re_raises(self, capsys):
+        """An interrupted run must not claim a result it never established.
+
+        `all_success` at the moment of a cancellation means "nothing has
+        failed *yet*", not "every assertion ran and passed". Recording it
+        made `ppd-simulator --script … --oneshot` print
+        `>>> All scripts PASSED` and exit **0** for a run stopped inside a
+        30 s `wait`, two steps before its `assert` (F-H1). Re-raising is what
+        lets `asyncio.Runner` turn the cancellation back into
+        `KeyboardInterrupt` for main().
+        """
+        stop = asyncio.Event()
+        result: list = [None]
+        task, runs = await self._cancel_mid_script(stop, result, oneshot=True)
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert runs == ["s1"]
+        assert result[0] is None
         assert not stop.is_set()
+        out = capsys.readouterr().out
+        assert ">>> All scripts" not in out
+        assert ">>> Interrupted after 0 of 1 script(s)" in out
+
+    async def test_a_cancelled_run_counts_the_scripts_that_did_finish(self, capsys):
+        """The banner reports progress, so a partial run is not mistaken for a
+        whole one: the first script completed, the second was cut off."""
+        stop = asyncio.Event()
+        result: list = [None]
+        sim, handler, runner, _stop, _result, runs, started = self._make()
+
+        blocker = asyncio.Event()
+        real_run = runner.run
+
+        async def run(script):
+            await real_run(script)
+            if script.name == "s2":
+                await blocker.wait()
+            return True
+
+        runner.run = run
+        task = asyncio.create_task(
+            self._run(["s1", "s2"], sim, handler, runner, stop, result, oneshot=True)
+        )
+        while runs != ["s1", "s2"]:
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+
+        assert result[0] is None
+        assert ">>> Interrupted after 1 of 2 script(s)" in capsys.readouterr().out
+
+    async def test_a_cancelled_non_oneshot_run_prints_no_banner_at_all(self, capsys):
+        """Without `--oneshot` there is no verdict line either way, so an
+        interrupted run stays silent - but still records no result."""
+        stop = asyncio.Event()
+        result: list = [None]
+        task, _runs = await self._cancel_mid_script(stop, result, oneshot=False)
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert result[0] is None
+        out = capsys.readouterr().out
+        assert ">>> All scripts" not in out
+        assert ">>> Interrupted" not in out
 
 
 # ============================================================================
@@ -1929,6 +2093,35 @@ class TestRunSimulatorScripts:
         assert ">>> Script FAILED: Failing Script" in out
         assert ">>> All scripts FAILED" in out
 
+    async def test_cancelling_mid_script_cancels_the_startup_task_first(self, tmp_path, capsys):
+        """The startup-script task is cancelled *inside* run_simulator's
+        cleanup, not left for `asyncio.run`'s shutdown.
+
+        As a bare `create_task` it was reaped after `main()` had already
+        read `script_result[0]`, so `run_simulator` returned `None` and the
+        `>>> All scripts PASSED` banner was printed by the dying task on the
+        way out - a verdict for a run that never reached its assertion, on
+        the exit path that then reported 0 (F-H1).
+        """
+        script = tmp_path / "slow.yaml"
+        script.write_text(
+            "name: Slow Script\nsteps:\n  - action: log\n    message: started\n"
+            "  - action: wait\n    seconds: 30\n"
+            "  - action: assert\n    condition: door_status\n    equals: DOOR_HOLDING\n"
+        )
+        task = asyncio.create_task(
+            cli.run_simulator(host="127.0.0.1", port=0, scripts=[str(script)], oneshot=True)
+        )
+        while ">>> Running script: Slow Script" not in capsys.readouterr().out:
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 15)
+
+        out = capsys.readouterr().out
+        assert ">>> All scripts" not in out
+        assert ">>> Interrupted after 0 of 1 script(s)" in out
+
     async def test_oneshot_unknown_script_returns_false(self, capsys):
         result = await asyncio.wait_for(
             cli.run_simulator(
@@ -2085,11 +2278,21 @@ class TestRunSimulatorDaemonExtras:
         assert result is None
 
     async def test_external_cancel_shuts_down_cleanly(self):
-        """Cancelling the run_simulator task performs full cleanup and returns."""
+        """Cancelling the run_simulator task performs full cleanup and then
+        lets the cancellation through.
+
+        Swallowing it is how Ctrl-C became exit 0 (F-H1): `asyncio.Runner`
+        delivers SIGINT by cancelling the main task and only re-raises
+        `KeyboardInterrupt` if that cancellation actually propagates.
+        """
         task, ports = await self._start_daemon()
         task.cancel()
-        # run_simulator catches the cancellation, cleans up, and returns None
-        assert await asyncio.wait_for(task, 10) is None
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 10)
+        # ...and the cleanup really ran: the door port is free again.
+        with socket.socket() as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("127.0.0.1", ports["door"]))
 
 
 # ============================================================================
@@ -2384,3 +2587,327 @@ class TestRunSimulatorInteractive:
             os.close(w_fd)
             os.close(r_fd)
         assert result is None
+
+
+# ============================================================================
+# Ctrl-C against the real binary (F-H1)
+# ============================================================================
+
+
+class TestTheRealBinaryUnderSIGINT:
+    """The exit code and the verdict banner, measured on a real process.
+
+    The test this replaced monkeypatched `cli.run_simulator` to raise
+    `KeyboardInterrupt` directly, so it asserted `main()`'s handler in
+    isolation and could not fail for the reason it existed: the shipped
+    binary swallowed the cancellation `asyncio.Runner` uses to deliver
+    SIGINT, so that handler was never entered and an interrupted `--oneshot`
+    run printed `>>> All scripts PASSED` and exited **0** (F-H1). Only a real
+    process carries that machinery, so only a real process can pin it.
+    """
+
+    LONG_SCRIPT = """\
+name: Long Script
+steps:
+  - action: log
+    message: starting
+  - action: wait
+    seconds: 30
+  - action: assert
+    condition: door_status
+    equals: DOOR_CLOSED
+"""
+
+    def _run(self, script_path, *, interrupt_at=None):
+        """Run `ppd-simulator --script <path> --oneshot`, optionally SIGINTing.
+
+        Returns (returncode, combined output). `interrupt_at` is a marker
+        line fragment; SIGINT is sent as soon as it appears, so the signal
+        lands deterministically inside the 30 s `wait` step rather than after
+        a wall-clock guess.
+        """
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "powerpetdoor.simulator",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0",
+                "--script",
+                str(script_path),
+                "--oneshot",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        chunks: list[str] = []
+        try:
+            if interrupt_at is not None:
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    line = proc.stdout.readline()
+                    if not line:
+                        break
+                    chunks.append(line)
+                    if interrupt_at in line:
+                        break
+                else:  # no break: the marker never arrived
+                    raise AssertionError(f"marker {interrupt_at!r} never appeared")
+                proc.send_signal(signal.SIGINT)
+            chunks.append(proc.stdout.read())
+            return proc.wait(timeout=30), "".join(chunks)
+        finally:
+            proc.stdout.close()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+
+    def test_sigint_mid_run_exits_130_and_claims_no_verdict(self, tmp_path):
+        script = tmp_path / "long.yaml"
+        script.write_text(self.LONG_SCRIPT)
+
+        rc, out = self._run(script, interrupt_at="Step 2")
+
+        assert rc == 130, out
+        assert ">>> All scripts PASSED" not in out
+        assert ">>> All scripts FAILED" not in out
+        assert ">>> Interrupted after 0 of 1 script(s)" in out
+        # Step 3 is the assertion the run existed for; it never ran.
+        assert "Step 3" not in out
+
+    def test_an_uninterrupted_run_still_passes_and_exits_zero(self, tmp_path):
+        """Control: the same binary, the same flags, no signal."""
+        script = tmp_path / "short.yaml"
+        script.write_text(
+            "name: Short Script\nsteps:\n"
+            "  - action: assert\n    condition: door_status\n    equals: DOOR_CLOSED\n"
+        )
+
+        rc, out = self._run(script)
+
+        assert rc == 0, out
+        assert ">>> All scripts PASSED" in out
+
+
+# ============================================================================
+# Startup failures (round-9 frontend L1)
+# ============================================================================
+
+
+class TestBindTimeArgumentsFailAsArguments:
+    """Ports and hosts were the one class this parser did not check.
+
+    `--scripts-dir` has had `parser.error(...)` since round 7; `--port
+    99999` reached `socket.bind()` and exited with `OverflowError: bind():
+    port must be 0-65535` under 30 lines of asyncio traceback carrying
+    absolute paths from the machine that built the venv (round-9 frontend
+    L1).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _never_reach_run_simulator(self, monkeypatch):
+        async def _boom(**kwargs):
+            raise AssertionError("main() reached run_simulator; it should have exited first")
+
+        monkeypatch.setattr(cli, "run_simulator", _boom)
+
+    @pytest.mark.parametrize(
+        ("argv", "message"),
+        [
+            (["--port", "99999"], "error: --port 99999: port must be 0-65535"),
+            (["--port", "-5"], "error: --port -5: port must be 0-65535"),
+            (["--port", "65536"], "error: --port 65536: port must be 0-65535"),
+            (["--daemon", "99999"], "error: --daemon 99999: port must be 0-65535"),
+            (["--daemon", "-2"], "error: --daemon -2: port must be 0-65535"),
+        ],
+        ids=["port-high", "port-negative", "port-limit+1", "daemon-high", "daemon-negative"],
+    )
+    def test_an_out_of_range_port_is_an_argument_error(self, capsys, monkeypatch, argv, message):
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", *argv])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+        assert exc_info.value.code == 2
+        assert message in capsys.readouterr().err
+
+    @pytest.mark.parametrize("port", [cli.MIN_PORT, cli.MAX_PORT], ids=["min-port", "max-port"])
+    def test_the_control_at_both_ends_of_the_range(self, monkeypatch, port):
+        """Rule 8: `limit` itself must be accepted, on both bounds."""
+        recorded: dict = {}
+
+        async def fake_run(**kwargs):
+            recorded.update(kwargs)
+            return None
+
+        monkeypatch.setattr(cli, "run_simulator", fake_run)
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--port", str(port), "--daemon"])
+
+        cli.main()
+
+        assert recorded["port"] == port
+
+    def test_the_daemon_sentinel_is_not_range_checked(self, monkeypatch):
+        """`--daemon` with no value is -1, which is not a port an operator
+        typed - checking it would refuse the documented default."""
+        recorded: dict = {}
+
+        async def fake_run(**kwargs):
+            recorded.update(kwargs)
+            return None
+
+        monkeypatch.setattr(cli, "run_simulator", fake_run)
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--port", "3000", "--daemon"])
+
+        cli.main()
+
+        assert cli.DAEMON_DEFAULT_CONTROL_PORT == -1
+        assert recorded["control_port"] == 3000 + cli.CONTROL_PORT_OFFSET
+
+    @pytest.mark.parametrize("value", ["-5", "0", "-0.5"], ids=["negative", "zero", "fractional"])
+    def test_a_non_positive_run_for_is_an_argument_error(self, capsys, monkeypatch, value):
+        """`--run-for -5` was accepted and silently meant "shut down
+        immediately", logging `Run time (-5.0s) elapsed, shutting down` as
+        if five negative seconds had passed (round-9 frontend T1)."""
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--daemon", "--run-for", value])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+        assert exc_info.value.code == 2
+        assert (
+            f"error: --run-for {float(value):g}: must be greater than 0" in capsys.readouterr().err
+        )
+
+    def test_the_control_a_positive_run_for_is_plumbed_through(self, monkeypatch):
+        recorded: dict = {}
+
+        async def fake_run(**kwargs):
+            recorded.update(kwargs)
+            return None
+
+        monkeypatch.setattr(cli, "run_simulator", fake_run)
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--daemon", "--run-for", "0.001"])
+
+        cli.main()
+
+        assert recorded["run_for"] == 0.001
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["--host", "300.1.1.1"],
+            ["--daemon", "--control-host", "300.1.1.1"],
+        ],
+        ids=["host", "control-host"],
+    )
+    def test_an_unresolvable_bind_address_is_an_argument_error(self, capsys, monkeypatch, argv):
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", *argv])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+        assert exc_info.value.code == 2
+        assert "300.1.1.1: " in capsys.readouterr().err
+
+
+class TestStartupBindFailuresPrintOneSentence:
+    """Which of the two ports failed, and which flag changes it."""
+
+    @staticmethod
+    def _occupied_port():
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        return sock, sock.getsockname()[1]
+
+    async def test_the_door_port_failure_names_the_door_port(self):
+        sock, port = self._occupied_port()
+        try:
+            with pytest.raises(cli.SimulatorStartupError) as exc_info:
+                await cli.run_simulator(host="127.0.0.1", port=port, daemon=True)
+        finally:
+            sock.close()
+
+        err = exc_info.value
+        assert err.role == "door"
+        assert err.port == port
+        assert str(err).startswith(f"Cannot start: door server cannot use 127.0.0.1:{port} (")
+        assert str(err).endswith("change it with --port")
+
+    async def test_the_control_port_failure_names_the_control_port(self):
+        """The case with an empty stdout before the fix: the door bound fine
+        and only the derived control port collided."""
+        sock, port = self._occupied_port()
+        try:
+            with pytest.raises(cli.SimulatorStartupError) as exc_info:
+                await cli.run_simulator(host="127.0.0.1", port=0, daemon=True, control_port=port)
+        finally:
+            sock.close()
+
+        err = exc_info.value
+        assert err.role == "control"
+        assert err.port == port
+        assert str(err).endswith("change it with --daemon PORT")
+
+    async def test_a_failed_control_bind_does_not_leave_the_door_server_listening(self):
+        """The door server is started first; it has to come back down."""
+        sock, port = self._occupied_port()
+        door_ports: list[int] = []
+        real_start = DoorSimulator.start
+
+        async def recording_start(self):
+            await real_start(self)
+            door_ports.append(self.server.sockets[0].getsockname()[1])
+
+        try:
+            DoorSimulator.start = recording_start
+            with pytest.raises(cli.SimulatorStartupError):
+                await cli.run_simulator(host="127.0.0.1", port=0, daemon=True, control_port=port)
+        finally:
+            DoorSimulator.start = real_start
+            sock.close()
+
+        assert len(door_ports) == 1
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", door_ports[0]))
+
+    def test_main_prints_the_sentence_and_exits_1(self, capsys, monkeypatch):
+        async def failing(**kwargs):
+            raise cli.SimulatorStartupError(
+                "door", "0.0.0.0", 3000, OSError(98, "address already in use")
+            )
+
+        monkeypatch.setattr(cli, "run_simulator", failing)
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--daemon"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert captured.err.splitlines() == [
+            "Cannot start: door server cannot use 0.0.0.0:3000 "
+            "(address already in use); change it with --port"
+        ]
+        assert "Traceback" not in captured.err
+
+    def test_debug_still_gives_the_traceback(self, capsys, monkeypatch):
+        async def failing(**kwargs):
+            raise cli.SimulatorStartupError(
+                "door", "0.0.0.0", 3000, OSError(98, "address already in use")
+            )
+
+        monkeypatch.setattr(cli, "run_simulator", failing)
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--daemon", "--debug"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+        assert exc_info.value.code == 1
+        assert "Traceback" in capsys.readouterr().err

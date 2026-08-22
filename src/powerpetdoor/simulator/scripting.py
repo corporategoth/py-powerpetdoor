@@ -271,6 +271,11 @@ _ACTION_PARAMS: dict[str, frozenset[str]] = {
 #: ``test_annotation_keys_never_collide_with_a_real_parameter`` pins.
 STEP_ANNOTATION_KEYS = frozenset({"comment", "description", "note"})
 
+#: The complete set of keys :meth:`Script.from_yaml` reads. Anything else at
+#: the top level of a script file is a misspelling and is refused, in the
+#: same shape as every other unknown name in this DSL (round-9 frontend M3).
+SCRIPT_TOP_LEVEL_KEYS = frozenset({"description", "name", "steps"})
+
 
 @dataclass
 class ScriptStep:
@@ -308,6 +313,21 @@ class Script:
             raise ScriptError(f"Invalid script YAML: {err}") from err
         if not isinstance(data, dict):
             raise ScriptError("Script must be a YAML dictionary")
+
+        # Top-level keys were the last silent misspelling class in this DSL,
+        # and they have the worst blast radius: a step-parameter typo loses
+        # one step, `stpes:` loses the entire file while still printing
+        # `>>> Script PASSED` and exiting 0 (round-9 frontend M3). Every
+        # other class - action, sensor, condition, setting, step parameter -
+        # already fails loudly in this `Unknown X: y. Use: ...` shape.
+        # `steps: []` legitimately means "no steps", so the check is on
+        # unknown keys and not on emptiness.
+        unknown = sorted(set(data) - SCRIPT_TOP_LEVEL_KEYS)
+        if unknown:
+            raise ScriptError(
+                f"Unknown top-level key(s): {', '.join(str(key) for key in unknown)}. "
+                f"Use: {', '.join(sorted(SCRIPT_TOP_LEVEL_KEYS))}"
+            )
 
         name = data.get("name", "Unnamed Script")
         description = data.get("description", "")

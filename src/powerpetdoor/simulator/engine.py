@@ -363,6 +363,63 @@ class DoorMotionEngine:
         )
         return False
 
+    def sensor_open_block_reason(self, sensor: str) -> str | None:
+        """Why ``sensor`` may not open the door right now, or ``None``.
+
+        **One** predicate for both sensor entry points. There used to be
+        two: :meth:`trigger_sensor` checked power, command lockout,
+        per-sensor enable, safety lock and the schedule; while
+        :meth:`activate_sensor` re-implemented a weaker subset inline with
+        no command-lockout check and no schedule check. Nothing asserted
+        either, so every operand of both compound guards could be deleted
+        with the whole suite green (round-9 test-fanatic M2).
+
+        The divergence was reachable from both shipped front ends - the
+        ``inside``/``outside`` CLI commands (``commands/door.py``) and the
+        ``inside``/``outside``/``pet_presence`` script actions
+        (``scripting.py``) - so a CI script step ``- action: inside`` opened
+        the door while every schedule window was closed. ``docs/operation.md``
+        ("Schedule and Sensor Interaction") settles that half outright:
+        *"Outside scheduled windows, sensor triggers are ignored"*. The
+        command-lockout half is not settled by ``docs/operation.md``, which
+        describes command lockout only in terms of blocking the door from
+        *closing*; the two are made consistent on ``trigger_sensor``'s
+        answer, which is the behaviour ``scripts/power_lockout_test.yaml``
+        and ``test_cmd_lockout_ignores_trigger`` have asserted since round 1.
+
+        Note the scope: this gates *opening the door*, not the sensor-active
+        flag. A pet standing in the doorway is a physical fact, so
+        :meth:`activate_sensor` still records it and
+        :meth:`DoorSimulatorState.is_sensor_blocking_close` still consults
+        it under its own (documented, different) rules.
+
+        Args:
+            sensor: "inside" or "outside" (already validated by
+                :meth:`_known_sensor`).
+
+        Returns:
+            A short operator-facing reason, or None when the sensor may open
+            the door.
+        """
+        state = self.state
+        if not state.power:
+            return "power OFF"
+        if state.cmd_lockout:
+            return "command lockout"
+        if sensor == "inside":
+            if not state.inside:
+                return "disabled"
+        else:
+            # `else`, not `elif sensor == "outside"`: _known_sensor has
+            # already established the name is one of SENSOR_NAMES.
+            if not state.outside:
+                return "disabled"
+            if state.safety_lock:
+                return "safety lock"
+        if not state.is_sensor_allowed_by_schedule(sensor):
+            return "outside schedule"
+        return None
+
     def trigger_sensor(self, sensor: str) -> None:
         """Simulate a sensor trigger (pet walking through).
 
@@ -375,28 +432,9 @@ class DoorMotionEngine:
         now = time.monotonic()
         state = self.state
 
-        if not state.power:
-            logger.info("Simulator: Sensor %s ignored (power OFF)", sensor)
-            return
-
-        if state.cmd_lockout:
-            logger.info("Simulator: Sensor %s ignored (command lockout)", sensor)
-            return
-
-        if sensor == "inside" and not state.inside:
-            logger.info("Simulator: Inside sensor ignored (disabled)")
-            return
-
-        if sensor == "outside":
-            if not state.outside:
-                logger.info("Simulator: Outside sensor ignored (disabled)")
-                return
-            if state.safety_lock:
-                logger.info("Simulator: Outside sensor ignored (safety lock)")
-                return
-
-        if not state.is_sensor_allowed_by_schedule(sensor):
-            logger.info("Simulator: %s sensor ignored (outside schedule)", sensor.capitalize())
+        blocked = self.sensor_open_block_reason(sensor)
+        if blocked is not None:
+            logger.info("Simulator: %s sensor ignored (%s)", sensor.capitalize(), blocked)
             return
 
         # If door is already open/holding, re-trigger extends hold time
@@ -484,19 +522,21 @@ class DoorMotionEngine:
                 self._arm_sensor_timer(sensor, duration)
         self.notify_sensors_changed()
 
-        # If door is closed and sensor should trigger, open the door
-        if state.door_status == DOOR_STATE_CLOSED:
-            should_trigger = False
-            if sensor == "inside" and state.inside_sensor_active:
-                # Inside sensor: check if enabled and power on
-                should_trigger = state.power and state.inside
-            elif sensor == "outside" and state.outside_sensor_active:
-                # Outside sensor: check if enabled, power on, and not safety locked
-                should_trigger = state.power and state.outside and not state.safety_lock
-
-            if should_trigger:
+        # If door is closed and sensor should trigger, open the door.
+        # `active` is the second operand and it is decisive: toggling a
+        # sensor *off* (duration 0) must not open the door.
+        active = state.inside_sensor_active if sensor == "inside" else state.outside_sensor_active
+        if state.door_status == DOOR_STATE_CLOSED and active:
+            # The same gate `trigger_sensor` applies - one predicate, so the
+            # two entry points cannot disagree again (round-9 test-fanatic
+            # M2). This is where command lockout and the schedule window used
+            # to be missing.
+            blocked = self.sensor_open_block_reason(sensor)
+            if blocked is None:
                 logger.info("Simulator: %s sensor triggering door cycle", sensor.capitalize())
                 self.open(hold=False)
+            else:
+                logger.info("Simulator: %s sensor ignored (%s)", sensor.capitalize(), blocked)
 
     def _cancel_sensor_timer(self, sensor: str) -> None:
         """Cancel a pending auto-deactivation timer for ``sensor``, if any."""

@@ -11,6 +11,9 @@ terminal (or a log record read on one) raw.
 """
 
 import asyncio
+import contextlib
+import io
+import json
 import logging
 
 import pytest
@@ -75,6 +78,88 @@ class TestSanitizeText:
         result = sanitize_text(value)
         assert result == expected
         assert "\x1b" not in result and "\x9b" not in result
+
+
+class TestSurrogatesAreEscaped:
+    """An unpaired surrogate is the one class whose *result* is unusable.
+
+    ``"\\ud800"`` is legal JSON, arrives on the wire as six ASCII characters,
+    and becomes an unpaired surrogate at ``json.loads``. It cannot be encoded
+    to UTF-8, so before round-9 security M2 the "sanitized" value was exactly
+    what a ``logging.FileHandler(encoding="utf-8")`` could not write: the
+    record was dropped from the operator's log file entirely and the payload
+    went to stderr instead, from a code path outside every ``EventThrottle``.
+    """
+
+    @pytest.mark.parametrize(
+        ("codepoint", "expected"),
+        [
+            (0xD7FF, "퟿"),  # last code point below the surrogate block
+            (0xD800, "\\ud800"),  # first surrogate
+            (0xDFFF, "\\udfff"),  # last surrogate
+            (0xE000, ""),  # first code point above it
+        ],
+        ids=["U+D7FF", "U+D800", "U+DFFF", "U+E000"],
+    )
+    def test_the_surrogate_block_boundary_is_exact(self, codepoint, expected):
+        """Rule 8 at both edges: escape the block, and only the block.
+
+        Compared through `ascii()` on purpose: a *failing* assertion would
+        otherwise put a raw unpaired surrogate into pytest's report, and
+        pytest-xdist cannot serialize that back to the controller - the run
+        would die with an INTERNALERROR instead of naming this test.
+        """
+        assert ascii(sanitize_text(chr(codepoint))) == ascii(expected)
+
+    def test_the_escape_is_width_aware(self):
+        """``\\x{ord:02x}`` would render U+D800 as ``\\xd800``, which reads as
+        ``\\xd8`` followed by ``00``. Above U+00FF the escape is ``\\uNNNN``."""
+        assert ascii(sanitize_text("\x1b")) == ascii("\\x1b")
+        assert ascii(sanitize_text("\x9f")) == ascii("\\x9f")
+        assert ascii(sanitize_text("\ud800")) == ascii("\\ud800")
+
+    def test_a_sanitized_value_always_encodes_to_utf8(self):
+        assert sanitize_text("\ud800BAD", 200).encode("utf-8") == b"\\ud800BAD"
+
+    def test_a_surrogate_from_the_wire_produces_a_writable_log_record(self, tmp_path):
+        """End to end: pure-ASCII wire bytes, a real UTF-8 file handler.
+
+        This is the shipped `door.py:1494` sink the security harness measured
+        at 200 hostile frames -> **0** log lines and 359 KB of stderr. The
+        assertion is that the record the handler produces can actually be
+        written; `caplog` cannot see this failure mode, because it never
+        encodes anything.
+        """
+        from powerpetdoor.door import PowerPetDoor
+
+        # Exactly what a peer sends: the six ASCII characters \ud800.
+        wire = rb'{"fwInfo": "\ud800SECRETPROBE"}'
+        assert wire.decode("ascii") == wire.decode()  # pure ASCII on the wire
+        payload = json.loads(wire)["fwInfo"]
+
+        door = PowerPetDoor(host="127.0.0.1", port=3000)
+        log_path = tmp_path / "ppd.log"
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        door_logger = logging.getLogger("powerpetdoor.door")
+        door_logger.addHandler(handler)
+        previous = door_logger.propagate
+        door_logger.propagate = False
+        # `logging.handleError` writes the failing record to stderr verbatim,
+        # raw surrogate and all. Swallowing it keeps a *failing* run readable:
+        # pytest-xdist cannot serialize captured output containing one.
+        swallowed = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(swallowed):
+                door._on_hw_info_update(payload)
+        finally:
+            door_logger.propagate = previous
+            door_logger.removeHandler(handler)
+            handler.close()
+
+        assert ascii(swallowed.getvalue()) == ascii("")
+        written = log_path.read_text(encoding="utf-8")
+        assert "Ignoring non-mapping hardware info: \\ud800SECRETPROBE" in written
 
 
 class TestLibraryLogSinks:

@@ -603,62 +603,182 @@ class TestAutoRetract:
         assert state.total_auto_retracts == 0
 
 
-class TestTriggerSensorGuards:
-    """trigger_sensor pre-condition checks."""
+def _close_every_schedule_window(state, *, inside=True):
+    """Turn timers on with a zero-length window, so no trigger is ever allowed."""
+    from powerpetdoor.simulator import Schedule
 
-    async def test_power_off_ignores_trigger(self, engine, state):
-        """No door motion when power is off."""
-        state.power = False
-        engine.trigger_sensor("inside")
+    state.auto = True
+    state.schedules[0] = Schedule(
+        index=0,
+        enabled=True,
+        days_of_week=[True] * 7,
+        inside=inside,
+        start_hour=0,
+        start_min=0,
+        end_hour=0,
+        end_min=0,
+    )
+
+
+#: The two ways a sensor reaches the motion engine. Both are driven by both
+#: shipped front ends - `commands/door.py`'s `inside`/`outside` CLI commands
+#: and `scripting.py`'s `inside`/`outside`/`pet_presence` script actions -
+#: so a gate that only one of them applies is a gate the operator can walk
+#: straight past (round-9 test-fanatic M2).
+SENSOR_ENTRY_POINTS = [
+    pytest.param(lambda engine, sensor: engine.trigger_sensor(sensor), id="trigger_sensor"),
+    pytest.param(lambda engine, sensor: engine.activate_sensor(sensor, 5.0), id="activate_sensor"),
+]
+
+
+class TestSensorGuardsBlockBothEntryPoints:
+    """Every gate, against both entry points.
+
+    `trigger_sensor` had five explicit early returns; `activate_sensor`
+    re-implemented a weaker subset inline (`state.power and state.inside` /
+    `state.power and state.outside and not state.safety_lock`) with **no**
+    command-lockout check and **no** schedule check. Every negative test in
+    the suite drove the first one, and the `activate_sensor` tests asserted
+    only toggle/duration mechanics and never looked at `door_status` - so
+    every operand of both compound guards could be deleted with the full
+    suite green, and the two answers had disagreed for nine rounds
+    (round-9 test-fanatic M2).
+
+    Coverage cannot see this class at all: the guard is one branch point
+    with two destinations and the positive destination runs, which is
+    CLAUDE.md rule 9 exactly.
+
+    The divergence is resolved onto `trigger_sensor`'s answer. The schedule
+    half is settled by `docs/operation.md` outright ("Outside scheduled
+    windows, sensor triggers are ignored"); the command-lockout half is not
+    - that document describes command lockout only as something that stops
+    a sensor blocking the door from *closing* - so the two are made
+    consistent on the behaviour `scripts/power_lockout_test.yaml` and this
+    file have asserted since round 1.
+    """
+
+    @pytest.mark.parametrize("trigger", SENSOR_ENTRY_POINTS)
+    @pytest.mark.parametrize(
+        ("gate", "sensor", "setup"),
+        [
+            ("power", "inside", lambda state: setattr(state, "power", False)),
+            ("power", "outside", lambda state: setattr(state, "power", False)),
+            ("cmd_lockout", "inside", lambda state: setattr(state, "cmd_lockout", True)),
+            ("cmd_lockout", "outside", lambda state: setattr(state, "cmd_lockout", True)),
+            ("sensor_enabled", "inside", lambda state: setattr(state, "inside", False)),
+            ("sensor_enabled", "outside", lambda state: setattr(state, "outside", False)),
+            ("safety_lock", "outside", lambda state: setattr(state, "safety_lock", True)),
+            ("schedule", "inside", _close_every_schedule_window),
+            (
+                "schedule",
+                "outside",
+                lambda state: _close_every_schedule_window(state, inside=False),
+            ),
+        ],
+        ids=[
+            "power-inside",
+            "power-outside",
+            "cmd_lockout-inside",
+            "cmd_lockout-outside",
+            "enabled-inside",
+            "enabled-outside",
+            "safety_lock-outside",
+            "schedule-inside",
+            "schedule-outside",
+        ],
+    )
+    async def test_a_blocked_sensor_does_not_open_the_door(
+        self, engine, state, trigger, gate, sensor, setup
+    ):
+        setup(state)
+
+        trigger(engine, sensor)
+        await asyncio.sleep(0)
+
+        assert engine.sensor_open_block_reason(sensor) is not None
         assert state.door_status == DOOR_STATE_CLOSED
         assert engine._task is None
 
-    async def test_cmd_lockout_ignores_trigger(self, engine, state):
-        """No door motion when command lockout is enabled."""
-        state.cmd_lockout = True
-        engine.trigger_sensor("inside")
-        assert state.door_status == DOOR_STATE_CLOSED
+    @pytest.mark.parametrize("trigger", SENSOR_ENTRY_POINTS)
+    @pytest.mark.parametrize("sensor", ["inside", "outside"])
+    async def test_the_control_an_unblocked_sensor_opens_the_door(
+        self, engine, state, trigger, sensor
+    ):
+        """Without a control the tests above pass on a door that never opens."""
+        state.safety_lock = False
 
-    async def test_disabled_sensor_ignores_trigger(self, engine, state):
-        """No door motion when the triggering sensor is disabled."""
-        state.inside = False
-        engine.trigger_sensor("inside")
-        assert state.door_status == DOOR_STATE_CLOSED
+        trigger(engine, sensor)
+        await asyncio.sleep(0)
 
-    async def test_disabled_outside_sensor_ignores_trigger(self, engine, state):
-        """No door motion when the outside sensor is disabled."""
-        state.outside = False
-        engine.trigger_sensor("outside")
-        assert state.door_status == DOOR_STATE_CLOSED
-
-    async def test_safety_lock_ignores_outside_trigger(self, engine, state):
-        """Safety lock blocks the outside sensor only."""
-        state.safety_lock = True
-        engine.trigger_sensor("outside")
-        assert state.door_status == DOOR_STATE_CLOSED
-
-        engine.trigger_sensor("inside")
+        assert engine.sensor_open_block_reason(sensor) is None
         assert state.door_status == DOOR_STATE_RISING
 
-    async def test_out_of_schedule_trigger_is_ignored(self, engine, state):
-        """With timers on, a trigger outside every schedule window is ignored."""
-        from powerpetdoor.simulator import Schedule
+    @pytest.mark.parametrize("trigger", SENSOR_ENTRY_POINTS)
+    async def test_safety_lock_blocks_only_the_outside_sensor(self, engine, state, trigger):
+        state.safety_lock = True
 
-        state.auto = True
-        # A zero-length window never allows the sensor
-        state.schedules[0] = Schedule(
-            index=0,
-            enabled=True,
-            days_of_week=[1, 1, 1, 1, 1, 1, 1],
-            inside=True,
-            start_hour=0,
-            start_min=0,
-            end_hour=0,
-            end_min=0,
-        )
-        engine.trigger_sensor("inside")
+        trigger(engine, "outside")
+        await asyncio.sleep(0)
         assert state.door_status == DOOR_STATE_CLOSED
-        assert engine._task is None
+
+        trigger(engine, "inside")
+        await asyncio.sleep(0)
+        assert state.door_status == DOOR_STATE_RISING
+
+    async def test_activating_a_blocked_sensor_still_records_the_pet(self, engine, state):
+        """Scope: the gate is on *opening the door*, not on the sensor flag.
+
+        A pet standing in the doorway is a physical fact whatever the
+        settings say, and `is_sensor_blocking_close` consults the flag under
+        its own, differently documented rules.
+        """
+        state.cmd_lockout = True
+
+        engine.activate_sensor("inside", 5.0)
+        await asyncio.sleep(0)
+
+        assert state.inside_sensor_active is True
+        assert state.door_status == DOOR_STATE_CLOSED
+
+    async def test_toggling_a_sensor_off_does_not_open_the_door(self, engine, state):
+        """The second operand of `door_status == CLOSED and active`."""
+        engine.activate_sensor("inside", 0)
+        await asyncio.sleep(0)
+        assert state.inside_sensor_active is True
+        assert state.door_status == DOOR_STATE_RISING
+
+        state.door_status = DOOR_STATE_CLOSED
+        engine.activate_sensor("inside", 0)
+        await asyncio.sleep(0)
+
+        assert state.inside_sensor_active is False
+        assert state.door_status == DOOR_STATE_CLOSED
+
+    @pytest.mark.parametrize(
+        ("setup", "expected"),
+        [
+            (lambda state: setattr(state, "power", False), "power OFF"),
+            (lambda state: setattr(state, "cmd_lockout", True), "command lockout"),
+            (lambda state: setattr(state, "inside", False), "disabled"),
+            (_close_every_schedule_window, "outside schedule"),
+            (lambda state: None, None),
+        ],
+        ids=["power", "cmd_lockout", "enabled", "schedule", "allowed"],
+    )
+    def test_the_reason_names_the_gate_that_fired(self, engine, state, setup, expected):
+        """The operator-facing text is part of the contract: "ignored" with no
+        reason is what sends someone hunting the wrong setting."""
+        setup(state)
+
+        assert engine.sensor_open_block_reason("inside") == expected
+
+    def test_the_outside_reason_distinguishes_disabled_from_safety_lock(self, engine, state):
+        state.outside = False
+        assert engine.sensor_open_block_reason("outside") == "disabled"
+
+        state.outside = True
+        state.safety_lock = True
+        assert engine.sensor_open_block_reason("outside") == "safety lock"
 
     async def test_trigger_notifies_and_opens_when_closed(self, engine, state):
         """A trigger from CLOSED emits a notification and opens the door."""

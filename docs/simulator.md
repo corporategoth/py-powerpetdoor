@@ -126,13 +126,43 @@ ppd-simulator --list-scripts
 When using `--oneshot`:
 
 - **0**: All scripts completed successfully (all assertions passed)
-- **1**: A script failed (assertion failed or error occurred)
+- **1**: A script failed (assertion failed or error occurred), **or** the run
+  produced no verdict at all
+- **2**: A bad argument (argparse usage error)
+- **130**: Interrupted by Ctrl-C (`128 + SIGINT`)
 
 This makes it easy to integrate with CI/CD pipelines:
 
 ```bash
 ppd-simulator -s full_test_suite --oneshot || echo "Tests failed!"
 ```
+
+**An interrupted run never reports success.** Ctrl-C mid-run prints
+`>>> Interrupted after N of M script(s)` — not a PASSED/FAILED verdict, because
+the remaining assertions never ran — and exits 130. `ppd-simulator --daemon`
+interrupted by Ctrl-C exits 130 too, matching `ppd-simulator-ctl`.
+
+### Argument Validation
+
+Everything bind-time is checked before anything is bound, so a bad value is an
+argparse usage error at **rc 2** rather than a traceback:
+
+- `--port`, `--daemon PORT`: must be 0-65535
+- `--host`, `--control-host`: must resolve
+- `--run-for`: must be greater than 0
+- `--scripts-dir`: must be a directory
+
+If a port is in range but already taken, startup prints one sentence naming the
+role of the port that failed and the flag that changes it, and exits 1:
+
+```
+$ ppd-simulator --port 3000 --daemon
+Cannot start: door server cannot use 0.0.0.0:3000 (error while attempting to
+bind on address ('0.0.0.0', 3000): [errno 98] address already in use); change
+it with --port
+```
+
+`--debug` additionally prints the traceback.
 
 ## Interactive Mode
 
@@ -351,9 +381,14 @@ ppd-simulator-ctl run basic_cycle         # Queue a script (returns immediately)
 ppd-simulator-ctl shutdown                # Stop the daemon
 ```
 
-The exit code is **0** on success and **1** on error (unknown command,
-validation failure, or connection failure), so one-shot commands are
-scriptable.
+The exit code is **0** on success, **1** on error (unknown command,
+validation failure, or connection failure), **2** on a bad argument and
+**130** on Ctrl-C, so one-shot commands are scriptable.
+
+An empty or whitespace-only command is refused locally at rc 2 (`error: empty
+command`) rather than sent: the daemon has no answer for a blank line, so it
+could only ever time out. `--timeout` must be greater than 0 — `run <script>
+wait` is the spelling for "wait as long as it takes".
 
 **For `run`, only `run <script> wait` reflects the script result** (0 passed,
 1 failed). Plain `run <script>` just queues the script and exits **0** as soon

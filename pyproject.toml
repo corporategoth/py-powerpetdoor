@@ -146,6 +146,19 @@ exclude_lines = [
     # 28 branch destinations from the gate (round 6, test-fanatic H2).
     "(^\\s*\\.\\.\\.\\s*$)|(:\\s*\\.\\.\\.\\s*$)",
 ]
+# The branch half of the same mechanism, and the fourth instance of the
+# class rounds 6-8 fixed on the `exclude_lines` side. Leaving this unset
+# does not mean "no branch exclusions": it means coverage's own default,
+# `#\s*(pragma|PRAGMA)[:\s]?\s*(no|NO)\s*(branch|BRANCH)`, which is a bare
+# unanchored `re.search` and therefore forgives a missing branch arc on any
+# line that merely *mentions* the phrase - including the two lines in
+# `scripts/generate_gaps_report.py` whose job is to describe it (round-9
+# test-fanatic M1). Anchored the same way the pragma pattern above is, and
+# fed to the prose sweep so the branch perimeter is checked like the line
+# perimeter.
+partial_branches = [
+    "#\\s*pragma:\\s*no\\s+branch\\s*($|\\()",
+]
 
 [tool.coverage.paths]
 source = [

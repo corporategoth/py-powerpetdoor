@@ -21,6 +21,7 @@ import re
 import sys
 import tokenize
 import tomllib
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -47,10 +48,40 @@ _OMIT_NOTES = {
     "*/__init__.py": "Package init files",
     "*/__main__.py": "Entry point files",
 }
+#: Gloss for each configured branch-exclusion pattern.
+_PARTIAL_NOTES = {
+    "#\\s*pragma:\\s*no\\s+branch\\s*($|\\()": (
+        "Explicitly annotated partial branches (see Pragma Exclusions below)"
+    ),
+}
 
 
-def coverage_config() -> tuple[list[str], list[str]]:
-    """Read the configured ``omit`` and ``exclude_lines`` from pyproject.
+@dataclass(frozen=True)
+class CoverageSettings:
+    """The coverage gate's perimeter, as configured in ``pyproject.toml``.
+
+    Six dimensions, not two. ``TESTING_GAPS.md`` disclosed ``omit`` and
+    ``exclude_lines`` and nothing else, and no test read anything but their
+    non-emptiness - so ``branch = false`` (which stops measuring all 2410
+    branch destinations while the gate still prints ``100.00%`` and exits
+    0), a ``source`` that quietly drops ``scripts``, and an eighth
+    ``exclude_lines`` pattern that deletes a whole shipped function were
+    each a silent one-line disarm of this project's central quality control
+    (round-9 test-fanatic H1). Reading them all here is what lets
+    ``tests/test_gaps_report.py`` assert their *values* and lets the report
+    disclose them.
+    """
+
+    source: list[str] = field(default_factory=list)
+    omit: list[str] = field(default_factory=list)
+    branch: bool = False
+    fail_under: float = 0.0
+    exclude_lines: list[str] = field(default_factory=list)
+    partial_branches: list[str] = field(default_factory=list)
+
+
+def coverage_config() -> CoverageSettings:
+    """Read the configured coverage perimeter from pyproject.
 
     The report used to hard-code six bullets while the config carried seven
     patterns, so the project's own gap-disclosure artifact did not disclose
@@ -58,24 +89,54 @@ def coverage_config() -> tuple[list[str], list[str]]:
     config means the two cannot drift.
     """
     if not PYPROJECT.exists():
-        return [], []
+        return CoverageSettings()
     config = tomllib.loads(PYPROJECT.read_text())
     coverage = config.get("tool", {}).get("coverage", {})
-    omit = list(coverage.get("run", {}).get("omit", []))
-    exclude = list(coverage.get("report", {}).get("exclude_lines", []))
-    return omit, exclude
+    run = coverage.get("run", {})
+    report = coverage.get("report", {})
+    return CoverageSettings(
+        source=list(run.get("source", [])),
+        omit=list(run.get("omit", [])),
+        branch=bool(run.get("branch", False)),
+        fail_under=float(report.get("fail_under", 0)),
+        exclude_lines=list(report.get("exclude_lines", [])),
+        partial_branches=list(report.get("partial_branches", [])),
+    )
 
 
 def render_automatic_exclusions() -> list[str]:
     """Render the "Automatic Exclusions" bullets from the live config."""
-    omit, exclude = coverage_config()
+    settings = coverage_config()
     bullets = []
-    for pattern, notes in ((omit, _OMIT_NOTES), (exclude, _EXCLUSION_NOTES)):
-        for entry in pattern:
+    for patterns, notes in (
+        (settings.omit, _OMIT_NOTES),
+        (settings.exclude_lines, _EXCLUSION_NOTES),
+        (settings.partial_branches, _PARTIAL_NOTES),
+    ):
+        for entry in patterns:
             note = notes.get(entry)
             suffix = f" - {note}" if note else ""
             bullets.append(f"- `{entry}`{suffix}")
     return bullets
+
+
+def render_gate_configuration() -> list[str]:
+    """Render the three gate dimensions the exclusion bullets do not cover.
+
+    ``branch``, ``source`` and ``fail_under`` decide what the 100% gate
+    actually measures, and none of them appeared anywhere in this artifact -
+    so `branch = true -> false` removed every one of 2410 branch
+    destinations from the gate with the report still saying ``100.00%`` and
+    nothing in the document changing (round-9 test-fanatic H1).
+    """
+    settings = coverage_config()
+    if not settings.source:
+        return []
+    return [
+        f"- Measured roots (`coverage.run.source`): {', '.join(f'`{s}`' for s in settings.source)}",
+        f"- Branch coverage (`coverage.run.branch`): `{str(settings.branch).lower()}`",
+        f"- Gate threshold (`coverage.report.fail_under`): `{settings.fail_under:g}`",
+    ]
 
 
 def _comment_tokens(source: str) -> dict[int, tuple[int, str]]:
@@ -495,6 +556,15 @@ def main() -> int:
     # Pragma exclusions section
     lines.append("## Coverage Exclusions")
     lines.append("")
+    lines.append("### Gate Configuration")
+    lines.append("")
+    lines.append(
+        "What the 100% gate measures, read from `pyproject.toml` "
+        "(`tests/test_gaps_report.py` asserts each value):"
+    )
+    lines.append("")
+    lines.extend(render_gate_configuration())
+    lines.append("")
     lines.append("### Automatic Exclusions")
     lines.append("")
     lines.append("The following are excluded from coverage by configuration (`pyproject.toml`):")
@@ -508,17 +578,21 @@ def main() -> int:
     # section is the gate's real perimeter as opposed to its intended one
     # (round-8 test-fanatic H1); `tests/test_gaps_report.py` fails the
     # build if it is ever non-empty.
+    _settings = coverage_config()
     prose = find_prose_exclusions(
         tuple(d for d in (Path(SOURCE_PREFIX), Path(SCRIPTS_PREFIX)) if d.exists()),
-        coverage_config()[1],
+        # Both halves of the same mechanism: `partial_branches` is the
+        # identical bare-`re.search` hazard applied to branch arcs, and the
+        # sweep was simply never handed it (round-9 test-fanatic M1).
+        _settings.exclude_lines + _settings.partial_branches,
     )
     lines.append("### Prose-Triggered Exclusions")
     lines.append("")
     if prose:
         lines.append(
             f"**{len(prose)} statement(s)** are excluded because an `exclude_lines` "
-            "pattern matched prose (a string literal), not the construct it names. "
-            "These are unintended and are outside the 100% gate."
+            "or `partial_branches` pattern matched prose (a string literal), not the "
+            "construct it names. These are unintended and are outside the 100% gate."
         )
         lines.append("")
         lines.append("| File | Line | Pattern | Code |")
@@ -529,8 +603,9 @@ def main() -> int:
             lines.append(f"| `{entry['file']}` | {entry['line']} | `{pattern}` | `{code}` |")
     else:
         lines.append(
-            "None. Every `exclude_lines` pattern above matches only the construct "
-            "it names, never a string literal on a line carrying a statement."
+            "None. Every `exclude_lines` and `partial_branches` pattern above matches "
+            "only the construct it names, never a string literal on a line carrying a "
+            "statement."
         )
     lines.append("")
 

@@ -12,6 +12,7 @@ The `PowerPetDoor` class provides a high-level, Pythonic interface to your Power
 - [Quick Start](#quick-start)
 - [Installation](#installation)
 - [Connection](#connection)
+- [Behaviour While Disconnected](#behaviour-while-disconnected)
 - [Door Control](#door-control)
 - [Door Status](#door-status)
 - [Sensors](#sensors)
@@ -118,6 +119,59 @@ callbacks fire around each transition.
 | `host` | `str` | The door's IP address or hostname |
 | `port` | `int` | The door's TCP port |
 | `latency` | `float \| None` | Ping round-trip latency in seconds (`None` before the first ping) |
+
+## Behaviour While Disconnected
+
+> **A command issued while disconnected is queued, not refused, and it
+> executes on the next connection.** This is a physical door: it can open
+> minutes after the call that asked for it, unattended.
+
+The fire-and-forget methods - `open()`, `open_and_hold()`, `close()`,
+`toggle()`, `cycle()` - send with `notify=False`. With no transport there
+is nothing to write to, so the message sits in the client's priority queue
+until a connection appears, and the client flushes that queue as soon as
+one does. Measured against a running door emulation:
+
+```
+connected: True | door_status: DOOR_CLOSED
+device went away -> door.connected = False
+open_and_hold() during the reconnect window -> returned in 0.000s, no error
+device back at t+1.0s; reconnect completes
+t+4.0s after the button press: connected=True  door_status=DOOR_KEEPUP
+```
+
+Four seconds after a call that reported nothing, the door was open and
+latched. Nothing is lost and nothing raises; the request is simply
+deferred.
+
+**This is deliberate.** It is what makes a command survive a transient
+network drop rather than vanishing, and it is implemented in
+`PowerPetDoorClient` (which behaves identically if you use it directly) -
+not in this facade. An operator UI built on this library must decide which
+semantics it wants:
+
+```python
+# "Refuse when offline" - check first; the facade will not do it for you.
+if not door.connected:
+    raise ConnectionError(f"not connected to {door.host}:{door.port}")
+await door.open()
+```
+
+The **awaited** methods (every setter, and the `refresh_*` family) behave
+the same way underneath, but they wait: the request is queued, no response
+arrives, and after `default_timeout` seconds they raise `TimeoutError`
+with a message that says so:
+
+```
+TimeoutError: SET_HOLD_TIME timed out after 20.0s waiting for 192.168.1.100:3000;
+not connected - the command is queued and will be sent when the connection is
+next established (call connect() first to avoid this)
+```
+
+The queued command is *still queued* after that `TimeoutError`; the
+timeout bounds your wait, not the command's lifetime. Call `disconnect()`
+to clear the queue and fail every outstanding future with
+`ConnectionError`.
 
 ## Door Control
 

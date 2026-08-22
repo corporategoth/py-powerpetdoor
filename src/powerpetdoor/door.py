@@ -114,6 +114,7 @@ from .const import (
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
 )
+from .framing import EventThrottle
 from .sanitize import MAX_LOGGED_LENGTH, sanitize_text
 from .schedule import (
     MAX_SCHEDULE_INDEX,
@@ -252,16 +253,31 @@ class DoorStatus(Enum):
     UNKNOWN = "UNKNOWN"
 
     @classmethod
-    def from_string(cls, value: str) -> DoorStatus:
+    def from_string(cls, value: str, *, throttle: EventThrottle | None = None) -> DoorStatus:
         """Convert a string status to enum.
 
         Unrecognized status strings map to :attr:`UNKNOWN` with a warning
         logged - never silently claim a possibly-open door is closed (L16).
+
+        Args:
+            value: The status string the device sent.
+            throttle: Optional per-connection :class:`EventThrottle`. This
+                runs once per device *frame* on the facade's status path, so
+                a peer answering as the door - or simply a firmware revision
+                reporting a status this library does not know - bought one
+                uncapped WARNING per status update: 20,000 records for
+                20,000 frames, and a single 65,086-byte record from one
+                frame (round-9 security M1). The facade passes its throttle
+                so the warning rides the same doubling schedule as the
+                client's four sibling sites; a one-off caller passes nothing
+                and is always told.
         """
         for status in cls:
             if status.value == value:
                 return status
-        logger.warning("Unknown door status from device: %r", value)
+        rendered = sanitize_text(value, MAX_LOGGED_LENGTH)
+        if throttle is None or throttle.record(len(rendered)):
+            logger.warning("Unknown door status from device: %s", rendered)
         return cls.UNKNOWN
 
 
@@ -466,6 +482,32 @@ class PowerPetDoor:
         await door.set_power(True)
 
         await door.disconnect()
+
+    .. warning::
+
+       **Commands issued while disconnected are queued, not refused, and
+       they execute on the next connection.** This is a *physical* door.
+       ``open()``/``open_and_hold()``/``close()``/``toggle()``/``cycle()``
+       are fire-and-forget: with no transport there is nothing to write to,
+       so the message sits in the client's priority queue until a
+       connection appears - and then the door opens, unattended, for a
+       request the caller was told nothing about. Measured against a real
+       device emulation: ``open_and_hold()`` returned in 0.000 s during a
+       reconnect window and the door latched open 4.0 s later.
+
+       This is deliberate (:class:`~powerpetdoor.PowerPetDoorClient` has
+       flushed its queue on connect since the round-1 fixes), and it is
+       what makes a command survive a transient drop. Check
+       :attr:`connected` first if you need "refuse when offline" instead::
+
+           if not door.connected:
+               raise ConnectionError("door is offline")
+           await door.open()
+
+       The awaited setters have the same semantics: they wait
+       :attr:`default_timeout` and then raise ``TimeoutError`` with a
+       message saying the command is still queued. See "Behaviour while
+       disconnected" in ``docs/door.md``.
     """
 
     def __init__(
@@ -525,6 +567,32 @@ class PowerPetDoor:
         self._connected_event = asyncio.Event()
         self._initialized = False
 
+        # Per-frame log sites on the *facade*. Each fires once per device
+        # frame on a condition the peer picks, so without a throttle a peer
+        # answering as the door writes one WARNING per frame into the host
+        # application's log - which for the Home Assistant deployment target
+        # is the whole instance's log. Measured at 20,000 records per 20,000
+        # frames against 10 for the client's throttled siblings, plus a
+        # single 65,086-byte record from one frame (round-9 security M1).
+        # Connection-scoped like the client's, flushed and reset in
+        # :meth:`_on_disconnect`.
+        self._unknown_statuses = EventThrottle(
+            logger,
+            logging.WARNING,
+            "Received %d unknown door status(es) from device (%d bytes) on this connection",
+        )
+        self._bad_hw_info = EventThrottle(
+            logger,
+            logging.WARNING,
+            "Ignored %d non-mapping hardware info payload(s) from device (%d bytes) "
+            "on this connection",
+        )
+        self._bad_schedule_updates = EventThrottle(
+            logger,
+            logging.WARNING,
+            "Ignored %d malformed schedule update(s) from device (%d bytes) on this connection",
+        )
+
         # User callbacks
         self._status_callbacks: list[Callable[[DoorStatus], None]] = []
         self._settings_callbacks: list[Callable[[dict[str, Any]], None]] = []
@@ -570,6 +638,43 @@ class PowerPetDoor:
         or if keepalive is disabled).
         """
         return self._latency
+
+    async def _await_response(self, cmd: str, future, timeout: float | None):
+        """Await a command's response, with a timeout that says something.
+
+        Every command and setter on this facade is
+        ``await asyncio.wait_for(<future>, timeout=...)``, and
+        ``asyncio.wait_for`` raises a **bare** ``TimeoutError()`` - its
+        ``repr`` is literally ``TimeoutError()``. A developer saw an empty
+        exception after a 20-second stall with no way to tell "the door is
+        wedged" from "you never called ``connect()``" (round-9 frontend
+        M2). This is the least actionable exception the API can produce, so
+        the message names the command, the wait, the endpoint, and - when
+        there is no connection - the fact that the command is **queued**
+        rather than lost.
+
+        Args:
+            cmd: The protocol command being awaited, for the message.
+            future: The future returned by ``send_message(..., notify=True)``.
+            timeout: Seconds to wait, or None for :attr:`default_timeout`.
+
+        Returns:
+            Whatever the command's response resolved to.
+
+        Raises:
+            TimeoutError: With a message, on expiry.
+        """
+        effective = timeout if timeout is not None else self.default_timeout
+        try:
+            return await asyncio.wait_for(future, timeout=effective)
+        except TimeoutError as err:
+            detail = f"{cmd} timed out after {effective}s waiting for {self._host}:{self._port}"
+            if not self.connected:
+                detail += (
+                    "; not connected - the command is queued and will be sent when the "
+                    "connection is next established (call connect() first to avoid this)"
+                )
+            raise TimeoutError(detail) from err
 
     async def connect(self, *, timeout: float | None = None) -> None:
         """Connect to the door and fetch initial state.
@@ -768,9 +873,8 @@ class PowerPetDoor:
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
         cmd = CMD_ENABLE_INSIDE if enabled else CMD_DISABLE_INSIDE
-        await asyncio.wait_for(
-            self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=timeout if timeout is not None else self.default_timeout,
+        await self._await_response(
+            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
         )
 
     @property
@@ -786,9 +890,8 @@ class PowerPetDoor:
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
         cmd = CMD_ENABLE_OUTSIDE if enabled else CMD_DISABLE_OUTSIDE
-        await asyncio.wait_for(
-            self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=timeout if timeout is not None else self.default_timeout,
+        await self._await_response(
+            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
         )
 
     # =========================================================================
@@ -808,9 +911,8 @@ class PowerPetDoor:
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
         cmd = CMD_POWER_ON if enabled else CMD_POWER_OFF
-        await asyncio.wait_for(
-            self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=timeout if timeout is not None else self.default_timeout,
+        await self._await_response(
+            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
         )
 
     # =========================================================================
@@ -830,9 +932,8 @@ class PowerPetDoor:
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
         cmd = CMD_ENABLE_AUTO if enabled else CMD_DISABLE_AUTO
-        await asyncio.wait_for(
-            self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=timeout if timeout is not None else self.default_timeout,
+        await self._await_response(
+            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
         )
 
     # =========================================================================
@@ -856,9 +957,8 @@ class PowerPetDoor:
             if enabled
             else CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK
         )
-        await asyncio.wait_for(
-            self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=timeout if timeout is not None else self.default_timeout,
+        await self._await_response(
+            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
         )
 
     @property
@@ -874,9 +974,8 @@ class PowerPetDoor:
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
         cmd = CMD_ENABLE_AUTORETRACT if enabled else CMD_DISABLE_AUTORETRACT
-        await asyncio.wait_for(
-            self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=timeout if timeout is not None else self.default_timeout,
+        await self._await_response(
+            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
         )
 
     @property
@@ -901,9 +1000,8 @@ class PowerPetDoor:
         """
         # Inverted: enable keep-open = disable cmd_lockout
         cmd = CMD_DISABLE_CMD_LOCKOUT if enabled else CMD_ENABLE_CMD_LOCKOUT
-        await asyncio.wait_for(
-            self._client.send_message(COMMAND, cmd, notify=True),
-            timeout=timeout if timeout is not None else self.default_timeout,
+        await self._await_response(
+            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
         )
 
     # =========================================================================
@@ -924,11 +1022,12 @@ class PowerPetDoor:
         """
         # Protocol uses centiseconds
         centiseconds = int(seconds * 100)
-        await asyncio.wait_for(
+        await self._await_response(
+            CMD_SET_HOLD_TIME,
             self._client.send_message(
                 CONFIG, CMD_SET_HOLD_TIME, notify=True, holdTime=centiseconds
             ),
-            timeout=timeout if timeout is not None else self.default_timeout,
+            timeout,
         )
 
     @property
@@ -943,9 +1042,10 @@ class PowerPetDoor:
             tz: Timezone in POSIX format (e.g., 'EST5EDT,M3.2.0,M11.1.0').
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
-        await asyncio.wait_for(
+        await self._await_response(
+            CMD_SET_TIMEZONE,
             self._client.send_message(CONFIG, CMD_SET_TIMEZONE, notify=True, tz=tz),
-            timeout=timeout if timeout is not None else self.default_timeout,
+            timeout,
         )
 
     # =========================================================================
@@ -1066,9 +1166,10 @@ class PowerPetDoor:
         }
         # The wire protocol uses "1"/"0" strings (docs/protocol.md).
         settings = {key: "1" if value else "0" for key, value in merged.items()}
-        await asyncio.wait_for(
+        await self._await_response(
+            CMD_SET_NOTIFICATIONS,
             self._client.send_message(CONFIG, CMD_SET_NOTIFICATIONS, notify=True, **settings),
-            timeout=timeout if timeout is not None else self.default_timeout,
+            timeout,
         )
 
     # =========================================================================
@@ -1087,9 +1188,10 @@ class PowerPetDoor:
             index: Schedule index (0-based).
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
-        result = await asyncio.wait_for(
+        result = await self._await_response(
+            CMD_GET_SCHEDULE,
             self._client.send_message(CONFIG, CMD_GET_SCHEDULE, notify=True, index=index),
-            timeout=timeout if timeout is not None else self.default_timeout,
+            timeout,
         )
         return Schedule.from_dict(result)
 
@@ -1100,11 +1202,12 @@ class PowerPetDoor:
             schedule: The schedule to set.
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
-        await asyncio.wait_for(
+        await self._await_response(
+            CMD_SET_SCHEDULE,
             self._client.send_message(
                 CONFIG, CMD_SET_SCHEDULE, notify=True, **{FIELD_SCHEDULE: schedule.to_dict()}
             ),
-            timeout=timeout if timeout is not None else self.default_timeout,
+            timeout,
         )
 
     async def delete_schedule(self, index: int, *, timeout: float | None = None) -> None:
@@ -1114,9 +1217,10 @@ class PowerPetDoor:
             index: Schedule index to delete.
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
-        await asyncio.wait_for(
+        await self._await_response(
+            CMD_DELETE_SCHEDULE,
             self._client.send_message(CONFIG, CMD_DELETE_SCHEDULE, notify=True, index=index),
-            timeout=timeout if timeout is not None else self.default_timeout,
+            timeout,
         )
         # Keep the cache correct even when the device does not echo the
         # deleted index (the listener is a no-op if it already ran).
@@ -1136,9 +1240,10 @@ class PowerPetDoor:
         effective_timeout = timeout if timeout is not None else self.default_timeout
 
         # Step 1: Get schedule indices
-        indices = await asyncio.wait_for(
+        indices = await self._await_response(
+            CMD_GET_SCHEDULE_LIST,
             self._client.send_message(CONFIG, CMD_GET_SCHEDULE_LIST, notify=True),
-            timeout=effective_timeout,
+            effective_timeout,
         )
 
         if not indices:
@@ -1162,11 +1267,12 @@ class PowerPetDoor:
         schedules = []
         for idx in indices:
             try:
-                result = await asyncio.wait_for(
+                result = await self._await_response(
+                    CMD_GET_SCHEDULE,
                     self._client.send_message(
                         CONFIG, CMD_GET_SCHEDULE, notify=True, **{FIELD_INDEX: idx}
                     ),
-                    timeout=effective_timeout,
+                    effective_timeout,
                 )
                 if result:
                     schedules.append(Schedule.from_dict(result))
@@ -1258,11 +1364,12 @@ class PowerPetDoor:
         Args:
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
-        result = await asyncio.wait_for(
+        result = await self._await_response(
+            CMD_GET_DOOR_STATUS,
             self._client.send_message(CONFIG, CMD_GET_DOOR_STATUS, notify=True),
-            timeout=timeout if timeout is not None else self.default_timeout,
+            timeout,
         )
-        self._status = DoorStatus.from_string(result)
+        self._status = DoorStatus.from_string(result, throttle=self._unknown_statuses)
         return self._status
 
     async def refresh_settings(self, *, timeout: float | None = None) -> None:
@@ -1278,13 +1385,15 @@ class PowerPetDoor:
         # GET_SETTINGS includes hold time, timezone, and sensor voltages
         # Notifications are separate
         results = await asyncio.gather(
-            asyncio.wait_for(
+            self._await_response(
+                CMD_GET_SETTINGS,
                 self._client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True),
-                timeout=effective_timeout,
+                effective_timeout,
             ),
-            asyncio.wait_for(
+            self._await_response(
+                CMD_GET_NOTIFICATIONS,
                 self._client.send_message(CONFIG, CMD_GET_NOTIFICATIONS, notify=True),
-                timeout=effective_timeout,
+                effective_timeout,
             ),
             return_exceptions=True,
         )
@@ -1296,9 +1405,10 @@ class PowerPetDoor:
         Args:
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
-        await asyncio.wait_for(
+        await self._await_response(
+            CMD_GET_DOOR_BATTERY,
             self._client.send_message(CONFIG, CMD_GET_DOOR_BATTERY, notify=True),
-            timeout=timeout if timeout is not None else self.default_timeout,
+            timeout,
         )
         return self._battery
 
@@ -1308,9 +1418,10 @@ class PowerPetDoor:
         Args:
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
-        await asyncio.wait_for(
+        await self._await_response(
+            CMD_GET_DOOR_OPEN_STATS,
             self._client.send_message(CONFIG, CMD_GET_DOOR_OPEN_STATS, notify=True),
-            timeout=timeout if timeout is not None else self.default_timeout,
+            timeout,
         )
 
     async def refresh_hardware_info(self, *, timeout: float | None = None) -> dict[str, Any]:
@@ -1319,9 +1430,10 @@ class PowerPetDoor:
         Args:
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
-        result = await asyncio.wait_for(
+        result = await self._await_response(
+            CMD_GET_HW_INFO,
             self._client.send_message(CONFIG, CMD_GET_HW_INFO, notify=True),
-            timeout=timeout if timeout is not None else self.default_timeout,
+            timeout,
         )
         if isinstance(result, dict) and result:
             self._hw_info = result
@@ -1341,7 +1453,7 @@ class PowerPetDoor:
 
     def _on_door_status(self, status: str) -> None:
         """Handle door status update from client."""
-        new_status = DoorStatus.from_string(status)
+        new_status = DoorStatus.from_string(status, throttle=self._unknown_statuses)
         if new_status != self._status:
             self._status = new_status
             for callback in self._status_callbacks:
@@ -1491,10 +1603,9 @@ class PowerPetDoor:
         M1/L1). They go through the module-level ``_keep_*`` helpers now.
         """
         if not isinstance(data, dict):
-            logger.warning(
-                "Ignoring non-mapping hardware info: %s",
-                sanitize_text(data, MAX_LOGGED_LENGTH),
-            )
+            rendered = sanitize_text(data, MAX_LOGGED_LENGTH)
+            if self._bad_hw_info.record(len(rendered)):
+                logger.warning("Ignoring non-mapping hardware info: %s", rendered)
             return
         self._hw_info = data
 
@@ -1548,6 +1659,11 @@ class PowerPetDoor:
         """Handle connection lost."""
         self._connected_event.clear()
         self._latency = None  # Reset latency since we're no longer connected
+        # Same connection scope as the client's throttles: report the
+        # suppressed tail, then start the next connection's count clean.
+        for throttle in (self._unknown_statuses, self._bad_hw_info, self._bad_schedule_updates):
+            throttle.flush()
+            throttle.reset()
         for callback in self._disconnect_callbacks:
             try:
                 callback()
@@ -1573,7 +1689,12 @@ class PowerPetDoor:
         try:
             schedule = Schedule.from_dict(schedule_data)
         except ValueError as err:
-            logger.warning("Ignoring malformed schedule update from device: %s", err)
+            # `err` embeds `{value!r}` of the untrusted payload, so this is
+            # a peer-chosen string on a per-frame path: capped and throttled
+            # like every other such site (round-9 security M1).
+            rendered = sanitize_text(err, MAX_LOGGED_LENGTH)
+            if self._bad_schedule_updates.record(len(rendered)):
+                logger.warning("Ignoring malformed schedule update from device: %s", rendered)
             return
         # Update or add the schedule in our cache
         for i, s in enumerate(self._schedules):

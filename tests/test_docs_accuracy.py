@@ -56,6 +56,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL_MD = REPO_ROOT / "docs" / "protocol.md"
 CLIENT_MD = REPO_ROOT / "docs" / "client.md"
 SIMULATOR_MD = REPO_ROOT / "docs" / "simulator.md"
+OPERATION_MD = REPO_ROOT / "docs" / "operation.md"
 
 
 # ============================================================================
@@ -820,3 +821,238 @@ def test_every_same_file_anchor_link_resolves(path):
     broken = [target for target in re.findall(r"\]\(#([\w-]+)\)", text) if target not in anchors]
 
     assert broken == []
+
+
+# ============================================================================
+# docs/operation.md - the behavioural specification the simulator exists to
+# be faithful to (round-9 test-fanatic M2)
+# ============================================================================
+
+
+class TestOperationMdSensorGating:
+    """`docs/operation.md` had no accuracy tests at all.
+
+    It is the behavioural specification the simulator exists to be faithful
+    to, and its "Schedule and Sensor Interaction" and "Power and Battery"
+    sections are a list of assertions waiting to be written. Nothing checked
+    them, which is how `activate_sensor` came to open the door outside every
+    scheduled window while `trigger_sensor` refused - a disagreement with
+    the project's own specification that survived nine rounds because no
+    test asserted either answer (round-9 test-fanatic M2).
+
+    These execute the prose against the shipped engine, through **both**
+    sensor entry points, because both are reachable from both front ends.
+    """
+
+    @staticmethod
+    def _engine():
+        from powerpetdoor.simulator import DoorTimingConfig
+        from powerpetdoor.simulator.engine import DoorMotionEngine
+
+        state = DoorSimulatorState(
+            timing=DoorTimingConfig(rise_time=0.01, slowing_time=0.01), hold_time=0.05
+        )
+        return DoorMotionEngine(state), state
+
+    def test_the_prose_still_says_what_these_tests_assert(self):
+        """Pin the sentences, so rewording the spec forces the tests to move."""
+        sections = _sections(OPERATION_MD)
+
+        schedule = sections["schedule-and-sensor-interaction"]
+        assert "Outside scheduled windows, sensor triggers are ignored" in schedule
+        assert "Sensors only respond during their scheduled time windows" in schedule
+        assert "Schedules are stored but not applied" in schedule
+
+        power = sections["power-and-battery"]
+        assert "Door will not respond to sensor triggers" in power
+
+    @pytest.mark.parametrize(
+        "trigger",
+        [
+            pytest.param(lambda e, s: e.trigger_sensor(s), id="trigger_sensor"),
+            pytest.param(lambda e, s: e.activate_sensor(s, 5.0), id="activate_sensor"),
+        ],
+    )
+    @pytest.mark.parametrize("sensor", ["inside", "outside"])
+    async def test_outside_a_scheduled_window_a_sensor_trigger_is_ignored(self, trigger, sensor):
+        """*"Outside scheduled windows, sensor triggers are ignored."*"""
+        from powerpetdoor.simulator import Schedule
+
+        engine, state = self._engine()
+        try:
+            state.auto = True  # timersEnabled
+            state.schedules[0] = Schedule(
+                index=0,
+                enabled=True,
+                days_of_week=[True] * 7,
+                inside=(sensor == "inside"),
+                start_hour=0,
+                start_min=0,
+                end_hour=0,
+                end_min=0,
+            )
+
+            trigger(engine, sensor)
+            await asyncio.sleep(0)
+
+            assert state.door_status == "DOOR_CLOSED"
+        finally:
+            await engine.stop()
+
+    @pytest.mark.parametrize(
+        "trigger",
+        [
+            pytest.param(lambda e, s: e.trigger_sensor(s), id="trigger_sensor"),
+            pytest.param(lambda e, s: e.activate_sensor(s, 5.0), id="activate_sensor"),
+        ],
+    )
+    async def test_with_timers_disabled_a_stored_schedule_is_not_applied(self, trigger):
+        """*"Schedules are stored but not applied."* - the control for the
+        test above: the same closed window, with `auto` off, opens the door."""
+        from powerpetdoor.simulator import Schedule
+
+        engine, state = self._engine()
+        try:
+            state.auto = False
+            state.schedules[0] = Schedule(
+                index=0,
+                enabled=True,
+                days_of_week=[True] * 7,
+                inside=True,
+                start_hour=0,
+                start_min=0,
+                end_hour=0,
+                end_min=0,
+            )
+
+            trigger(engine, "inside")
+            await asyncio.sleep(0)
+
+            assert state.door_status == "DOOR_RISING"
+        finally:
+            await engine.stop()
+
+    @pytest.mark.parametrize(
+        "trigger",
+        [
+            pytest.param(lambda e, s: e.trigger_sensor(s), id="trigger_sensor"),
+            pytest.param(lambda e, s: e.activate_sensor(s, 5.0), id="activate_sensor"),
+        ],
+    )
+    @pytest.mark.parametrize("sensor", ["inside", "outside"])
+    async def test_with_power_off_the_door_does_not_respond_to_sensor_triggers(
+        self, trigger, sensor
+    ):
+        """*"Door will not respond to sensor triggers."*"""
+        engine, state = self._engine()
+        try:
+            state.power = False
+
+            trigger(engine, sensor)
+            await asyncio.sleep(0)
+
+            assert state.door_status == "DOOR_CLOSED"
+        finally:
+            await engine.stop()
+
+    def test_the_safety_interaction_table_matches_is_sensor_blocking_close(self):
+        """*"If command lockout is ON, sensor detection never blocks door
+        closing, regardless of other settings."*
+
+        This is the one place `docs/operation.md` does pin command lockout,
+        and it is about blocking the *close* - which is why the simulator's
+        two sensor entry points had to be made consistent on
+        `trigger_sensor`'s answer rather than on the document's.
+        """
+        section = " ".join(_sections(OPERATION_MD)["how-safety-features-interact"].split())
+        assert (
+            "If **command lockout is ON**, sensor detection never blocks door closing, "
+            "regardless of other settings." in section
+        )
+
+        state = DoorSimulatorState()
+        state.inside_sensor_active = True
+        state.inside = True
+        assert state.is_sensor_blocking_close() is True
+
+        state.cmd_lockout = True
+        assert state.is_sensor_blocking_close() is False
+
+        state.cmd_lockout = False
+        state.inside_sensor_active = False
+        state.outside_sensor_active = True
+        state.outside = True
+        state.safety_lock = False
+        assert state.is_sensor_blocking_close() is True
+        state.safety_lock = True
+        assert state.is_sensor_blocking_close() is False
+
+
+# ============================================================================
+# Published artifacts (round-9 security informational 1 / frontend M1)
+# ============================================================================
+
+
+class TestTheSourceDistributionShipsWhatItClaims:
+    """The sdist carried 9 test modules and none of the machinery.
+
+    No `conftest.py`, no `tests/__init__.py`, no `tests/fuzz/`, no
+    `tests/simulator/` - so `pytest` in the unpacked artifact collected
+    nothing and errored on `from tests.conftest import ...`. Every security
+    fix in rounds 1-9 is asserted by a test, and a downstream packager, an
+    auditor or a distribution's build system takes the *sdist*: advertising
+    a suite it cannot execute is worse than shipping none (round-9 security
+    informational 1).
+
+    The choice made is "ship the whole thing". These pin the declaration;
+    `.github/workflows/test.yml`'s `packaging` job pins the built artifact,
+    which is the thing that actually matters.
+    """
+
+    @staticmethod
+    def _manifest() -> list[str]:
+        return [
+            line.strip()
+            for line in (REPO_ROOT / "MANIFEST.in").read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+
+    @pytest.mark.parametrize(
+        "directive",
+        ["graft tests", "graft docs", "graft scripts", "include CHANGELOG.md", "include uv.lock"],
+    )
+    def test_the_manifest_grafts_the_whole_suite(self, directive):
+        assert directive in self._manifest()
+
+    def test_every_test_directory_is_covered_by_the_graft(self):
+        """The graft is recursive, so a directory added later is included -
+        which is exactly what the default sdist heuristic did not do."""
+        assert "graft tests" in self._manifest()
+        packages = {
+            path.parent.relative_to(REPO_ROOT).as_posix()
+            for path in (REPO_ROOT / "tests").rglob("__init__.py")
+        }
+        assert packages == {"tests", "tests/fuzz", "tests/simulator", "tests/simulator/scripts"}
+
+    def test_the_test_extra_the_shipped_addopts_needs_is_declared(self):
+        """`addopts = "-n auto"` ships in `pyproject.toml`, so a third party
+        with only `pytest` cannot start at all (`unrecognized arguments: -n`).
+        The `dev` extra is what makes the shipped suite runnable."""
+        import tomllib
+
+        pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+        dev = pyproject["project"]["optional-dependencies"]["dev"]
+
+        assert pyproject["tool"]["pytest"]["ini_options"]["addopts"] == "-n auto"
+        assert any(entry.startswith("pytest-xdist") for entry in dev)
+        assert any(entry.startswith("pytest-asyncio") for entry in dev)
+        assert any(entry.startswith("hypothesis") for entry in dev)
+
+    def test_ci_asserts_the_built_artifacts(self):
+        """A declaration nobody checks is how this drifted in the first place."""
+        workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text()
+
+        assert "  packaging:" in workflow
+        assert "The wheel carries the PEP 561 marker" in workflow
+        assert "The sdist ships a suite that actually runs" in workflow
+        assert "powerpetdoor/py.typed" in workflow

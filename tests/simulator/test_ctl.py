@@ -1034,3 +1034,62 @@ class TestOneShotEndToEnd:
             await asyncio.wait_for(task, 10)
         assert ok is True
         assert msg == "OK: Shutting down..."
+
+
+class TestUnanswerableAndOutOfRangeArguments:
+    """Two shapes that could never work, refused before a socket is opened.
+
+    `ppd-simulator-ctl ""` sat out the full `--timeout` and then advised
+    raising it - the daemon skips blank lines by design, so no answer could
+    ever come and the advice was wrong in both halves. `-t 0` put the
+    socket in *non-blocking* mode and surfaced `Error: [Errno 115]
+    Operation now in progress`; `-t -1` leaked `settimeout`'s own ValueError
+    text (round-9 frontend L4/T1).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_socket(self, monkeypatch):
+        def _boom(*args, **kwargs):
+            raise AssertionError("ctl.main() opened a socket; it should have exited first")
+
+        monkeypatch.setattr(ctl, "send_command", _boom)
+        monkeypatch.setattr(ctl, "interactive_mode", _boom)
+
+    @pytest.mark.parametrize("command", ["", "   ", "\t"], ids=["empty", "spaces", "tab"])
+    def test_a_blank_command_is_refused_locally(self, monkeypatch, capsys, command):
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator-ctl", command])
+
+        with pytest.raises(SystemExit) as exc_info:
+            ctl.main()
+
+        assert exc_info.value.code == 2
+        assert "error: empty command" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("timeout", ["0", "-1", "-0.5"], ids=["zero", "negative", "fractional"])
+    def test_a_non_positive_timeout_is_an_argument_error(self, monkeypatch, capsys, timeout):
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator-ctl", "-t", timeout, "status"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            ctl.main()
+
+        assert exc_info.value.code == 2
+        err = capsys.readouterr().err
+        assert f"error: --timeout {float(timeout):g}: must be greater than 0" in err
+        assert "run <script> wait" in err
+
+    def test_the_control_a_positive_timeout_still_works(self, monkeypatch):
+        """Rule 8: the smallest usable value is accepted."""
+        calls = {}
+
+        def fake_send(host, port, command, timeout):
+            calls["timeout"] = timeout
+            return True, "OK: fine"
+
+        monkeypatch.setattr(ctl, "send_command", fake_send)
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator-ctl", "-t", "0.001", "status"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            ctl.main()
+
+        assert exc_info.value.code == 0
+        assert calls["timeout"] == 0.001

@@ -1258,7 +1258,11 @@ def _capture_messages(client) -> list[dict]:
     async def _noop() -> None:
         pass
 
-    def _record(msg):
+    def _record(msg, **_kwargs):
+        # `**_kwargs` absorbs `frame_size=`, which the receive path now
+        # passes so the throttles record real wire bytes (round-9 backend
+        # F2). A recorder that pins the shipped signature would break on
+        # every keyword the production code ever adds.
         received.append(msg)
         return _noop()
 
@@ -3830,9 +3834,9 @@ class TestBoundedFrameDispatch:
         seen: list[dict] = []
         original = client.process_message
 
-        async def recording(msg):
+        async def recording(msg, **kwargs):
             seen.append(msg)
-            await original(msg)
+            await original(msg, **kwargs)
 
         client.process_message = recording
         frames = 500
@@ -3966,7 +3970,7 @@ class TestDecodeFailuresThatAreNotJSONDecodeError:
     async def test_a_legitimate_frame_after_a_poisoned_one_is_still_handled(self, mock_client):
         client, _, _ = mock_client
         seen: list[dict] = []
-        client.process_message = lambda msg: _record(seen, msg)
+        client.process_message = lambda msg, **_kwargs: _record(seen, msg)
 
         client.data_received(bigint_frame() + nested_frame() + b'{"CMD":"AFTER"}')
         for _ in range(100):
@@ -4157,7 +4161,13 @@ class TestPerFrameLogThrottling:
                 "_device_errors",
                 [b'{"CMD":"a","success":"false"}' * 3],
                 logging.WARNING,
-                "Device reported 3 error response(s) (96 bytes) on this connection",
+                # 87 = 3 x 29, the bytes the peer actually sent. It read 96
+                # while this site recorded `len(json.dumps(msg))`, which is
+                # the *re-serialized* size: json.dumps inserts the spaces
+                # the wire did not have, so a 29-byte envelope over-reported
+                # by 12% - and a padded one under-reported by 2,144x
+                # (round-9 backend F2). This assertion moving is the finding.
+                "Device reported 3 error response(s) (87 bytes) on this connection",
             ),
         ],
         ids=["non_ascii", "bad_frames", "bad_messages", "device_errors"],
@@ -4226,8 +4236,11 @@ class TestHardwareInfoPayload:
             await asyncio.sleep(0)
 
         assert seen == []
+        # Two records: the throttle's running tally and, on the occurrences
+        # the throttle reports, the sanitized detail (round-9 security M1).
         assert [record.getMessage() for record in caplog.records] == [
-            "Device sent a non-mapping fwInfo payload; not notifying hw_info listeners: 1.2.3"
+            "Device sent 1 non-mapping fwInfo payload(s) (5 bytes) on this connection",
+            "Device sent a non-mapping fwInfo payload; not notifying hw_info listeners: 1.2.3",
         ]
 
     async def test_a_scalar_payload_still_resolves_the_caller_future(self, mock_client):
@@ -4377,3 +4390,212 @@ class TestAbsentSettingsFieldsAreGuarded:
         )
         assert calls == [(listener_field, 9)]
         assert [record for record in caplog.records if record.exc_info] == []
+
+
+# ============================================================================
+# The last two unthrottled per-frame sites (round-9 security M1)
+# ============================================================================
+
+
+class TestTheRemainingPerFrameLogSitesAreThrottledAndCapped:
+    """Rounds 6 and 7 throttled four per-frame sites and missed two.
+
+    Both fire once per *frame* on a condition the peer picks, so both were
+    limited by the peer's byte rate. Measured on the shipped client before
+    the fix: `{"CMD":0,"msgID":[]}` in a tight loop produced **20,032**
+    records for 20,000 frames (x5.27 the wire bytes) against **10** for the
+    throttled sibling in the same function, and one frame just under the
+    64 KiB framing cap produced a single **65,638-byte** log record where
+    the round-7-fixed sibling produced 293 (round-9 security M1).
+    """
+
+    async def _drain(self, client):
+        for _ in range(5000):
+            if not client._dispatcher.backlog and not client._dispatcher.inflight:
+                return
+            await asyncio.sleep(0)
+
+    async def test_unusable_msg_ids_are_summarized(self, mock_client, caplog):
+        client, _, _ = mock_client
+        frame = b'{"CMD":0,"msgID":[]}'
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            client.data_received(frame * 200)
+            await self._drain(client)
+
+        details = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Ignoring unusable msgID")
+        ]
+        # 1, 2, 4, ... 128 - logarithmic in 200 frames, not linear.
+        assert len(details) == 8
+        assert client._bad_msg_ids.count == 200
+        assert details[0] == "Ignoring unusable msgID [] in device response; no future to resolve"
+
+    async def test_the_echoed_msg_id_is_bounded(self, mock_client, caplog):
+        """One frame carrying a 21,840-item `msgID` list produced one
+        65,638-byte record; `MAX_LOGGED_LENGTH` is what bounds it."""
+        client, _, _ = mock_client
+        payload = json.dumps({"CMD": 0, "msgID": list(range(5000))}).encode()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            client.data_received(payload)
+            await self._drain(client)
+
+        detail = next(
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Ignoring unusable msgID")
+        )
+        assert "...(truncated)" in detail
+        assert len(detail) < 400
+
+    async def test_non_mapping_hw_payloads_are_summarized(self, mock_client, caplog):
+        """Capped since round 6, throttled only now: a cap alone still buys
+        one WARNING per frame."""
+        client, _, _ = mock_client
+        client.add_listener("t", hw_info_update=lambda data: None)
+        frame = json.dumps({"CMD": "GET_HW_INFO", "success": "true", "fwInfo": "1.2.3"}).encode()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            client.data_received(frame * 200)
+            await self._drain(client)
+
+        details = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Device sent a non-mapping")
+        ]
+        assert len(details) == 8
+        assert client._bad_hw_payloads.count == 200
+
+    async def test_the_two_new_throttles_are_connection_scoped(self, mock_client, caplog):
+        """Like their four siblings: report the tail at teardown, then start
+        the next connection's count clean."""
+        client, _, _ = mock_client
+        client.add_listener("t", hw_info_update=lambda data: None)
+        client.data_received(b'{"CMD":0,"msgID":[]}' * 3)
+        client.data_received(
+            json.dumps({"CMD": "GET_HW_INFO", "success": "true", "fwInfo": "x"}).encode() * 3
+        )
+        await self._drain(client)
+        assert client._bad_msg_ids.count == 3
+        assert client._bad_hw_payloads.count == 3
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            client.disconnect()
+
+        tallies = [record.getMessage() for record in caplog.records]
+        assert "Ignored 3 unusable msgID(s) in device responses (6 bytes) on this connection" in (
+            tallies
+        )
+        assert "Device sent 3 non-mapping fwInfo payload(s) (3 bytes) on this connection" in tallies
+        assert client._bad_msg_ids.count == 0
+        assert client._bad_hw_payloads.count == 0
+
+    async def test_a_handler_error_echoes_a_bounded_frame(self, mock_client, caplog, monkeypatch):
+        """`_LOGGER.exception(... json.dumps(msg))` is per-frame, and the
+        frame runs to the 64 KiB framing cap. Unreachable from any frame
+        rounds 7-9 could construct, so it is capped rather than throttled -
+        but the constant is bounded like every other per-frame line."""
+        client, _, _ = mock_client
+
+        from powerpetdoor.client import ResponseHandlerRegistry
+
+        def boom(self, msg, future):
+            raise RuntimeError("handler blew up")
+
+        monkeypatch.setitem(ResponseHandlerRegistry._handlers, CMD_GET_DOOR_STATUS, boom)
+        payload = json.dumps(
+            {"CMD": CMD_GET_DOOR_STATUS, "success": "true", "door_status": "D" * 5000}
+        ).encode()
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            client.data_received(payload)
+            await self._drain(client)
+
+        detail = next(
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Error handling")
+        )
+        assert detail.endswith("...(truncated)")
+        assert len(detail) < 400
+
+
+class TestTheReportedByteTotalsAreTheBytesTheDeviceSent:
+    """Two throttles recorded a size the peer controls independently.
+
+    `_bad_messages` and `_device_errors` handed `len(json.dumps(msg))` to
+    `record()`, i.e. the *re-serialized* size. Every sibling throttle on
+    this path records real received bytes (`_non_ascii.record(len(data))`,
+    `_bad_frames.record(len(frame))`), and the difference is not cosmetic:
+    a `{}` padded with 60,000 spaces was reported as **2 bytes**, a 30,001x
+    under-report, in the number an operator reads to decide whether a peer
+    is worth investigating (round-9 backend F2). The bad-frame site three
+    code paths away reported the same padded frame exactly right, which is
+    the control that makes it specific.
+    """
+
+    async def _drain_and_flush(self, client):
+        for _ in range(5000):
+            if not client._dispatcher.backlog and not client._dispatcher.inflight:
+                break
+            await asyncio.sleep(0)
+        client.disconnect()
+
+    @pytest.mark.parametrize(
+        ("frame", "summary"),
+        [
+            pytest.param(
+                b"{}",
+                "Ignored 1 malformed message(s) from device (%d bytes) on this connection",
+                id="malformed-compact",
+            ),
+            pytest.param(
+                b"{" + b" " * 60000 + b"}",
+                "Ignored 1 malformed message(s) from device (%d bytes) on this connection",
+                id="malformed-padded",
+            ),
+            pytest.param(
+                b'{"CMD":"a","success":"false"}',
+                "Device reported 1 error response(s) (%d bytes) on this connection",
+                id="device-error-compact",
+            ),
+            pytest.param(
+                b'{"CMD":"a","success":"false"' + b" " * 60000 + b"}",
+                "Device reported 1 error response(s) (%d bytes) on this connection",
+                id="device-error-padded",
+            ),
+            pytest.param(
+                b"{x" + b" " * 60000 + b"}",
+                "Failed to decode 1 JSON frame(s) from device (%d bytes) on this connection",
+                id="control-bad-frame-padded",
+            ),
+        ],
+    )
+    async def test_the_total_equals_the_wire_bytes(self, mock_client, caplog, frame, summary):
+        client, _, _ = mock_client
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            client.data_received(frame)
+            await self._drain_and_flush(client)
+
+        assert (summary % len(frame)) in [record.getMessage() for record in caplog.records]
+
+    async def test_a_direct_caller_without_a_frame_still_gets_a_magnitude(
+        self, mock_client, caplog
+    ):
+        """`frame_size` is optional so tests and third-party subclasses that
+        call `process_message` directly keep working - they fall back to the
+        re-serialized size, which is the best available answer with no frame."""
+        client, _, _ = mock_client
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            await client.process_message({})
+            client.disconnect()
+
+        assert "Ignored 1 malformed message(s) from device (2 bytes) on this connection" in [
+            record.getMessage() for record in caplog.records
+        ]
