@@ -1616,3 +1616,178 @@ class TestScriptBooleanCoercion:
         await runner._execute_step(ScriptStep(action="open", params={"hold": "on"}))
 
         assert held == [False, True]
+
+
+class TestUnknownNamesInStepsFailLoudly:
+    """Every user-supplied name in this DSL must fail loudly when misspelled.
+
+    A misspelled *action* has always failed. A misspelled *sensor* did not:
+    the engine's gates are `if sensor == "inside"` / `elif sensor ==
+    "outside"`, so an unrecognised name matched none of them and fell
+    through to the door open. One character opened the door with both
+    sensors disabled and the safety lock on, and still reported PASSED -
+    which over `ctl run <name> wait` is a green CI exit code (round-7
+    frontend M2). A misspelled *parameter* was ignored just as silently,
+    and the progress log echoed it back as if accepted (round-7 frontend
+    L3).
+    """
+
+    async def test_an_unknown_sensor_fails_the_script(self, runner, simulator, caplog):
+        script = Script(
+            name="Typo",
+            steps=[ScriptStep(action="trigger_sensor", params={"sensor": "insde"}, line_number=1)],
+        )
+
+        with caplog.at_level(logging.ERROR, logger=SCRIPT_LOGGER):
+            result = await runner.run(script, verbose=False)
+
+        assert result is False
+        assert "Script error at step 1: Unknown sensor: insde. Use: inside, outside" in caplog.text
+
+    async def test_an_unknown_sensor_cannot_bypass_the_gates(self, runner, simulator):
+        """The control the report used: identical state, one character apart.
+
+        With both sensors disabled and the safety lock on, the real sensor
+        name is gated and the typo used to open the door anyway.
+        """
+        simulator.state.inside = False
+        simulator.state.outside = False
+        simulator.state.safety_lock = True
+
+        typo = Script(
+            name="Typo",
+            steps=[ScriptStep(action="trigger_sensor", params={"sensor": "insde"}, line_number=1)],
+        )
+        assert await runner.run(typo, verbose=False) is False
+        assert simulator.state.door_status == DOOR_STATE_CLOSED
+
+        real = Script.from_simple_commands(["trigger inside"], name="Real")
+        assert await runner.run(real, verbose=False) is True
+        assert simulator.state.door_status == DOOR_STATE_CLOSED
+
+    @pytest.mark.parametrize("sensor", ["inside", "outside"])
+    async def test_the_real_sensor_names_still_work(self, runner, simulator, sensor):
+        simulator.state.safety_lock = False
+        script = Script.from_simple_commands([f"trigger {sensor}"], name="Real")
+
+        assert await runner.run(script, verbose=False) is True
+        assert simulator.state.door_status == DOOR_STATE_RISING
+
+    @pytest.mark.parametrize(
+        ("action", "params", "expected"),
+        [
+            ("wait", {"duration": 8}, "Unknown parameter(s) for wait: duration. Use: seconds"),
+            (
+                "trigger_sensor",
+                {"sensr": "inside"},
+                "Unknown parameter(s) for trigger_sensor: sensr. Use: sensor",
+            ),
+            ("close", {"hold": True}, "Unknown parameter(s) for close: hold. Use: none"),
+            (
+                "wait_for",
+                {"condition": "door_closed", "timout": 1, "zzz": 2},
+                "Unknown parameter(s) for wait_for: timout, zzz. Use: condition, timeout",
+            ),
+        ],
+        ids=["wait-duration", "sensor-typo", "no-params-action", "two-unknowns"],
+    )
+    async def test_an_unknown_parameter_fails_the_script(
+        self, runner, simulator, caplog, action, params, expected
+    ):
+        script = Script(
+            name="Typo", steps=[ScriptStep(action=action, params=params, line_number=1)]
+        )
+
+        with caplog.at_level(logging.ERROR, logger=SCRIPT_LOGGER):
+            result = await runner.run(script, verbose=False)
+
+        assert result is False
+        assert f"Script error at step 1: {expected}" in caplog.text
+
+    async def test_the_typod_wait_no_longer_silently_shortens_the_wait(self, runner, simulator):
+        """The observable substance: 8 s asked for, 1 s taken, PASSED reported."""
+        loop = asyncio.get_running_loop()
+        script = Script(
+            name="Typo", steps=[ScriptStep(action="wait", params={"duration": 8}, line_number=1)]
+        )
+
+        started = loop.time()
+        result = await runner.run(script, verbose=False)
+
+        assert result is False
+        assert loop.time() - started < 1.0
+
+    async def test_an_unknown_action_is_still_reported_as_such(self, runner, simulator, caplog):
+        """The action chain stays authoritative for unknown *actions*."""
+        script = Script(name="Bad", steps=[ScriptStep(action="frobnicate", line_number=1)])
+
+        with caplog.at_level(logging.ERROR, logger=SCRIPT_LOGGER):
+            assert await runner.run(script, verbose=False) is False
+
+        assert "Unknown action: frobnicate" in caplog.text
+
+    def test_every_executed_action_declares_its_parameters(self):
+        """`_ACTION_PARAMS` must not drift from the dispatch chain.
+
+        If an action is added to `_execute_step` and not to the table its
+        parameters silently stop being validated, which is exactly the
+        state this fix found the DSL in.
+        """
+        import re
+
+        source = Path(scripting.__file__).read_text()
+        body = source.split("async def _execute_step", 1)[1].split("\n    async def ", 1)[0]
+        dispatched = set(re.findall(r'action == "([a-z_]+)"', body))
+
+        assert dispatched == set(scripting._ACTION_PARAMS)
+
+    def test_every_declared_parameter_is_actually_read(self):
+        """...and the table must not grow parameters nothing consumes."""
+        import re
+
+        source = Path(scripting.__file__).read_text()
+        body = source.split("async def _execute_step", 1)[1].split("\n    async def ", 1)[0]
+        read = set(re.findall(r'params\.get\(\s*"([a-z_]+)"', body))
+        declared = set().union(*scripting._ACTION_PARAMS.values())
+
+        assert declared - read == set()
+
+
+class TestSimpleCommandShorthandDefaults:
+    """The documented 2-word forms were never supplied by any test.
+
+    `from_simple_commands` reads `parts[2]` only when `len(parts) > 2`, so
+    `> 2` -> `>= 2` would raise IndexError on the documented 2-word form -
+    and survived the whole suite, because every test supplied three words
+    (round-7 test-fanatic M5). These pin the documented defaults.
+    """
+
+    def test_wait_for_defaults_to_a_thirty_second_timeout(self):
+        script = Script.from_simple_commands(["wait_for door_closed"])
+
+        assert script.steps[0].params == {"condition": "door_closed", "timeout": 30.0}
+
+    def test_set_defaults_to_an_empty_value(self):
+        script = Script.from_simple_commands(["set power"])
+
+        assert script.steps[0].params == {"name": "power", "value": ""}
+
+    def test_assert_defaults_to_an_empty_expectation(self):
+        script = Script.from_simple_commands(["assert door_status"])
+
+        assert script.steps[0].params == {"condition": "door_status", "equals": ""}
+
+    def test_the_three_word_forms_still_carry_their_third_word(self):
+        """The control: the branch that was exercised must keep working."""
+        assert Script.from_simple_commands(["wait_for door_closed 10"]).steps[0].params == {
+            "condition": "door_closed",
+            "timeout": 10.0,
+        }
+        assert Script.from_simple_commands(["set power 1"]).steps[0].params == {
+            "name": "power",
+            "value": "1",
+        }
+        assert Script.from_simple_commands(["assert door_status DOOR_CLOSED"]).steps[0].params == {
+            "condition": "door_status",
+            "equals": "DOOR_CLOSED",
+        }

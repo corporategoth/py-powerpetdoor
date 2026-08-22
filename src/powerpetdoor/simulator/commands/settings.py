@@ -5,6 +5,7 @@
 
 """Settings management commands."""
 
+import math
 import random
 from typing import TYPE_CHECKING
 
@@ -138,9 +139,22 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
         ],
     )
     def holdtime(self, seconds: float | None = None) -> CommandResult:
-        """Set or show hold time."""
+        """Set or show hold time.
+
+        Validates *before* writing. The broadcast that follows converts to
+        centiseconds (``int(hold_time * 100)``), so an unrepresentable
+        value raised out of the handler *after* the assignment: the command
+        printed ERROR having already corrupted the state it reported
+        failing on, and every later ``GET_SETTINGS`` / ``GET_HOLD_TIME``
+        answered ``success:false`` (round-7 frontend M1). ``parse_arg``
+        refuses non-finite input on the operator path now, so this is the
+        second layer - it also covers direct programmatic callers of the
+        command mixin.
+        """
         if seconds is None:
             return CommandResult(True, f"Hold time: {self.simulator.state.hold_time}s")
+        if not math.isfinite(seconds):
+            return CommandResult(False, f"Hold time must be a finite number, got {seconds}")
         self.simulator.state.hold_time = seconds
         # Broadcast hold time change to connected PPD clients
         self.simulator.broadcast_hold_time()

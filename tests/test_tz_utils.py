@@ -267,6 +267,30 @@ class TestFindIanaForPosix:
         assert result is not None
         assert tz_utils.get_posix_tz_string(result) == posix
 
+    def test_first_match_wins_when_many_zones_share_one_posix_string(self):
+        """`tz_utils.py:102` says "First match wins"; nothing asserted it.
+
+        `all_tzs` is `sorted()` and the build guard is `if posix not in
+        _posix_to_iana`, so the *alphabetically first* IANA name wins.
+        Dropping that guard makes the map last-match-wins - for this tzdata
+        `America/New_York`'s POSIX string resolves to `US/Michigan` instead
+        of `America/Detroit`, out of 27 candidates - and nothing failed
+        (round-7 test-fanatic L3).
+
+        Asserting `min(candidates)` rather than a zone name keeps this
+        stable across tzdata builds, which is the reason the sibling test
+        above asserts a round trip rather than a name.
+        """
+        posix = tz_utils.get_posix_tz_string("America/New_York")
+        assert posix is not None
+        candidates = sorted(
+            iana for iana, mapped in tz_utils._iana_to_posix.items() if mapped == posix
+        )
+        # The tie-break is only meaningful if there *is* a tie.
+        assert len(candidates) > 1
+
+        assert tz_utils.find_iana_for_posix(posix) == min(candidates)
+
     def test_invalid_posix_returns_none(self):
         """Invalid POSIX string should return None."""
         result = tz_utils.find_iana_for_posix("INVALID123")

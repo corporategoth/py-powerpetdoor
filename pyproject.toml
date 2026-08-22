@@ -88,6 +88,18 @@ filterwarnings = ["error"]
 # additionally bounded in the tests themselves, so the usual failure is a
 # clear assertion rather than this.
 timeout = 60
+# ...and it must cover tests/fuzz/ too, which is the half where a novel
+# input finds a novel hang. pytest-timeout's default "signal" method raises
+# inside the running test frame; hypothesis catches whatever the body raises
+# and re-invokes it to shrink, but the one-shot SIGALRM is spent, so every
+# shrink attempt re-enters the hang with no alarm armed and the process
+# spins forever. Measured: an infinite-loop mutation in FrameScanner.feed
+# failed a plain test at 60 s and produced *zero output in 150 s* from the
+# identical hang inside @given - under the real `-n auto` addopts as well as
+# `-n0`. The thread method runs its timer off-thread, dumps every stack and
+# calls os._exit(), so hypothesis cannot swallow it, and it names the
+# hanging line. Zero cost on a passing run (round-7 test-fanatic M1).
+timeout_method = "thread"
 
 [tool.coverage.run]
 # `scripts/` is in scope too: generate_gaps_report.py produces the artifact

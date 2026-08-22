@@ -52,6 +52,7 @@ from powerpetdoor.const import (
     FIELD_AUTO,
     FIELD_AUTORETRACT,
     FIELD_CMD_LOCKOUT,
+    FIELD_HOLD_OPEN_TIME,
     FIELD_INSIDE,
     FIELD_LOW_BATTERY_NOTIFICATIONS,
     FIELD_NOTIFICATIONS,
@@ -62,10 +63,13 @@ from powerpetdoor.const import (
     FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
     FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
     FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_TRIGGER_VOLTAGE,
     FIELD_SETTINGS,
+    FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     FIELD_SUCCESS,
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
+    FIELD_TZ,
     PING,
     PONG,
     PRIORITY_CRITICAL,
@@ -3874,6 +3878,14 @@ class TestPerFrameLogThrottling:
 
         with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
             client.data_received(b"{x}" * 1000)
+            # The dispatcher spends at most max_inflight frames per
+            # invocation and re-arms via call_soon, so an unparseable
+            # burst is no longer drained inside data_received (round-7
+            # security M1). Same drain the sibling test below already did.
+            for _ in range(5000):
+                await asyncio.sleep(0)
+                if not client._dispatcher.backlog:
+                    break
 
         tallies = [
             record.getMessage()
@@ -3893,6 +3905,10 @@ class TestPerFrameLogThrottling:
 
         with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
             client.data_received(b"{x}" * 1000)
+            for _ in range(5000):
+                await asyncio.sleep(0)
+                if not client._dispatcher.backlog:
+                    break
 
         details = [
             record.getMessage()
@@ -3916,6 +3932,71 @@ class TestPerFrameLogThrottling:
         )
         assert detail.endswith("...(truncated)")
         assert len(detail) < 400
+
+    async def test_device_error_responses_are_summarized(self, mock_client, caplog):
+        """The device's *ordinary* error envelope, not just malformed input.
+
+        Every frame carrying a CMD whose `success` is not "true" logged an
+        unthrottled, length-unbounded WARNING. Measured before the fix, in
+        the shipped library - which for the Home Assistant deployment
+        target is the whole instance's log: packed `{"CMD":"a"}` envelopes
+        cost x6.64 the wire bytes and 20,000 records for 220,000 bytes;
+        after, x0.01 and 32 records (round-7 security L3).
+        """
+        client, _, _ = mock_client
+        frame = b'{"CMD":"a","success":"false"}'
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            client.data_received(frame * 200)
+            for _ in range(5000):
+                await asyncio.sleep(0)
+                if not client._dispatcher.backlog and not client._dispatcher.inflight:
+                    break
+
+        details = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Error reported by device:")
+        ]
+        # 1, 2, 4, ... 128 - logarithmic in 200 frames, not linear.
+        assert len(details) == 8
+        assert client._device_errors.count == 200
+
+    async def test_the_device_error_echo_is_bounded(self, mock_client, caplog):
+        """One frame with a 60 KB `reason` produced one ~60 KB record."""
+        client, _, _ = mock_client
+        payload = json.dumps({"CMD": "a", "success": "false", "reason": "R" * 5000}).encode()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            client.data_received(payload)
+            for _ in range(5000):
+                await asyncio.sleep(0)
+                if not client._dispatcher.backlog and not client._dispatcher.inflight:
+                    break
+
+        detail = next(
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Error reported by device:")
+        )
+        assert detail.endswith("...(truncated)")
+        assert len(detail) < 400
+
+    async def test_the_first_device_error_is_still_reported_immediately(self, mock_client, caplog):
+        """Nothing the device sends is hidden - only repetition is batched."""
+        client, _, _ = mock_client
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            client.data_received(b'{"CMD":"GET_SETTINGS","success":"false","reason":"nope"}')
+            for _ in range(5000):
+                await asyncio.sleep(0)
+                if not client._dispatcher.backlog and not client._dispatcher.inflight:
+                    break
+
+        assert any(
+            'Error reported by device: {"CMD": "GET_SETTINGS"' in record.getMessage()
+            for record in caplog.records
+        )
 
     async def test_malformed_messages_are_summarized_too(self, mock_client, caplog):
         """`{}` is two bytes of *legal* JSON and cost a WARNING each."""
@@ -4009,3 +4090,129 @@ class TestHardwareInfoPayload:
 
         with pytest.raises(CommandError, match="Response missing expected field"):
             await asyncio.wait_for(future, 1.0)
+
+
+class TestAbsentSettingsFieldsAreGuarded:
+    """The "may be absent on some firmware variants" guards, with it absent.
+
+    `client.py:796-797` says outright: *"these fields may be absent on some
+    firmware variants, so guard each one (never assume presence)"*. No test
+    combined **a registered listener** with **a payload omitting that
+    listener's field**, so flipping `listeners and field_name in settings`
+    to `or` survived the whole suite - and with `or` the code indexes
+    `settings[field_name]` and raises `KeyError` into `_LOGGER.exception`:
+    a full traceback per frame, the exact failure mode the round-5 security
+    work removed elsewhere (round-7 test-fanatic L5).
+    """
+
+    SENSOR_FIELDS = [
+        FIELD_POWER,
+        FIELD_INSIDE,
+        FIELD_OUTSIDE,
+        FIELD_AUTO,
+        FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
+        FIELD_CMD_LOCKOUT,
+        FIELD_AUTORETRACT,
+    ]
+
+    @pytest.mark.parametrize("field_name", SENSOR_FIELDS)
+    async def test_a_registered_sensor_listener_is_not_called_for_an_absent_field(
+        self, mock_client, caplog, field_name
+    ):
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        calls: list[tuple] = []
+        client.add_listener(
+            "probe", sensor_update={field_name: lambda field, value: calls.append((field, value))}
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.client"):
+            # Every *other* sensor field present; this one omitted.
+            settings = {other: "1" for other in self.SENSOR_FIELDS if other != field_name}
+            await client.process_message(
+                {"success": "true", "CMD": CMD_GET_SETTINGS, "settings": settings}
+            )
+
+        assert calls == []
+        assert "Traceback" not in caplog.text
+        assert [record for record in caplog.records if record.exc_info] == []
+
+    @pytest.mark.parametrize("field_name", SENSOR_FIELDS)
+    async def test_the_same_listener_is_called_when_the_field_is_present(
+        self, mock_client, field_name
+    ):
+        """The control: the guard must not be refusing everything."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        calls: list[tuple] = []
+        client.add_listener(
+            "probe", sensor_update={field_name: lambda field, value: calls.append((field, value))}
+        )
+
+        await client.process_message(
+            {"success": "true", "CMD": CMD_GET_SETTINGS, "settings": {field_name: "1"}}
+        )
+
+        assert calls == [(field_name, True)]
+
+    @pytest.mark.parametrize(
+        ("kwarg", "field_name"),
+        [
+            ("timezone_update", FIELD_TZ),
+            ("hold_time_update", FIELD_HOLD_OPEN_TIME),
+            ("sensor_trigger_voltage_update", FIELD_SENSOR_TRIGGER_VOLTAGE),
+            ("sleep_sensor_trigger_voltage_update", FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE),
+        ],
+    )
+    async def test_scalar_listeners_are_not_called_for_an_absent_field(
+        self, mock_client, caplog, kwarg, field_name
+    ):
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        calls: list = []
+        client.add_listener("probe", **{kwarg: calls.append})
+
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.client"):
+            await client.process_message(
+                {"success": "true", "CMD": CMD_GET_SETTINGS, "settings": {FIELD_POWER: "1"}}
+            )
+        assert calls == []
+
+        # Control: present -> the listener does fire.
+        await client.process_message(
+            {"success": "true", "CMD": CMD_GET_SETTINGS, "settings": {field_name: 7}}
+        )
+        assert calls == [7]
+        assert [record for record in caplog.records if record.exc_info] == []
+
+    @pytest.mark.parametrize(
+        ("field_name", "listener_field"),
+        [
+            (FIELD_TOTAL_OPEN_CYCLES, FIELD_TOTAL_AUTO_RETRACTS),
+            (FIELD_TOTAL_AUTO_RETRACTS, FIELD_TOTAL_OPEN_CYCLES),
+        ],
+    )
+    async def test_stats_listeners_are_not_called_for_an_absent_field(
+        self, mock_client, caplog, field_name, listener_field
+    ):
+        """Same shape, stats path (`client.py:843`)."""
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        calls: list[tuple] = []
+        client.add_listener(
+            "probe",
+            stats_update={listener_field: lambda field, value: calls.append((field, value))},
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.client"):
+            await client.process_message(
+                {"success": "true", "CMD": CMD_GET_DOOR_OPEN_STATS, field_name: 5}
+            )
+        assert calls == []
+
+        # Control: present -> the listener does fire.
+        await client.process_message(
+            {"success": "true", "CMD": CMD_GET_DOOR_OPEN_STATS, listener_field: 9}
+        )
+        assert calls == [(listener_field, 9)]
+        assert [record for record in caplog.records if record.exc_info] == []

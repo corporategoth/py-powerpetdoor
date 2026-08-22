@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -886,3 +887,66 @@ class TestLifecycle:
         await engine.stop()
 
         assert await waiter == DOOR_STATE_RISING
+
+
+class TestEngineBoundsHaveTheirValuesPinned:
+    """`MIN_BLOCKED_RECHECK` stops a near-zero hold_time turning the
+    blocked-sensor wait into a busy loop; doubling it left the suite green
+    (round-7 test-fanatic L1)."""
+
+    def test_the_blocked_recheck_floor_is_100ms(self):
+        from powerpetdoor.simulator import engine as engine_module
+
+        assert engine_module.MIN_BLOCKED_RECHECK == 0.1
+
+
+class TestUnknownSensorNames:
+    """An unrecognised sensor name matched none of the gates.
+
+    Every gate in `trigger_sensor` is `if sensor == "inside"` / `elif
+    sensor == "outside"`, so a name that is neither skipped the enable
+    flags, the safety lock *and* the schedule, and fell straight through to
+    the door open (round-7 frontend M2). `DoorSimulator.trigger_sensor()`
+    and `activate_sensor()` are documented programmatic APIs returning
+    None, so the engine refuses in the same shape as its other gates - log
+    and do nothing - while the script DSL raises.
+    """
+
+    @pytest.mark.parametrize("sensor", ["insde", "INSIDE", "", "both", "middle"])
+    async def test_trigger_sensor_refuses_an_unknown_name(self, engine, state, sensor, caplog):
+        state.inside = False
+        state.outside = False
+        state.safety_lock = True
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.engine"):
+            assert engine.trigger_sensor(sensor) is None
+
+        assert state.door_status == DOOR_STATE_CLOSED
+        assert engine._task is None
+        assert f"Ignoring unknown sensor {sensor}" in caplog.text
+        assert "use: inside, outside" in caplog.text
+
+    @pytest.mark.parametrize("sensor", ["insde", "both"])
+    async def test_activate_sensor_refuses_an_unknown_name(self, engine, state, sensor, caplog):
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.engine"):
+            assert engine.activate_sensor(sensor, 5.0) is None
+
+        assert state.inside_sensor_active is False
+        assert state.outside_sensor_active is False
+        assert state.door_status == DOOR_STATE_CLOSED
+        assert engine._sensor_timers == {}
+        assert f"Ignoring unknown sensor {sensor}" in caplog.text
+
+    async def test_the_refusal_is_sanitized(self, engine, caplog):
+        """The name reaches a log; it may come from a YAML file (S3)."""
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.engine"):
+            engine.trigger_sensor("\x1b[31mred")
+
+        assert "\\x1b[31mred" in caplog.text
+        assert "\x1b[31m" not in caplog.text
+
+    @pytest.mark.parametrize("sensor", ["inside", "outside"])
+    async def test_the_real_names_are_unaffected(self, engine, state, sensor):
+        engine.trigger_sensor(sensor)
+
+        assert state.door_status == DOOR_STATE_RISING

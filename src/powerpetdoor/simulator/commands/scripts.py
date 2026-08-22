@@ -12,8 +12,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 from ..scripting import (
+    describe_out_of_directory_remedy,
     describe_script_argument,
-    list_extra_scripts,
+    render_script_listing,
     script_completer,
     script_escapes_directory,
 )
@@ -255,7 +256,7 @@ class ScriptsCommandsMixin:
                 if script_escapes_directory(candidate, base):
                     raise ValueError(
                         f"Script '{name}' resolves outside {self._scripts_dir} and cannot be "
-                        f"run by name; move it into the directory or run it by path"
+                        f"run by name; {describe_out_of_directory_remedy()}"
                     )
                 return self._Script.from_file(candidate.resolve())
         return self._get_builtin_script(name)
@@ -286,23 +287,10 @@ class ScriptsCommandsMixin:
         genuinely unreachable, since paths are refused (round-6 frontend
         L3).
         """
-        extra = list_extra_scripts()
-        shadowed = {name for name, _ in extra}
-        scripts = list(self._list_builtin_scripts())
-        lines = ["Built-in scripts:"]
-        for name, desc in scripts:
-            marker = f" (shadowed by {self._scripts_dir}/{name})" if name in shadowed else ""
-            lines.append(f"  {name}: {desc}{marker}")
-        if self._scripts_dir is not None:
-            # Header even when the directory is empty, exactly as
-            # `--list-scripts` prints it: a ctl user who cannot see the
-            # command line otherwise cannot tell "no --scripts-dir
-            # configured" from "configured but empty" (T5).
-            lines.append(f"Scripts from {self._scripts_dir}:")
-            for name, desc in extra:
-                lines.append(f"  {name}: {desc}")
-            if not extra:
-                lines.append("  (none)")
+        # One renderer for both surfaces (round-7 frontend L5).
+        listing = render_script_listing(self._scripts_dir, builtin=self._list_builtin_scripts())
+        lines = list(listing.lines)
+        scripts, extra = listing.builtin, listing.extra
         status = self.script_status()
         lines.append(format_script_status(status))
         if status.pending:

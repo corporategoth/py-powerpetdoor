@@ -362,7 +362,20 @@ def _basic_readline(prompt_text: str) -> "asyncio.Future[str | None]":
     def cleanup(_fut):
         try:
             loop.remove_reader(fd)
-        except Exception:  # pragma: no cover (defensive: Linux selectors swallow errors for dead fds, so this cannot be triggered deterministically)
+        except Exception:
+            # Defensive. Linux selectors swallow errors for dead fds, so no
+            # *real* selector can drive this clause - that part of the
+            # exclusion rationale this line used to carry was true. What
+            # was wrong was concluding it could not be tested:
+            # `loop.remove_reader` is a stdlib API a test can replace, and
+            # the contract this clause exists for (the error must not reach
+            # the loop's exception handler) is now pinned by a seam test
+            # rather than hidden from the gate (round-7 test-fanatic M4).
+            #
+            # Do not write the exclusion phrase itself in prose here: it is
+            # matched by `re.search` against the whole source line, so a
+            # comment mentioning it silently excludes that line - the same
+            # shape as the bare `...` pattern round 6 removed.
             pass
 
     sys.stdout.write(prompt_text)

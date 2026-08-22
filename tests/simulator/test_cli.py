@@ -1703,6 +1703,34 @@ class TestRunStartupScripts:
         assert ">>> Script run #2" in out
         assert "before next loop" not in out
 
+    async def test_zero_script_delay_between_scripts_does_not_wait(self, capsys):
+        """The *other* `script_delay > 0` guard, at `cli.py:488`.
+
+        Round 6 added the zero-delay test for the outer loop only; the
+        inner guard has a positive-delay test but had no zero-delay
+        counterpart, so a mutant printing ">>> Waiting 0s before next
+        script..." between every script - or before the *first* one - went
+        unnoticed (round-7 test-fanatic L4). Coverage cannot see this:
+        `if A and B:` is one branch point with two destinations, so 100%
+        branch coverage never requires `i > 0 and delay == 0`.
+        """
+        sim, handler, runner, stop, result, runs, _ = self._make()
+        await self._run(["s1", "s2"], sim, handler, runner, stop, result, script_delay=0)
+
+        assert runs == ["s1", "s2"]
+        assert "before next script" not in capsys.readouterr().out
+
+    async def test_the_first_script_never_waits_even_with_a_delay(self, capsys):
+        """The `i > 0` operand of the same compound condition.
+
+        `i > 0` -> `i >= 0` makes the run pause before the *first* script.
+        """
+        sim, handler, runner, stop, result, runs, _ = self._make()
+        await self._run(["s1"], sim, handler, runner, stop, result, script_delay=0.01)
+
+        assert runs == ["s1"]
+        assert "before next script" not in capsys.readouterr().out
+
     async def test_cancelled_mid_script_still_records_result(self):
         blocker = asyncio.Event()
 

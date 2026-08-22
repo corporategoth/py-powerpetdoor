@@ -294,6 +294,71 @@ class TestFallbackSession:
         # Only the two daemon commands ever reached the daemon
         assert daemon.drain_received() == ["status", "bad"]
 
+    @pytest.mark.parametrize(
+        ("statuses", "invalidations"),
+        [
+            ([b"STATUS: clients=0\n"], 0),
+            ([b"STATUS: clients=1\n"], 1),
+            ([b"STATUS: clients=1\n", b"STATUS: clients=1\n"], 1),
+            ([b"STATUS: clients=1\n", b"STATUS: clients=0\n"], 2),
+            ([b"STATUS: clients=2\n"], 1),
+        ],
+        ids=["zero-is-no-change", "one-connects", "one-then-one", "connect-disconnect", "two"],
+    )
+    async def test_only_a_real_change_redraws_the_prompt(
+        self,
+        daemon,
+        piped_stdin,
+        recorded_stdout,
+        start_session,
+        monkeypatch,
+        statuses,
+        invalidations,
+    ):
+        """`STATUS: clients=0` was annotated "no change"; nothing asserted it.
+
+        `new_status = count > 0` -> `>= 0` makes a zero-client status flip
+        the prompt's connected indicator **on** and trigger a redraw, and
+        the session still produced the same transcript, so the test passed
+        (round-7 test-fanatic L6). The `clients=0` row is the one that
+        distinguishes the two: the mutant redraws once where the correct
+        code redraws not at all.
+
+        This is the machinery round 6 added in e92a82a ("Refresh prompt
+        colour immediately on client connect/disconnect"), so its
+        zero-client edge is exactly the case worth pinning.
+        """
+        from powerpetdoor.simulator.prompt_common import InteractiveSession
+
+        calls: list[int] = []
+        real_invalidate = InteractiveSession.invalidate
+
+        def counting_invalidate(self):
+            calls.append(1)
+            return real_invalidate(self)
+
+        monkeypatch.setattr(InteractiveSession, "invalidate", counting_invalidate)
+
+        daemon.greeting = b"".join(statuses)
+        daemon.responses = {"status": b"OK: door fine\n"}
+        await daemon.start()
+        stdin_fd = piped_stdin()
+        recorder = recorded_stdout()
+        prompt = prompt_for(daemon)
+
+        task = start_session(daemon)
+        await recorder.wait_for(prompt, count=1)
+        # Round-trip one command so every greeting line has certainly been
+        # read before the assertion (no sleeps).
+        os.write(stdin_fd, b"status\n")
+        await recorder.wait_for(">>> door fine")
+
+        await recorder.wait_for(prompt, count=2)
+        os.write(stdin_fd, b"exit\n")
+        await asyncio.wait_for(task, 10)
+
+        assert len(calls) == invalidations
+
     async def test_response_timeout_message(
         self, daemon, piped_stdin, recorded_stdout, start_session
     ):

@@ -336,6 +336,28 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             logging.WARNING,
             "Simulator: %d unknown command(s) (%d bytes) on this connection",
         )
+        # Round 6 throttled the three sites above and left the *rejection*
+        # sites - one record per rejected SET_*, per bad schedule and per
+        # bad schedule list, with no length cap - at x1.9-2.6 write
+        # amplification and one WARNING per frame (round-7 security L3).
+        # One throttle for all three: they are the same event to an
+        # operator ("the peer keeps sending fields we refuse"), and the
+        # first occurrence is always reported in full.
+        self._rejections = EventThrottle(
+            logger,
+            logging.WARNING,
+            "Simulator: rejected %d malformed field(s)/payload(s) (%d bytes) on this connection",
+        )
+        # The write ceiling used to announce "dropping the connection"
+        # once per message and then not drop it (round-7 security L2).
+        self._connection_drops = EventThrottle(
+            logger,
+            logging.ERROR,
+            "Simulator: %d connection-drop event(s) (%d bytes) on this connection",
+        )
+        #: Latched once a protocol violation has cost this peer its
+        #: connection, so nothing re-checks and re-reports it.
+        self._dropped = False
         self._tasks: set[asyncio.Task] = set()
         # One task per framed message, created synchronously per read, was
         # unbounded: 256 KiB of `{}` admitted 131,072 live tasks / ~145 MB,
@@ -366,6 +388,8 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         self._non_ascii.flush()
         self._bad_frames.flush()
         self._unknown_commands.flush()
+        self._rejections.flush()
+        self._connection_drops.flush()
         self._scanner.reset()
         self._dispatcher.reset()
         for task in list(self._tasks):
@@ -421,12 +445,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
         frames, diag = self._scanner.feed(text)
         if diag.overflow:
-            logger.error(
-                "Simulator: receive buffer overflowed without a complete message; "
-                "dropping client connection"
-            )
-            if self.transport:
-                self.transport.close()
+            self._drop_connection("receive buffer overflowed without a complete message")
             return
 
         # Bounded dispatch, twin of the client's (round-6 security finding 1).
@@ -482,20 +501,46 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         responses is dropped, exactly like one that overflows the framing
         cap.
         """
+        # Latched: this peer has already cost itself its connection, so
+        # neither queued frames nor later broadcasts re-check the ceiling
+        # and re-announce the drop.
+        if self._dropped:
+            return
         data = json.dumps(msg).encode("ascii")
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Simulator TX: %s", sanitize_log_text(str(msg)))
         if not self.transport:
             return
-        if self.transport.get_write_buffer_size() > MAX_WRITE_BACKLOG:
-            logger.error(
-                "Simulator: client is not reading its responses (%d bytes buffered); "
-                "dropping the connection",
-                self.transport.get_write_buffer_size(),
+        buffered = self.transport.get_write_buffer_size()
+        if buffered > MAX_WRITE_BACKLOG:
+            self._drop_connection(
+                f"client is not reading its responses ({buffered} bytes buffered)"
             )
-            self.transport.close()
             return
         self.transport.write(data)
+
+    def _drop_connection(self, reason: str) -> None:
+        """Abort this connection after a declared protocol violation.
+
+        ``transport.close()`` only sets ``_closing`` and removes the
+        reader; ``connection_lost`` is deferred until the write buffer
+        drains, and a peer holding a zero TCP window never lets it. So the
+        protocol object, its ~1 MB buffer and its slot in
+        ``DoorSimulator.protocols`` were held for the life of the daemon,
+        ``ctl status`` kept reporting the client the daemon's own ERROR
+        said it had dropped, and every later broadcast logged again
+        (round-7 security L2).
+
+        ``abort()`` discards the unsent tail and delivers
+        ``connection_lost`` immediately. Discarding it is correct here:
+        the peer has already violated the protocol, and this is the only
+        thing that makes ``ctl status`` truthful.
+        """
+        if self._connection_drops.record(len(reason)):
+            logger.error("Simulator: %s; dropping the connection", reason)
+        self._dropped = True
+        if self.transport:
+            self.transport.abort()
 
     def _check_command_allowed(self, cmd: str) -> tuple[bool, str]:
         """Check if a command is allowed given current state.
@@ -573,9 +618,12 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             # A deliberate rejection: the handler validated an untrusted
             # field and refused it before touching state. Report the actual
             # reason so a legitimate client can fix its payload.
-            logger.warning(
-                "Simulator: Rejected %s: %s", sanitize_log_text(cmd), sanitize_log_text(err)
-            )
+            if self._rejections.record(len(str(err))):
+                logger.warning(
+                    "Simulator: Rejected %s: %s",
+                    sanitize_log_text(cmd, MAX_LOGGED_LENGTH),
+                    sanitize_log_text(err, MAX_LOGGED_LENGTH),
+                )
             response = self._error_envelope(cmd, msg_id, str(err))
         except Exception:
             logger.exception("Simulator: Error handling command %s", sanitize_log_text(cmd))
@@ -736,7 +784,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         except ValueError as err:
             # Untrusted wire data: reject malformed schedules rather than
             # storing something that raises later during evaluation.
-            logger.warning("Simulator: Rejected schedule: %s", sanitize_log_text(err))
+            if self._rejections.record(len(str(err))):
+                logger.warning(
+                    "Simulator: Rejected schedule: %s",
+                    sanitize_log_text(err, MAX_LOGGED_LENGTH),
+                )
             response[FIELD_SUCCESS] = SUCCESS_FALSE
             response[FIELD_REASON] = str(err)
             return
@@ -778,7 +830,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         except ValueError as err:
             # Reject the whole list atomically: a partial load would
             # leave the simulator in a state no client asked for.
-            logger.warning("Simulator: Rejected schedule list: %s", sanitize_log_text(err))
+            if self._rejections.record(len(str(err))):
+                logger.warning(
+                    "Simulator: Rejected schedule list: %s",
+                    sanitize_log_text(err, MAX_LOGGED_LENGTH),
+                )
             response[FIELD_SUCCESS] = SUCCESS_FALSE
             response[FIELD_REASON] = str(err)
             return

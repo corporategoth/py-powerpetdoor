@@ -210,6 +210,30 @@ are non-negotiable:
    time / event hooks, `asyncio.Event`s, or awaited futures so tests are
    deterministic on slow CI runners.
 
+8. **Assert at the boundary**: for every numeric limit, assert at
+   `limit - 1`, `limit`, and `limit + 1` — not merely "inside" and "far
+   outside". Coverage cannot see this class at all, so a saturated 100%
+   gate says nothing about it. Round 7 found 36 proven sites: the schedule
+   window's inclusive start and exclusive end, the CLI float validator's
+   `max_value` (whose `int` sibling *was* pinned), the wire-string length
+   limit, the low-battery crossing, the truncation marker. Prefer one
+   parametrized test per limit over three separate ones.
+
+9. **Make the second operand of a compound condition decisive**: `if A and
+   B:` is a single branch point with two destinations, so 100% branch
+   coverage is reached without ever running `A and not B`. Any test for a
+   compound guard must include the case where the *second* operand is the
+   one that decides. The guards whose comment says a field "may be absent"
+   need a test with the field actually absent — that is what round 5's
+   "full traceback per frame" defect looked like before it was one.
+
+10. **Pin the value of a shipped bound, not just its symbol**: importing
+    `MAX_BUFFER_SIZE + 1` keeps a test non-brittle but leaves the value
+    untested. Every DoS/resource constant needs one assertion of its
+    literal value in a test whose name states the rationale, so relaxing it
+    has to be argued in the diff. Round 7 relaxed four of them by 16x with
+    the suite fully green.
+
 ### Git Usage Rules (Critical)
 
 **Never use git commands to revert uncommitted changes.**

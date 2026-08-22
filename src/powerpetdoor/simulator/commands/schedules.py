@@ -36,24 +36,33 @@ class ScheduleCommandsMixin:
         active = [DAY_NAMES[i] for i, v in enumerate(days) if v]
         return ", ".join(active) if active else "none"
 
+    @staticmethod
+    def _format_sensor_scope(inside: bool, outside: bool) -> str:
+        """Render which sensors a schedule covers.
+
+        One helper for every surface that says it. The same concept was
+        spelled three ways in one command family - ``add`` echoed the raw
+        ``both sensor`` choice (not even grammatical), ``list`` rendered
+        ``inside+outside sensor``, and the implicit-schedule line said
+        ``both sensors`` (round-7 frontend T2). Plural throughout.
+        """
+        if inside and outside:
+            return "inside and outside sensors"
+        if inside:
+            return "inside sensor"
+        if outside:
+            return "outside sensor"
+        return "no sensors"
+
     def _format_schedule(self, schedule: "Schedule") -> str:
         """Format a schedule for display."""
         status = "enabled" if schedule.enabled else "disabled"
         days = self._format_days(schedule.days_of_week)
         time_start = self._format_time(schedule.start_hour, schedule.start_min)
         time_end = self._format_time(schedule.end_hour, schedule.end_min)
+        sensor = self._format_sensor_scope(schedule.inside, schedule.outside)
 
-        # Determine sensor type
-        if schedule.inside and schedule.outside:
-            sensor = "inside+outside"
-        elif schedule.inside:
-            sensor = "inside"
-        elif schedule.outside:
-            sensor = "outside"
-        else:
-            sensor = "none"
-
-        return f"  #{schedule.index}: {sensor} sensor, {days}, {time_start}-{time_end} ({status})"
+        return f"  #{schedule.index}: {sensor}, {days}, {time_start}-{time_end} ({status})"
 
     @command("schedule", ["sched"], "Manage schedules", category="schedules")
     def schedule(self) -> CommandResult:
@@ -70,7 +79,8 @@ class ScheduleCommandsMixin:
             return CommandResult(
                 True,
                 f"Schedules (auto mode {auto_status}):\n"
-                "  (implicit): both sensors, all days, 00:00-23:59",
+                f"  (implicit): {self._format_sensor_scope(True, True)}, "
+                "all days, 00:00-23:59",
             )
 
         auto_status = "ON" if self.simulator.state.auto else "OFF"
@@ -149,7 +159,8 @@ class ScheduleCommandsMixin:
 
         return CommandResult(
             True,
-            f"Added schedule #{idx}: {sensor} sensor, {self._format_days(days)}, "
+            f"Added schedule #{idx}: {self._format_sensor_scope(inside, outside)}, "
+            f"{self._format_days(days)}, "
             f"{self._format_time(start_h, start_m)}-{self._format_time(end_h, end_m)}",
         )
 

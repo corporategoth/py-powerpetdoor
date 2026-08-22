@@ -540,7 +540,7 @@ async def run_tests(simulator):
     # Create a script programmatically
     script = Script.from_simple_commands([
         "trigger inside",
-        "wait 2",
+        "wait_for door_closed 10",
         "assert door_status DOOR_CLOSED",
     ], name="Quick Test")
     success = await runner.run(script)
@@ -605,14 +605,27 @@ description: "Description of what this script tests"
 steps:
   - action: trigger_sensor
     sensor: inside
-  - action: wait
-    seconds: 2
+  - action: wait_for
+    condition: door_closed
+    timeout: 10
   - action: assert
     condition: door_status
     equals: DOOR_CLOSED
 ```
 
+Note the `wait_for` rather than a fixed `wait`: the hold timer only starts
+once the door *reaches* `DOOR_HOLDING`, so a `wait` long enough today
+becomes a flaky failure the moment `hold_time` changes. The built-in
+scripts all use `wait_for` for this reason.
+
 ### Available Actions
+
+Every step parameter is validated against the action's known set: an
+unrecognised key fails the step with `Unknown parameter(s) for <action>:
+<key>. Use: <known>`. Unknown parameters used to be ignored silently while
+the progress log echoed them back as if accepted, so `wait: {duration: 8}`
+(`duration` is a real parameter name — for `inside`/`outside`) waited the
+1.0 s default instead of 8 and still reported PASSED.
 
 #### Door Operations
 
@@ -620,8 +633,25 @@ steps:
 Trigger a pet sensor to open the door.
 ```yaml
 - action: trigger_sensor
-  sensor: inside    # "inside" or "outside"
+  sensor: inside    # "inside" or "outside" - anything else fails the step
 ```
+
+`sensor` is validated like every other name in this DSL: a misspelling
+fails the step, and therefore the run. It used to be accepted silently and
+synthesised a third "sensor" that ignored the enable flags, the safety lock
+and the schedule — so a one-character typo opened the door with everything
+disabled and still reported PASSED.
+
+**inside** / **outside**
+Hold one sensor active for a chosen time. `trigger_sensor` has no duration,
+so these are the way to keep a sensor asserted across a door phase (the
+interactive `inside` / `outside` commands do the same thing).
+```yaml
+- action: inside
+  duration: 1.5     # Seconds (default: 0.5); 0 = toggle, on until toggled off
+```
+Activating one sensor clears the other — they are mutually exclusive, as on
+the real door.
 
 **open**
 Open the door directly.
@@ -743,7 +773,11 @@ Print a message to the log.
 
 ### Conditions
 
-Conditions are used with `wait_for` and `assert` actions:
+#### Conditions for `wait_for`
+
+These names are accepted by the `wait_for` action **only**. `assert` uses a
+separate, disjoint set — see [Conditions for `assert`](#conditions-for-assert)
+below.
 
 | Condition | Description |
 |-----------|-------------|
@@ -752,6 +786,7 @@ Conditions are used with `wait_for` and `assert` actions:
 | `door_rising` | Door is currently opening |
 | `door_holding` | Door is open and in hold timer |
 | `door_keepup` | Door is open and held indefinitely |
+| `door_closing` | Door is closing (from the top or from mid-travel) |
 | `power_on` | Power is enabled |
 | `power_off` | Power is disabled |
 | `auto_on` | Schedule/timers are enabled |
@@ -767,7 +802,10 @@ Conditions are used with `wait_for` and `assert` actions:
 | `cmd_lockout_on` | Command lockout is on |
 | `cmd_lockout_off` | Command lockout is off |
 
-For `assert`, you can also check these values:
+#### Conditions for `assert`
+
+`assert` does **not** accept any of the names above; it checks a value
+against an expectation, using this separate set:
 
 | Condition | Expected Values |
 |-----------|-----------------|

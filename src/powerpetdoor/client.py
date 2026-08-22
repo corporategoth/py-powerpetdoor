@@ -356,6 +356,15 @@ class PowerPetDoorClient(asyncio.Protocol):
             logging.WARNING,
             "Ignored %d malformed message(s) from device (%d bytes) on this connection",
         )
+        # The device's own error envelope is a per-frame site too, and it
+        # is reachable without any malformed input: every frame whose
+        # `success` is not "true" logged an unthrottled, length-unbounded
+        # WARNING (round-7 security L3).
+        self._device_errors = EventThrottle(
+            _LOGGER,
+            logging.WARNING,
+            "Device reported %d error response(s) (%d bytes) on this connection",
+        )
         # One task per framed message, created synchronously per read, was
         # unbounded: one 256 KiB read of `{}` admitted 131,072 live tasks
         # and ~135 MB of heap (round-6 security finding 1).
@@ -1445,7 +1454,12 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._scanner.reset()
         # Same connection scope as the scanner: report the tail, then start
         # the next connection's count clean.
-        for throttle in (self._non_ascii, self._bad_frames, self._bad_messages):
+        for throttle in (
+            self._non_ascii,
+            self._bad_frames,
+            self._bad_messages,
+            self._device_errors,
+        ):
             throttle.flush()
             throttle.reset()
         # Undispatched frames belong to the connection that delivered them.
@@ -1813,7 +1827,22 @@ class PowerPetDoorClient(asyncio.Protocol):
                     future.set_result(msg)
             else:
                 reason = msg.get(FIELD_REASON)
-                _LOGGER.warning("Error reported by device: %s", json.dumps(msg))
+                # Fires for every frame carrying a CMD whose success is not
+                # "true" - the device's *ordinary* error envelope, not just
+                # malformed input - so a peer packing 11-byte {"CMD":"a"}
+                # envelopes bought one unthrottled WARNING per frame at
+                # x6.64 the wire bytes, in the host application's log
+                # (round-7 security L3). This is the shipped library; for
+                # the Home Assistant deployment target that is the whole
+                # instance's log. Throttled and length-capped like the
+                # three sibling sites; the first occurrence is still
+                # reported immediately and in full context.
+                reported = json.dumps(msg)
+                if self._device_errors.record(len(reported)):
+                    _LOGGER.warning(
+                        "Error reported by device: %s",
+                        sanitize_text(reported, MAX_LOGGED_LENGTH),
+                    )
                 if future is not None and not future.done():
                     future.set_exception(CommandError(cmd, reason))
         finally:

@@ -85,7 +85,8 @@ class TestScheduleList:
         result = await command_handler.execute("schedule")
         assert result.success is True
         assert result.message == (
-            "Schedules (auto mode ON):\n  (implicit): both sensors, all days, 00:00-23:59"
+            "Schedules (auto mode ON):\n"
+            "  (implicit): inside and outside sensors, all days, 00:00-23:59"
         )
 
     async def test_list_reflects_auto_off(self, command_handler):
@@ -114,14 +115,16 @@ class TestScheduleList:
             index=0, inside=True, outside=True, enabled=False
         )
         result = await command_handler.execute("schedule list")
-        assert "  #0: inside+outside sensor, all days, 06:00-22:00 (disabled)" in result.message
+        assert (
+            "  #0: inside and outside sensors, all days, 06:00-22:00 (disabled)" in result.message
+        )
 
     async def test_list_renders_no_sensor_and_weekend_preset(self, command_handler):
         command_handler.simulator.state.schedules[0] = Schedule(
             index=0, days_of_week=[1, 0, 0, 0, 0, 0, 1]
         )
         result = await command_handler.execute("schedule list")
-        assert "  #0: none sensor, weekends, 06:00-22:00 (enabled)" in result.message
+        assert "  #0: no sensors, weekends, 06:00-22:00 (enabled)" in result.message
 
     async def test_list_renders_custom_days_and_none_days(self, command_handler):
         sim = command_handler.simulator
@@ -174,7 +177,9 @@ class TestScheduleAdd:
     async def test_add_both_sensors_default_days(self, command_handler):
         result = await command_handler.execute("schedule add both 8:15-20:45")
         assert result.success is True
-        assert result.message == "Added schedule #0: both sensor, all days, 08:15-20:45"
+        assert (
+            result.message == "Added schedule #0: inside and outside sensors, all days, 08:15-20:45"
+        )
         sched = command_handler.simulator.state.schedules[0]
         assert sched.inside is True
         assert sched.outside is True

@@ -187,3 +187,23 @@ class TestTruncation:
         from powerpetdoor.sanitize import MAX_LOGGED_LENGTH
 
         assert MAX_LOGGED_LENGTH == 200
+
+
+class TestTheLoggedLengthCapIsPinned:
+    """A per-frame log record's *constant* has to be bounded independently
+    of how often the line fires (round-6 security 2 / round-7 L1)."""
+
+    def test_the_logged_length_cap_is_200(self):
+        from powerpetdoor import sanitize
+
+        assert sanitize.MAX_LOGGED_LENGTH == 200
+
+    def test_the_truncation_boundary_is_exact(self):
+        """Assert *at* the limit: `len(value) > limit` -> `>=` marked a
+        value of exactly `limit` as truncated though nothing was cut
+        (round-7 test-fanatic M5)."""
+        from powerpetdoor.sanitize import sanitize_text
+
+        assert sanitize_text("x" * 10, 10) == "x" * 10
+        assert sanitize_text("x" * 11, 10) == "x" * 10 + "...(truncated)"
+        assert sanitize_text("x" * 9, 10) == "x" * 9

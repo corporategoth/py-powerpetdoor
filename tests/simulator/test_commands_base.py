@@ -144,6 +144,57 @@ class TestParseArgFloat:
         assert value is None
         assert error == "'xyz' is not a valid number"
 
+    @pytest.mark.parametrize(
+        "raw",
+        ["nan", "NaN", "-nan", "inf", "-inf", "Infinity", "-Infinity", "1e400", "-1e400"],
+        ids=[
+            "nan",
+            "NaN",
+            "-nan",
+            "inf",
+            "-inf",
+            "Infinity",
+            "-Infinity",
+            "overflow",
+            "-overflow",
+        ],
+    )
+    def test_non_finite_is_refused(self, raw):
+        """`nan < min` and `nan > max` are both False, so the bounds the
+        command's own help advertises silently did not hold.
+
+        One `holdtime nan` reported ERROR *after* writing the state, wedged
+        the door, and made GET_SETTINGS and GET_HOLD_TIME answer every
+        connected client `success:false` for the life of the daemon. The
+        wire path and the script DSL both refuse these already; this is the
+        third front end onto the same state (round-7 frontend M1).
+        """
+        value, error = parse_arg(raw, ArgSpec("n", "float", min_value=0.1, max_value=900))
+
+        assert value is None
+        assert error == f"'{raw}' must be a finite number"
+
+    def test_the_int_branch_needs_no_finite_guard(self):
+        """int() raises on both spellings, so the guard belongs to floats only."""
+        assert parse_arg("nan", ArgSpec("n", "int")) == (None, "'nan' is not a valid integer")
+        assert parse_arg("1e400", ArgSpec("n", "int")) == (
+            None,
+            "'1e400' is not a valid integer",
+        )
+
+    def test_boundary_values_accepted(self):
+        """Assert *at* the limit, not merely inside it (round-7 test-fanatic M5).
+
+        `max_value >` -> `>=` on this branch survived the whole suite while
+        the same flip on the int sibling was caught.
+        """
+        spec = ArgSpec("n", "float", min_value=0.1, max_value=900)
+
+        assert parse_arg("0.1", spec) == (0.1, None)
+        assert parse_arg("900", spec) == (900.0, None)
+        assert parse_arg("0.09", spec)[0] is None
+        assert parse_arg("900.1", spec)[0] is None
+
 
 # ============================================================================
 # parse_arg: bool_toggle

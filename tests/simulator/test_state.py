@@ -451,6 +451,52 @@ class TestSchedule:
         # 12:00 should NOT be allowed
         assert schedule.is_sensor_allowed("inside", 12, 0, 0) is False
 
+    @pytest.mark.parametrize(
+        ("hour", "minute", "allowed"),
+        [(21, 59, False), (22, 0, True), (5, 59, True), (6, 0, False)],
+        ids=["before-start", "at-start", "last-minute", "at-end"],
+    )
+    def test_a_midnight_crossing_window_at_its_four_edge_minutes(self, hour, minute, allowed):
+        """Assert *at* the boundary, not only inside it.
+
+        This test's older half asserts 23:00, 02:00 and 12:00 - the
+        interior of the window and one point far outside it - so both
+        comparisons that define the window were unpinned: `>= start` -> `>`
+        and `< end` -> `<=` each survived the whole suite (round-7
+        test-fanatic M5). The window is inclusive at the start and
+        exclusive at the end, and those are the two minutes that say so.
+        """
+        schedule = Schedule(
+            index=0,
+            enabled=True,
+            days_of_week=[1, 1, 1, 1, 1, 1, 1],
+            inside=True,
+            outside=False,
+            start_hour=22,
+            end_hour=6,
+        )
+
+        assert schedule.is_sensor_allowed("inside", hour, minute, 0) is allowed
+
+    @pytest.mark.parametrize(
+        ("hour", "minute", "allowed"),
+        [(7, 59, False), (8, 0, True), (16, 59, True), (17, 0, False)],
+        ids=["before-start", "at-start", "last-minute", "at-end"],
+    )
+    def test_a_normal_window_at_its_four_edge_minutes(self, hour, minute, allowed):
+        """The same four edges on the non-crossing branch."""
+        schedule = Schedule(
+            index=0,
+            enabled=True,
+            days_of_week=[1, 1, 1, 1, 1, 1, 1],
+            inside=True,
+            outside=False,
+            start_hour=8,
+            end_hour=17,
+        )
+
+        assert schedule.is_sensor_allowed("inside", hour, minute, 0) is allowed
+
 
 class TestScheduleFromDictRejectsHostileInput:
     """Wire schedules are untrusted: malformed ones must never be stored.

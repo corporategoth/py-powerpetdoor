@@ -172,7 +172,11 @@ hard disconnect roughly every 90 seconds, reported as `Last PING not
 responded to 3 times.` — so an alternate implementation that answers
 `{"PONG": ""}` looks like a flaky network rather than a protocol mismatch.
 The token's *content* is not interpreted by the device; only the echo
-matters. `msgId` should be echoed back as `msgID` like any other response.
+matters — the echoed token is the whole correlation mechanism, and the
+client never reads `msgID` on a `PONG`. Whether the firmware echoes `msgId`
+back as `msgID` here, the way it does on ordinary responses, is
+**unverified**; this project's simulator does not, and an alternate
+implementation must not depend on it being present.
 
 Typical interval: 30 seconds
 

@@ -1583,6 +1583,77 @@ class TestScriptsDirVisibility:
 
         assert "Script name or file path" in result.message
 
+    @pytest.mark.parametrize(
+        ("allow_paths", "expected", "forbidden"),
+        [
+            (
+                False,
+                "move it into the directory (paths are not accepted over the control channel)",
+                "or run it by path",
+            ),
+            (True, "move it into the directory or run it by path", "not accepted"),
+        ],
+        ids=["control-channel", "local-cli"],
+    )
+    async def test_the_symlink_refusal_is_policy_aware(
+        self, simulator, tmp_path, allow_paths, expected, forbidden
+    ):
+        """Over ctl the two refusals used to point at each other.
+
+        "...move it into the directory or run it by path" was answered by
+        the very next line of code with "Script paths are not allowed over
+        the control channel; use a bare script name" (round-7 frontend L6).
+        Locally, running it by path really *is* the remedy, so that half of
+        the advice has to survive - which is why the string is policy-aware
+        rather than simply shortened.
+        """
+        outside = tmp_path.parent / f"outside_{allow_paths}"
+        outside.mkdir(exist_ok=True)
+        (outside / "secret.yaml").write_text(PASSING_SCRIPT)
+        (tmp_path / "evil.yaml").symlink_to(outside / "secret.yaml")
+        handler = CommandHandler(
+            simulator=simulator,
+            script_runner=ScriptRunner(simulator),
+            stop_callback=MagicMock(),
+            scripts_dir=str(tmp_path),
+            allow_script_paths=allow_paths,
+        )
+
+        with pytest.raises(ValueError) as excinfo:
+            handler._load_script_by_name("evil")
+
+        assert expected in str(excinfo.value)
+        assert forbidden not in str(excinfo.value)
+
+    async def test_a_shadowed_builtin_is_marked_with_its_real_path(self, simulator, tmp_path):
+        """The marker names the real file, suffix included.
+
+        It used to reconstruct `<dir>/<name>`, which read like a path but
+        `ls` on it failed, and could not express a shadowing `.yml`
+        (round-7 frontend L5).
+        """
+        shadowing = tmp_path / "basic_cycle.yml"
+        shadowing.write_text(
+            "name: Shadowing\ndescription: This shadows the built-in\nsteps:\n"
+            "  - action: log\n    message: ok\n"
+        )
+        handler = CommandHandler(
+            simulator=simulator,
+            script_runner=ScriptRunner(simulator),
+            stop_callback=MagicMock(),
+            scripts_dir=str(tmp_path),
+            allow_script_paths=False,
+        )
+
+        result = await handler.execute("list")
+
+        assert f"(shadowed by {shadowing})" in result.message
+        # Listed once as the shadowed built-in, once as the shadowing file.
+        entries = [line for line in result.message.split("\n") if line.startswith("  basic_cycle:")]
+        assert len(entries) == 2
+        assert entries[0].endswith(f"(shadowed by {shadowing})")
+        assert entries[1] == "  basic_cycle: This shadows the built-in"
+
 
 # ============================================================================
 # is_wait_run (R3-M3)

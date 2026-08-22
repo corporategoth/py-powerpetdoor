@@ -1032,25 +1032,17 @@ def main():
 
     # List scripts and exit
     if args.list_scripts:
-        from .scripting import list_builtin_scripts, list_extra_scripts, set_extra_scripts_dir
+        from .scripting import render_script_listing, set_extra_scripts_dir
 
-        # Same header the `list` command prints (T1): two spellings of the
-        # same list in the two places a user looks for it is a needless
-        # inconsistency.
-        print("Built-in scripts:")
-        for name, desc in list_builtin_scripts():
-            # Descriptions come out of YAML files (S3).
-            print(f"  {sanitize_text(name)}: {sanitize_text(desc)}")
+        # The very same renderer the `list` command uses. These two
+        # surfaces were always *intended* to agree, but the round-6 shadow
+        # marker landed only in `list`, so the pre-flight surface printed a
+        # shadowed name twice with no marker (round-7 frontend L5). Sharing
+        # the renderer is the only way that stays true.
         set_extra_scripts_dir(args.scripts_dir)
-        if args.scripts_dir is not None:
-            # Always print the header, even when empty, so the flag's effect
-            # is visible rather than silently absent (L1).
-            print(f"Scripts from {args.scripts_dir}:")
-            extra = list_extra_scripts()
-            for name, desc in extra:
-                print(f"  {sanitize_text(name)}: {sanitize_text(desc)}")
-            if not extra:
-                print("  (none)")
+        for line in render_script_listing(args.scripts_dir).lines:
+            # Names and descriptions come out of YAML files (S3).
+            print(sanitize_text(line))
         return
 
     # Determine daemon mode and control port
@@ -1081,8 +1073,11 @@ def main():
         parser.error("--control-host requires --daemon")
 
     if daemon:
-        # -1 means use default (port+1), otherwise use specified port
-        control_port = args.port + 1 if args.daemon == -1 else args.daemon
+        # -1 means use default (port + CONTROL_PORT_OFFSET), otherwise the
+        # port given. The offset was a named constant *and* inlined here,
+        # so nothing read the constant and the documented default had no
+        # executable pin (round-7 test-fanatic L2).
+        control_port = args.port + CONTROL_PORT_OFFSET if args.daemon == -1 else args.daemon
     else:
         control_port = None
 

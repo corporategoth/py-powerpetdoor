@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -125,6 +126,79 @@ from .schedule import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Facade cache guards (layer 1)
+# =============================================================================
+#
+# `PowerPetDoor` is the strict-typed layer: every property here is annotated
+# with a concrete Python type and consumers (the Home Assistant integration
+# publishes these as sensor states) are entitled to rely on it. The client is
+# layer 3 and is deliberately liberal - it hands the facade whatever the
+# device said, and `make_bool` is *documented* to return None for a string it
+# does not recognize - so the coercion has to happen here, on the way into the
+# cache.
+#
+# It did not. Five listeners assigned device values straight into strictly
+# typed attributes, so `batteryPercent: "55"` made the documented
+# `door.battery.charging` property raise TypeError with nothing logged
+# (round-7 backend M1), and stats/timezone silently held the wrong type
+# (round-7 backend L1). Worse, the `data.get(key, cached)` "keep the last
+# good value" defaults could never fire, because the client always builds
+# every key - so a bad frame *overwrote* a good cached value with None.
+#
+# The rule these three helpers enforce, and the one to apply to any listener
+# added later: **nothing enters the facade cache without a type check, and a
+# value that fails it leaves the cache untouched.**
+#
+# Rejections log at DEBUG, not WARNING: these listeners fire once per device
+# frame, and an unthrottled per-frame WARNING is precisely the log
+# amplification defect this project has removed from four other sites. The
+# client already logs every received frame at DEBUG, so an operator
+# diagnosing a firmware variant has both halves in the same place.
+
+
+def _keep_int(value: Any, cached: int, field_name: str) -> int:
+    """Coerce a device value to ``int``, or keep the cached one."""
+    # bool is an int subclass; True must not become 1 in a counter field.
+    if not isinstance(value, bool):
+        if isinstance(value, int):
+            return value
+        # json.loads accepts NaN/Infinity by default, and int() raises on
+        # both, so finiteness is checked before the conversion rather than
+        # after. isinstance(int) above already returned, so an arbitrarily
+        # large integer never reaches math.isfinite (which would overflow).
+        if isinstance(value, float) and math.isfinite(value):
+            return int(value)
+    _log_rejected(field_name, value, "int")
+    return cached
+
+
+def _keep_bool(value: Any, cached: bool, field_name: str) -> bool:
+    """Keep a device value only if it is already a ``bool``."""
+    if isinstance(value, bool):
+        return value
+    _log_rejected(field_name, value, "bool")
+    return cached
+
+
+def _keep_str(value: Any, cached: str, field_name: str) -> str:
+    """Keep a device value only if it is already a ``str``."""
+    if isinstance(value, str):
+        return value
+    _log_rejected(field_name, value, "str")
+    return cached
+
+
+def _log_rejected(field_name: str, value: Any, expected: str) -> None:
+    """Record a device value the facade refused to cache."""
+    logger.debug(
+        "Ignoring %s from device for %s (expected %s); keeping the cached value",
+        sanitize_text(value, MAX_LOGGED_LENGTH),
+        field_name,
+        expected,
+    )
 
 
 class DoorStatus(Enum):
@@ -1306,31 +1380,62 @@ class PowerPetDoor:
             self._pet_proximity_keep_open = not value
 
     def _on_battery_update(self, data: dict[str, Any]) -> None:
-        """Handle battery update from client."""
+        """Handle battery update from client.
+
+        Every field is type-checked on the way in (see the module-level
+        facade cache guards). The ``dict.get(key, cached)`` defaults this
+        used to rely on were dead code - ``_handle_battery`` always builds
+        all three keys, holding None for a field the device omitted - so a
+        reply that omitted ``batteryPercent`` replaced a good cached value
+        with None and made ``battery.charging`` raise (round-7 backend M1).
+        """
         self._battery = BatteryInfo(
-            percent=data.get(FIELD_BATTERY_PERCENT, self._battery.percent),
-            present=data.get(FIELD_BATTERY_PRESENT, self._battery.present),
-            ac_present=data.get(FIELD_AC_PRESENT, self._battery.ac_present),
+            percent=_keep_int(
+                data.get(FIELD_BATTERY_PERCENT), self._battery.percent, "battery_percent"
+            ),
+            present=_keep_bool(
+                data.get(FIELD_BATTERY_PRESENT), self._battery.present, "battery_present"
+            ),
+            ac_present=_keep_bool(
+                data.get(FIELD_AC_PRESENT), self._battery.ac_present, "ac_present"
+            ),
         )
 
     def _on_hold_time_update(self, value: int) -> None:
-        """Handle hold time update (value is in centiseconds)."""
-        self._hold_time = value / 100.0
+        """Handle hold time update (value is in centiseconds).
+
+        Found by the sibling sweep the round-7 fix ran over every retained
+        facade value, not by the report: a device that spells
+        ``holdOpenTime`` as ``"200"`` made ``value / 100.0`` raise
+        TypeError, which the client's listener isolation turned into a
+        full traceback *per frame* while the cache stayed silently stale;
+        and ``NaN`` (which ``json.loads`` accepts) was cached straight into
+        a property documented ``-> float``.
+        """
+        centiseconds = _keep_int(value, round(self._hold_time * 100), "hold_time")
+        self._hold_time = centiseconds / 100.0
 
     def _on_timezone_update(self, value: str) -> None:
-        self._timezone = value
+        self._timezone = _keep_str(value, self._timezone, "timezone")
 
     def _on_hw_info_update(self, data: dict[str, Any]) -> None:
         """Cache the device's hardware info.
 
-        Guarded because this is the only device payload the facade
-        *retains*: a scalar cached here poisons three documented public
-        properties (``firmware_version``, ``hardware_version``,
-        ``hardware_info`` all raise ``AttributeError``) with nothing in the
-        log tying the failure to the frame that caused it, and it heals
-        only on the next well-formed reply (round-6 backend M1). The client
-        already shields this listener, so the guard is defence in depth
-        against a third-party client subclass calling it directly.
+        Guarded like every other value the facade *retains*: a scalar
+        cached here poisons three documented public properties
+        (``firmware_version``, ``hardware_version``, ``hardware_info`` all
+        raise ``AttributeError``) with nothing in the log tying the failure
+        to the frame that caused it, and it heals only on the next
+        well-formed reply (round-6 backend M1). The client already shields
+        this listener, so the guard is defence in depth against a
+        third-party client subclass calling it directly.
+
+        This docstring used to claim ``_hw_info`` was "the only device
+        payload the facade retains", which is false and is what stopped the
+        round-6 sweep one method short: ``_battery``,
+        ``_total_open_cycles``, ``_total_auto_retracts`` and ``_timezone``
+        are retained too, and all four were unguarded (round-7 backend
+        M1/L1). They go through the module-level ``_keep_*`` helpers now.
         """
         if not isinstance(data, dict):
             logger.warning(
@@ -1344,10 +1449,10 @@ class PowerPetDoor:
     # callback(field, value) (decision D4 / backend M2).
 
     def _on_total_cycles_update(self, field_name: str, value: int) -> None:
-        self._total_open_cycles = value
+        self._total_open_cycles = _keep_int(value, self._total_open_cycles, field_name)
 
     def _on_total_retracts_update(self, field_name: str, value: int) -> None:
-        self._total_auto_retracts = value
+        self._total_auto_retracts = _keep_int(value, self._total_auto_retracts, field_name)
 
     def _on_notify_inside_on(self, field_name: str, value: bool | None) -> None:
         if value is not None:

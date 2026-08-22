@@ -528,6 +528,7 @@ class FrameDispatcher:
         "_max_inflight",
         "_pause_at",
         "_paused",
+        "_pump_scheduled",
         "_transport",
     )
 
@@ -544,6 +545,7 @@ class FrameDispatcher:
         self._backlog: deque[str] = deque()
         self._inflight = 0
         self._paused = False
+        self._pump_scheduled = False
         self._transport: asyncio.ReadTransport | None = None
 
     @property
@@ -586,12 +588,45 @@ class FrameDispatcher:
         self._transport = None
 
     def _pump(self) -> None:
-        while self._backlog and self._inflight < self._max_inflight:
+        """Dispatch at most ``max_inflight`` frames, then yield the loop.
+
+        The in-flight bound alone does not bound the *work admitted per
+        callback*, because it only counts frames that produced a task. A
+        frame that fails to parse dispatches to nothing, increments
+        nothing, and the loop keeps going - so one 256 KiB read of ``{x}``
+        drained all 87,381 frames synchronously inside ``data_received``,
+        blocking the event loop for ~250 ms without ever reaching the
+        pause threshold (round-7 security M1). For the host application
+        that is the whole loop, not just this connection.
+
+        Capping the frames handled per invocation and re-arming through
+        ``call_soon`` spreads the same work across loop turns: nothing is
+        refused, no byte is dropped, and every frame is still dispatched in
+        order. The re-arm is only needed when the backlog stalls with
+        dispatch slots free - if we stopped because ``max_inflight`` is
+        reached, the running handlers' done-callbacks pump the rest.
+        """
+        budget = self._max_inflight
+        while budget and self._backlog and self._inflight < self._max_inflight:
+            budget -= 1
             task = self._dispatch(self._backlog.popleft())
             if task is not None:
                 self._inflight += 1
                 task.add_done_callback(self._on_dispatched_done)
+        if self._backlog and self._inflight < self._max_inflight:
+            self._schedule_pump()
         self._update_flow()
+
+    def _schedule_pump(self) -> None:
+        """Continue pumping on the next event-loop turn (at most one pending)."""
+        if self._pump_scheduled:
+            return
+        self._pump_scheduled = True
+        asyncio.get_running_loop().call_soon(self._resume_pump)
+
+    def _resume_pump(self) -> None:
+        self._pump_scheduled = False
+        self._pump()
 
     def _on_dispatched_done(self, task: asyncio.Task) -> None:
         self._inflight -= 1

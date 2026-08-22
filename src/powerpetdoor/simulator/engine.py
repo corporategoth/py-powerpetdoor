@@ -46,9 +46,23 @@ from ..const import (
     DOOR_STATE_SLOWING,
     SENSOR_STATE_ON,
 )
+from ..sanitize import MAX_LOGGED_LENGTH, sanitize_text
 from .state import DoorSimulatorState
 
 logger = logging.getLogger(__name__)
+
+#: The two sensors a real door has, and the only names the engine acts on.
+#:
+#: Every gate in :meth:`DoorMotionEngine.trigger_sensor` is spelled
+#: ``if sensor == "inside"`` / ``elif sensor == "outside"``, so a name that
+#: is neither matched none of them and fell through to the open: a
+#: one-character typo in a script synthesised a third sensor that ignored
+#: the enable flags, the safety lock *and* the schedule, and the run still
+#: reported PASSED (round-7 frontend M2). Callers that want a hard failure
+#: (the script DSL) check against this first; the engine itself refuses the
+#: name the same way it refuses a disabled sensor, so the documented
+#: programmatic API keeps its "returns None" contract.
+SENSOR_NAMES = ("inside", "outside")
 
 #: Floor (seconds) on the blocked-sensor re-check wait. While a sensor
 #: blocks closing the engine waits ``max(hold_time, MIN_BLOCKED_RECHECK)``;
@@ -332,12 +346,32 @@ class DoorMotionEngine:
     # Sensor interaction
     # =========================================================================
 
+    @staticmethod
+    def _known_sensor(sensor: str) -> bool:
+        """Whether ``sensor`` is a sensor this door actually has.
+
+        Refuses in the same shape as the other gates - log and do nothing -
+        so ``DoorSimulator.trigger_sensor()`` / ``activate_sensor()``, both
+        documented programmatic APIs, keep returning None.
+        """
+        if sensor in SENSOR_NAMES:
+            return True
+        logger.warning(
+            "Simulator: Ignoring unknown sensor %s (use: %s)",
+            sanitize_text(sensor, MAX_LOGGED_LENGTH),
+            ", ".join(SENSOR_NAMES),
+        )
+        return False
+
     def trigger_sensor(self, sensor: str) -> None:
         """Simulate a sensor trigger (pet walking through).
 
         Args:
             sensor: "inside" or "outside"
         """
+        if not self._known_sensor(sensor):
+            return
+
         now = time.monotonic()
         state = self.state
 
@@ -410,6 +444,9 @@ class DoorMotionEngine:
         If door is closed, triggers a door cycle (respecting sensor enable
         and safety settings).
         """
+        if not self._known_sensor(sensor):
+            return
+
         state = self.state
 
         # Re-activating a sensor restarts its window: drop any pending
@@ -430,7 +467,10 @@ class DoorMotionEngine:
                 state.inside_sensor_active = True
                 logger.info("Simulator: Inside sensor activated for %ss", duration)
                 self._arm_sensor_timer(sensor, duration)
-        elif sensor == "outside":
+        else:
+            # `else`, not `elif sensor == "outside"`: the guard above has
+            # already established that the name is one of SENSOR_NAMES, so
+            # an `elif` would leave a destination nothing can reach.
             state.inside_sensor_active = False
             if duration == 0:
                 state.outside_sensor_active = not state.outside_sensor_active

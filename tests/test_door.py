@@ -29,13 +29,18 @@ from powerpetdoor.const import (
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
+    FIELD_AC_PRESENT,
     FIELD_AUTO,
     FIELD_AUTORETRACT,
+    FIELD_BATTERY_PERCENT,
+    FIELD_BATTERY_PRESENT,
     FIELD_CMD_LOCKOUT,
     FIELD_INSIDE,
     FIELD_OUTSIDE,
     FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
     FIELD_POWER,
+    FIELD_TOTAL_AUTO_RETRACTS,
+    FIELD_TOTAL_OPEN_CYCLES,
 )
 from powerpetdoor.simulator import (
     DoorSimulator,
@@ -2047,3 +2052,160 @@ class TestFacadeRejectsMalformedDevicePayloads:
         assert "Timeout fetching schedule zero" in [
             r.getMessage() for r in caplog.records if r.name == "powerpetdoor.door"
         ]
+
+
+# ============================================================================
+# Facade cache type guards (round-7 backend M1 / L1)
+# ============================================================================
+
+
+class TestFacadeCacheIsTypeGuarded:
+    """Nothing enters the facade cache without a type check.
+
+    ``PowerPetDoor`` is layer 1 (strict Python types) and the client is
+    layer 3 (deliberately liberal - it hands the facade whatever the device
+    said, and ``make_bool`` is *documented* to return None for a string it
+    does not recognize). Five listeners assigned those values straight into
+    strictly typed attributes:
+
+    - ``batteryPercent: "55"`` made the documented ``battery.charging``
+      property raise ``TypeError`` with **nothing logged** (backend M1);
+    - stats and timezone silently held the wrong Python type (backend L1);
+    - ``holdOpenTime: "200"`` raised out of the listener - a full traceback
+      per frame - and ``NaN`` was cached into a property documented
+      ``-> float`` (found by this round's sibling sweep).
+
+    And the ``dict.get(key, cached)`` "keep the last good value" defaults
+    could never fire, because ``_handle_battery`` always builds every key:
+    a reply that *omitted* a field overwrote a good cached value with None.
+    """
+
+    @pytest.fixture
+    def door(self):
+        return PowerPetDoor("127.0.0.1")
+
+    # -- battery ------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "percent",
+        ["55", None, True, float("nan"), float("inf"), [55], {"p": 55}],
+        ids=["str", "absent", "bool", "nan", "inf", "list", "dict"],
+    )
+    async def test_a_bad_battery_percent_keeps_the_cached_value(self, door, percent, caplog):
+        door._battery = BatteryInfo(percent=42, present=True, ac_present=True)
+
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.door"):
+            door._on_battery_update(
+                {
+                    FIELD_BATTERY_PERCENT: percent,
+                    FIELD_BATTERY_PRESENT: True,
+                    FIELD_AC_PRESENT: True,
+                }
+            )
+
+        assert door.battery_percent == 42
+        assert isinstance(door.battery_percent, int)
+        # The property that used to raise now answers, every time.
+        assert door.battery.charging is True
+        assert any("keeping the cached value" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize(
+        ("percent", "expected"),
+        [(55, 55), (0, 0), (100, 100), (55.7, 55)],
+        ids=["int", "zero", "full", "float-is-coerced"],
+    )
+    async def test_a_usable_battery_percent_is_cached_as_an_int(self, door, percent, expected):
+        door._on_battery_update({FIELD_BATTERY_PERCENT: percent})
+
+        assert door.battery_percent == expected
+        assert isinstance(door.battery_percent, int)
+
+    async def test_a_huge_integer_percent_does_not_overflow_the_guard(self, door):
+        """``math.isfinite`` on a 10**400 int raises OverflowError.
+
+        The guard returns on the ``isinstance(int)`` branch before it can,
+        so a hostile device cannot turn the type check itself into an
+        exception escaping the listener.
+        """
+        door._on_battery_update({FIELD_BATTERY_PERCENT: 10**400})
+
+        assert door.battery_percent == 10**400
+
+    @pytest.mark.parametrize(
+        "value", [None, "1", 1, "maybe"], ids=["unrecognized", "str", "int", "make_bool-None"]
+    )
+    async def test_a_non_bool_battery_flag_keeps_the_cached_value(self, door, value):
+        """``make_bool`` returns None for a value it does not recognize."""
+        door._battery = BatteryInfo(percent=42, present=True, ac_present=True)
+
+        door._on_battery_update({FIELD_BATTERY_PRESENT: value, FIELD_AC_PRESENT: value})
+
+        assert door.battery_present is True
+        assert door.ac_present is True
+        assert door.battery.charging is True
+        assert door.battery.discharging is False
+
+    async def test_a_usable_battery_flag_is_cached(self, door):
+        door._battery = BatteryInfo(percent=42, present=True, ac_present=True)
+
+        door._on_battery_update({FIELD_BATTERY_PRESENT: False, FIELD_AC_PRESENT: False})
+
+        assert door.battery_present is False
+        assert door.ac_present is False
+
+    # -- stats --------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "value", ["5", None, True, 1.5e400, [5]], ids=["str", "null", "bool", "inf", "list"]
+    )
+    async def test_bad_stats_counters_keep_the_cached_values(self, door, value):
+        door._total_open_cycles = 11
+        door._total_auto_retracts = 3
+
+        door._on_total_cycles_update(FIELD_TOTAL_OPEN_CYCLES, value)
+        door._on_total_retracts_update(FIELD_TOTAL_AUTO_RETRACTS, value)
+
+        assert door.total_open_cycles == 11
+        assert door.total_auto_retracts == 3
+
+    async def test_usable_stats_counters_are_cached(self, door):
+        door._on_total_cycles_update(FIELD_TOTAL_OPEN_CYCLES, 7)
+        door._on_total_retracts_update(FIELD_TOTAL_AUTO_RETRACTS, 2)
+
+        assert door.total_open_cycles == 7
+        assert door.total_auto_retracts == 2
+
+    # -- timezone -----------------------------------------------------------
+
+    @pytest.mark.parametrize("value", [5, None, True, ["EST"]], ids=["int", "null", "bool", "list"])
+    async def test_a_non_str_timezone_keeps_the_cached_value(self, door, value):
+        door._timezone = "EST5EDT,M3.2.0,M11.1.0"
+
+        door._on_timezone_update(value)
+
+        assert door.timezone == "EST5EDT,M3.2.0,M11.1.0"
+
+    async def test_a_str_timezone_is_cached(self, door):
+        door._on_timezone_update("UTC0")
+
+        assert door.timezone == "UTC0"
+
+    # -- hold time ----------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "value",
+        ["200", None, float("nan"), True, [200]],
+        ids=["str", "null", "nan", "bool", "list"],
+    )
+    async def test_a_bad_hold_time_keeps_the_cached_value_without_raising(self, door, value):
+        """A string used to raise ``TypeError`` straight out of the listener."""
+        door._hold_time = 4.0
+
+        door._on_hold_time_update(value)
+
+        assert door.hold_time == 4.0
+
+    async def test_a_usable_hold_time_is_cached_in_seconds(self, door):
+        door._on_hold_time_update(1500)
+
+        assert door.hold_time == 15.0

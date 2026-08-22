@@ -440,6 +440,24 @@ class TestRetainedRemainderCost:
         assert scanner._retained == len('{"a": "xy')
         assert scanner.buffer == '{"a": "xy'
 
+    def test_buffer_coalesces_exactly_two_pieces(self):
+        """Two retained pieces is the ordinary state after two feeds.
+
+        ``buffer`` coalesces the piece list and returns ``_pieces[0]``; the
+        ``len(self._pieces) > 1`` guard is the only thing that makes that
+        correct. Every existing ``.buffer`` assertion landed on 1 piece or
+        on 3+, so ``> 1`` -> ``> 2`` returned a **truncated** remainder
+        (``'{"a": '`` for ``'{"a": "xy'``) with all 2454 tests green
+        (round-7 test-fanatic M2).
+        """
+        scanner = FrameScanner()
+        scanner.feed('{"a": ')
+        scanner.feed('"xy')
+
+        assert len(scanner._pieces) == 2
+        assert scanner.buffer == '{"a": "xy'
+        assert scanner._retained == len(scanner.buffer)
+
     def test_a_frame_that_spans_three_feeds_is_assembled_intact(self):
         """The join happens across every retained piece, in order."""
         scanner = FrameScanner()
@@ -717,12 +735,28 @@ class TestEventThrottleTimeFloor:
         assert [record.getMessage() for record in caplog.records] == ["seen 2 (2 bytes)"]
 
     def test_flush_restarts_the_quiet_period(self, caplog):
-        """A flushed tail counts as a report, so it is not double-counted."""
+        """A flushed tail counts as a report, so it is not double-counted.
+
+        This could not fail. ``ManualClock`` starts at 1000.0 and the test
+        recorded and flushed with no ``advance`` in between, so
+        ``flush()``'s ``self._last_report = self._clock()`` wrote back the
+        value already there; the near-miss that follows was then measured
+        against the last *record* rather than against the flush, and the
+        assertion held whether or not ``flush()`` restarted anything.
+        Deleting the line the test is named after left its whole class -
+        and the whole suite - green (round-7 test-fanatic M3).
+
+        Advancing a full quiet period first makes the two clocks differ, so
+        the assignment is now decisive.
+        """
         clock = ManualClock()
         throttle = self._throttle(clock)
         with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
             for _ in range(5):  # reports at 1, 2, 4; the 5th is suppressed
                 throttle.record()
+            # Without this the flush's timestamp equals the last record's
+            # and the near-miss below cannot distinguish them.
+            clock.advance(framing.THROTTLE_QUIET_PERIOD)
             caplog.clear()
 
             throttle.flush()
@@ -732,6 +766,25 @@ class TestEventThrottleTimeFloor:
         # Only the flushed tail: the 6th occurrence is still inside the
         # quiet period the flush restarted, and is not due on the count.
         assert [record.getMessage() for record in caplog.records] == ["seen 5 (5 bytes)"]
+
+    def test_flush_marks_the_tail_as_reported(self, caplog):
+        """The *other* thing flush() updates: ``self._reported``.
+
+        Dropping that assignment also left the test above green, so the
+        state flush() writes was unpinned in both directions.
+        """
+        clock = ManualClock()
+        throttle = self._throttle(clock)
+        for _ in range(5):
+            throttle.record()
+        throttle.flush()
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.framing"):
+            caplog.clear()
+            # A second flush has nothing new to say.
+            throttle.flush()
+
+        assert caplog.records == []
 
     def test_reset_restarts_the_quiet_period_too(self):
         clock = ManualClock()
@@ -962,7 +1015,16 @@ class TestFrameDispatcher:
         assert transport.resume_calls == 0
 
     async def test_a_frame_that_produces_no_task_is_not_counted(self):
-        """A frame that fails json.loads costs nothing here."""
+        """A frame that fails json.loads costs no in-flight slot.
+
+        It also no longer drains the rest of the read synchronously. The
+        in-flight bound only counts frames that produced a task, so an
+        unparseable burst used to run the whole backlog to zero inside one
+        ``data_received`` - ~250 ms of unyielding event loop for one
+        256 KiB read (round-7 security M1). The pump now spends at most
+        ``max_inflight`` frames per invocation and re-arms on the next
+        loop turn.
+        """
 
         def dispatch(frame):
             return None
@@ -971,7 +1033,13 @@ class TestFrameDispatcher:
         dispatcher.submit(["{x}", "{y}"], RecordingTransport())
 
         assert dispatcher.inflight == 0
+        # One frame per invocation, then the loop gets a turn.
+        assert dispatcher.backlog == 1
+
+        await asyncio.sleep(0)
+
         assert dispatcher.backlog == 0
+        assert dispatcher.inflight == 0
 
     async def test_reset_drops_the_backlog_and_the_transport(self, dispatchers):
         """The undispatched frames belong to the connection that is over."""
@@ -1003,3 +1071,224 @@ class TestFrameDispatcher:
         assert dispatcher.inflight == 2
         assert dispatcher.backlog == 4
         assert dispatcher.paused is False
+
+
+class TestPumpYieldsBetweenBatches:
+    """The in-flight bound does not bound the *work admitted per read*.
+
+    It only counts frames that produced a task, so a frame that fails to
+    parse dispatches to nothing, increments nothing, and the loop keeps
+    going: one 256 KiB read of `{x}` drained all 87,381 frames
+    synchronously inside `data_received`, ~250 ms of unyielding event loop,
+    and the pause threshold never engaged at all. For the shipped client
+    that is the *host application's* loop (round-7 security M1).
+
+    Measured on this tree, one 256 KiB read into the simulator protocol,
+    5 trials, median callback block: `{x}` 252.0 ms -> 50.5 ms,
+    `{"a"}` 161.3 ms -> 36.8 ms, and `paused` went from False to True in
+    both cases. Nothing is refused and no byte is dropped - the same frames
+    are dispatched, in the same order, across more loop turns.
+    """
+
+    async def test_no_more_than_max_inflight_frames_per_invocation(self):
+        dispatched: list[str] = []
+
+        def dispatch(frame):
+            dispatched.append(frame)
+            return None
+
+        dispatcher = framing.FrameDispatcher(dispatch, max_inflight=4, pause_at=1000)
+        dispatcher.submit([f"{{{i}}}" for i in range(10)], RecordingTransport())
+
+        assert len(dispatched) == 4
+        assert dispatcher.backlog == 6
+
+        await asyncio.sleep(0)
+        assert len(dispatched) == 8
+
+        await asyncio.sleep(0)
+        assert len(dispatched) == 10
+        assert dispatcher.backlog == 0
+
+    async def test_every_frame_still_arrives_in_order(self):
+        dispatched: list[str] = []
+
+        def dispatch(frame):
+            dispatched.append(frame)
+            return None
+
+        submitted = [f"{{{i}}}" for i in range(500)]
+        dispatcher = framing.FrameDispatcher(dispatch, max_inflight=8, pause_at=10_000)
+        dispatcher.submit(submitted, RecordingTransport())
+
+        for _ in range(200):
+            if not dispatcher.backlog:
+                break
+            await asyncio.sleep(0)
+
+        assert dispatched == submitted
+
+    async def test_an_unparseable_burst_now_reaches_the_pause_threshold(self):
+        """`backlog left 0` was the whole problem: the pause never engaged."""
+
+        def dispatch(frame):
+            return None
+
+        transport = RecordingTransport()
+        dispatcher = framing.FrameDispatcher(dispatch, max_inflight=4, pause_at=8)
+        dispatcher.submit([f"{{x{i}}}" for i in range(64)], transport)
+
+        assert dispatcher.paused is True
+        assert transport.pause_calls == 1
+
+        for _ in range(200):
+            if not dispatcher.backlog:
+                break
+            await asyncio.sleep(0)
+
+        assert dispatcher.paused is False
+        assert transport.resume_calls == 1
+
+    async def test_only_one_continuation_is_ever_scheduled(self):
+        """A second submit while a pump is pending must not stack call_soons."""
+        dispatched: list[str] = []
+
+        def dispatch(frame):
+            dispatched.append(frame)
+            return None
+
+        dispatcher = framing.FrameDispatcher(dispatch, max_inflight=2, pause_at=1000)
+        dispatcher.submit(["{1}", "{2}", "{3}", "{4}"], RecordingTransport())
+        assert dispatcher._pump_scheduled is True
+
+        # Re-entering submit() must find the pending continuation and not
+        # arm a second one.
+        dispatcher.submit(["{5}", "{6}"], RecordingTransport())
+        assert dispatcher._pump_scheduled is True
+
+        for _ in range(50):
+            if not dispatcher.backlog:
+                break
+            await asyncio.sleep(0)
+
+        assert dispatched == ["{1}", "{2}", "{3}", "{4}", "{5}", "{6}"]
+        assert dispatcher._pump_scheduled is False
+
+    async def test_a_reset_while_a_pump_is_pending_is_safe(self):
+        """Fix interaction: the deferred pump meets `connection_lost`.
+
+        `DoorSimulatorProtocol.connection_lost` (and the client's
+        `disconnect`) call `reset()`, which now happens with a `call_soon`
+        continuation possibly still queued. It must find an empty backlog,
+        clear its own flag, and touch no transport - the connection is
+        over.
+        """
+        dispatched: list[str] = []
+
+        def dispatch(frame):
+            dispatched.append(frame)
+            return None
+
+        transport = RecordingTransport()
+        dispatcher = framing.FrameDispatcher(dispatch, max_inflight=2, pause_at=1)
+        dispatcher.submit(["{1}", "{2}", "{3}", "{4}"], transport)
+        assert dispatcher._pump_scheduled is True
+
+        dispatcher.reset()
+
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert dispatcher._pump_scheduled is False
+        assert dispatcher.backlog == 0
+        assert dispatcher.paused is False
+        # The two the first invocation spent, and nothing after the reset.
+        assert dispatched == ["{1}", "{2}"]
+
+    async def test_a_resubmit_after_reset_still_drains(self):
+        """...and the connection's successor is not starved by the flag."""
+        dispatched: list[str] = []
+
+        def dispatch(frame):
+            dispatched.append(frame)
+            return None
+
+        dispatcher = framing.FrameDispatcher(dispatch, max_inflight=2, pause_at=1000)
+        dispatcher.submit(["{1}", "{2}", "{3}"], RecordingTransport())
+        dispatcher.reset()
+        dispatcher.submit(["{a}", "{b}", "{c}"], RecordingTransport())
+
+        for _ in range(50):
+            if not dispatcher.backlog:
+                break
+            await asyncio.sleep(0)
+
+        assert dispatcher.backlog == 0
+        assert dispatched[-3:] == ["{a}", "{b}", "{c}"]
+
+    async def test_a_full_inflight_bound_does_not_arm_a_continuation(self):
+        """Nothing to re-arm: the running handlers' done-callbacks pump."""
+        tasks: list[asyncio.Task] = []
+
+        async def handler():
+            await asyncio.sleep(3600)
+
+        def dispatch(frame):
+            task = asyncio.ensure_future(handler())
+            tasks.append(task)
+            return task
+
+        dispatcher = framing.FrameDispatcher(dispatch, max_inflight=2, pause_at=1000)
+        try:
+            dispatcher.submit(["{1}", "{2}", "{3}"], RecordingTransport())
+
+            assert dispatcher.inflight == 2
+            assert dispatcher.backlog == 1
+            assert dispatcher._pump_scheduled is False
+        finally:
+            dispatcher.reset()
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class TestShippedResourceBoundsHaveTheirValuesPinned:
+    """Every test that touches these bounds imported the symbol.
+
+    That is the right way to keep tests non-brittle, but it left the
+    *value* completely untested: relaxing `MAX_BUFFER_SIZE` 64 KiB -> 1 MiB
+    and `MAX_WRITE_BACKLOG` 1 MiB -> 16 MiB - the two per-connection memory
+    caps round-6 security work added - left the whole suite green, and so
+    did `MAX_BUFFER_SIZE` 64 KiB -> 63 KiB, which the test-fanatic report
+    had chosen as its control mutation precisely because it "must" be
+    caught (round-7 test-fanatic L1).
+
+    The neighbouring constants (`MAX_INFLIGHT_FRAMES`, `MAX_FRAME_BACKLOG`,
+    `MAX_THROTTLE_INTERVAL`, `MAX_RETAINED_PIECES`) *were* caught, so this
+    is a real gap and not a property of the technique. Each assertion below
+    states the rationale, so changing one has to say why in the diff.
+    """
+
+    def test_the_retained_buffer_cap_is_64_kib(self):
+        """Per-connection memory cap: a peer that never completes a frame."""
+        assert framing.MAX_BUFFER_SIZE == 64 * 1024
+
+    def test_the_quiet_period_is_sixty_seconds(self):
+        """Carries "a new burst is never invisible"; 86400 voids it for a day."""
+        assert framing.THROTTLE_QUIET_PERIOD == 60.0
+
+    def test_the_throttle_ceiling_is_4096(self):
+        """Bounds the worst-case reporting delay of an endless burst."""
+        assert framing.MAX_THROTTLE_INTERVAL == 4096
+
+    def test_the_inflight_bound_is_64(self):
+        """Handlers running at once, per connection."""
+        assert framing.MAX_INFLIGHT_FRAMES == 64
+
+    def test_the_backlog_pause_threshold_is_256(self):
+        """Backlog depth above which the transport stops being read."""
+        assert framing.MAX_FRAME_BACKLOG == 256
+
+    def test_the_coalesce_threshold_is_64_pieces(self):
+        """Keeps memory held within a small factor of MAX_BUFFER_SIZE."""
+        assert framing.MAX_RETAINED_PIECES == 64

@@ -25,6 +25,7 @@ import asyncio
 import inspect
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -44,12 +45,15 @@ from powerpetdoor.const import (
     PRIORITY_LOW,
     PRIORITY_MEDIUM,
 )
+from powerpetdoor.simulator import cli as cli_module
+from powerpetdoor.simulator.commands import history as history_module
 from powerpetdoor.simulator.protocol import DoorSimulatorProtocol
 from powerpetdoor.simulator.state import DoorSimulatorState
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL_MD = REPO_ROOT / "docs" / "protocol.md"
 CLIENT_MD = REPO_ROOT / "docs" / "client.md"
+SIMULATOR_MD = REPO_ROOT / "docs" / "simulator.md"
 
 
 # ============================================================================
@@ -424,3 +428,184 @@ def test_hold_time_units_agree_between_the_docstring_and_the_prose():
     rows = _table_rows(_sections(CLIENT_MD)["available-listener-types"])
     prose = next(row[2] for row in rows if row[0] == "`hold_time_update`")
     assert "centiseconds" in prose
+
+
+# ============================================================================
+# docs/simulator.md defaults (round-7 test-fanatic L2)
+# ============================================================================
+
+
+def test_the_documented_control_port_offset_is_the_constant():
+    """`--daemon` advertises "door port + 1"; nothing executable said so.
+
+    `CONTROL_PORT_OFFSET` was defined and then *inlined* at the use site,
+    so the name had zero readers - a DRY-rule violation by this project's
+    own CLAUDE.md, and a mutation of `1` -> `2` that the whole suite could
+    not see. The constant is used now; this pins the prose to it.
+    """
+    row = next(
+        row for row in _table_rows(_sections(SIMULATOR_MD)["options"]) if "`--daemon`" in row[0]
+    )
+
+    assert f"door port + {cli_module.CONTROL_PORT_OFFSET}" in row[1]
+
+
+def test_the_daemon_control_port_really_is_the_documented_offset(monkeypatch):
+    """...and the prose is checked against the argument parser, by execution."""
+    captured: dict = {}
+
+    async def fake_run(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli_module, "run_simulator", fake_run)
+    monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--port", "4321", "--daemon"])
+
+    cli_module.main()
+
+    assert captured["control_port"] == 4321 + cli_module.CONTROL_PORT_OFFSET
+
+
+def test_the_documented_history_default_is_the_constant():
+    """`history [N|clear]` advertises "default 20"; nothing pinned it."""
+    row = next(row for row in _table_rows(_sections(SIMULATOR_MD)["info"]) if "`history" in row[0])
+
+    assert f"default {history_module.DEFAULT_HISTORY_LIMIT}" in row[2]
+
+
+# ============================================================================
+# pytest configuration pins (round-7 test-fanatic M1)
+# ============================================================================
+
+
+def test_the_deadlock_backstop_uses_the_thread_method():
+    """`timeout = 60` alone does not cover `tests/fuzz/`.
+
+    pytest-timeout's default "signal" method raises inside the running test
+    frame; hypothesis catches whatever the body raises and re-invokes it to
+    shrink, but the one-shot SIGALRM is spent, so every shrink attempt
+    re-enters the hang with no alarm armed and the process spins forever.
+    Measured with an infinite-loop mutation in `FrameScanner.feed`: a plain
+    test failed at 60 s, the *identical* hang inside `@given` produced zero
+    output in 150 s - under the project's real `-n auto` addopts as well as
+    `-n0` - and `timeout_method = "thread"` failed it at 60 s naming the
+    hanging line.
+
+    Nothing else in the suite can observe this setting, so it is asserted
+    here rather than left to a comment.
+    """
+    import tomllib
+
+    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    options = config["tool"]["pytest"]["ini_options"]
+
+    assert options["timeout"] == 60
+    assert options["timeout_method"] == "thread"
+
+
+# ============================================================================
+# docs/simulator.md script DSL (round-7 frontend L1 / L2 / L4)
+# ============================================================================
+
+
+def _yaml_blocks(text: str) -> list[str]:
+    """Every ```yaml fenced block in a markdown section."""
+    return re.findall(r"```yaml\n(.*?)```", text, re.DOTALL)
+
+
+async def test_the_script_format_example_actually_passes():
+    """The first thing a script author copies exited 1.
+
+    `trigger sensor` -> `wait 2` -> `assert door_status DOOR_CLOSED` is
+    deterministically wrong: the default `hold_time` is 2.0 s and the hold
+    timer only starts once the door *reaches* `DOOR_HOLDING`, so two
+    seconds is never enough (round-7 frontend L2). Running the block is the
+    only check that cannot drift.
+    """
+    from powerpetdoor.simulator import DoorSimulator
+    from powerpetdoor.simulator.scripting import Script, ScriptRunner
+
+    block = _yaml_blocks(_sections(SIMULATOR_MD)["script-format"])[0]
+    simulator = DoorSimulator()
+    try:
+        assert await ScriptRunner(simulator).run(Script.from_yaml(block)) is True
+    finally:
+        await simulator.stop()
+
+
+async def test_the_from_simple_commands_example_actually_passes():
+    """Its programmatic twin, one section earlier, had the same defect."""
+    from powerpetdoor.simulator import DoorSimulator
+    from powerpetdoor.simulator.scripting import Script, ScriptRunner
+
+    section = _sections(SIMULATOR_MD)["running-scripts-programmatically"]
+    listed = re.search(r"from_simple_commands\(\[(.*?)\]", section, re.DOTALL)
+    assert listed is not None
+    commands = re.findall(r'"([^"]+)"', listed.group(1))
+    assert commands  # the example must still be there
+
+    simulator = DoorSimulator()
+    try:
+        script = Script.from_simple_commands(commands, name="Doc Example")
+        assert await ScriptRunner(simulator).run(script) is True
+    finally:
+        await simulator.stop()
+
+
+def test_the_wait_for_condition_table_matches_the_implementation():
+    """The table was introduced as applying to `wait_for` *and* `assert`.
+
+    All 19 of its rows fail with `assert`, whose accepting set is disjoint
+    (round-7 frontend L1). `door_closing` was implemented and absent from
+    the table (round-7 frontend L4).
+    """
+    from powerpetdoor.simulator import scripting
+
+    rows = _table_rows(_sections(SIMULATOR_MD)["conditions-for-wait_for"])
+    documented = {row[0].strip("`") for row in rows if row[0] != "Condition"}
+    source = Path(scripting.__file__).read_text()
+    body = source.split("def _check_condition", 1)[1].split("\n    def ", 1)[0]
+    implemented = set(re.findall(r'condition == "([a-z_]+)"', body))
+    implemented |= set(scripting._STATUS_WAIT_CONDITIONS)
+
+    assert documented == implemented
+
+
+def test_the_assert_condition_table_matches_the_implementation():
+    from powerpetdoor.simulator import scripting
+
+    rows = _table_rows(_sections(SIMULATOR_MD)["conditions-for-assert"])
+    documented = {row[0].strip("`") for row in rows if row[0] != "Condition"}
+    source = Path(scripting.__file__).read_text()
+    body = source.split("def _assert_condition", 1)[1].split("\n    def ", 1)[0]
+    implemented = set(re.findall(r'condition == "([a-z_]+)"', body))
+    implemented |= set(re.findall(r'condition in \("([a-z_]+)"', body))
+
+    assert documented == implemented
+
+
+def test_the_two_condition_tables_are_disjoint():
+    """Which is why "you can *also* check these" was the wrong word."""
+    wait_for = {
+        row[0].strip("`")
+        for row in _table_rows(_sections(SIMULATOR_MD)["conditions-for-wait_for"])
+        if row[0] != "Condition"
+    }
+    asserts = {
+        row[0].strip("`")
+        for row in _table_rows(_sections(SIMULATOR_MD)["conditions-for-assert"])
+        if row[0] != "Condition"
+    }
+
+    assert wait_for & asserts == set()
+
+
+def test_every_script_action_is_documented():
+    """`inside`/`outside` were implemented, *depended on* by the "Numeric
+    bounds" note, and introduced nowhere (round-7 frontend L4)."""
+    from powerpetdoor.simulator import scripting
+
+    section = _sections(SIMULATOR_MD)["available-actions"]
+    documented = set(re.findall(r"^\*\*([a-z_]+)\*\*", section, re.MULTILINE))
+    documented |= set(re.findall(r"\*\* / \*\*([a-z_]+)\*\*", section))
+
+    assert set(scripting._ACTION_PARAMS) - documented == set()

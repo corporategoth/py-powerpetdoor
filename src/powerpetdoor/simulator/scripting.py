@@ -71,6 +71,7 @@ from ..const import (
 )
 from ..sanitize import sanitize_text
 from ..schedule import MAX_SCHEDULE_INDEX, coerce_schedule_flag
+from .engine import SENSOR_NAMES
 from .state import Schedule
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,43 @@ _STATUS_WAIT_CONDITIONS: dict[str, tuple[str, ...]] = {
     "door_holding": (DOOR_STATE_HOLDING,),
     "door_keepup": (DOOR_STATE_KEEPUP,),
     "door_closing": (DOOR_STATE_CLOSING_TOP_OPEN, DOOR_STATE_CLOSING_MID_OPEN),
+}
+
+#: The parameters each script action understands.
+#:
+#: No step parameter used to be validated at all, and the progress log
+#: renders ``step.params`` verbatim - so ``wait: {duration: 8}`` (``duration``
+#: is a real parameter name in this DSL, for ``inside``/``outside``) logged
+#: ``Step 1: wait(duration=8)``, waited the 1.0 s default instead of 8, and
+#: reported PASSED. The one piece of output an author inspects actively
+#: confirmed the typo had been accepted, and a script written to wait out a
+#: door cycle silently became a no-op that still exits 0 (round-7 frontend
+#: L3). Every other misspelling class in this DSL - action, setting,
+#: condition, and now sensor - fails loudly; parameters now do too.
+#:
+#: Keys must stay in step with the ``action == "..."`` chain in
+#: :meth:`ScriptRunner._execute_step`; that is pinned by
+#: ``test_every_executed_action_declares_its_parameters``.
+_ACTION_PARAMS: dict[str, frozenset[str]] = {
+    "trigger_sensor": frozenset({"sensor"}),
+    "trigger": frozenset({"sensor"}),
+    "obstruction": frozenset(),
+    "pet_presence": frozenset(),
+    "pet_on": frozenset(),
+    "pet_off": frozenset(),
+    "inside": frozenset({"duration"}),
+    "outside": frozenset({"duration"}),
+    "open": frozenset({"hold"}),
+    "close": frozenset(),
+    "wait": frozenset({"seconds"}),
+    "wait_for": frozenset({"condition", "timeout"}),
+    "set": frozenset({"name", "value"}),
+    "toggle": frozenset({"name"}),
+    "assert": frozenset({"condition", "equals"}),
+    "log": frozenset({"message"}),
+    "add_schedule": frozenset({"index", "enabled"}),
+    "remove_schedule": frozenset({"index"}),
+    "battery": frozenset({"percent", "value"}),
 }
 
 
@@ -390,10 +428,32 @@ class ScriptRunner:
         action = step.action.lower().replace("-", "_")
         params = step.params
 
+        # An unknown *action* is still caught by the chain's final `else`,
+        # which stays authoritative for that; this only rejects unknown
+        # parameters of an action we do recognize.
+        known_params = _ACTION_PARAMS.get(action)
+        if known_params is not None:
+            unexpected = sorted(set(params) - known_params)
+            if unexpected:
+                expected = ", ".join(sorted(known_params)) or "none"
+                raise ScriptError(
+                    f"Unknown parameter(s) for {action}: {', '.join(unexpected)}. Use: {expected}"
+                )
+
         state = self.simulator.state
 
         if action == "trigger_sensor" or action == "trigger":
+            # `sensor:` was the only user-supplied *name* in this DSL that
+            # was not validated, and it failed in the worst direction: an
+            # unrecognised name matched none of the engine's gates, so a
+            # one-character typo opened the door with both sensors disabled
+            # and the safety lock on - and still reported PASSED, which
+            # over `ctl run <name> wait` is a green CI exit code
+            # (round-7 frontend M2). Every other misspelling class here
+            # (action, setting, condition) already fails loudly.
             sensor = params.get("sensor", "inside")
+            if sensor not in SENSOR_NAMES:
+                raise ScriptError(f"Unknown sensor: {sensor}. Use: {', '.join(SENSOR_NAMES)}")
             self.simulator.trigger_sensor(sensor)
 
         elif action == "obstruction":
@@ -812,6 +872,20 @@ def describe_script_argument() -> str:
     return "Script name (paths are not accepted over the control channel)"
 
 
+def describe_out_of_directory_remedy() -> str:
+    """What to do about a script that resolves outside ``--scripts-dir``.
+
+    Policy-aware for the same reason :func:`describe_script_argument` is:
+    over the control channel "or run it by path" pointed the operator at a
+    form the very next line of code refuses, so the two refusals pointed at
+    each other (round-7 frontend L6). Locally, running it by path really is
+    the remedy, so the advice stays.
+    """
+    if _script_paths_allowed:
+        return "move it into the directory or run it by path"
+    return "move it into the directory (paths are not accepted over the control channel)"
+
+
 def script_escapes_directory(path: Path, base: Path) -> bool:
     """Whether ``path`` resolves outside its own ``base`` directory.
 
@@ -905,6 +979,67 @@ def list_builtin_scripts() -> list[tuple[str, str]]:
 def list_extra_scripts() -> list[tuple[str, str]]:
     """List the ``--scripts-dir`` scripts with descriptions."""
     return _describe_scripts(get_extra_script_files())
+
+
+@dataclass
+class ScriptListing:
+    """The rendered script listing plus the raw pairs behind it.
+
+    Attributes:
+        lines: The listing as printed, shadow markers included.
+        builtin: ``(name, description)`` for the built-in scripts.
+        extra: ``(name, description)`` for the ``--scripts-dir`` scripts.
+    """
+
+    lines: list[str]
+    builtin: list[tuple[str, str]]
+    extra: list[tuple[str, str]]
+
+
+def render_script_listing(
+    scripts_dir: str | None,
+    builtin: list[tuple[str, str]] | None = None,
+) -> ScriptListing:
+    """Render "what can I run?" for every surface that answers it.
+
+    The ``list`` command and ``ppd-simulator --list-scripts`` print the
+    same list, and ``cli.py`` even carries a comment saying they are meant
+    to agree - but the round-6 shadow marker landed in ``list`` and in tab
+    completion only. ``--list-scripts`` is the pre-flight surface (it needs
+    no daemon), so it is the one most likely to be consulted first, and it
+    showed the shadowed name twice with two contradicting descriptions and
+    nothing saying which one ``run`` picks (round-7 frontend L5).
+
+    The marker also prints the *real* file, from
+    :func:`get_extra_script_files`, rather than reconstructing
+    ``<dir>/<name>``: the reconstructed form dropped the suffix, so it read
+    like a path but ``ls`` on it failed, and it could not express a
+    shadowing ``.yml``.
+
+    Args:
+        scripts_dir: The configured ``--scripts-dir``, or None. When None
+            the "Scripts from ..." section is omitted entirely.
+        builtin: Pre-computed built-in pairs, for callers holding an
+            injected lister. Defaults to :func:`list_builtin_scripts`.
+    """
+    extra_files = get_extra_script_files()
+    extra = _describe_scripts(extra_files)
+    builtin = list(list_builtin_scripts() if builtin is None else builtin)
+
+    lines = ["Built-in scripts:"]
+    for name, desc in builtin:
+        shadowing = extra_files.get(name)
+        marker = f" (shadowed by {shadowing})" if shadowing is not None else ""
+        lines.append(f"  {name}: {desc}{marker}")
+    if scripts_dir is not None:
+        # Header even when the directory is empty, so the flag's effect is
+        # visible rather than silently absent (round-5 L1 / T5).
+        lines.append(f"Scripts from {scripts_dir}:")
+        for name, desc in extra:
+            lines.append(f"  {name}: {desc}")
+        if not extra:
+            lines.append("  (none)")
+    return ScriptListing(lines=lines, builtin=builtin, extra=extra)
 
 
 def script_completer(prefix: str = "") -> list[tuple[str, str]]:

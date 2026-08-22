@@ -247,6 +247,48 @@ class TestHoldtimeCommand:
         assert result.success is False
         assert result.message == "'0' is below minimum (0.1)\nUsage: holdtime [seconds]"
 
+    async def test_boundary_values_accepted(self, command_handler):
+        """The documented 0.1-900 bounds, asserted *at* the edges."""
+        assert (await command_handler.execute("holdtime 0.1")).success is True
+        assert command_handler.simulator.state.hold_time == 0.1
+        assert (await command_handler.execute("holdtime 900")).success is True
+        assert command_handler.simulator.state.hold_time == 900.0
+
+    @pytest.mark.parametrize("raw", ["nan", "inf", "Infinity", "1e400"])
+    async def test_non_finite_is_refused_without_touching_state(self, command_handler, raw):
+        """`holdtime nan` reported ERROR having already corrupted the state.
+
+        Everything downstream then broke: `broadcast settings` and
+        `broadcast all` failed forever after, and `GET_SETTINGS` /
+        `GET_HOLD_TIME` answered every connected client
+        `success:false / reason:"Command failed"` because
+        `int(hold_time * 100)` raises (round-7 frontend M1).
+        """
+        before = command_handler.simulator.state.hold_time
+
+        result = await command_handler.execute(f"holdtime {raw}")
+
+        assert result.success is False
+        assert result.message.startswith(f"'{raw}' must be a finite number")
+        assert command_handler.simulator.state.hold_time == before
+        # The value the wire path chokes on is still representable.
+        assert int(command_handler.simulator.state.hold_time * 100) >= 0
+
+    async def test_the_handler_itself_validates_before_writing(self, command_handler):
+        """Second layer, for a direct programmatic caller of the mixin.
+
+        `parse_arg` refuses non-finite input on the operator path, but the
+        rule this pins is the ordering one: a command that reports ERROR
+        must not have already mutated the state it reports failing on.
+        """
+        before = command_handler.simulator.state.hold_time
+
+        result = command_handler.holdtime(float("nan"))
+
+        assert result.success is False
+        assert result.message == "Hold time must be a finite number, got nan"
+        assert command_handler.simulator.state.hold_time == before
+
 
 # ============================================================================
 # battery / battery_present / charge rates

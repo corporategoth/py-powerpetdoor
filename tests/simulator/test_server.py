@@ -301,6 +301,36 @@ class TestDoorSimulator:
         simulator.set_battery(-10)
         assert simulator.state.battery_percent == 0
 
+    @pytest.mark.parametrize(
+        ("start", "end", "notifies"),
+        [
+            (21, 20, True),
+            (21, 21, False),
+            (20, 20, False),
+            (20, 19, False),
+            (21, 19, True),
+        ],
+        ids=["crosses-onto", "stays-above", "already-below", "below-to-below", "crosses-past"],
+    )
+    def test_the_low_battery_crossing_is_asserted_at_the_threshold(
+        self, simulator, monkeypatch, start, end, notifies
+    ):
+        """`old > THRESHOLD and new <= THRESHOLD` at exactly 20%.
+
+        The constant's *value* was pinned; the crossing was not, so both
+        `old_percent > THRESHOLD` -> `>=` and `percent <= THRESHOLD` -> `<`
+        survived the whole suite (round-7 test-fanatic M5). The rule is
+        edge-triggered: it fires only on the transition *onto* the
+        threshold, exactly once.
+        """
+        sent: list[int] = []
+        monkeypatch.setattr(simulator, "_send_low_battery_notification", lambda: sent.append(end))
+        simulator.state.battery_percent = start
+
+        simulator.set_battery(end)
+
+        assert bool(sent) is notifies
+
     def test_set_power(self, simulator):
         """set_power should update power state."""
         simulator.set_power(False)

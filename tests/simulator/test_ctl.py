@@ -906,6 +906,40 @@ class TestBasicReadline:
         finally:
             loop.set_exception_handler(old_handler)
 
+    async def test_cleanup_swallows_a_failing_remove_reader(self, pipe_stdin):
+        """The defensive `except` around `loop.remove_reader` in cleanup.
+
+        It carried a `# pragma: no cover` saying it "cannot be triggered
+        deterministically" because Linux selectors swallow errors for dead
+        fds. That first clause is true - no *real* selector drives this -
+        but `loop.remove_reader` is a stdlib API a test can replace, and
+        the contract the clause exists for is precisely testable: the error
+        must not reach the loop's exception handler. Pinned by this seam
+        test instead of hidden by a pragma (round-7 test-fanatic M4).
+        """
+        loop = asyncio.get_running_loop()
+        callback_errors: list[dict] = []
+        old_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, ctx: callback_errors.append(ctx))
+        real_remove_reader = loop.remove_reader
+
+        def boom(fd):
+            raise OSError(9, "Bad file descriptor")
+
+        try:
+            fut = ctl._basic_readline("> ")
+            loop.remove_reader = boom  # type: ignore[method-assign]
+            fut.cancel()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        finally:
+            loop.remove_reader = real_remove_reader  # type: ignore[method-assign]
+            loop.set_exception_handler(old_handler)
+
+        assert callback_errors == [], f"cleanup let the error escape: {callback_errors}"
+        # The reader really was registered, so the cleanup really ran.
+        real_remove_reader(sys.stdin.fileno())
+
 
 class TestEnableLineBuffering:
     """ctl -i off a terminal was block-buffered: 12 s of live log, 0 bytes (M3)."""

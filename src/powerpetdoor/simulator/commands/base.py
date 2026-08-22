@@ -10,6 +10,7 @@ used by all command handlers.
 """
 
 import functools
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TypeVar, cast
@@ -171,6 +172,21 @@ def parse_arg(value: str, spec: ArgSpec) -> tuple[Any, str | None]:
     elif spec.arg_type == "float":
         try:
             parsed_float = float(value)
+            # `nan`/`inf`/`Infinity`/`1e400` are legal float() parses, and
+            # every bound check below is False for nan, so the bounds the
+            # command's own help advertises silently did not hold. One
+            # `holdtime nan` then wedged the door and made GET_SETTINGS and
+            # GET_HOLD_TIME answer every connected client
+            # `success:false` for the life of the daemon (round-7 frontend
+            # M1). The wire path (protocol._require_finite) and the script
+            # DSL (ScriptRunner._script_number) already refuse these; this
+            # is the third front end onto the same state, and it now uses
+            # the same wording they do.
+            #
+            # The "int" branch needs no such guard: int("nan") and
+            # int("1e400") both raise ValueError and are caught below.
+            if not math.isfinite(parsed_float):
+                return None, f"'{value}' must be a finite number"
             # Validate limits
             if spec.min_value is not None and parsed_float < spec.min_value:
                 return None, f"'{value}' is below minimum ({spec.min_value})"
