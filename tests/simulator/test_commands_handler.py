@@ -199,7 +199,7 @@ class TestExecuteDispatch:
         monkeypatch.setattr(command_handler, "holdtime", boom)
         result = await command_handler.execute("holdtime 5")
         assert result.success is False
-        assert result.message == "Error: boom"
+        assert result.message == "boom"
 
     async def test_no_arg_handler_exception_reported(self, command_handler, monkeypatch):
         def boom():
@@ -208,7 +208,7 @@ class TestExecuteDispatch:
         monkeypatch.setattr(command_handler, "close", boom)
         result = await command_handler.execute("close")
         assert result.success is False
-        assert result.message == "Error: kaboom"
+        assert result.message == "kaboom"
 
     async def test_async_no_arg_handler_awaited(self, command_handler, monkeypatch):
         async def async_close():
@@ -226,7 +226,7 @@ class TestExecuteDispatch:
         monkeypatch.setattr(command_handler, "run", async_boom)
         result = await command_handler.execute("run something")
         assert result.success is False
-        assert result.message == "Error: async boom"
+        assert result.message == "async boom"
 
     async def test_implicit_subcommand_help_without_args(self, command_handler):
         result = await command_handler.execute("schedule ?")

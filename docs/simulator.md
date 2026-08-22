@@ -77,7 +77,9 @@ Then connect your client to `localhost:3000`.
 
 Mode-scoped flags are rejected outside their mode rather than silently
 ignored: `--loop`, `--script-delay`, `--oneshot` and `--wait-for-client`
-require `--script`, and `--control-host` requires `--daemon`.
+cannot be used without `--script` (in daemon mode, where `--script` is itself
+refused, the error says so directly), and `--control-host` requires
+`--daemon`.
 
 ### Options
 
@@ -94,7 +96,7 @@ require `--script`, and `--control-host` requires `--daemon`.
 | `--list-scripts`, `-l` | List runnable scripts (built-in, plus `--scripts-dir` if given) and exit |
 | `--daemon`, `-D` `[CONTROL_PORT]` | Run in daemon mode with a control channel (default control port: door port + 1) |
 | `--control-host` `ADDR` | Bind address for the daemon control channel (default: `127.0.0.1`). Requires `--daemon`. See the [security note](#daemon-mode) before widening this. |
-| `--scripts-dir` `DIR` | Directory of extra YAML scripts runnable by bare name, in addition to the built-ins. They appear in `list`, in `--list-scripts`, in unknown-script errors, and in tab completion. |
+| `--scripts-dir` `DIR` | Directory of extra YAML scripts runnable by bare name, in addition to the built-ins. They appear in `list`, in `--list-scripts`, in unknown-script errors, and in the *simulator CLI's* tab completion (ctl's completer cannot see them). Must exist. |
 | `--run-for`, `-r` `SECONDS` | Maximum run time in seconds (`--oneshot` can exit earlier) |
 | `--history` `FILE` | Prompt history file, or `none` to disable (default: `~/.powerpetdoor_simulator_history`; ignored when prompt_toolkit is not installed) |
 | `--firmware`, `-f` `VERSION` | Firmware version to report as `major.minor.patch` (default: 1.2.3) |
@@ -115,7 +117,7 @@ ppd-simulator -s basic_cycle -s obstruction_test --loop --script-delay 2
 # Run a script suite and exit (useful for CI/CD)
 ppd-simulator --script full_test_suite --oneshot
 
-# List available built-in scripts
+# List runnable scripts (built-in, plus --scripts-dir if given)
 ppd-simulator --list-scripts
 ```
 
@@ -235,13 +237,14 @@ The `schedule` command (alias `sched`) manages schedule entries:
 |---------|---------|--------|
 | `run <script>` | `r`, `file` | Queue a script — built-in name, `--scripts-dir` name, or YAML file path. The command returns as soon as the script is queued; the PASSED/FAILED result is only logged. A queued script waits for any script already running |
 | `run <script> wait` | `r`, `file` | Run the script synchronously and report `Script PASSED`/`Script FAILED` as the command result. Fails immediately with `Another script is already running: <name>` rather than queueing, so the result always belongs to the script you asked for. Over ctl this is the only form whose exit code reflects the script |
-| `list` | `/`, `scripts` | List runnable scripts (built-in, plus any from `--scripts-dir`) |
+| `list` | `/`, `scripts` | List runnable scripts (built-in, plus any from `--scripts-dir`), ending with the runner's current state |
+| `stop` | | Stop the **running script** at its next step boundary (the run then reports FAILED). Does *not* stop the simulator — use `shutdown` for that |
 
 ### Info
 
 | Command | Aliases | Action |
 |---------|---------|--------|
-| `status` | `state`, `info`, `v` | Show the full simulator state (connected clients, door, power, sensors, settings, battery, notifications, schedules, statistics) |
+| `status` | `state`, `info`, `v` | Show the full simulator state (connected clients, door, power, sensors, settings, battery, notifications, schedules, statistics) and the script runner's state (`Script: none running` / `Script: running "<name>" (N queued)`) |
 | `help` | `?` | Show all available commands |
 | `broadcast <what>` | `bc` | Push an unsolicited update to connected door clients. `<what>` is one of `status`, `settings`, `battery`, `hwinfo`, `stats`, `schedules`, `notifications`, `all`. Errors if no client is connected |
 | `history [N\|clear]` | `hist` | Show the last N commands (default 20) or clear history. Needs an interactive terminal session with prompt_toolkit installed; otherwise the command is hidden and reported as unknown |
@@ -251,7 +254,7 @@ The `schedule` command (alias `sched`) manages schedule entries:
 | Command | Aliases | Action |
 |---------|---------|--------|
 | `debug [on\|off]` | | Show or set debug logging |
-| `shutdown` | `stop` | Stop the simulator |
+| `shutdown` | | Stop the **simulator**. `stop` is *not* an alias for this — it stops the running script |
 | `exit` | `q`, `quit` | In the interactive CLI these are aliases for `shutdown` |
 | `clear` | `cls` | Clear the screen (interactive prompt only) |
 
@@ -306,9 +309,15 @@ arbitrary YAML file path is only possible locally, via the interactive CLI or
 `--script`.
 
 Start the daemon with `--scripts-dir DIR` to make your own YAML scripts
-runnable by bare name. They then show up in `list`, in `--list-scripts`, in
-the "Available:" hint of an unknown-script error, and in tab completion, so a
-ctl user who did not start the daemon can still discover them.
+runnable by bare name. They then show up in `list`, in `--list-scripts` and in
+the "Available:" hint of an unknown-script error, so a ctl user who did not
+start the daemon can still discover them with `list`.
+
+Tab completion for those names works in the **simulator CLI only**.
+`ppd-simulator-ctl` is a separate process that never learns the daemon's
+`--scripts-dir`, so its completer offers the built-in names only — use `list`
+to see the rest. A nonexistent `--scripts-dir` is rejected at startup, and an
+existing but empty one logs a warning.
 
 ## Remote Control (ppd-simulator-ctl)
 
@@ -344,9 +353,20 @@ daemon connection is alive. For every other command `--timeout` bounds a *gap*
 in daemon traffic rather than the total wait, so streaming `LOG:` output keeps
 a long-running command alive.
 
+While a wait-run is in flight ctl streams the daemon's `LOG:` lines to
+**stderr** as they arrive, so a CI job sees progress and — when a script fails
+— the assertion text that explains why. stdout carries only the single result
+line, so `ppd-simulator-ctl run x wait` stays scriptable:
+
+```bash
+ppd-simulator-ctl run full_test_suite wait 2>run.log || cat run.log
+```
+
 Only one script runs at a time. A wait-run issued while another script is
 running fails immediately with `Another script is already running: <name>`
-instead of interleaving; a plain (queued) `run` waits its turn.
+instead of interleaving; a plain (queued) `run` waits its turn. `status` and
+`list` report what is running and how deep the queue is, and `stop` ends the
+running script.
 
 ### Interactive Mode
 

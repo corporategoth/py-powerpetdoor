@@ -21,10 +21,10 @@ jobs:
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Create virtual environment
-        run: uv venv && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+      # Resolve from the committed, hashed uv.lock rather than fresh from
+      # PyPI - this is the job that gates a publish.
       - name: Install dependencies
-        run: uv pip install -e ".[dev]"
+        run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
       - name: Run tests
         run: pytest --ignore=tests/fuzz -q
 
@@ -43,6 +43,9 @@ jobs:
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           python-version: "3.14"
+      # The build backend is pinned exactly in [build-system] requires, so
+      # `uv build`'s isolated build environment cannot pull an arbitrary
+      # setuptools/wheel from PyPI into the job that holds id-token: write.
       - name: Build package
         run: uv build
       - name: Publish to PyPI

@@ -59,6 +59,12 @@ logger = logging.getLogger(__name__)
 #: unnoticed for up to ``hold_time``.
 MIN_BLOCKED_RECHECK = 0.1
 
+#: Deferred sequence intents. A re-entrant request records what was asked
+#: for, not where the door was when it was asked - see
+#: :meth:`DoorMotionEngine._defer_sequence`.
+_INTENT_OPEN = "open"
+_INTENT_CLOSE = "close"
+
 
 class DoorMotionEngine:
     """The single door open/hold/close/retract state machine.
@@ -88,7 +94,7 @@ class DoorMotionEngine:
         #: Non-zero while status callbacks are running inside the owner
         #: task; sequence starts requested from there are deferred.
         self._dispatch_depth = 0
-        self._pending_sequence: tuple[str, bool] = (DOOR_STATE_CLOSED, False)
+        self._pending_sequence: tuple[str, bool] = (_INTENT_CLOSE, False)
         self._restart_handle: asyncio.Handle | None = None
         self._hold_mode = False
         self._hold_deadline = 0.0
@@ -161,7 +167,7 @@ class DoorMotionEngine:
         that window so a callback that commands the door (``open()``/
         ``close()``) defers its sequence start instead of spawning a second
         runner alongside the one dispatching to it (see
-        :meth:`_start_sequence`).
+        :meth:`_defer_sequence`).
         """
         self.state.door_status = status
         self._dispatch_depth += 1
@@ -206,6 +212,9 @@ class DoorMotionEngine:
             logger.debug("Simulator: Open command ignored (already opening)")
             return False
 
+        if self._defer_sequence(_INTENT_OPEN, hold):
+            return True
+
         # CLOSING_TOP_OPEN (66%) -> SLOWING (66%)
         # CLOSING_MID_OPEN (33%) -> RISING (33%)
         # CLOSED -> RISING
@@ -218,7 +227,7 @@ class DoorMotionEngine:
         else:
             start_state = DOOR_STATE_RISING
 
-        self._start_sequence(start_state, hold=hold)
+        self._replace_sequence(start_state, hold)
         return True
 
     def close(self) -> bool:
@@ -241,6 +250,9 @@ class DoorMotionEngine:
             logger.debug("Simulator: Close command ignored (already closing)")
             return False
 
+        if self._defer_sequence(_INTENT_CLOSE, False):
+            return True
+
         # RISING (33%) -> CLOSING_MID_OPEN (33%)
         # SLOWING (66%) -> CLOSING_TOP_OPEN (66%)
         # HOLDING/KEEPUP -> CLOSING_TOP_OPEN
@@ -253,11 +265,11 @@ class DoorMotionEngine:
         else:
             start_state = DOOR_STATE_CLOSING_TOP_OPEN
 
-        self._start_sequence(start_state, hold=False)
+        self._replace_sequence(start_state, False)
         return True
 
-    def _start_sequence(self, start_state: str, hold: bool) -> None:
-        """Start a sequence from ``start_state``, replacing any current one.
+    def _defer_sequence(self, intent: str, hold: bool) -> bool:
+        """Record a re-entrant open/close request for later application.
 
         A request made from a status listener or the broadcast callback
         arrives *inside* the owner task's call stack, where the owner is
@@ -265,27 +277,45 @@ class DoorMotionEngine:
         recorded and applied from a ``call_soon`` callback instead, once the
         owner task is suspended again — so exactly one ``_run`` task can ever
         exist. Repeat requests within one dispatch coalesce (last one wins).
+
+        What is recorded is the *intent* (open/close), never a resolved
+        start state: the owner task does not always suspend between two
+        ``_set_status`` calls (``_hold_open`` returns without awaiting when
+        ``hold_time`` is ~0), so a state resolved at request time can be
+        stale by the time it is applied, and replaying it re-broadcasts a
+        status the door has already moved past (L3).
+
+        Returns:
+            True if the request was deferred (the caller must not act now).
         """
-        if self._dispatch_depth:
-            self._pending_sequence = (start_state, hold)
-            if self._restart_handle is None:
-                self._restart_handle = asyncio.get_running_loop().call_soon(
-                    self._start_pending_sequence
-                )
-            return
-        self._replace_sequence(start_state, hold)
+        if not self._dispatch_depth:
+            return False
+        self._pending_sequence = (intent, hold)
+        if self._restart_handle is None:
+            self._restart_handle = asyncio.get_running_loop().call_soon(
+                self._start_pending_sequence
+            )
+        return True
 
     def _start_pending_sequence(self) -> None:
-        """Apply a sequence start deferred out of a status-callback stack."""
+        """Apply a sequence start deferred out of a status-callback stack.
+
+        Re-invokes :meth:`open`/:meth:`close`, which re-derive the start
+        state from the status the door is in *now* and correctly no-op when
+        it already got there ("already closing").
+        """
         self._restart_handle = None
-        start_state, hold = self._pending_sequence
-        self._replace_sequence(start_state, hold)
+        intent, hold = self._pending_sequence
+        if intent == _INTENT_OPEN:
+            self.open(hold=hold)
+        else:
+            self.close()
 
     def _replace_sequence(self, start_state: str, hold: bool) -> None:
         """Replace the current sequence task with a new one from start_state.
 
-        Only ever called from outside the owner task (``_start_sequence``
-        defers re-entrant calls), so cancelling the current task is safe:
+        Only ever called from outside the owner task (``open``/``close``
+        defer re-entrant calls), so cancelling the current task is safe:
         it is suspended at an await point and can no longer change status.
         It is awaited in :meth:`stop`.
         """

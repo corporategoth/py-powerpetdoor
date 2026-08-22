@@ -16,6 +16,7 @@ import socket
 import sys
 from typing import TYPE_CHECKING, cast
 
+from ..sanitize import sanitize_text
 from ..tz_utils import async_init_timezone_cache
 
 # Import command infrastructure for local command handling
@@ -38,7 +39,7 @@ from .prompt_common import (
     PROMPT_TOOLKIT_AVAILABLE,
     InputLine,
     InteractiveSession,
-    sanitize_text,
+    render_result,
     unescape_message,
 )
 
@@ -211,7 +212,9 @@ class LocalCommandHandler(InfoCommandsMixin, ControlCommandsMixin):
                     )
                 result = handler()
         except Exception as e:
-            return LocalCommandResult(False, f"Error: {e}")
+            # The transport already labels failures ("ERROR: ..."), so an
+            # inner "Error: " prefix only doubles it up (T2).
+            return LocalCommandResult(False, str(e))
 
         # Check for exit marker
         if result.message == "__EXIT_CTL__":
@@ -236,7 +239,10 @@ def send_command(
     received chunk restarts it, so a chatty command never times out. For
     ``run <script> wait`` there is no deadline at all - the script's
     duration is unbounded and arbitrarily quiet, and the live connection is
-    the liveness signal.
+    the liveness signal. A wait-run also streams the daemon's ``LOG:`` lines
+    to **stderr** as they arrive, so a CI job sees progress while the script
+    runs and the assertion that failed when it does (M3); stdout stays
+    clean for the single result line.
 
     Args:
         host: Simulator host address
@@ -252,7 +258,8 @@ def send_command(
             sock.settimeout(timeout)
             sock.connect((host, port))
             sock.sendall(f"{command}\n".encode())
-            if is_wait_run(command):
+            stream_logs = is_wait_run(command)
+            if stream_logs:
                 sock.settimeout(None)
 
             # Read response - only complete (newline-terminated) lines are
@@ -279,7 +286,13 @@ def send_command(
                     elif line.startswith("ERROR:"):
                         msg = sanitize_text(unescape_message(line[7:]))
                         return False, f"ERROR: {msg}"
-                    # LOG:/STATUS: lines are not command responses - skip them
+                    elif stream_logs and line.startswith("LOG:"):
+                        print(
+                            sanitize_text(unescape_message(line[5:])),
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    # Other LOG:/STATUS: lines are not command responses - skip
 
             # Connection closed without a response line
             leftover = sanitize_text(buffer.strip())
@@ -586,7 +599,7 @@ async def interactive_mode_async(
                 if result.exit_ctl:
                     break
                 if result.message:
-                    print(f">>> {result.message}")
+                    print(render_result(result.message))
                 continue
 
             # Send command to daemon
@@ -594,7 +607,7 @@ async def interactive_mode_async(
             interactive.handle_result(input_line, success)
 
             if response:
-                print(f">>> {response}")
+                print(render_result(response))
 
     except KeyboardInterrupt:
         print("\nExiting.")
@@ -658,7 +671,10 @@ Use the 'help' command to see available simulator commands.
         "-t",
         type=float,
         default=5.0,
-        help="Command timeout in seconds (default: 5)",
+        help="Seconds of daemon SILENCE tolerated while waiting for a response "
+        "(default: 5). Any received line restarts it, so a chatty command never "
+        "trips it; 'run <script> wait' ignores it entirely and waits as long as "
+        "the script takes.",
     )
     # Always registered so command lines are portable; ignored (with a note in
     # the help text) when prompt_toolkit is not installed

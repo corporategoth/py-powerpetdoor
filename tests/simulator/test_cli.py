@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
 import sys
@@ -105,15 +106,21 @@ class PipeStdin:
 class FakeStreamWriter:
     """Recording fake for asyncio.StreamWriter used in ControlChannel tests."""
 
-    def __init__(self, *, fail_write=False, fail_close=False, fail_wait_closed=False):
+    def __init__(
+        self, *, fail_write=False, fail_close=False, fail_wait_closed=False, closing=False
+    ):
         self.data = b""
         self.closed = False
         self._fail_write = fail_write
         self._fail_close = fail_close
         self._fail_wait_closed = fail_wait_closed
+        self._closing = closing
 
     def get_extra_info(self, name):
         return ("127.0.0.1", 55555)
+
+    def is_closing(self) -> bool:
+        return self._closing or self.closed
 
     def write(self, data: bytes):
         if self._fail_write:
@@ -396,7 +403,7 @@ class TestControlChannelScriptRestrictions:
         _, channel, _ = control_setup
         response = await self._run_over_channel(channel, "run no_such_script")
         assert response.startswith("ERROR:")
-        assert "Unknown built-in script" in response
+        assert "Unknown script" in response
 
 
 # ============================================================================
@@ -578,10 +585,10 @@ class TestMainArguments:
     @pytest.mark.parametrize(
         ("flag", "message"),
         [
-            (["--loop"], "error: --loop require --script"),
-            (["--script-delay", "1"], "error: --script-delay require --script"),
-            (["--oneshot"], "error: --oneshot require --script"),
-            (["--wait-for-client"], "error: --wait-for-client require --script"),
+            (["--loop"], "error: --loop cannot be used without --script"),
+            (["--script-delay", "1"], "error: --script-delay cannot be used without --script"),
+            (["--oneshot"], "error: --oneshot cannot be used without --script"),
+            (["--wait-for-client"], "error: --wait-for-client cannot be used without --script"),
         ],
     )
     def test_script_only_flags_rejected_without_script(self, capsys, monkeypatch, flag, message):
@@ -597,7 +604,15 @@ class TestMainArguments:
         with pytest.raises(SystemExit) as exc_info:
             cli.main()
         assert exc_info.value.code == 2
-        assert "error: --loop, --oneshot require --script" in capsys.readouterr().err
+        assert "error: --loop, --oneshot cannot be used without --script" in capsys.readouterr().err
+
+    def test_script_only_flags_in_daemon_mode_say_so(self, capsys, monkeypatch):
+        """--daemon --oneshot used to advise --script, which --daemon refuses (T1)."""
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--daemon", "--oneshot"])
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+        assert exc_info.value.code == 2
+        assert "error: --oneshot is not available in daemon mode" in capsys.readouterr().err
 
     def test_control_host_rejected_without_daemon(self, capsys, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--control-host", "0.0.0.0"])
@@ -629,6 +644,26 @@ class TestMainArguments:
         assert "Available built-in scripts:" in out
         assert f"Scripts from {tmp_path}:" in out
         assert "  my_custom: Local extras" in out
+
+    def test_list_scripts_shows_an_empty_scripts_dir_explicitly(
+        self, capsys, monkeypatch, tmp_path
+    ):
+        """The flag's effect must be visible even when it finds nothing (L1)."""
+        monkeypatch.setattr(
+            sys, "argv", ["ppd-simulator", "--list-scripts", "--scripts-dir", str(tmp_path)]
+        )
+        cli.main()
+        out = capsys.readouterr().out
+        assert f"Scripts from {tmp_path}:\n  (none)\n" in out
+
+    def test_missing_scripts_dir_is_rejected(self, capsys, monkeypatch, tmp_path):
+        """A typo'd --scripts-dir used to be silently ignored (L1)."""
+        missing = tmp_path / "nope"
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--scripts-dir", str(missing)])
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+        assert exc_info.value.code == 2
+        assert f"error: --scripts-dir {missing}: not a directory" in capsys.readouterr().err
 
     def test_daemon_explicit_control_port(self, monkeypatch):
         captured = self._run_main(monkeypatch, ["ppd-simulator", "--daemon", "4321"])
@@ -797,6 +832,37 @@ class TestInteractivePrompt:
 
 
 # ============================================================================
+# Non-TTY status output (M2)
+# ============================================================================
+
+
+class TestStatusPrint:
+    """Operator-facing status lines must survive a redirected stdout."""
+
+    def test_status_print_flushes(self, monkeypatch):
+        """stdout is block-buffered off a terminal; the banner and script
+        progress would otherwise appear after the fact, or die with the
+        process on SIGTERM (M2)."""
+        flushes: list[bool] = []
+
+        class RecordingStdout(io.StringIO):
+            def flush(self):
+                flushes.append(True)
+                super().flush()
+
+        stream = RecordingStdout()
+        monkeypatch.setattr(sys, "stdout", stream)
+        cli.status_print("Simulator started on 0.0.0.0:3000")
+
+        assert stream.getvalue() == "Simulator started on 0.0.0.0:3000\n"
+        assert flushes  # print(..., flush=True)
+
+    def test_status_print_blank_line(self, capsys):
+        cli.status_print()
+        assert capsys.readouterr().out == "\n"
+
+
+# ============================================================================
 # _ControlLogHandler (daemon log broadcast)
 # ============================================================================
 
@@ -808,10 +874,54 @@ class TestControlLogHandler:
     def test_broken_writer_does_not_stop_broadcast(self):
         good = FakeStreamWriter()
         bad = FakeStreamWriter(fail_write=True)
-        handler = cli._ControlLogHandler({good, bad})
+        clients = {good, bad}
+        handler = cli._ControlLogHandler(clients)
         handler.setFormatter(logging.Formatter("%(message)s"))
         handler.emit(self._record("hi"))
         assert good.data == b"LOG: hi\n"
+        # A writer that raised is dropped, not retried on every record (H1)
+        assert clients == {good}
+
+    def test_closing_writer_is_dropped_without_writing(self):
+        """A peer that died mid-stream is only noticed here (H1)."""
+        good = FakeStreamWriter()
+        dead = FakeStreamWriter(closing=True)
+        clients = {good, dead}
+        handler = cli._ControlLogHandler(clients)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        handler.emit(self._record("hi"))
+        assert dead.data == b""
+        assert clients == {good}
+
+    def test_emit_refuses_to_re_enter(self):
+        """asyncio logs from inside write(); rebroadcasting that is the loop.
+
+        Reproduces the report's scenario (a ctl client killed / piped to
+        head): the writer stays open but every write emits a root-logger
+        WARNING. Without the guard this recurses until the stack blows;
+        with it, exactly one record is broadcast per real record.
+        """
+        records: list[str] = []
+
+        class LoggingWriter(FakeStreamWriter):
+            def write(self, data: bytes):
+                super().write(data)
+                records.append(data.decode())
+                # What asyncio's selector transport does once _conn_lost
+                # passes its threshold.
+                logging.getLogger("asyncio").warning("socket.send() raised exception.")
+
+        writer = LoggingWriter()
+        handler = cli._ControlLogHandler({writer})
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            logging.getLogger("powerpetdoor.test").warning("one real record")
+        finally:
+            root.removeHandler(handler)
+
+        assert records == ["LOG: one real record\n"]
 
     def test_format_error_calls_handle_error(self, capsys):
         good = FakeStreamWriter()
@@ -925,6 +1035,16 @@ class TestControlChannelEdges:
         channel.clients.update({good, bad})
         channel.broadcast_status()
         assert good.data == b"STATUS: clients=0\n"
+        assert channel.clients == {good}
+
+    def test_broadcast_status_drops_closing_writers(self):
+        channel = make_channel()
+        good = FakeStreamWriter()
+        dead = FakeStreamWriter(closing=True)
+        channel.clients.update({good, dead})
+        channel.broadcast_status()
+        assert dead.data == b""
+        assert channel.clients == {good}
 
     async def test_stop_twice_is_safe(self, control_setup):
         _, channel, _ = control_setup
@@ -1520,6 +1640,20 @@ class TestRunSimulatorDaemonExtras:
             line = await read_line_containing(reader, "Script PASSED: Passing Script")
             assert line.startswith("LOG: ")
 
+            writer.write(b"shutdown\n")
+            await writer.drain()
+            assert await asyncio.wait_for(task, 10) is None
+        finally:
+            writer.close()
+
+    async def test_empty_scripts_dir_warns_at_startup(self, tmp_path, caplog):
+        """An existing but empty --scripts-dir must not be silent either (L1)."""
+        caplog.set_level(logging.WARNING)
+        task, ports = await self._start_daemon(scripts_dir=str(tmp_path))
+        reader, writer = await asyncio.open_connection("127.0.0.1", ports["control"])
+        try:
+            await read_line_matching(reader, "STATUS:")
+            assert f"No *.yaml/*.yml scripts found in {tmp_path}" in caplog.text
             writer.write(b"shutdown\n")
             await writer.drain()
             assert await asyncio.wait_for(task, 10) is None

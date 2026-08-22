@@ -291,8 +291,11 @@ class Schedule:
             # Convert bitmask to list of booleans [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
             days = [bool((days >> i) & 1) for i in range(7)]
         else:
-            # Convert 1/0 list to booleans
-            days = [bool(d) for d in days]
+            # Read each flag the way every other wire flag is read: bool("0")
+            # is True, so plain truthiness would turn a day the device
+            # reported as disabled back on. Anything make_bool cannot read
+            # fails closed rather than granting access (L4).
+            days = [make_bool(d) is True for d in days]
 
         # Handle enabled field - could be bool or string
         enabled = data.get(FIELD_ENABLED, True)
@@ -528,10 +531,14 @@ class PowerPetDoor:
     async def disconnect(self) -> None:
         """Disconnect from the door and stop automatic reconnection.
 
+        Async lifecycle handlers still in flight (e.g. the ``on_disconnect``
+        this call itself triggers) are awaited, then cancelled if they
+        overrun ``default_timeout``, so nothing outlives this call (T2).
+
         Idempotent: safe to call multiple times, and before connect().
         """
         self._initialized = False
-        self._client.shutdown()
+        await self._client.aclose(self.default_timeout)
         self._client.del_listener("_door_facade")
         self._client.del_handlers("_door_facade")
 

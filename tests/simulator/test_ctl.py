@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
+import io
 import os
 import socket
 import sys
@@ -201,12 +203,19 @@ class TestSendCommand:
         assert "the command may still be running; raise --timeout" in msg
 
     async def test_streaming_output_extends_the_response_deadline(self):
-        """Each received chunk restarts the silence timer for any command."""
+        """Each received chunk restarts the silence timer for any command.
+
+        The margin is deliberately 10x (0.1 s gaps against a 1.0 s budget):
+        under `-n auto` on a loaded runner the loop can be delayed >100 ms
+        between a sleep expiring and the write landing, and this is one of
+        the few tests where a slow machine could produce a *false failure*
+        rather than a false pass (R3-L5). Total runtime is unchanged.
+        """
 
         async def chatty_handler(reader, writer):
             line = await reader.readline()
             if line:
-                # Four gaps, each just under the timeout: total elapsed is
+                # Four gaps, each far under the timeout: total elapsed is
                 # well past it, but no single gap is.
                 for _ in range(4):
                     await asyncio.sleep(0.1)
@@ -218,13 +227,93 @@ class TestSendCommand:
 
         server, port = await start_fake_daemon(chatty_handler)
         try:
-            success, msg = await send_command_async(port, "status", timeout=0.3)
+            success, msg = await send_command_async(port, "status", timeout=1.0)
         finally:
             server.close()
             await server.wait_closed()
 
         assert success is True
         assert msg == "OK: done"
+
+    async def test_wait_run_streams_log_lines_to_stderr(self, capfd):
+        """A one-shot wait-run must show why a script failed (M3).
+
+        The assertion text lives only in the LOG: stream; ctl used to parse
+        and discard it, so the documented CI recipe printed one bare
+        "ERROR: Script FAILED" and nothing else.
+        """
+
+        async def failing_wait_run(reader, writer):
+            line = await reader.readline()
+            if line:
+                writer.write(b"LOG: Running script: Failing Script\n")
+                writer.write(b"LOG: Assertion failed at step 3: door_status\n")
+                writer.write(b"ERROR: Script FAILED: Failing Script\n")
+                await writer.drain()
+            writer.close()
+
+        server, port = await start_fake_daemon(failing_wait_run)
+        try:
+            success, msg = await send_command_async(port, "run failing wait", timeout=2.0)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert success is False
+        assert msg == "ERROR: Script FAILED: Failing Script"
+        captured = capfd.readouterr()
+        # stdout stays clean and scriptable; the narrative goes to stderr.
+        assert captured.out == ""
+        assert captured.err.splitlines() == [
+            "Running script: Failing Script",
+            "Assertion failed at step 3: door_status",
+        ]
+
+    async def test_plain_run_does_not_stream_log_lines(self):
+        """Only a wait-run streams; a queued run stays quiet as before."""
+
+        async def chatty_handler(reader, writer):
+            line = await reader.readline()
+            if line:
+                writer.write(b"LOG: unrelated daemon chatter\n")
+                writer.write(b"OK: Queued script: Custom\n")
+                await writer.drain()
+            writer.close()
+
+        server, port = await start_fake_daemon(chatty_handler)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                success, msg = await send_command_async(port, "run custom", timeout=2.0)
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        assert success is True
+        assert msg == "OK: Queued script: Custom"
+        assert err.getvalue() == ""
+
+    async def test_streamed_log_lines_are_sanitized(self, capfd):
+        """Streamed daemon output cannot inject ANSI into the operator's shell."""
+
+        async def hostile_handler(reader, writer):
+            line = await reader.readline()
+            if line:
+                writer.write(b"LOG: evil \x1b[2J log\n")
+                writer.write(b"OK: Script PASSED: x\n")
+                await writer.drain()
+            writer.close()
+
+        server, port = await start_fake_daemon(hostile_handler)
+        try:
+            success, _msg = await send_command_async(port, "run x wait", timeout=2.0)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert success is True
+        err = capfd.readouterr().err
+        assert "\x1b" not in err
+        assert "evil \\x1b[2J log" in err
 
     async def test_connection_refused_message(self, refused_port):
         success, msg = await send_command_async(refused_port, "status")
@@ -439,7 +528,7 @@ class TestLocalCommandDispatch:
         handler = LocalCommandHandler(history=None)
         result = handler.execute("broadcast status")
         assert result.success is False
-        assert result.message == "Error: 'NoneType' object has no attribute 'protocols'"
+        assert result.message == "'NoneType' object has no attribute 'protocols'"
 
     def test_unknown_subcommand_lists_alternatives(self):
         handler = LocalCommandHandler(history=None)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -60,6 +61,7 @@ from powerpetdoor.const import (
     CMD_SET_SENSOR_TRIGGER_VOLTAGE,
     CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     CMD_SET_TIMEZONE,
+    COMMAND,
     CONFIG,
     DOOR_STATE_CLOSED,
     DOOR_STATE_CLOSING_TOP_OPEN,
@@ -113,6 +115,7 @@ from powerpetdoor.const import (
     SENSOR_STATE_OFF,
     SENSOR_STATE_ON,
     SUCCESS_FALSE,
+    SUCCESS_TRUE,
 )
 from powerpetdoor.framing import MAX_BUFFER_SIZE
 from powerpetdoor.simulator import (
@@ -619,20 +622,28 @@ class TestProtocolViolations:
         response = last_response(mock_transport)
         assert response[FIELD_MSG_ID_RESPONSE] == 0
 
-    async def test_handler_exception_answers_command_failed(self, protocol, mock_transport, state):
-        """A handler crash must answer the error envelope, not go silent."""
-        # holdTime as a string makes the handler's arithmetic raise TypeError
-        await dispatch(
-            protocol, {CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: "not-a-number", "msgId": 9}
-        )
+    async def test_handler_exception_answers_command_failed(
+        self, protocol, mock_transport, state, monkeypatch
+    ):
+        """An *unexpected* handler crash answers the generic error envelope.
+
+        Deliberate wire-value rejections carry their own reason (see
+        TestWireValueValidation); this covers the catch-all instead.
+        """
+
+        def boom():
+            raise RuntimeError("simulated internal failure")
+
+        monkeypatch.setattr(state, "get_settings", boom)
+
+        await dispatch(protocol, {CONFIG: CMD_GET_SETTINGS, "msgId": 9})
 
         response = last_response(mock_transport)
-        assert response[FIELD_CMD] == CMD_SET_HOLD_TIME
+        assert response[FIELD_CMD] == CMD_GET_SETTINGS
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
         assert response[FIELD_REASON] == "Command failed"
         assert response[FIELD_MSG_ID_RESPONSE] == 9
-        # State was not corrupted
-        assert state.hold_time == 1
+        assert FIELD_SETTINGS not in response
 
     async def test_set_schedule_missing_payload_fails(self, protocol, mock_transport):
         """CMD_SET_SCHEDULE without a schedule payload answers failure + reason."""
@@ -689,14 +700,18 @@ class TestProtocolViolations:
         from powerpetdoor.simulator import Schedule
 
         state.schedules[0] = Schedule(index=0, inside=True)
+        times = {
+            "in_start_time": {"hour": 6, "min": 0},
+            "in_end_time": {"hour": 22, "min": 0},
+        }
 
         await dispatch(
             protocol,
             {
                 CONFIG: CMD_SET_SCHEDULE_LIST,
                 FIELD_SCHEDULES: [
-                    {FIELD_INDEX: 1, FIELD_INSIDE: True},
-                    {FIELD_INDEX: 2, FIELD_INSIDE: True, "daysOfWeek": "everyday"},
+                    {FIELD_INDEX: 1, FIELD_INSIDE: True, **times},
+                    {FIELD_INDEX: 2, FIELD_INSIDE: True, "daysOfWeek": "everyday", **times},
                 ],
                 "msgId": 13,
             },
@@ -1323,9 +1338,15 @@ class TestMessageEnvelopeEdgeCases:
         assert response[FIELD_POWER] == "1"
         assert FIELD_MSG_ID_RESPONSE not in response
 
-    async def test_handler_crash_without_msgid(self, protocol, mock_transport, state):
+    async def test_handler_crash_without_msgid(self, protocol, mock_transport, state, monkeypatch):
         """The error envelope also omits msgID when the request had none."""
-        await dispatch(protocol, {CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: "bad"})
+
+        def boom():
+            raise RuntimeError("simulated internal failure")
+
+        monkeypatch.setattr(state, "get_settings", boom)
+
+        await dispatch(protocol, {CONFIG: CMD_GET_SETTINGS})
         response = last_response(mock_transport)
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
         assert response[FIELD_REASON] == "Command failed"
@@ -1471,3 +1492,267 @@ class TestProtocolLifecycle:
             assert mock_transport.write.call_count == 0
         finally:
             await proto.aclose()
+
+
+# ============================================================================
+# Untrusted SET_* wire values (security finding 1)
+# ============================================================================
+
+
+class TestWireValueValidation:
+    """One packet must never be able to poison long-lived simulator state.
+
+    Every rejection is checked three ways: the error envelope carries the
+    specific reason, the state is unchanged, and a *later* command still
+    works - the whole point is that the damage used to survive the
+    attacker's disconnect.
+    """
+
+    async def _assert_rejected(self, protocol, mock_transport, msg, reason_fragment):
+        await dispatch(protocol, {**msg, "msgId": 77})
+        response = last_response(mock_transport)
+        assert response[FIELD_CMD] == (msg.get(CONFIG) or msg.get(COMMAND))
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert reason_fragment in response[FIELD_REASON]
+        assert response[FIELD_MSG_ID_RESPONSE] == 77
+        return response
+
+    @pytest.mark.parametrize(
+        ("hold_time", "reason"),
+        [
+            (float("inf"), "holdTime must be a finite number"),
+            (float("nan"), "holdTime must be a finite number"),
+            (-1, "holdTime must be between"),
+            (90001, "holdTime must be between"),
+            ("200", "holdTime must be a number"),
+            (True, "holdTime must be a number"),
+            ([200], "holdTime must be a number"),
+            ({"v": 200}, "holdTime must be a number"),
+            (None, "holdTime must be a number"),
+        ],
+    )
+    async def test_set_hold_time_rejects_bad_values(
+        self, protocol, mock_transport, state, hold_time, reason
+    ):
+        state.hold_time = 2.0
+        await self._assert_rejected(
+            protocol,
+            mock_transport,
+            {CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: hold_time},
+            reason,
+        )
+        assert state.hold_time == 2.0
+
+    async def test_infinite_hold_time_does_not_break_later_commands(
+        self, protocol, mock_transport, state
+    ):
+        """The exact `1e400` reproduction from the security report.
+
+        Before the fix this stored `inf`, and every later GET_SETTINGS /
+        GET_HOLD_TIME answered "Command failed" for the life of the process.
+        """
+        state.hold_time = 2.0
+        protocol.data_received(b'{"cmd":"SET_HOLD_TIME","holdTime":1e400}')
+        await protocol.drain()
+        assert last_response(mock_transport)[FIELD_SUCCESS] == SUCCESS_FALSE
+
+        await dispatch(protocol, {CONFIG: CMD_GET_SETTINGS, "msgId": 1})
+        settings_response = last_response(mock_transport)
+        assert settings_response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert settings_response[FIELD_SETTINGS][FIELD_HOLD_OPEN_TIME] == 200
+
+        await dispatch(protocol, {CONFIG: CMD_GET_HOLD_TIME, "msgId": 2})
+        assert last_response(mock_transport)[FIELD_HOLD_TIME] == 200
+
+    async def test_valid_hold_time_still_applies(self, protocol, mock_transport, state):
+        await dispatch(protocol, {CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: 1500, "msgId": 3})
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert response[FIELD_HOLD_TIME] == 1500
+        assert state.hold_time == 15.0
+
+    @pytest.mark.parametrize(
+        ("timezone", "reason"),
+        [
+            (["x"], "tz must be a string"),
+            ({"a": 1}, "tz must be a string"),
+            (5, "tz must be a string"),
+            (None, "tz must be a string"),
+            ("x" * 129, "tz must be at most 128 characters"),
+        ],
+    )
+    async def test_set_timezone_rejects_non_strings(
+        self, protocol, mock_transport, state, timezone, reason
+    ):
+        """The exact list/dict reproductions from the security report."""
+        state.timezone = "America/New_York"
+        await self._assert_rejected(
+            protocol, mock_transport, {CONFIG: CMD_SET_TIMEZONE, FIELD_TZ: timezone}, reason
+        )
+        assert state.timezone == "America/New_York"
+        # The value that used to wedge schedule evaluation for good:
+        assert state.is_sensor_allowed_by_schedule("inside") is True
+
+    async def test_set_timezone_still_stores_a_wire_posix_string(
+        self, protocol, mock_transport, state
+    ):
+        await dispatch(
+            protocol,
+            {CONFIG: CMD_SET_TIMEZONE, FIELD_TZ: "EST5EDT,M3.2.0,M11.1.0", "msgId": 4},
+        )
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert state.timezone == "EST5EDT,M3.2.0,M11.1.0"
+
+    @pytest.mark.parametrize(
+        "command_name",
+        [CMD_SET_SENSOR_TRIGGER_VOLTAGE, CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE],
+    )
+    @pytest.mark.parametrize(
+        ("value", "reason"),
+        [
+            ({"a": 1}, "must be a number"),
+            ("100", "must be a number"),
+            (float("inf"), "must be a finite number"),
+            (-1, "must be between"),
+            (65536, "must be between"),
+        ],
+    )
+    async def test_set_trigger_voltage_rejects_bad_values(
+        self, protocol, mock_transport, state, command_name, value, reason
+    ):
+        field = (
+            FIELD_SENSOR_TRIGGER_VOLTAGE
+            if command_name == CMD_SET_SENSOR_TRIGGER_VOLTAGE
+            else FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE
+        )
+        attribute = (
+            "sensor_trigger_voltage"
+            if command_name == CMD_SET_SENSOR_TRIGGER_VOLTAGE
+            else "sleep_sensor_trigger_voltage"
+        )
+        before = getattr(state, attribute)
+        await self._assert_rejected(
+            protocol, mock_transport, {CONFIG: command_name, field: value}, reason
+        )
+        assert getattr(state, attribute) == before
+
+    async def test_set_trigger_voltages_still_apply(self, protocol, mock_transport, state):
+        await dispatch(
+            protocol,
+            {CONFIG: CMD_SET_SENSOR_TRIGGER_VOLTAGE, FIELD_SENSOR_TRIGGER_VOLTAGE: 250, "msgId": 5},
+        )
+        assert last_response(mock_transport)[FIELD_SENSOR_TRIGGER_VOLTAGE] == 250
+        assert state.sensor_trigger_voltage == 250
+
+        await dispatch(
+            protocol,
+            {
+                CONFIG: CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+                FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE: 75,
+                "msgId": 6,
+            },
+        )
+        assert last_response(mock_transport)[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE] == 75
+        assert state.sleep_sensor_trigger_voltage == 75
+
+    @pytest.mark.parametrize("flag", [["1"], {"a": 1}, "maybe", None, 2.5])
+    async def test_set_notifications_rejects_unreadable_flags(
+        self, protocol, mock_transport, state, flag
+    ):
+        state.low_battery = True
+        state.sensor_on_indoor = False
+        await self._assert_rejected(
+            protocol,
+            mock_transport,
+            {
+                CONFIG: CMD_SET_NOTIFICATIONS,
+                FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: "1",
+                FIELD_LOW_BATTERY_NOTIFICATIONS: flag,
+            },
+            "must be 0 or 1",
+        )
+        # Nothing applied: the valid sibling field must not land either.
+        assert state.sensor_on_indoor is False
+        assert state.low_battery is True
+
+    @pytest.mark.parametrize(
+        ("wire_value", "expected"),
+        [("1", True), ("0", False), (1, True), (0, False), (True, True), (False, False)],
+    )
+    async def test_set_notifications_reads_flags_not_truthiness(
+        self, protocol, mock_transport, state, wire_value, expected
+    ):
+        """bool("0") is True; make_bool is what the client uses (L4)."""
+        state.low_battery = not expected
+        await dispatch(
+            protocol,
+            {
+                CONFIG: CMD_SET_NOTIFICATIONS,
+                FIELD_LOW_BATTERY_NOTIFICATIONS: wire_value,
+                "msgId": 7,
+            },
+        )
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert state.low_battery is expected
+
+    async def test_set_schedule_reads_string_day_flags_as_flags(
+        self, protocol, mock_transport, state
+    ):
+        """`"0"` must not enable the day - the bool("0") trap (L4)."""
+        await dispatch(
+            protocol,
+            {
+                CONFIG: CMD_SET_SCHEDULE,
+                FIELD_SCHEDULE: {
+                    FIELD_INDEX: 0,
+                    FIELD_INSIDE: True,
+                    "in_start_time": {"hour": 6, "min": 0},
+                    "in_end_time": {"hour": 22, "min": 0},
+                    "daysOfWeek": ["1", "0", "1", "0", "1", "0", "1"],
+                },
+                "msgId": 8,
+            },
+        )
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert response[FIELD_SCHEDULE]["daysOfWeek"] == [1, 0, 1, 0, 1, 0, 1]
+        assert state.schedules[0].days_of_week == [True, False, True, False, True, False, True]
+
+    async def test_set_schedule_rejects_a_missing_time_window(
+        self, protocol, mock_transport, state
+    ):
+        """An inside entry with no window must fail, not become 06:00-22:00 (L5)."""
+        await self._assert_rejected(
+            protocol,
+            mock_transport,
+            {
+                CONFIG: CMD_SET_SCHEDULE,
+                FIELD_SCHEDULE: {FIELD_INDEX: 0, FIELD_INSIDE: True, "daysOfWeek": [1] * 7},
+            },
+            "missing required field 'in_start_time'",
+        )
+        assert state.schedules == {}
+
+    async def test_set_schedule_infinite_index_reports_the_range_reason(
+        self, protocol, mock_transport, state
+    ):
+        """int(inf) raises OverflowError; it must not fall through to the
+        generic "Command failed" with a stack trace (informational #5)."""
+        protocol.data_received(b'{"cmd":"SET_SCHEDULE","schedule":{"index":1e400,"inside":true}}')
+        await protocol.drain()
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == "Schedule index must be a number, got inf"
+        assert state.schedules == {}
+
+    async def test_rejection_is_logged_sanitized(self, protocol, mock_transport, state, caplog):
+        """The reason reaches the operator's log with no raw control chars."""
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
+            protocol.data_received(b'{"cmd":"SET_TIMEZONE","tz":["\\u001b[2J"]}')
+            await protocol.drain()
+
+        assert "Rejected SET_TIMEZONE" in caplog.text
+        assert "\x1b" not in caplog.text
+        assert "\\x1b[2J" in caplog.text

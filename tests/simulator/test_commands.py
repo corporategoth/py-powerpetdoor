@@ -25,6 +25,7 @@ from powerpetdoor.simulator import (
     DoorTimingConfig,
 )
 from powerpetdoor.simulator.commands import CommandHandler
+from powerpetdoor.simulator.commands.scripts import is_wait_run
 from powerpetdoor.simulator.scripting import Script, ScriptRunner, ScriptStep
 
 
@@ -327,7 +328,7 @@ class TestAliases:
         result = await command_handler.execute("r nonexistent")
 
         assert result.success is False
-        assert result.message.startswith("Error: Unknown built-in script: nonexistent")
+        assert result.message.startswith("Unknown script: nonexistent")
 
 
 # ============================================================================
@@ -467,24 +468,47 @@ class TestInteractiveOnlyCommands:
         assert result.success is False
         assert "Unknown command" in result.message
 
-    async def test_clear_works_in_interactive_mode(self, command_handler, monkeypatch):
-        """clear command should work in interactive mode."""
+    async def test_clear_writes_the_ansi_sequence_on_a_terminal(self, command_handler, monkeypatch):
+        """On a real terminal `clear` must actually clear it.
+
+        The assertion is against the buffer this test installs. `capsys`
+        patches sys.stdout, not sys.__stdout__, so a capsys-based assertion
+        here is vacuous - it holds whether or not the sequence was written
+        (R3-M1).
+        """
         command_handler.set_interactive_mode(True)
-        monkeypatch.setattr(sys, "__stdout__", _TtyStdout())
+        tty = _TtyStdout()
+        monkeypatch.setattr(sys, "__stdout__", tty)
 
         result = await command_handler.execute("clear")
-        assert result.success is True
-        assert result.message == ""  # Clear returns empty message
 
-    async def test_clear_off_a_terminal_emits_no_escape_sequence(self, command_handler, capsys):
+        assert result.success is True
+        assert result.message == ""  # cli.py skips printing an empty message
+        assert tty.getvalue() == "\033[2J\033[H"
+
+    async def test_clear_writes_nothing_off_a_terminal(self, command_handler, monkeypatch):
         """Piped/dumb sessions must not receive ANSI garbage (T3)."""
         command_handler.set_interactive_mode(True)
+        pipe = io.StringIO()  # isatty() -> False
+        monkeypatch.setattr(sys, "__stdout__", pipe)
 
         result = await command_handler.execute("clear")
 
         assert result.success is True
         assert result.message == ""
-        assert capsys.readouterr().out == ""
+        assert pipe.getvalue() == ""
+
+    async def test_clear_falls_back_to_sys_stdout(self, command_handler, monkeypatch):
+        """Under pythonw/embedding sys.__stdout__ can be None."""
+        command_handler.set_interactive_mode(True)
+        tty = _TtyStdout()
+        monkeypatch.setattr(sys, "__stdout__", None)
+        monkeypatch.setattr(sys, "stdout", tty)
+
+        result = await command_handler.execute("clear")
+
+        assert result.success is True
+        assert tty.getvalue() == "\033[2J\033[H"
 
     async def test_clear_alias_cls_rejected_when_not_interactive(self, command_handler):
         """cls alias should also be rejected when not in interactive mode."""
@@ -720,6 +744,20 @@ class TestExtraArgumentRejection:
 class TestCliModeRestore:
     """set_cli_mode(False) must fully restore the exit command."""
 
+    @pytest.fixture(autouse=True)
+    def cli_mode_guard(self, command_handler):
+        """Always leave the *global* registry out of CLI mode.
+
+        Without this, a failing assertion between set_cli_mode(True) and
+        set_cli_mode(False) leaves every later test in this xdist worker
+        looking at a corrupted registry - a cascade of misleading failures
+        around the one real one (R3-T2).
+        """
+        try:
+            yield
+        finally:
+            command_handler.set_cli_mode(False)
+
     async def test_exit_restored_after_cli_mode(self, command_handler):
         from powerpetdoor.simulator.commands.base import get_command_registry
 
@@ -897,10 +935,14 @@ class TestRunWaitMode:
         async with asyncio.timeout(2.0):
             await entered.wait()
 
-        result = await queued_handler.execute(f"run {script} wait")
+        # Bounded: without the fast-fail guard this call waits on the run
+        # lock that only `release` frees, and the test would hang forever
+        # instead of failing (R3-M4).
+        async with asyncio.timeout(2.0):
+            result = await queued_handler.execute(f"run {script} wait")
 
         assert result.success is False
-        assert result.message == "Error: Another script is already running: Long Script"
+        assert result.message == "Another script is already running: Long Script"
 
         release.set()
         await asyncio.wait_for(busy, 2.0)
@@ -932,6 +974,110 @@ class TestRunWaitMode:
 
         release.set()
         await asyncio.wait_for(busy, 2.0)
+
+
+class TestScriptBusyVisibility:
+    """Serialized runs made "busy" a real state; it must be observable (M5)."""
+
+    @pytest.fixture
+    def queued_handler(self, simulator):
+        handler = CommandHandler(
+            simulator=simulator,
+            script_runner=ScriptRunner(simulator),
+            stop_callback=MagicMock(),
+            script_queue=asyncio.Queue(),
+        )
+        return handler
+
+    @staticmethod
+    async def _start_blocking_script(runner, name="Slow Script"):
+        """Start a two-step script parked on its first step.
+
+        Two steps, so a stop request has a step boundary to be noticed at.
+        Returns (task, release).
+        """
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking_step(step):
+            entered.set()
+            await release.wait()
+
+        runner._execute_step = blocking_step
+        steps = [ScriptStep(action="open", params={}), ScriptStep(action="close", params={})]
+        task = asyncio.ensure_future(runner.run(Script(name=name, steps=steps)))
+        async with asyncio.timeout(2.0):
+            await entered.wait()
+        return task, release
+
+    async def test_status_reports_the_running_script(self, queued_handler):
+        task, release = await self._start_blocking_script(queued_handler.script_runner)
+        try:
+            result = await queued_handler.execute("status")
+            assert result.success is True
+            assert '  Script: running "Slow Script"' in result.message
+            assert result.data["running_script"] == "Slow Script"
+            assert result.data["queued_scripts"] == 0
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 2.0)
+
+    async def test_status_reports_the_queue_depth(self, queued_handler, tmp_path):
+        script = tmp_path / "pass.yaml"
+        script.write_text(PASSING_SCRIPT)
+        task, release = await self._start_blocking_script(queued_handler.script_runner)
+        try:
+            await queued_handler.execute(f"run {script}")
+            result = await queued_handler.execute("status")
+            assert '  Script: running "Slow Script" (1 queued)' in result.message
+            assert result.data["queued_scripts"] == 1
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 2.0)
+
+    async def test_status_reports_no_script_when_idle(self, queued_handler):
+        result = await queued_handler.execute("status")
+        assert "  Script: none running" in result.message
+        assert result.data["running_script"] is None
+
+    async def test_list_reports_the_running_script(self, queued_handler):
+        task, release = await self._start_blocking_script(queued_handler.script_runner)
+        try:
+            result = await queued_handler.execute("list")
+            assert result.message.endswith('\nScript: running "Slow Script"')
+            assert result.data["running"] == "Slow Script"
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 2.0)
+
+    async def test_stop_ends_the_running_script(self, queued_handler):
+        """`stop` stops the script, and the run reports FAILED (M5)."""
+        runner = queued_handler.script_runner
+        task, release = await self._start_blocking_script(runner)
+        try:
+            result = await queued_handler.execute("stop")
+            assert result.success is True
+            assert result.message == "Stopping script: Slow Script"
+            assert runner._stop_requested is True
+        finally:
+            release.set()
+            assert await asyncio.wait_for(task, 2.0) is False
+
+    async def test_stop_without_a_running_script_reports_so(self, queued_handler):
+        result = await queued_handler.execute("stop")
+        assert result.success is False
+        assert result.message == "No script is running"
+
+    async def test_stop_does_not_shut_the_simulator_down(self, queued_handler):
+        """The whole point of dropping the shutdown alias (M5)."""
+        await queued_handler.execute("stop")
+        queued_handler.stop_callback.assert_not_called()
+
+    async def test_shutdown_no_longer_answers_to_stop(self, queued_handler):
+        result = await queued_handler.execute("shutdown")
+        assert result.success is True
+        assert result.message == "Shutting down..."
+        queued_handler.stop_callback.assert_called_once_with()
 
 
 class TestScriptPathRestrictions:
@@ -1017,7 +1163,7 @@ class TestScriptsDirVisibility:
         result = await scripts_dir_handler.execute("run bogus")
 
         assert result.success is False
-        assert result.message.startswith("Error: Unknown built-in script: bogus. Available: ")
+        assert result.message.startswith("Unknown script: bogus. Available: ")
         assert "my_custom" in result.message
 
     async def test_completion_offers_scripts_dir_entries(self, scripts_dir_handler):
@@ -1033,18 +1179,51 @@ class TestScriptsDirVisibility:
 
 
 # ============================================================================
-# Empty Message Result Tests
+# is_wait_run (R3-M3)
 # ============================================================================
 
 
-class TestEmptyMessageResults:
-    """Tests for commands that return empty messages."""
+class TestIsWaitRun:
+    """The helper that removes ctl's response deadline entirely.
 
-    async def test_clear_returns_empty_message(self, command_handler, monkeypatch):
-        """clear command should return an empty message (cli.py skips printing it)."""
-        command_handler.set_interactive_mode(True)
-        monkeypatch.setattr(sys, "__stdout__", _TtyStdout())
+    Getting it wrong either hangs the operator indefinitely (a plain
+    command treated as a wait-run) or times out mid-script (a wait-run
+    treated as a plain command). 100% branch coverage does not help: the
+    whole function is one boolean expression, so short-circuit paths are
+    not separate coverage arcs - only a value table pins it.
+    """
 
-        result = await command_handler.execute("clear")
-        assert result.success is True
-        assert result.message == ""
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            # Arity: three parts, the last of which is the keyword.
+            ("run foo wait", True),
+            ("run foo/bar.yaml wait", True),
+            ("run foo wait extra", False),
+            # A script *named* `wait` is not a wait-run.
+            ("run wait", False),
+            ("wait", False),
+            ("", False),
+            ("   ", False),
+            # Every alias of `run`, since the daemon accepts them all.
+            ("r foo wait", True),
+            ("file foo wait", True),
+            # Command case: the daemon's dispatch is case-insensitive.
+            ("RUN foo wait", True),
+            ("Run foo wait", True),
+            ("R foo wait", True),
+            ("FILE foo wait", True),
+            # Keyword case: parse_arg's choice matching is case-insensitive.
+            ("run foo WAIT", True),
+            ("run foo Wait", True),
+            # Not the run command at all.
+            ("status wait", False),
+            ("shutdown foo wait", False),
+            ("runner foo wait", False),
+            # Right command, wrong keyword.
+            ("run foo waitt", False),
+            ("run foo now", False),
+        ],
+    )
+    def test_is_wait_run(self, line, expected):
+        assert is_wait_run(line) is expected

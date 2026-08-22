@@ -13,8 +13,10 @@ import asyncio
 import logging
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..sanitize import sanitize_text
 from ..tz_utils import async_init_timezone_cache
 from .commands import CommandHandler
 from .prompt_common import (
@@ -26,7 +28,7 @@ from .prompt_common import (
     PROMPT_TOOLKIT_AVAILABLE,
     InteractiveSession,
     escape_message,
-    sanitize_text,
+    render_result,
     use_prompt_toolkit,
 )
 from .server import DoorSimulator
@@ -145,6 +147,17 @@ class _PromptLoggingHandler(logging.Handler):
             self.handleError(record)
 
 
+def status_print(message: str = "") -> None:
+    """Print an operator-facing status line, flushed.
+
+    stdout is block-buffered whenever it is not a terminal, while logging
+    goes to stderr unbuffered. Without an explicit flush the startup banner
+    and script progress appear after the fact in a redirected log - or not
+    at all, since the buffer dies with the process on SIGTERM (M2).
+    """
+    print(message, flush=True)
+
+
 # Default control port offset from simulator port
 CONTROL_PORT_OFFSET = 1
 
@@ -154,13 +167,29 @@ DEFAULT_CONTROL_HOST = "127.0.0.1"
 
 
 class _ControlLogHandler(logging.Handler):
-    """Logging handler that broadcasts sanitized log lines to control clients."""
+    """Logging handler that broadcasts sanitized log lines to control clients.
+
+    Installed on the **root** logger, which makes the broadcast itself a
+    log source: writing to a transport whose peer has gone away does not
+    raise, it makes asyncio log ``socket.send() raised exception.`` at
+    WARNING - synchronously, inside this handler. Without a guard that
+    record is broadcast to the same dead writer, producing another record,
+    and one closed ``ctl`` session floods every other session with hundreds
+    of lines (H1). Three things break the loop: dead writers are dropped,
+    failing writers are dropped, and ``emit`` refuses to re-enter.
+    """
 
     def __init__(self, clients: set[asyncio.StreamWriter]):
         super().__init__()
         self._clients = clients
+        self._broadcasting = False
 
     def emit(self, record):
+        if self._broadcasting:
+            # A record produced *by* this broadcast (asyncio's write
+            # warnings). Rebroadcasting it is the feedback loop.
+            return
+        self._broadcasting = True
         try:
             msg = self.format(record)
             # Sanitize control characters and escape newlines so untrusted
@@ -169,15 +198,21 @@ class _ControlLogHandler(logging.Handler):
             data = f"LOG: {escape_message(sanitize_text(msg))}\n".encode()
             # Broadcast to all connected control clients
             for writer in list(self._clients):
+                if writer.is_closing():
+                    # The reader task reaps writers on EOF, but a peer that
+                    # died mid-stream is only noticed here.
+                    self._clients.discard(writer)
+                    continue
                 try:
                     writer.write(data)
                     # Don't await drain here - it would block.
                     # The message will be sent eventually.
                 except Exception:
-                    # Client disconnected, will be cleaned up later
-                    pass
+                    self._clients.discard(writer)
         except Exception:
             self.handleError(record)
+        finally:
+            self._broadcasting = False
 
 
 class ControlChannel:
@@ -256,10 +291,13 @@ class ControlChannel:
         """
         data = f"STATUS: clients={self._client_count()}\n".encode()
         for writer in list(self.clients):
+            if writer.is_closing():
+                self.clients.discard(writer)
+                continue
             try:
                 writer.write(data)
             except Exception:
-                pass
+                self.clients.discard(writer)
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle a control connection."""
@@ -377,22 +415,22 @@ async def _run_startup_scripts(
     try:
         # Wait for client connection if requested
         if wait_for_client:
-            print(">>> Waiting for client connection...")
+            status_print(">>> Waiting for client connection...")
             while not simulator.protocols:
                 if stop_event.is_set():
                     return
                 await asyncio.sleep(0.1)
-            print(">>> Client connected, starting scripts")
+            status_print(">>> Client connected, starting scripts")
 
         while True:
             # Check for client disconnect if wait_for_client
             if wait_for_client and not simulator.protocols:
-                print(">>> Client disconnected, stopping scripts")
+                status_print(">>> Client disconnected, stopping scripts")
                 break
 
             run_count += 1
             if loop_scripts:
-                print(f"\n>>> Script run #{run_count}")
+                status_print(f"\n>>> Script run #{run_count}")
 
             for i, script_ref in enumerate(scripts):
                 # Check for disconnect before each script
@@ -402,20 +440,20 @@ async def _run_startup_scripts(
 
                 # Add delay between scripts (not before first one)
                 if i > 0 and script_delay > 0:
-                    print(f">>> Waiting {script_delay}s before next script...")
+                    status_print(f">>> Waiting {script_delay}s before next script...")
                     await asyncio.sleep(script_delay)
 
                 try:
                     script = cmd_handler.load_script(script_ref)
-                    print(f"\n>>> Running script: {script.name}")
+                    status_print(f"\n>>> Running script: {script.name}")
                     success = await script_runner.run(script)
                     if not success:
                         all_success = False
-                        print(f">>> Script FAILED: {script.name}")
+                        status_print(f">>> Script FAILED: {script.name}")
                     else:
-                        print(f">>> Script PASSED: {script.name}")
+                        status_print(f">>> Script PASSED: {script.name}")
                 except Exception as e:
-                    print(f"Error running script '{script_ref}': {e}")
+                    status_print(f"Error running script '{script_ref}': {e}")
                     all_success = False
             else:
                 # Loop completed without break (no disconnect)
@@ -424,7 +462,7 @@ async def _run_startup_scripts(
 
                 # Delay before next loop iteration
                 if script_delay > 0:
-                    print(f">>> Waiting {script_delay}s before next loop...")
+                    status_print(f">>> Waiting {script_delay}s before next loop...")
                     await asyncio.sleep(script_delay)
                 continue
 
@@ -436,7 +474,7 @@ async def _run_startup_scripts(
     finally:
         script_result[0] = all_success
         if oneshot:
-            print(f"\n>>> All scripts {'PASSED' if all_success else 'FAILED'}")
+            status_print(f"\n>>> All scripts {'PASSED' if all_success else 'FAILED'}")
             stop_event.set()
 
 
@@ -497,11 +535,11 @@ class _BasicStdinInput:
         if self._stop_event.is_set():
             self._prompt.clear_line()
             if result.message:
-                print(f">>> {result.message}")
+                status_print(render_result(result.message))
             # Remove stdin reader immediately to avoid blocking shutdown
             self.stop()
         elif result.message:
-            self._prompt.output(f">>> {result.message}")
+            self._prompt.output(render_result(result.message))
         else:
             self._prompt.show()
 
@@ -618,6 +656,14 @@ async def run_simulator(
         allow_script_paths=not daemon,
     )
 
+    # The handler publishes scripts_dir on construction; say so out loud when
+    # the directory turns out to hold nothing runnable (L1).
+    if scripts_dir:
+        from .scripting import list_extra_scripts
+
+        if not list_extra_scripts():
+            logger.warning("No *.yaml/*.yml scripts found in %s", scripts_dir)
+
     # Determine mode
     interactive = not scripts and not daemon
 
@@ -641,14 +687,14 @@ async def run_simulator(
         channel_holder[0] = control_channel
 
     # Print startup info
-    print(f"Simulator started on {host}:{actual_port}")
+    status_print(f"Simulator started on {host}:{actual_port}")
     if control_channel:
-        print(f"Control channel: {control_host}:{control_channel.bound_port}")
+        status_print(f"Control channel: {control_host}:{control_channel.bound_port}")
     if interactive:
-        print("=" * 65)
-        print(cmd_handler.get_help())
-        print("=" * 65)
-    print()
+        status_print("=" * 65)
+        status_print(cmd_handler.get_help())
+        status_print("=" * 65)
+    status_print()
 
     if on_ready:
         on_ready(actual_port, control_channel.bound_port if control_channel else None)
@@ -723,7 +769,10 @@ async def run_simulator(
                             session.handle_result(input_line, result.success)
 
                             if result.message:
-                                print(f">>> {result.message}")
+                                # Command output can carry network-poisoned
+                                # state (a wire-set timezone, say): never
+                                # print it to a terminal raw.
+                                print(render_result(result.message))
                             if stop_event.is_set():
                                 break
                     except asyncio.CancelledError:
@@ -844,7 +893,10 @@ def main():
         "Scripts stop if client disconnects.",
     )
     parser.add_argument(
-        "--list-scripts", "-l", action="store_true", help="List available built-in scripts and exit"
+        "--list-scripts",
+        "-l",
+        action="store_true",
+        help="List runnable scripts (built-in, plus --scripts-dir if given) and exit",
     )
     parser.add_argument(
         "--daemon",
@@ -908,6 +960,12 @@ def main():
     if not PROMPT_TOOLKIT_AVAILABLE:
         args.history = None
 
+    # A typo'd --scripts-dir used to be silently ignored: the daemon started
+    # happily and the first sign of trouble was an "Unknown script" error
+    # from a ctl user much later (L1).
+    if args.scripts_dir is not None and not Path(args.scripts_dir).is_dir():
+        parser.error(f"--scripts-dir {args.scripts_dir}: not a directory")
+
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -921,11 +979,15 @@ def main():
         for name, desc in list_builtin_scripts():
             print(f"  {name}: {desc}")
         set_extra_scripts_dir(args.scripts_dir)
-        extra = list_extra_scripts()
-        if extra:
+        if args.scripts_dir is not None:
+            # Always print the header, even when empty, so the flag's effect
+            # is visible rather than silently absent (L1).
             print(f"Scripts from {args.scripts_dir}:")
+            extra = list_extra_scripts()
             for name, desc in extra:
                 print(f"  {name}: {desc}")
+            if not extra:
+                print("  (none)")
         return
 
     # Determine daemon mode and control port
@@ -947,7 +1009,11 @@ def main():
     if not args.scripts:
         unusable = [name for name, given in script_only_flags if given]
         if unusable:
-            parser.error(f"{', '.join(unusable)} require --script")
+            # In daemon mode --script is itself refused, so "use --script"
+            # would just send the operator round a second time (T1).
+            if daemon:
+                parser.error(f"{', '.join(unusable)} is not available in daemon mode")
+            parser.error(f"{', '.join(unusable)} cannot be used without --script")
     if not daemon and args.control_host != DEFAULT_CONTROL_HOST:
         parser.error("--control-host requires --daemon")
 

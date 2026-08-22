@@ -676,7 +676,9 @@ def get_builtin_script(name: str) -> Script:
     script_files = _get_script_files()
     if name not in script_files:
         available = ", ".join(sorted({*script_files, *get_extra_script_files()}))
-        raise ScriptError(f"Unknown built-in script: {name}. Available: {available}")
+        # "built-in" would read as if the --scripts-dir names in that same
+        # Available: list were built-ins too (T3).
+        raise ScriptError(f"Unknown script: {name}. Available: {available}")
     return Script.from_file(script_files[name])
 
 

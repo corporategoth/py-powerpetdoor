@@ -225,6 +225,102 @@ class TestReentrantStatusListeners:
         assert engine._task is None
         assert state.door_status == DOOR_STATE_RISING
 
+    async def test_zero_hold_time_does_not_replay_a_stale_start_state(self, state):
+        """The deferred request records the intent, not a resolved state (L3).
+
+        With ``hold_time`` ~0 ``_hold_open()`` returns without awaiting, so
+        ``_run`` performs a second ``_set_status`` in the same synchronous
+        block. A start state resolved when the listener asked is stale by
+        the time it is applied: the old code replayed CLOSING_TOP_OPEN on
+        top of the close the door had already begun, re-broadcasting a
+        status that never changed and restarting the phase timer.
+        """
+        state.hold_time = 0.0
+        engine = DoorMotionEngine(state)
+        seen: list[str] = []
+
+        def closer(status: str) -> None:
+            seen.append(status)
+            if status == DOOR_STATE_HOLDING:
+                engine.close()
+
+        engine.add_status_listener(closer)
+        try:
+            engine.open()
+            await engine.wait_for_status(DOOR_STATE_CLOSED, timeout=5.0)
+        finally:
+            await engine.stop()
+
+        assert seen == FULL_OPEN_CLOSE_SEQUENCE
+        assert state.total_open_cycles == 1
+
+    async def test_deferred_open_reresolves_from_the_current_status(self, state):
+        """A deferred open() re-derives its start state when it is applied.
+
+        Asking to open from CLOSING_TOP_OPEN resolves to SLOWING; by the
+        time a re-entrant request is applied the door may have moved on to
+        CLOSING_MID_OPEN, whose correct reversal is RISING.
+        """
+        state.hold_time = 0.0
+        engine = DoorMotionEngine(state)
+        seen: list[str] = []
+        sampled_inside_dispatch: list[tuple[str, bool]] = []
+        reopened = False
+
+        def opener(status: str) -> None:
+            nonlocal reopened
+            seen.append(status)
+            if status == DOOR_STATE_CLOSING_TOP_OPEN and not reopened:
+                reopened = True
+                assert engine.open() is True
+                # Sampled *inside* the dispatch. A re-entrant open() must
+                # defer: starting the sequence here would cancel the owner
+                # task from inside itself and leave a second _run racing it.
+                sampled_inside_dispatch.append(
+                    (state.door_status, engine._restart_handle is not None)
+                )
+
+        engine.add_status_listener(opener)
+        try:
+            engine.open()
+            await engine.wait_for_status(DOOR_STATE_CLOSED, timeout=5.0)
+        finally:
+            await engine.stop()
+
+        assert sampled_inside_dispatch == [(DOOR_STATE_CLOSING_TOP_OPEN, True)]
+        # HOLDING -> CLOSING_TOP_OPEN (the listener asks to open) -> the door
+        # is still at CLOSING_TOP_OPEN when the deferral runs, so it reverses
+        # to SLOWING. No status is ever emitted twice in a row.
+        assert all(a != b for a, b in zip(seen, seen[1:], strict=False))
+        assert seen == [
+            DOOR_STATE_RISING,
+            DOOR_STATE_SLOWING,
+            DOOR_STATE_HOLDING,
+            DOOR_STATE_CLOSING_TOP_OPEN,
+            DOOR_STATE_SLOWING,
+            DOOR_STATE_HOLDING,
+            DOOR_STATE_CLOSING_TOP_OPEN,
+            DOOR_STATE_CLOSING_MID_OPEN,
+            DOOR_STATE_CLOSED,
+        ]
+
+    async def test_deferred_open_with_hold_reaches_keepup(self, state):
+        """The deferred intent carries `hold`, so open(hold=True) still holds."""
+        engine = DoorMotionEngine(state)
+
+        def opener(status: str) -> None:
+            if status == DOOR_STATE_CLOSING_TOP_OPEN:
+                engine.open(hold=True)
+
+        engine.add_status_listener(opener)
+        try:
+            engine.open()
+            await engine.wait_for_status(DOOR_STATE_KEEPUP, timeout=5.0)
+        finally:
+            await engine.stop()
+
+        assert state.door_status == DOOR_STATE_KEEPUP
+
     async def test_cancel_nowait_drops_a_deferred_sequence_start(self, state):
         """cancel_nowait() also drops the deferred restart."""
         engine = DoorMotionEngine(state)

@@ -360,8 +360,12 @@ class TestFallbackSession:
         recorder = recorded_stdout()
         prompt = prompt_for(daemon)
 
-        # Total elapsed (~0.4s) far exceeds the timeout; no single gap does.
-        task = start_session(daemon, timeout=0.25)
+        # Total elapsed (~0.4s) far exceeds the timeout; no single gap comes
+        # close. The margin is 10x on purpose: under `-n auto` on a loaded
+        # runner the loop can be delayed >100 ms between a sleep expiring and
+        # the write landing, and this is one of the few tests where a slow
+        # machine could produce a *false failure* (R3-L5).
+        task = start_session(daemon, timeout=1.0)
         await recorder.wait_for(prompt, count=1)
         os.write(stdin_fd, b"status\n")
         await recorder.wait_for(">>> done")

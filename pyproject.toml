@@ -1,5 +1,9 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+# Pinned exactly, not floored: `uv build`'s default build isolation installs
+# these from PyPI *inside* the release job that holds `id-token: write`, so a
+# hijacked setuptools/wheel release would be executing in the job that signs
+# and publishes the artifact.
+requires = ["setuptools==84.0.0", "wheel==0.48.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -16,7 +20,12 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+    # The library itself is portable, but the simulator's plain-stdin prompt
+    # fallback uses loop.add_reader() on stdin, which Windows'
+    # ProactorEventLoop does not implement. CI is Linux-only, so claiming
+    # "OS Independent" would be an untested claim.
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -41,6 +50,9 @@ dev = [
     "pytest-asyncio>=0.21.0",
     "pytest-xdist>=3.0.0",
     "pytest-cov>=5.0.0",
+    # Suite-wide backstop: a regression that deadlocks must fail the build,
+    # not occupy the shared runner until the 6-hour job timeout.
+    "pytest-timeout>=2.3.0",
     "hypothesis>=6.100.0",
     "pyyaml>=6.0",
     "prompt_toolkit>=3.0.0",
@@ -70,9 +82,18 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-n auto"
 filterwarnings = ["error"]
+# Backstop against a deadlock regression. The whole suite runs in ~25 s and
+# the slowest single test is well under a second, so a 60 s per-test cap can
+# only ever fire on a genuine hang. Individual awaits that can deadlock are
+# additionally bounded in the tests themselves, so the usual failure is a
+# clear assertion rather than this.
+timeout = 60
 
 [tool.coverage.run]
-source = ["src/powerpetdoor"]
+# `scripts/` is in scope too: generate_gaps_report.py produces the artifact
+# this project uses to report its own testing gaps, so it must participate
+# in the 100% gate like everything else.
+source = ["src/powerpetdoor", "scripts"]
 branch = true
 parallel = true
 omit = [
@@ -99,6 +120,10 @@ exclude_lines = [
 source = [
     "src/powerpetdoor",
     "*/src/powerpetdoor",
+]
+scripts = [
+    "scripts",
+    "*/scripts",
 ]
 
 [tool.coverage.html]

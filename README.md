@@ -30,6 +30,12 @@ This is an independent, community-developed project. No contributions, financial
 pip install pypowerpetdoor
 ```
 
+Requires Python 3.11-3.14. **Supported platforms: Linux and macOS.** The
+library itself has no platform-specific code, but the simulator's plain-stdin
+prompt fallback uses `loop.add_reader()` on stdin, which Windows'
+`ProactorEventLoop` does not implement, and CI runs on Linux only - so
+Windows is not a claimed platform.
+
 ## Quick Start
 
 The library provides two interfaces:
@@ -132,6 +138,7 @@ powerpetdoor/
 ├── client.py          # PowerPetDoorClient low-level client
 ├── const.py           # Protocol constants and commands
 ├── framing.py         # Shared JSON frame scanner for the wire protocol
+├── sanitize.py        # Terminal-safety helper for untrusted text (shared)
 ├── schedule.py        # Schedule utilities
 ├── tz_utils.py        # Timezone utilities
 └── simulator/         # Door simulator submodule

@@ -448,10 +448,12 @@ class TestShutdownCommand:
         assert result.message == "Shutting down..."
         command_handler.stop_callback.assert_called_once_with()
 
-    async def test_stop_alias(self, command_handler):
+    async def test_stop_is_not_an_alias_for_shutdown(self, command_handler):
+        """`stop` stops the running script, never the whole simulator (M5)."""
         result = await command_handler.execute("stop")
-        assert result.success is True
-        command_handler.stop_callback.assert_called_once_with()
+        assert result.success is False
+        assert result.message == "No script is running"
+        command_handler.stop_callback.assert_not_called()
 
 
 class TestDebugCommand:
@@ -499,7 +501,8 @@ class TestListCommand:
         assert scripts  # There are built-in scripts
         for name, desc in scripts:
             assert f"  {name}: {desc}" in result.message
-        assert result.data == {"scripts": scripts}
+        assert result.message.endswith("\nScript: none running")
+        assert result.data == {"scripts": scripts, "running": None, "queued": 0}
 
     async def test_aliases(self, command_handler):
         for alias in ("/", "scripts"):

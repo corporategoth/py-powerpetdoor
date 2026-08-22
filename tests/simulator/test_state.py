@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from powerpetdoor.const import (
@@ -198,17 +200,61 @@ class TestSchedule:
         assert schedule.days_of_week == [1, 1, 1, 1, 1, 0, 0]
 
     def test_from_dict_normalizes_days_to_seven_bools(self):
-        """Wire days become exactly 7 booleans, whatever their input type."""
+        """Wire days become exactly 7 booleans, whatever their flag spelling."""
         schedule = Schedule.from_dict(
-            {"index": 0, "inside": True, "daysOfWeek": [1, 0, "yes", "", None, 2, True]}
+            {
+                "index": 0,
+                "inside": True,
+                "in_start_time": {"hour": 6, "min": 0},
+                "in_end_time": {"hour": 22, "min": 0},
+                "daysOfWeek": [1, 0, "yes", "no", "off", 2, True],
+            }
         )
         assert schedule.days_of_week == [True, False, True, False, False, True, True]
         assert all(isinstance(day, bool) for day in schedule.days_of_week)
 
+    def test_from_dict_reads_string_day_flags_as_flags_not_truthiness(self):
+        """`"0"` disables the day - bool("0") is True, which would enable it (L4)."""
+        schedule = Schedule.from_dict(
+            {
+                "index": 0,
+                "inside": True,
+                "in_start_time": {"hour": 6, "min": 0},
+                "in_end_time": {"hour": 22, "min": 0},
+                "daysOfWeek": ["1", "0", "1", "0", "1", "0", "1"],
+            }
+        )
+        assert schedule.days_of_week == [True, False, True, False, True, False, True]
+
+    @pytest.mark.parametrize("bad_day", ["", None, "maybe", [1], 1.5, {}])
+    def test_from_dict_rejects_unreadable_day_flags(self, bad_day):
+        """A day element that is not a 0/1 flag is rejected, not guessed at."""
+        with pytest.raises(ValueError, match=r"daysOfWeek\[3\] must be 0 or 1"):
+            Schedule.from_dict(
+                {
+                    "index": 0,
+                    "inside": True,
+                    "in_start_time": {"hour": 6, "min": 0},
+                    "in_end_time": {"hour": 22, "min": 0},
+                    "daysOfWeek": [1, 1, 1, bad_day, 1, 1, 1],
+                }
+            )
+
     def test_to_dict_writes_wire_ints_for_bool_days(self):
-        """Booleans in memory are written back to the wire as 1/0."""
+        """Booleans in memory are written back to the wire as 1/0.
+
+        `True == 1`, so equality alone cannot tell the two apart - the type
+        check is what pins the wire format (docs/protocol.md uses 1/0).
+        """
         schedule = Schedule(index=0, inside=True, days_of_week=[True, False] * 3 + [True])
-        assert schedule.to_dict()["daysOfWeek"] == [1, 0, 1, 0, 1, 0, 1]
+        days = schedule.to_dict()["daysOfWeek"]
+        assert days == [1, 0, 1, 0, 1, 0, 1]
+        assert all(type(day) is int for day in days)
+
+    def test_to_dict_serializes_days_as_json_ints(self):
+        """What actually goes on the wire is `1`/`0`, never `true`/`false`."""
+        schedule = Schedule(index=0, inside=True, days_of_week=[True, False] * 3 + [True])
+        assert '"daysOfWeek": [1, 0, 1, 0, 1, 0, 1]' in json.dumps(schedule.to_dict())
 
     def test_from_dict_coerces_numeric_strings(self):
         """Numeric strings from a sloppy client are coerced, not stored raw."""
@@ -396,8 +442,56 @@ class TestScheduleFromDictRejectsHostileInput:
     def test_outside_entry_times_are_validated_too(self):
         with pytest.raises(ValueError, match="end time hour must be between 0 and 23"):
             Schedule.from_dict(
-                {"index": 0, "outside": True, "out_end_time": {"hour": 99, "min": 0}}
+                {
+                    "index": 0,
+                    "outside": True,
+                    "out_start_time": {"hour": 6, "min": 0},
+                    "out_end_time": {"hour": 99, "min": 0},
+                }
             )
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            (
+                {"index": 0, "inside": True},
+                "missing required field 'in_start_time'",
+            ),
+            (
+                {"index": 0, "inside": True, "in_start_time": {"hour": 6, "min": 0}},
+                "missing required field 'in_end_time'",
+            ),
+            (
+                {"index": 0, "outside": True, "out_end_time": {"hour": 22, "min": 0}},
+                "missing required field 'out_start_time'",
+            ),
+            (
+                {
+                    "index": 0,
+                    "inside": True,
+                    "in_start_time": {},
+                    "in_end_time": {"hour": 22, "min": 0},
+                },
+                "start time must specify hour",
+            ),
+        ],
+    )
+    def test_missing_time_window_is_rejected_not_invented(self, payload, message):
+        """A selected sensor with no window must fail, not get 06:00-22:00 (L5)."""
+        with pytest.raises(ValueError, match=message):
+            Schedule.from_dict(payload)
+
+    def test_entry_for_neither_sensor_keeps_the_placeholder_window(self):
+        """With no sensor selected the entry gates nothing, so defaults are fine."""
+        schedule = Schedule.from_dict({"index": 4})
+        assert (schedule.inside, schedule.outside) == (False, False)
+        assert (schedule.start_hour, schedule.start_min) == (6, 0)
+        assert (schedule.end_hour, schedule.end_min) == (22, 0)
+
+    def test_infinite_index_is_rejected_with_the_number_reason(self):
+        """int(inf) raises OverflowError, which must not escape the validator."""
+        with pytest.raises(ValueError, match="index must be a number"):
+            Schedule.from_dict({"index": float("inf"), "inside": True})
 
 
 # ============================================================================
@@ -699,6 +793,24 @@ class TestGetTzinfo:
 
         warnings = [rec for rec in caplog.records if "falling back to UTC" in rec.getMessage()]
         assert len(warnings) == 1
+
+    @pytest.mark.parametrize("timezone", [["x"], {"a": 1}, 5, None])
+    def test_unhashable_or_wrong_typed_timezone_falls_back_to_utc(self, timezone, caplog):
+        """Schedule evaluation runs on every sensor trigger and must never raise.
+
+        SET_TIMEZONE validates its input now, but a value set directly (or
+        by a future caller) must still degrade to UTC rather than propagate
+        a TypeError out of is_sensor_allowed_by_schedule.
+        """
+        import logging
+
+        from powerpetdoor import tz_utils
+
+        tz_utils.init_timezone_cache_sync()
+        state = DoorSimulatorState(timezone=timezone)  # type: ignore[arg-type]
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.state"):
+            assert state.get_tzinfo().key == "UTC"
+        assert state.is_sensor_allowed_by_schedule("inside") is True
 
     def test_warning_re_emitted_for_new_value(self, caplog):
         """Changing to a different bad value warns again."""

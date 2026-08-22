@@ -190,23 +190,28 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
         ],
     )
     def ac(self) -> CommandResult:
-        """Toggle AC power connection (default action)."""
+        """Toggle AC power connection (default action).
+
+        Phrased as "AC set to ..." rather than "AC: ...": the latter is how
+        the read-only displays (`battery`, `holdtime`) phrase themselves, so
+        a bare `ac` looked like it was showing rather than changing (T5).
+        """
         present = not self.simulator.state.ac_present
         self.simulator.set_ac_present(present)
         state = "connected" if present else "disconnected"
-        return CommandResult(True, f"AC: {state}")
+        return CommandResult(True, f"AC set to {state}")
 
     @subcommand("ac", "connect", ["c"], "Connect AC power")
     def ac_connect(self) -> CommandResult:
         """Connect AC power."""
         self.simulator.set_ac_present(True)
-        return CommandResult(True, "AC: connected")
+        return CommandResult(True, "AC set to connected")
 
     @subcommand("ac", "disconnect", ["d"], "Disconnect AC power")
     def ac_disconnect(self) -> CommandResult:
         """Disconnect AC power."""
         self.simulator.set_ac_present(False)
-        return CommandResult(True, "AC: disconnected")
+        return CommandResult(True, "AC set to disconnected")
 
     @subcommand("ac", "toggle", ["t"], "Toggle AC connection")
     def ac_toggle(self) -> CommandResult:
@@ -214,7 +219,7 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
         present = not self.simulator.state.ac_present
         self.simulator.set_ac_present(present)
         state = "connected" if present else "disconnected"
-        return CommandResult(True, f"AC: {state}")
+        return CommandResult(True, f"AC set to {state}")
 
     @command(
         "battery_present",

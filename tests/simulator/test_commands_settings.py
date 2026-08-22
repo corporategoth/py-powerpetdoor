@@ -336,20 +336,30 @@ class TestAcCommand:
 
         result = await command_handler.execute("ac toggle")
         assert result.success is True
-        assert result.message == "AC: disconnected"
+        assert result.message == "AC set to disconnected"
         assert state.ac_present is False
 
         result = await command_handler.execute("ac t")
-        assert result.message == "AC: connected"
+        assert result.message == "AC set to connected"
         assert state.ac_present is True
 
         result = await command_handler.execute("ac d")
-        assert result.message == "AC: disconnected"
+        assert result.message == "AC set to disconnected"
         assert state.ac_present is False
 
         result = await command_handler.execute("ac c")
-        assert result.message == "AC: connected"
+        assert result.message == "AC set to connected"
         assert state.ac_present is True
+
+    async def test_bare_ac_reads_as_a_change_not_a_display(self, command_handler):
+        """`ac` mutates, so it must not be phrased like `battery`/`holdtime` (T5)."""
+        state = command_handler.simulator.state
+        state.ac_present = True
+
+        result = await command_handler.execute("ac")
+        assert result.success is True
+        assert result.message == "AC set to disconnected"
+        assert state.ac_present is False
 
 
 # ============================================================================

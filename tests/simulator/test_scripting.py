@@ -889,7 +889,7 @@ class TestBuiltinScriptInfrastructure:
 
     def test_get_unknown_script_raises(self):
         """Should raise for unknown script name."""
-        with pytest.raises(ScriptError, match="Unknown built-in script"):
+        with pytest.raises(ScriptError, match="Unknown script"):
             get_builtin_script("nonexistent_script_xyz")
 
     def test_all_builtin_scripts_parse(self):
@@ -913,7 +913,7 @@ class TestBuiltinScriptInfrastructure:
         monkeypatch.setattr(scripting, "SCRIPTS_DIR", tmp_path / "gone")
 
         assert list_builtin_scripts() == []
-        with pytest.raises(ScriptError, match="Unknown built-in script: foo. Available: $"):
+        with pytest.raises(ScriptError, match="Unknown script: foo. Available: $"):
             get_builtin_script("foo")
 
     def test_list_builtin_scripts_reports_broken_script(self, tmp_path, monkeypatch, caplog):
@@ -1074,8 +1074,12 @@ class TestScriptSerialization:
         assert runner.busy is True
         assert runner.current_script == "First"
 
+        # Bounded: without the fast-fail guard this await parks on the run
+        # lock that only `release` (the line below) frees, and a regression
+        # would hang the suite forever instead of failing (R3-M4).
         with pytest.raises(ScriptError, match="Another script is already running: First"):
-            await runner.run(self._script("Second"), queue_if_busy=False)
+            async with asyncio.timeout(2.0):
+                await runner.run(self._script("Second"), queue_if_busy=False)
 
         release.set()
         assert await asyncio.wait_for(first, 2.0) is True

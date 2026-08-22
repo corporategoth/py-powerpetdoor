@@ -18,9 +18,17 @@ class ControlCommandsMixin:
     stop_callback: Callable[[], None]
     _cli_mode: bool
 
-    @command("shutdown", ["stop"], "Shutdown the simulator", category="control")
+    @command("shutdown", [], "Shutdown the simulator", category="control")
     def shutdown(self) -> CommandResult:
-        """Shutdown the simulator."""
+        """Shutdown the simulator.
+
+        ``stop`` used to be an alias for this. It is not any more: with
+        serialized script runs the natural reading of "stop" is "stop the
+        running script", and killing the whole daemon instead is a
+        foot-gun. ``stop`` now does exactly that (see the ``stop`` command);
+        use ``shutdown`` (or, in the CLI, ``exit``/``q``/``quit``) to stop
+        the simulator.
+        """
         self.stop_callback()
         return CommandResult(True, "Shutting down...")
 

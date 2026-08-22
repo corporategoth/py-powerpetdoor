@@ -117,6 +117,7 @@ from .const import (
     SUCCESS_TRUE,
 )
 from .framing import MAX_BUFFER_SIZE, extract_frames, find_frame_end
+from .sanitize import sanitize_text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -292,6 +293,11 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._ownLoop = False
         self._eventLoop: asyncio.AbstractEventLoop | None = None
         self._transport = None
+        #: Transports connection_made() declined and aborted while this
+        #: object was wired into create_connection() directly (see
+        #: :meth:`connection_made`). asyncio still delivers their
+        #: connection_lost() here, and it must not tear anything down.
+        self._declined = 0
         self._keepalive = None
         self._check_receipt = None
         self._reconnect_task: asyncio.Task | None = None
@@ -981,7 +987,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         for event in (NOTIFY_SENSOR_INDOOR, NOTIFY_SENSOR_OUTDOOR, NOTIFY_LOW_BATTERY):
             if event in msg:
                 state = msg.get(FIELD_SENSOR_STATE)
-                _LOGGER.debug("Notification event: %s (state=%s)", event, state)
+                _LOGGER.debug("Notification event: %s (state=%s)", event, sanitize_text(state))
                 self._notify_listeners(self.notification_event_listeners, event, state)
                 return True
         return False
@@ -1014,7 +1020,9 @@ class PowerPetDoorClient(asyncio.Protocol):
                 self._ownLoop = True
                 self._eventLoop = asyncio.new_event_loop()
 
-        self.ensure_future(self.connect())
+        # Tracked so a connect() that escapes with an unexpected exception is
+        # reported immediately rather than at GC time (L1).
+        self._track_task(self.connect())
 
         if self._ownLoop:
             _LOGGER.info("Starting up our own event loop.")
@@ -1049,6 +1057,32 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._shutdown = True
         self.disconnect()
 
+    async def aclose(self, timeout: float | None = None) -> None:
+        """Shut down and await outstanding async lifecycle handlers (T2).
+
+        :meth:`disconnect` deliberately leaves async ``on_connect``/
+        ``on_disconnect`` handlers running - an ``on_disconnect`` coroutine
+        must survive the teardown that triggered it - which means nothing
+        else ever awaits or cancels them. This is the clean teardown point
+        for an embedding application: the handlers are given ``timeout``
+        seconds to finish, and whatever is still running is cancelled.
+
+        Args:
+            timeout: Seconds to wait for handlers; defaults to cfg_timeout.
+        """
+        self.shutdown()
+        current = asyncio.current_task()
+        tasks = [task for task in self._handler_tasks if task is not current]
+        if not tasks:
+            return
+        _done, pending = await asyncio.wait(
+            tasks, timeout=self.cfg_timeout if timeout is None else timeout
+        )
+        for task in pending:
+            _LOGGER.warning("Cancelling a connection handler that did not finish in time")
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
     def reset_shutdown(self) -> None:
         """Re-enable the client after shutdown()/stop() so it may connect again."""
         self._shutdown = False
@@ -1061,9 +1095,12 @@ class PowerPetDoorClient(asyncio.Protocol):
         single connection, so a second socket would orphan the first and
         hog the device's only slot (M2).
 
-        On failure (unreachable/refused/timeout) the error is logged and a
-        reconnect attempt is scheduled with backoff; this method only
-        raises asyncio.CancelledError. No-op after shutdown()/stop().
+        On failure the error is logged and a reconnect attempt is scheduled
+        with backoff; this method only raises asyncio.CancelledError. That
+        includes failures ``create_connection()`` reports as something other
+        than OSError - an over-long IDNA label or a lone surrogate in the
+        host raises UnicodeEncodeError, and a port outside 0-65535 raises
+        OverflowError (L1). No-op after shutdown()/stop().
         """
         if self._shutdown:
             _LOGGER.debug("Ignoring connect() while shut down")
@@ -1081,8 +1118,13 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._connecting = True
         try:
             async with asyncio.timeout(self.cfg_timeout):
-                await loop.create_connection(lambda: self, self.cfg_host, self.cfg_port)
-        except (OSError, TimeoutError) as err:
+                # Each attempt gets its own protocol shim so a transport this
+                # client does not adopt cannot drive its connection state
+                # (M1/L2/T1) - see _ConnectionAttempt.
+                await loop.create_connection(
+                    lambda: _ConnectionAttempt(self), self.cfg_host, self.cfg_port
+                )
+        except (OSError, TimeoutError, ValueError, OverflowError) as err:
             _LOGGER.error(
                 "Unable to connect to Power Pet Door at %s:%s: %s",
                 self.cfg_host,
@@ -1094,13 +1136,37 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._connecting = False
 
     def connection_made(self, transport) -> None:
-        """asyncio callback for a successful connection."""
+        """asyncio callback for a successful connection.
+
+        ``PowerPetDoorClient`` is a public ``asyncio.Protocol``, so it may be
+        handed to ``create_connection()`` directly. A transport this client
+        will not adopt is aborted here, and the ``connection_lost()`` asyncio
+        then delivers *on this same object* is counted off rather than
+        allowed to tear down a healthy connection (L2).
+        """
+        if not self._adopt_transport(transport):
+            self._declined += 1
+
+    def _adopt_transport(self, transport) -> bool:
+        """Take ownership of ``transport``, or decline and abort it.
+
+        Returns:
+            True if the transport was adopted and now drives client state.
+        """
+        if self._shutdown:
+            # shutdown()/stop() landed while create_connection() was still in
+            # flight. disconnect() already ran, so nothing holds a reference
+            # that would ever close this socket - abandon it here instead of
+            # leaving a "shut down" client keepalive-pinging the device (M1).
+            _LOGGER.info("Discarding a connection that completed after shutdown")
+            transport.abort()
+            return False
         if self._transport is not None:
             # Belt and braces behind connect()'s guard: never let a second
             # transport orphan the live one (M2).
             _LOGGER.warning("Rejecting a second connection; one is already established")
-            transport.close()
-            return
+            transport.abort()
+            return False
         _LOGGER.info("Connection Successful!")
         self._transport = transport
         self._was_connected = True
@@ -1120,9 +1186,17 @@ class PowerPetDoorClient(asyncio.Protocol):
         # Caller code
         for name, callback in list(self.on_connect.items()):
             self._dispatch_handler(name, callback)
+        return True
 
     def connection_lost(self, exc) -> None:
         """asyncio callback for connection lost."""
+        if self._declined:
+            # A transport connection_made() refused and aborted. It never
+            # drove any state, so its lifecycle event must not close the
+            # connection that is actually live (L2).
+            self._declined -= 1
+            _LOGGER.debug("Ignoring connection_lost() from a declined transport")
+            return
         self.disconnect()
         if not self._shutdown:
             _LOGGER.error("The server closed the connection. Reconnecting...")
@@ -1144,7 +1218,9 @@ class PowerPetDoorClient(asyncio.Protocol):
 
     def _schedule_reconnect(self) -> None:
         """Schedule a tracked reconnect attempt (cancelled by disconnect/stop)."""
-        self._reconnect_task = self.ensure_future(self.reconnect(self._next_reconnect_delay()))
+        # Tracked in _tasks as well as _reconnect_task so an exception that
+        # escapes reconnect() is logged immediately (L1).
+        self._reconnect_task = self._track_task(self.reconnect(self._next_reconnect_delay()))
 
     async def reconnect(self, delay) -> None:
         """Reconnect after a delay, unless the client has been shut down."""
@@ -1400,14 +1476,17 @@ class PowerPetDoorClient(asyncio.Protocol):
                 "Received non-ASCII bytes from device; escaped them (affected frames are dropped)"
             )
 
-        _LOGGER.debug("RX < %s", decoded)
+        # Device bytes reach an operator's terminal through the host
+        # application's log (`tail -f`, `journalctl`, `docker logs`), so ESC
+        # and friends must be escaped before they get there.
+        _LOGGER.debug("RX < %s", sanitize_text(decoded))
         frames, self._buffer, diag = extract_frames(self._buffer + decoded)
 
         for frame in frames:
             try:
                 msg = json.loads(frame)
             except json.JSONDecodeError as err:
-                _LOGGER.error("Failed to decode JSON frame (%s): %s", err, frame)
+                _LOGGER.error("Failed to decode JSON frame (%s): %s", err, sanitize_text(frame))
                 continue
             self._track_task(self.process_message(msg))
 
@@ -1579,3 +1658,51 @@ class PowerPetDoorClient(asyncio.Protocol):
         the client will try before dropping an unacknowledged message.
         """
         return self.cfg_timeout * MAX_FAILED_MSG
+
+
+class _ConnectionAttempt(asyncio.Protocol):
+    """Per-attempt protocol shim for one :meth:`PowerPetDoorClient.connect`.
+
+    :class:`PowerPetDoorClient` is itself an ``asyncio.Protocol``. Attaching
+    it directly to every transport means one object receives the lifecycle
+    events of every socket it was ever attached to, with no way to tell them
+    apart — so a transport the client *declined* (a shutdown that landed
+    mid-connect, or a second connection) delivers ``connection_lost`` into
+    the live connection's teardown path, and a socket ``disconnect()`` has
+    already replaced logs a bogus loss and burns a reconnect.
+
+    Giving every attempt its own shim restores that identity. Only a
+    transport the client adopted, and only while it is still the live one,
+    reaches the client's callbacks (M1/L2/T1).
+    """
+
+    __slots__ = ("_adopted", "_client", "_transport")
+
+    def __init__(self, client: PowerPetDoorClient) -> None:
+        self._client = client
+        self._transport: asyncio.BaseTransport | None = None
+        self._adopted = False
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        """Offer the new transport to the client, which may decline it."""
+        self._transport = transport
+        self._adopted = self._client._adopt_transport(transport)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        """Route the loss to the client only if this transport is still its own."""
+        if not self._adopted:
+            # Declined and aborted in connection_made(): it never drove any
+            # client state, so there is nothing to tear down (M1/L2).
+            return
+        current = self._client._transport
+        if current is not None and current is not self._transport:
+            # disconnect() dropped this socket and a newer connection has
+            # since been established; this event is stale (T1).
+            _LOGGER.debug("Ignoring connection_lost() from a superseded transport")
+            return
+        self._client.connection_lost(exc)
+
+    def data_received(self, data: bytes) -> None:
+        """Forward received bytes, unless this transport was declined."""
+        if self._adopted:
+            self._client.data_received(data)

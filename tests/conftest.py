@@ -66,6 +66,7 @@ class MockTransport:
 
     def __init__(self):
         self.written_data: list[bytes] = []
+        self.aborted = False
         self._closing = False
         self._closed = False
 
@@ -79,6 +80,11 @@ class MockTransport:
 
     def close(self) -> None:
         """Mark transport as closing."""
+        self._closing = True
+
+    def abort(self) -> None:
+        """Close immediately, discarding any buffered data."""
+        self.aborted = True
         self._closing = True
 
     def get_written_messages(self) -> list[dict]:

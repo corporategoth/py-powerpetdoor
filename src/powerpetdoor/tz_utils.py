@@ -20,6 +20,8 @@ import logging
 import re
 import threading
 
+from .sanitize import sanitize_text
+
 _LOGGER = logging.getLogger(__name__)
 
 # Module-level caches - populated by async_init_timezone_cache()
@@ -209,7 +211,8 @@ def parse_posix_tz_string(posix_tz: str) -> dict | None:
 
     match = _POSIX_TZ_RE.match(tz_part)
     if not match:
-        _LOGGER.debug("Could not parse POSIX TZ string: %s", posix_tz)
+        # Device-supplied: never log it raw (ANSI injection into host logs).
+        _LOGGER.debug("Could not parse POSIX TZ string: %s", sanitize_text(posix_tz))
         return None
 
     result["std_abbrev"] = match.group(1).strip("<>")

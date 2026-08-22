@@ -352,7 +352,9 @@ class CommandHandler(
                 if asyncio.iscoroutine(result):
                     result = await result
             except Exception as e:
-                return CommandResult(False, f"Error: {e}")
+                # The transport already labels failures ("ERROR: ..."), so an
+                # inner "Error: " prefix only doubles it up (T2).
+                return CommandResult(False, str(e))
         else:
             # No args defined - reject leftovers instead of silently ignoring them
             if remaining_parts:
@@ -372,7 +374,9 @@ class CommandHandler(
                 if asyncio.iscoroutine(result):
                     result = await result
             except Exception as e:
-                return CommandResult(False, f"Error: {e}")
+                # The transport already labels failures ("ERROR: ..."), so an
+                # inner "Error: " prefix only doubles it up (T2).
+                return CommandResult(False, str(e))
 
         # Handlers are looked up dynamically (getattr), so the type checker
         # cannot see their return type; every command handler returns a

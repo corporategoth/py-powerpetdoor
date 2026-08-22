@@ -128,11 +128,14 @@ class TestStatusFullText:
             "  Sensor active: inside\n"
             "  Schedules: [0]\n"
             "  Open cycles: 7\n"
-            "  Auto-retracts: 2"
+            "  Auto-retracts: 2\n"
+            "  Script: none running"
         )
         assert result.data["door"] == DOOR_STATE_HOLDING
         assert result.data["schedules"] == [0]
         assert result.data["battery_percent"] == 50
+        assert result.data["running_script"] is None
+        assert result.data["queued_scripts"] == 0
 
     async def test_status_aliases(self, command_handler):
         for alias in ("state", "info", "v"):

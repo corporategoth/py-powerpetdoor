@@ -16,9 +16,10 @@ identical whether or not a client is connected.
 import asyncio
 import json
 import logging
-import re
+import math
 from collections.abc import Callable
 
+from ..client import make_bool
 from ..const import (
     CMD_CHECK_RESET_REASON,
     CMD_CLOSE,
@@ -124,31 +125,98 @@ from ..const import (
     SUCCESS_TRUE,
 )
 from ..framing import extract_frames
+from ..sanitize import sanitize_text
 from ..tz_utils import get_posix_tz_string, is_cache_initialized
 from .engine import DoorMotionEngine
 from .state import DoorSimulatorState, Schedule
 
 logger = logging.getLogger(__name__)
 
-# C0 control characters (except tab/newline), DEL, and C1 control characters.
-# Network-derived strings are stripped of these before they reach any log so
-# a hostile peer cannot inject terminal escape sequences into operator
-# consoles or forge extra log lines.
-#
-# NOTE: this duplicates prompt_common.sanitize_text on purpose - the core
-# simulator must not import the interactive front-end stack. Dedup is left
-# for a later cleanup wave.
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+#: Network-derived strings are stripped of terminal control characters before
+#: they reach any log, so a hostile peer cannot inject escape sequences into
+#: operator consoles or forge extra log lines. The single implementation
+#: lives in the library package (:mod:`powerpetdoor.sanitize`) and is shared
+#: with the client library and the interactive front end.
+sanitize_log_text = sanitize_text
+
+#: Widest hold time (centiseconds) accepted from the wire; matches the
+#: operator-side ``holdtime`` command's 900 s ceiling.
+MAX_HOLD_TIME_CENTISECONDS = 90000
+#: Longest ``SET_TIMEZONE`` string accepted from the wire. Real POSIX TZ
+#: strings and IANA names are far shorter than this.
+MAX_TIMEZONE_LENGTH = 128
+#: Widest sensor trigger voltage accepted from the wire (millivolts).
+MAX_TRIGGER_VOLTAGE = 65535
 
 
-def sanitize_log_text(text: object) -> str:
-    """Neutralize terminal control characters in untrusted text.
+class WireValueError(ValueError):
+    """An untrusted ``SET_*`` field failed validation.
 
-    Accepts any value (network-derived fields are not guaranteed to be
-    strings) and replaces C0 controls (except tab and newline), DEL, and C1
-    controls with their visible ``\\xNN`` escape so the result is safe to log.
+    Always raised *before* any state is mutated, so a single hostile packet
+    can never leave the simulator holding a value that a later command
+    chokes on (``inf`` hold time breaks every subsequent ``GET_SETTINGS``;
+    a list timezone breaks every schedule evaluation). ``_handle_message``
+    turns it into the standard error envelope, carrying this message as the
+    ``reason``.
     """
-    return _CONTROL_CHAR_RE.sub(lambda m: f"\\x{ord(m.group()):02x}", str(text))
+
+
+def _coerce_wire_number(value: object, name: str, minimum: float, maximum: float) -> float:
+    """Coerce an untrusted numeric wire field to a finite value in range.
+
+    JSON permits ``Infinity``/``NaN`` - Python's ``json.loads`` accepts both
+    the literals and ``1e400`` - and neither survives contact with the rest
+    of the simulator, so they must be rejected here rather than stored.
+
+    Raises:
+        WireValueError: If the value is not a finite number in range.
+    """
+    # bool is an int subclass; `true` is not a number on this wire.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise WireValueError(f"{name} must be a number, got {value!r}")
+    if not math.isfinite(value):
+        raise WireValueError(f"{name} must be a finite number, got {value!r}")
+    if not minimum <= value <= maximum:
+        raise WireValueError(f"{name} must be between {minimum} and {maximum}, got {value!r}")
+    return float(value)
+
+
+def _coerce_wire_int(value: object, name: str, minimum: int, maximum: int) -> int:
+    """Coerce an untrusted wire field to an int in ``minimum..maximum``.
+
+    Raises:
+        WireValueError: If the value is not a finite number in range.
+    """
+    return int(_coerce_wire_number(value, name, minimum, maximum))
+
+
+def _coerce_wire_string(value: object, name: str, max_length: int) -> str:
+    """Coerce an untrusted wire field to a bounded string.
+
+    Raises:
+        WireValueError: If the value is not a string, or is too long.
+    """
+    if not isinstance(value, str):
+        raise WireValueError(f"{name} must be a string, got {value!r}")
+    if len(value) > max_length:
+        raise WireValueError(f"{name} must be at most {max_length} characters, got {len(value)}")
+    return value
+
+
+def _coerce_wire_flag(value: object, name: str) -> bool:
+    """Coerce an untrusted wire field to a ``"1"``/``"0"`` protocol flag.
+
+    Read with :func:`~powerpetdoor.client.make_bool`, the same way the
+    client reads them, so ``1`` and ``"1"`` mean the same thing and
+    ``bool("0") is True`` can never turn a setting on.
+
+    Raises:
+        WireValueError: If the value is not a recognizable flag.
+    """
+    flag = make_bool(value) if isinstance(value, (bool, int, str)) else None
+    if not isinstance(flag, bool):
+        raise WireValueError(f"{name} must be 0 or 1, got {value!r}")
+    return flag
 
 
 def make_sensor_notification(
@@ -404,18 +472,32 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
         try:
             await handler(self, msg, response)
+        except WireValueError as err:
+            # A deliberate rejection: the handler validated an untrusted
+            # field and refused it before touching state. Report the actual
+            # reason so a legitimate client can fix its payload.
+            logger.warning(
+                "Simulator: Rejected %s: %s", sanitize_log_text(cmd), sanitize_log_text(err)
+            )
+            response = self._error_envelope(cmd, msg_id, str(err))
         except Exception:
             logger.exception("Simulator: Error handling command %s", sanitize_log_text(cmd))
-            response = {
-                FIELD_CMD: cmd,
-                FIELD_SUCCESS: SUCCESS_FALSE,
-                FIELD_DIRECTION: DOOR_TO_PHONE,
-                FIELD_REASON: "Command failed",
-            }
-            if msg_id is not None:
-                response[FIELD_MSG_ID_RESPONSE] = msg_id
+            response = self._error_envelope(cmd, msg_id, "Command failed")
 
         self._send(response)
+
+    @staticmethod
+    def _error_envelope(cmd: str, msg_id: object, reason: str) -> dict:
+        """Build the standard failure envelope for ``cmd``."""
+        response: dict = {
+            FIELD_CMD: cmd,
+            FIELD_SUCCESS: SUCCESS_FALSE,
+            FIELD_DIRECTION: DOOR_TO_PHONE,
+            FIELD_REASON: reason,
+        }
+        if msg_id is not None:
+            response[FIELD_MSG_ID_RESPONSE] = msg_id
+        return response
 
     # ==========================================================================
     # Command Handlers - Get Commands
@@ -704,16 +786,26 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     @CommandRegistry.handler(CMD_SET_TIMEZONE)
     async def _handle_set_timezone(self, msg: dict, response: dict) -> None:
         if FIELD_TZ in msg:
+            # A non-string here (a list, a dict, an int) is stored happily
+            # and then breaks GET_SETTINGS and every schedule evaluation for
+            # the life of the process - validate before assigning.
+            timezone = _coerce_wire_string(msg[FIELD_TZ], FIELD_TZ, MAX_TIMEZONE_LENGTH)
             # Store the wire (POSIX) value as-is; schedule evaluation maps
             # it back to an IANA zone (see DoorSimulatorState.get_tzinfo).
-            self.state.timezone = msg[FIELD_TZ]
+            self.state.timezone = timezone
         response[FIELD_TZ] = self.state.timezone
 
     @CommandRegistry.handler(CMD_SET_HOLD_TIME)
     async def _handle_set_hold_time(self, msg: dict, response: dict) -> None:
         if FIELD_HOLD_TIME in msg:
+            # `holdTime: 1e400` divides cleanly to inf; storing it makes
+            # every later int(hold_time * 100) raise and parks the door in
+            # DOOR_HOLDING forever. Validate before assigning.
+            centiseconds = _coerce_wire_number(
+                msg[FIELD_HOLD_TIME], FIELD_HOLD_TIME, 0, MAX_HOLD_TIME_CENTISECONDS
+            )
             # Convert centiseconds to seconds for internal storage
-            self.state.hold_time = msg[FIELD_HOLD_TIME] / 100.0
+            self.state.hold_time = centiseconds / 100.0
             logger.info("Simulator: Hold time set to %ss", self.state.hold_time)
         # Convert seconds to centiseconds for protocol response
         response[FIELD_HOLD_TIME] = int(self.state.hold_time * 100)
@@ -738,28 +830,47 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             if field_name in msg:
                 settings[field_name] = msg[field_name]
 
-        if FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS in settings:
-            self.state.sensor_on_indoor = settings[FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS] == "1"
-        if FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS in settings:
-            self.state.sensor_off_indoor = settings[FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS] == "1"
-        if FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS in settings:
-            self.state.sensor_on_outdoor = settings[FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS] == "1"
-        if FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS in settings:
-            self.state.sensor_off_outdoor = settings[FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS] == "1"
-        if FIELD_LOW_BATTERY_NOTIFICATIONS in settings:
-            self.state.low_battery = settings[FIELD_LOW_BATTERY_NOTIFICATIONS] == "1"
+        # Coerce every supplied flag BEFORE assigning any of them, so a
+        # malformed field cannot leave a half-applied notification set.
+        attributes = {
+            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: "sensor_on_indoor",
+            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: "sensor_off_indoor",
+            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: "sensor_on_outdoor",
+            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: "sensor_off_outdoor",
+            FIELD_LOW_BATTERY_NOTIFICATIONS: "low_battery",
+        }
+        coerced = {
+            attribute: _coerce_wire_flag(settings[field_name], field_name)
+            for field_name, attribute in attributes.items()
+            if field_name in settings
+        }
+        for attribute, flag in coerced.items():
+            setattr(self.state, attribute, flag)
         response[FIELD_NOTIFICATIONS] = self.state.get_notifications()
 
     @CommandRegistry.handler(CMD_SET_SENSOR_TRIGGER_VOLTAGE)
     async def _handle_set_sensor_voltage(self, msg: dict, response: dict) -> None:
         if FIELD_SENSOR_TRIGGER_VOLTAGE in msg:
-            self.state.sensor_trigger_voltage = msg[FIELD_SENSOR_TRIGGER_VOLTAGE]
+            # Nothing does arithmetic on this today, so an arbitrary JSON
+            # value is currently inert - it is the same latent trap as
+            # holdTime, so bound it at the door rather than later.
+            self.state.sensor_trigger_voltage = _coerce_wire_int(
+                msg[FIELD_SENSOR_TRIGGER_VOLTAGE],
+                FIELD_SENSOR_TRIGGER_VOLTAGE,
+                0,
+                MAX_TRIGGER_VOLTAGE,
+            )
         response[FIELD_SENSOR_TRIGGER_VOLTAGE] = self.state.sensor_trigger_voltage
 
     @CommandRegistry.handler(CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE)
     async def _handle_set_sleep_voltage(self, msg: dict, response: dict) -> None:
         if FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE in msg:
-            self.state.sleep_sensor_trigger_voltage = msg[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE]
+            self.state.sleep_sensor_trigger_voltage = _coerce_wire_int(
+                msg[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE],
+                FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+                0,
+                MAX_TRIGGER_VOLTAGE,
+            )
         response[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE] = self.state.sleep_sensor_trigger_voltage
 
     # ==========================================================================

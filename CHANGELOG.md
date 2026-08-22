@@ -20,13 +20,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   examples are now verified by tests)
 - `cycle()` method to `PowerPetDoor` facade for triggering sensor-like door cycles
 - Battery simulation with configurable charge/discharge rates in simulator
-- Notification commands (`notify`, `n`) in simulator CLI
+- Notification commands (`notify`) in simulator CLI
 - Simulator: `pet` command (CLI and ctl) for pet-in-doorway simulation
 - Simulator: `--control-host` and `--scripts-dir` flags, `run <script> wait`
   (exit code reflects script pass/fail), and `battery random`
 - Simulator: `DoorMotionEngine` with deterministic test hooks
   (`wait_for_status()`, `add_status_listener()`, `drain()`)
 - pytest-xdist for parallel test execution; hypothesis property-based fuzz suite
+- `PowerPetDoorClient.aclose()`: shuts down and awaits (then cancels)
+  outstanding async `on_connect`/`on_disconnect` handlers, so an embedding
+  application has a clean teardown point. `PowerPetDoor.disconnect()` uses it
+- Simulator: `stop` command — stops the **running script** (see Changed)
+- Simulator: `status` and `list` report the script runner's state
+  (`Script: running "<name>" (N queued)`)
+- ctl: `run <script> wait` streams the daemon's `LOG:` lines to stderr, so CI
+  sees progress and the assertion text behind a failure
 
 ### Changed
 - `loop=None` now resolves the running event loop lazily at connect time; the
@@ -50,6 +58,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Schedule `days_of_week` now uses list format `[Sun, Mon, Tue, Wed, Thu, Fri, Sat]` instead of bitmask
 - CLI alias 'y' now used for cycle (previously 'c' conflicted with close)
 - Removed duplicate 'f' alias from run command (kept 'r' and 'file')
+- **Breaking (simulator CLI/ctl)**: `stop` is no longer an alias for
+  `shutdown`. It now stops the *running script*; use `shutdown` (or, in the
+  CLI, `exit`/`q`/`quit`) to stop the simulator
+- Bare `ac` now answers "AC set to connected/disconnected" so it does not read
+  like the read-only `battery`/`holdtime` displays
+- Command failures no longer double their prefix (`ERROR: Error: ...`)
+- "Unknown built-in script: X" is now "Unknown script: X" — the `Available:`
+  list it prints includes `--scripts-dir` names too
+- Simulator status/progress output is flushed, so the startup banner and script
+  progress appear in redirected output (and survive SIGTERM)
+- A nonexistent `--scripts-dir` is now a startup error; an empty one warns
+- ctl `--help` describes `--timeout`'s silence-gap semantics
+- Packaging: replaced the `OS Independent` classifier with explicit
+  Linux/macOS classifiers — the simulator's plain-stdin prompt fallback uses
+  `loop.add_reader()`, which Windows' ProactorEventLoop does not implement
 
 ### Fixed
 - Receive framing: garbage bytes raised `IndexError`, a brace inside a JSON
@@ -67,6 +90,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simulator: `SET_NOTIFICATIONS` ignored the documented payload format;
   `DELETE_SCHEDULE` did not echo the deleted index
 - Simulator: script loader errors surfaced as raw YAML/OS exceptions
+- `shutdown()`/`stop()` during an in-flight `connect()` left a live,
+  keepalive-pinging connection that nothing ever closed
+- A connection the client declined (a second transport, or one completing
+  after shutdown) delivered `connection_lost` into the live connection's
+  teardown path, closing a perfectly healthy connection
+- A stale `connection_lost` after `disconnect()`+`connect()` logged a bogus
+  ERROR and burned a reconnect attempt
+- `connect()` escaped with `UnicodeEncodeError`/`OverflowError` for an invalid
+  host or port instead of logging and scheduling a reconnect
+- Simulator: a status listener commanding the door with `hold_time` ~0 replayed
+  a stale start state, re-broadcasting a status the door had moved past
+- Simulator: one dead ctl client made the daemon's log broadcast feed itself,
+  flooding every other session with hundreds of `socket.send() raised
+  exception.` lines
 - `ppd-simulator-ctl` printed a traceback on Ctrl-C instead of exiting 130
 - `compute_schedule_diff()` mutated its input; `compress_schedule()` now
   validates entries instead of raising `KeyError` on sparse input
@@ -83,7 +120,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured script directories (path traversal)
 - Control characters in network-derived data are escaped before reaching logs,
   broadcasts, or a terminal (ANSI escape injection, forged log lines)
-- `Schedule.from_dict()` validates and bounds wire-supplied schedule data
+- `Schedule.from_dict()` validates and bounds wire-supplied schedule data;
+  day flags are read as flags (`"0"` means off) and a selected sensor's time
+  window is required rather than defaulted to a permissive 06:00-22:00
+- Every simulator `SET_*` command validates its wire value **before** storing
+  it. `SET_HOLD_TIME` used to accept `Infinity`/`NaN` and `SET_TIMEZONE` any
+  JSON type, either of which permanently broke `GET_SETTINGS` for every client
+  (and wedged the door open) from a single unauthenticated packet
+- The shipped library no longer writes raw device bytes into log records: one
+  shared sanitizer (`powerpetdoor.sanitize`) now covers `client.py`,
+  `schedule.py`, `tz_utils.py`, the simulator and both front ends
+- The interactive simulator CLI sanitizes its own command output, which can
+  carry network-poisoned state (e.g. a wire-set timezone)
+- CI and release workflows install from the committed, hashed `uv.lock`
+  (`uv sync --locked`), and the build backend is pinned exactly
 - Simulator history files are created with `0600` permissions
 - All CI actions pinned to full commit SHAs
 

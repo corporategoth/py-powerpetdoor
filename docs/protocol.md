@@ -434,12 +434,31 @@ Response:
 See [Schedule Format](#schedule-format) for the schedule object structure.
 
 The simulator validates schedules coming off the wire before storing them:
-`index` must be an integer in 0-255, `daysOfWeek` must be a 7-element list
-(or the legacy integer bitmask), and `hour`/`min` must be integers in 0-23 /
-0-59. A malformed schedule is rejected with the standard error envelope
-(`"success": "false"` plus a `reason` naming the offending field) and nothing
-is stored; `SET_SCHEDULE_LIST` rejects the whole batch rather than loading it
-partially.
+`index` must be an integer in 0-255, `daysOfWeek` must be a 7-element list of
+0/1 flags (or the legacy integer bitmask), and `hour`/`min` must be integers
+in 0-23 / 0-59. Day flags are read as flags, not truthily, so a string `"0"`
+disables the day. When `inside` or `outside` is true the corresponding
+`*_start_time`/`*_end_time` objects are **required**, each carrying an
+`hour` (`min` defaults to 0): an absent window is rejected rather than
+silently materialized as 06:00-22:00. A malformed schedule is rejected with
+the standard error envelope (`"success": "false"` plus a `reason` naming the
+offending field) and nothing is stored; `SET_SCHEDULE_LIST` rejects the whole
+batch rather than loading it partially.
+
+The same validate-before-storing rule applies to every other `SET_*` command,
+so one malformed packet can never leave the simulator in a state a later
+command chokes on:
+
+| Command | Accepted values |
+|---------|-----------------|
+| `SET_HOLD_TIME` | a finite number of centiseconds in 0-90000 (`Infinity`/`NaN`, strings and containers are rejected) |
+| `SET_TIMEZONE` | a string of at most 128 characters |
+| `SET_SENSOR_TRIGGER_VOLTAGE` | a finite number in 0-65535 |
+| `SET_SLEEP_SENSOR_TRIGGER_VOLTAGE` | a finite number in 0-65535 |
+| `SET_NOTIFICATIONS` | each supplied field must be a 0/1 flag (`"1"`/`1`/`true` and `"0"`/`0`/`false`); one bad field rejects the whole message, so a notification set is never half-applied |
+
+A rejection answers `{"success": "false", "reason": "<field> must be ..."}`
+and leaves state untouched.
 
 ### Diagnostic Commands
 

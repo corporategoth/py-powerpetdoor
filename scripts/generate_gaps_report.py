@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 SOURCE_PREFIX = "src/powerpetdoor/"
+SCRIPTS_PREFIX = "scripts/"
 
 
 def _collect_pragma_exclusions(source_dir: Path) -> dict[str, list[dict]]:
@@ -77,8 +78,11 @@ def _collect_pragma_exclusions(source_dir: Path) -> dict[str, list[dict]]:
             last_pragma_type = pragma_type
 
             code = line.strip()
-            # Remove the pragma comment itself for cleaner display
-            code_before_pragma = code[: code.index("# pragma:")].rstrip()
+            # Remove the pragma comment itself for cleaner display. Slice at
+            # the regex match, not at a literal "# pragma:": the regex also
+            # accepts "#pragma:" and "#  pragma:", and str.index would raise
+            # ValueError on those.
+            code_before_pragma = line[: match.start()].strip()
 
             entry = {
                 "line": i,
@@ -110,6 +114,8 @@ def _group_lines(lines: list[int]) -> str:
 
 def _categorize(path: str) -> str:
     """Categorize a source file path into a logical group."""
+    if path.startswith(SCRIPTS_PREFIX):
+        return "Build Scripts"
     p = path.replace(SOURCE_PREFIX, "")
 
     if p.startswith("simulator/commands/"):

@@ -35,9 +35,12 @@ from powerpetdoor.const import (
     COMMAND,
     CONFIG,
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
+    DOOR_STATE_SLOWING,
     FIELD_INSIDE,
     FIELD_OUTSIDE,
     FIELD_POWER,
@@ -51,6 +54,19 @@ from powerpetdoor.simulator import (
     DoorTimingConfig,
     Schedule,
 )
+
+#: The exact DOOR_STATUS broadcast sequences the client observes. Only
+#: `CMD: DOOR_STATUS` frames reach a door_status listener - a command
+#: response carrying doorStatus does not (client._handle_door_status is
+#: registered for GET_DOOR_STATUS and DOOR_STATUS only).
+OPENING_SEQUENCE = [DOOR_STATE_RISING, DOOR_STATE_SLOWING, DOOR_STATE_HOLDING]
+CLOSING_SEQUENCE = [
+    DOOR_STATE_CLOSING_TOP_OPEN,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    DOOR_STATE_CLOSED,
+]
+FULL_CYCLE = [*OPENING_SEQUENCE, *CLOSING_SEQUENCE]
+
 
 # ============================================================================
 # Test Fixtures
@@ -144,6 +160,29 @@ class CallbackTracker:
     def get_calls(self, name: str) -> list[Any]:
         """Get all calls for a specific callback."""
         return [args for n, args in self.calls if n == name]
+
+    def get_values(self, name: str) -> list[Any]:
+        """The first positional argument of every call for ``name``."""
+        return [args[0] for args in self.get_calls(name)]
+
+    async def wait_for_sequence(
+        self, name: str, expected: list[Any], timeout: float = 5.0
+    ) -> list[Any]:
+        """Wait until the recorded values for ``name`` equal ``expected``.
+
+        Returns the recorded values; on timeout the caller's assertion
+        reports the mismatch. Event-driven, so a suppressed transition is a
+        clean failure rather than a slow one.
+        """
+        event = self.events[name]
+        try:
+            async with asyncio.timeout(timeout):
+                while self.get_values(name) != expected:
+                    event.clear()
+                    await event.wait()
+        except TimeoutError:
+            pass
+        return self.get_values(name)
 
     def clear(self):
         """Clear all recorded calls."""
@@ -259,21 +298,15 @@ class TestControlCommands:
         # Send open command
         client.send_message(COMMAND, CMD_OPEN)
 
-        # Wait for door to start opening
-        await tracker.wait_for("door_status", timeout=2.0)
-
-        # Should have received status update
-        calls = tracker.get_calls("door_status")
-        assert len(calls) > 0
-
-        # Door should be in an open state
-        statuses = [c[0] for c in calls]
-        assert any(
-            s in (DOOR_STATE_RISING, DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP) for s in statuses
-        )
+        # The broadcast sequence is fully deterministic: the first one after
+        # CMD_OPEN is always DOOR_RISING (engine._replace_sequence calls
+        # _set_status(start_state) synchronously). Accepting any of three
+        # states made this test blind to a simulator that skips one (R3-L1).
+        statuses = await tracker.wait_for_sequence("door_status", OPENING_SEQUENCE, timeout=3.0)
+        assert statuses == OPENING_SEQUENCE
 
     async def test_close_door(self, client, simulator, tracker):
-        """CLOSE command should close the door."""
+        """CLOSE broadcasts the exact closing sequence to the client."""
         # First open the door
         await simulator.open_door(hold=True)
         await simulator.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
@@ -281,11 +314,17 @@ class TestControlCommands:
         callback = tracker.make_callback("door_status")
         client.add_listener("test", door_status_update=callback)
 
+        # The KEEPUP broadcast is still in flight; wait until the client has
+        # actually seen it before pinning the close sequence.
+        seen = await tracker.wait_for_sequence("door_status", [DOOR_STATE_KEEPUP], timeout=3.0)
+        assert seen == [DOOR_STATE_KEEPUP]
+        tracker.clear()
+
         # Send close command
         client.send_message(COMMAND, CMD_CLOSE)
 
-        # Wait for close to complete
-        await simulator.wait_for_status(DOOR_STATE_CLOSED, timeout=5.0)
+        statuses = await tracker.wait_for_sequence("door_status", CLOSING_SEQUENCE, timeout=5.0)
+        assert statuses == CLOSING_SEQUENCE
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
     async def test_power_off(self, client, simulator):
@@ -357,24 +396,8 @@ class TestClientCallbacks:
         # Trigger door opening via simulator
         simulator.trigger_sensor("inside")
 
-        # Wait for callback
-        await tracker.wait_for("door_status", timeout=2.0)
-
-        calls = tracker.get_calls("door_status")
-        assert len(calls) > 0
-
-    async def test_sensor_callback(self, client, simulator, tracker):
-        """Sensor state changes should trigger callback."""
-        callback = tracker.make_callback("sensor")
-        client.add_listener("test", sensor_update={FIELD_INSIDE: callback})
-
-        # Change sensor state
-        client.send_message(COMMAND, CMD_DISABLE_INSIDE)
-
-        await tracker.wait_for("sensor", timeout=2.0)
-
-        calls = tracker.get_calls("sensor")
-        assert len(calls) > 0
+        statuses = await tracker.wait_for_sequence("door_status", OPENING_SEQUENCE, timeout=3.0)
+        assert statuses == OPENING_SEQUENCE
 
     async def test_sensor_callback_receives_field_and_value(self, client, simulator, tracker):
         """Sensor callback should receive both field_name and value arguments."""
@@ -475,11 +498,11 @@ class TestClientCallbacks:
         # Trigger status update
         simulator.trigger_sensor("inside")
 
-        await tracker.wait_for("listener1", timeout=2.0)
-        await tracker.wait_for("listener2", timeout=2.0)
-
-        assert len(tracker.get_calls("listener1")) > 0
-        assert len(tracker.get_calls("listener2")) > 0
+        # Both listeners must see the same broadcasts, in the same order.
+        first = await tracker.wait_for_sequence("listener1", OPENING_SEQUENCE, timeout=3.0)
+        second = await tracker.wait_for_sequence("listener2", OPENING_SEQUENCE, timeout=3.0)
+        assert first == OPENING_SEQUENCE
+        assert second == OPENING_SEQUENCE
 
 
 # ============================================================================
@@ -607,9 +630,11 @@ class TestDoorCycles:
         assert simulator.state.total_open_cycles == initial_cycles + 1
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
-        # Should have received multiple status updates
-        calls = tracker.get_calls("door_status")
-        assert len(calls) >= 2  # At least RISING and HOLDING
+        # Every broadcast of the cycle reached the client, in order: a
+        # ">= 2 calls" assertion is satisfied by a simulator that skips
+        # states entirely (R3-L1).
+        statuses = await tracker.wait_for_sequence("door_status", FULL_CYCLE, timeout=5.0)
+        assert statuses == FULL_CYCLE
 
     async def test_client_initiated_open_close(self, client, simulator):
         """Client-initiated open/close should work correctly."""

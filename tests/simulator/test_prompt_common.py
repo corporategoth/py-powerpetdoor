@@ -25,7 +25,6 @@ from powerpetdoor.simulator.prompt_common import (
     get_aliases,
     get_commands,
     init_command_sets,
-    sanitize_text,
     unescape_message,
     use_prompt_toolkit,
 )
@@ -50,50 +49,6 @@ def pt_pipe(monkeypatch):
     with create_pipe_input() as pipe_input:
         with create_app_session(input=pipe_input, output=DummyOutput()):
             yield pipe_input
-
-
-# ============================================================================
-# Terminal output sanitization (security: ANSI/control-char injection)
-# ============================================================================
-
-
-class TestSanitizeText:
-    """Tests for sanitize_text - untrusted data must not reach a terminal raw."""
-
-    def test_escapes_esc_character(self):
-        """ESC (0x1b) must be neutralized so ANSI sequences cannot execute."""
-        result = sanitize_text("evil \x1b[2J text")
-        assert "\x1b" not in result
-        assert "\\x1b" in result
-
-    def test_escapes_carriage_return(self):
-        """CR can overwrite the current line - must be neutralized."""
-        result = sanitize_text("before\rafter")
-        assert "\r" not in result
-        assert "\\x0d" in result
-
-    def test_escapes_c1_controls(self):
-        """C1 range (0x80-0x9f) includes CSI - must be neutralized."""
-        result = sanitize_text("a\x9bmb")  # 0x9b is CSI
-        assert "\x9b" not in result
-        assert "\\x9b" in result
-
-    def test_escapes_del(self):
-        result = sanitize_text("a\x7fb")
-        assert "\x7f" not in result
-        assert "\\x7f" in result
-
-    def test_preserves_newline_and_tab(self):
-        """Plain whitespace formatting survives sanitization."""
-        assert sanitize_text("line1\nline2\tend") == "line1\nline2\tend"
-
-    def test_plain_text_unchanged(self):
-        assert sanitize_text("Battery: 42%") == "Battery: 42%"
-
-    def test_null_byte(self):
-        result = sanitize_text("a\x00b")
-        assert "\x00" not in result
-        assert "\\x00" in result
 
 
 class TestEscapeUnescape:

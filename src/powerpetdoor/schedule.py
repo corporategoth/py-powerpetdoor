@@ -16,6 +16,7 @@ from copy import deepcopy
 from datetime import time
 from typing import Any, cast
 
+from .client import make_bool
 from .const import (
     FIELD_DAYSOFWEEK,
     FIELD_ENABLED,
@@ -29,6 +30,7 @@ from .const import (
     FIELD_OUTSIDE_PREFIX,
     FIELD_START_TIME_SUFFIX,
 )
+from .sanitize import sanitize_text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -69,17 +71,18 @@ def validate_schedule_entry(sched: dict) -> bool:
     try:
         # Check required fields exist
         if FIELD_INDEX not in sched:
-            _LOGGER.debug("Schedule entry missing index field: %s", sched)
+            _LOGGER.debug("Schedule entry missing index field: %s", sanitize_text(sched))
             return False
 
         if FIELD_DAYSOFWEEK not in sched:
-            _LOGGER.debug("Schedule entry missing daysOfWeek field: %s", sched)
+            _LOGGER.debug("Schedule entry missing daysOfWeek field: %s", sanitize_text(sched))
             return False
 
         # Validate daysOfWeek is a list of 7 elements
         if not isinstance(sched[FIELD_DAYSOFWEEK], list) or len(sched[FIELD_DAYSOFWEEK]) != 7:
             _LOGGER.debug(
-                "Schedule entry has invalid daysOfWeek format: %s", sched[FIELD_DAYSOFWEEK]
+                "Schedule entry has invalid daysOfWeek format: %s",
+                sanitize_text(sched[FIELD_DAYSOFWEEK]),
             )
             return False
 
@@ -88,30 +91,40 @@ def validate_schedule_entry(sched: dict) -> bool:
             in_start_key = FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX
             in_end_key = FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX
             if in_start_key not in sched or in_end_key not in sched:
-                _LOGGER.debug("Schedule entry missing inside time fields: %s", sched)
+                _LOGGER.debug("Schedule entry missing inside time fields: %s", sanitize_text(sched))
                 return False
             if FIELD_HOUR not in sched[in_start_key] or FIELD_MINUTE not in sched[in_start_key]:
                 _LOGGER.debug(
-                    "Schedule entry has invalid inside start time: %s", sched[in_start_key]
+                    "Schedule entry has invalid inside start time: %s",
+                    sanitize_text(sched[in_start_key]),
                 )
                 return False
             if FIELD_HOUR not in sched[in_end_key] or FIELD_MINUTE not in sched[in_end_key]:
-                _LOGGER.debug("Schedule entry has invalid inside end time: %s", sched[in_end_key])
+                _LOGGER.debug(
+                    "Schedule entry has invalid inside end time: %s",
+                    sanitize_text(sched[in_end_key]),
+                )
                 return False
 
         if sched.get(FIELD_OUTSIDE, False):
             out_start_key = FIELD_OUTSIDE_PREFIX + FIELD_START_TIME_SUFFIX
             out_end_key = FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX
             if out_start_key not in sched or out_end_key not in sched:
-                _LOGGER.debug("Schedule entry missing outside time fields: %s", sched)
+                _LOGGER.debug(
+                    "Schedule entry missing outside time fields: %s", sanitize_text(sched)
+                )
                 return False
             if FIELD_HOUR not in sched[out_start_key] or FIELD_MINUTE not in sched[out_start_key]:
                 _LOGGER.debug(
-                    "Schedule entry has invalid outside start time: %s", sched[out_start_key]
+                    "Schedule entry has invalid outside start time: %s",
+                    sanitize_text(sched[out_start_key]),
                 )
                 return False
             if FIELD_HOUR not in sched[out_end_key] or FIELD_MINUTE not in sched[out_end_key]:
-                _LOGGER.debug("Schedule entry has invalid outside end time: %s", sched[out_end_key])
+                _LOGGER.debug(
+                    "Schedule entry has invalid outside end time: %s",
+                    sanitize_text(sched[out_end_key]),
+                )
                 return False
 
         return True
@@ -230,7 +243,10 @@ def compress_schedule(schedule: list[dict]) -> list[dict]:
             out_start, out_end = out_end, out_start
 
         for day in range(len(sched[FIELD_DAYSOFWEEK])):
-            if sched[FIELD_DAYSOFWEEK][day]:
+            # make_bool, not truthiness: bool("0") is True, and a firmware
+            # variant that sends "0"/"1" day flags (as it already does for
+            # `enabled`) would otherwise expand to every day of the week (L4).
+            if make_bool(sched[FIELD_DAYSOFWEEK][day]) is True:
                 if sched[FIELD_INSIDE]:
                     daysched = expanded_sched[FIELD_INSIDE].setdefault(day, [])
                     daysched.append({"start": in_start, "end": in_end})

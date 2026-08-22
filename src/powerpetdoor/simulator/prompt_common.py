@@ -10,13 +10,13 @@ the InteractiveSession class for the simulator command-line interfaces.
 """
 
 import os
-import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..sanitize import sanitize_text
 from .commands.base import (
     DAY_NAMES,
     DAY_PRESET_NAMES,
@@ -52,20 +52,16 @@ if TYPE_CHECKING:
 CLI_HISTORY_FILE = Path.home() / ".powerpetdoor_simulator_history"
 CTL_HISTORY_FILE = Path.home() / ".powerpetdoor_ctl_history"
 
-# C0 control characters (except tab/newline), DEL, and C1 control characters.
-# These must never reach a terminal unescaped - ESC sequences can clear the
-# screen, move the cursor, or worse on vulnerable terminal emulators.
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
+def render_result(message: object) -> str:
+    """Format a command result for display on an operator's terminal.
 
-def sanitize_text(text: str) -> str:
-    """Neutralize terminal control characters in untrusted text.
-
-    Replaces C0 controls (except tab and newline), DEL, and C1 controls with
-    their visible ``\\xNN`` escape so network-derived data cannot inject ANSI
-    escape sequences into an operator's terminal.
+    Network-poisoned state can reach a command's own output (the string a
+    hostile ``SET_TIMEZONE`` stored is echoed by the ``timezone`` command,
+    for one), so every result printed to a terminal is sanitized here -
+    one place to get it right instead of one per print site.
     """
-    return _CONTROL_CHAR_RE.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+    return f">>> {sanitize_text(message)}"
 
 
 def escape_message(msg: str) -> str:

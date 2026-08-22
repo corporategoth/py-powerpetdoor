@@ -5,6 +5,9 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
+  # Weekly unseeded fuzz exploration (see the fuzz-tests job).
+  schedule:
+    - cron: "17 4 * * 1"
 
 # Only one run per ref at a time. The CI host is a single shared act_runner,
 # so two concurrent runs of this workflow compete for host-level resources
@@ -43,10 +46,12 @@ jobs:
       - uses: ./.github/actions/setup-uv-with-retry
         with:
           python-version: ${{ env.REFERENCE_PYTHON }}
-      - name: Create virtual environment
-        run: uv venv && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
-      - name: Install linting tools
-        run: uv pip install 'ruff==0.14.13' mypy types-PyYAML
+      # uv.lock is committed and carries a sha256 for every artifact.
+      # --locked fails loudly if the lock has drifted from pyproject.toml,
+      # so CI can never silently resolve a fresh (unpinned, unhashed)
+      # dependency set from PyPI.
+      - name: Install dependencies
+        run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
       - name: Check linting
         run: ruff check src tests
       - name: Check formatting
@@ -72,10 +77,8 @@ jobs:
       - uses: ./.github/actions/setup-uv-with-retry
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Create virtual environment
-        run: uv venv && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
       - name: Install dependencies
-        run: uv pip install -e ".[dev]"
+        run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
       - name: Run unit tests
         run: pytest --ignore=tests/fuzz --tb=line -q --cov --cov-report=xml --cov-fail-under=0
         env:
@@ -102,12 +105,19 @@ jobs:
       - uses: ./.github/actions/setup-uv-with-retry
         with:
           python-version: ${{ env.REFERENCE_PYTHON }}
-      - name: Create virtual environment
-        run: uv venv && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
       - name: Install dependencies
-        run: uv pip install -e ".[dev]"
-      - name: Run fuzz tests
+        run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+      # Push/PR runs are seeded so a failure is exactly reproducible from
+      # the log. A fixed seed with no persisted .hypothesis database means
+      # CI replays the same example set forever, though, so the weekly
+      # schedule run drops the seed and explores a fresh one - that is
+      # where new counterexamples actually come from (R3-T3).
+      - name: Run fuzz tests (seeded, reproducible)
+        if: ${{ github.event_name != 'schedule' }}
         run: pytest tests/fuzz -v --hypothesis-seed=0
+      - name: Run fuzz tests (weekly, unseeded exploration)
+        if: ${{ github.event_name == 'schedule' }}
+        run: pytest tests/fuzz -v
 
   coverage-report:
     name: Coverage Report
@@ -122,10 +132,8 @@ jobs:
       - uses: ./.github/actions/setup-uv-with-retry
         with:
           python-version: ${{ env.REFERENCE_PYTHON }}
-      - name: Create virtual environment
-        run: uv venv && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
       - name: Install dependencies
-        run: uv pip install -e ".[dev]"
+        run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
       - name: Download py3.11 coverage
         uses: christopherhx/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # v4
         with:

@@ -26,6 +26,7 @@ DOC_FILES = [
     REPO_ROOT / "README.md",
     REPO_ROOT / "docs" / "client.md",
     REPO_ROOT / "docs" / "door.md",
+    REPO_ROOT / "docs" / "simulator.md",
 ]
 
 

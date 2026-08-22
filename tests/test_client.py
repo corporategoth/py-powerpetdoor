@@ -2581,7 +2581,7 @@ class TestConnectIdempotence:
             await server.wait_closed()
 
     def test_connection_made_rejects_a_second_transport(self, mock_client, caplog):
-        """Belt and braces: a second transport is closed, not installed."""
+        """Belt and braces: a second transport is aborted, not installed."""
         from tests.conftest import MockTransport
 
         client, transport, _ = mock_client
@@ -2591,9 +2591,330 @@ class TestConnectIdempotence:
             client.connection_made(intruder)
 
         assert client._transport is transport
-        assert intruder.is_closing() is True
+        assert intruder.aborted is True
         assert transport.is_closing() is False
         assert "Rejecting a second connection" in caplog.text
+
+
+# ============================================================================
+# Declined-transport lifecycle (M1 / L2 / T1)
+# ============================================================================
+
+
+class TestDeclinedTransports:
+    """A transport the client did not adopt must never drive its state."""
+
+    async def test_rejected_second_transport_leaves_the_first_connection_alive(
+        self, mock_client, caplog
+    ):
+        """The rejected socket's connection_lost must not tear down the live one.
+
+        The client *is* the asyncio.Protocol, so asyncio delivers the
+        intruder's connection_lost on this same object a tick later. Before
+        the fix that ran the full teardown: on_disconnect fired, the healthy
+        transport was closed and a reconnect was scheduled (L2).
+        """
+        from tests.conftest import MockTransport
+
+        client, transport, _ = mock_client
+        disconnects: list[int] = []
+        client.add_handlers("watcher", on_disconnect=lambda: disconnects.append(1))
+        intruder = MockTransport()
+
+        client.connection_made(intruder)
+        # What asyncio does for the transport connection_made() aborted.
+        client.connection_lost(None)
+
+        assert client._transport is transport
+        assert client.available is True
+        assert disconnects == []
+        assert client._reconnect_task is None
+
+    async def test_a_real_loss_after_a_declined_one_still_reconnects(self, mock_client):
+        """The decline is counted off exactly once, not latched forever."""
+        from tests.conftest import MockTransport
+
+        client, _, _ = mock_client
+        client.connection_made(MockTransport())
+        client.connection_lost(None)  # the declined transport
+
+        client.connection_lost(None)  # the live one really goes away
+
+        assert client._transport is None
+        assert client._reconnect_task is not None
+        client.disconnect()
+
+    def test_shim_ignores_a_declined_transports_lifecycle_events(self, mock_client):
+        """A shim whose transport was declined forwards nothing at all."""
+        from powerpetdoor.client import _ConnectionAttempt
+        from tests.conftest import MockTransport
+
+        client, transport, _ = mock_client
+        attempt = _ConnectionAttempt(client)
+        attempt.connection_made(MockTransport())  # declined: already connected
+
+        attempt.data_received(b'{"success": "true", "CMD": "PONG", "PONG": "1"}')
+        attempt.connection_lost(None)
+
+        assert client._tasks == set()  # no message processing was scheduled
+        assert client._transport is transport
+        assert client.available is True
+
+    def test_shim_forwards_data_for_the_adopted_transport(self, disconnected_client):
+        """The happy path: an adopted transport's bytes reach the client."""
+        from powerpetdoor.client import _ConnectionAttempt
+        from tests.conftest import MockTransport
+
+        client = disconnected_client
+        attempt = _ConnectionAttempt(client)
+        transport = MockTransport()
+        attempt.connection_made(transport)
+
+        assert client._transport is transport
+        attempt.data_received(b'{"success": "true", "CMD": "PONG", "PONG": "1"}')
+        assert len(client._tasks) == 1
+        client.disconnect()
+
+    async def test_shim_ignores_a_superseded_transports_loss(self, disconnected_client, caplog):
+        """A stale connection_lost after disconnect()+connect() is dropped (T1).
+
+        disconnect() clears _transport immediately, but asyncio delivers
+        connection_lost for that socket on a later loop iteration. If the
+        caller reconnected in the meantime the stale callback used to log
+        an ERROR about a connection nobody lost and burn a reconnect task.
+        """
+        from powerpetdoor.client import _ConnectionAttempt
+        from tests.conftest import MockTransport
+
+        client = disconnected_client
+        first = _ConnectionAttempt(client)
+        old_transport = MockTransport()
+        first.connection_made(old_transport)
+
+        client.disconnect()
+        second = _ConnectionAttempt(client)
+        new_transport = MockTransport()
+        second.connection_made(new_transport)
+
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.client"):
+            first.connection_lost(None)  # the stale event finally lands
+
+        assert client._transport is new_transport
+        assert client.available is True
+        assert client._reconnect_task is None
+        assert "The server closed the connection" not in caplog.text
+        assert "superseded transport" in caplog.text
+        client.disconnect()
+
+    async def test_shim_forwards_a_genuine_loss_of_the_live_transport(self, disconnected_client):
+        """The normal path still tears down and reconnects."""
+        from powerpetdoor.client import _ConnectionAttempt
+        from tests.conftest import MockTransport
+
+        client = disconnected_client
+        attempt = _ConnectionAttempt(client)
+        attempt.connection_made(MockTransport())
+
+        attempt.connection_lost(ConnectionResetError())
+
+        assert client._transport is None
+        assert client._reconnect_task is not None
+        client.disconnect()
+
+    async def test_shutdown_during_connect_leaves_no_live_socket(self):
+        """shutdown() mid-connect must not adopt the socket that arrives (M1).
+
+        connect() only checked _shutdown at entry, so a shutdown() landing
+        while create_connection() was in flight produced a fully connected,
+        keepalive-pinging client that nothing held a reference to.
+        """
+        accepted: list[asyncio.StreamWriter] = []
+        connected = asyncio.Event()
+        closed = asyncio.Event()
+
+        async def handle(reader, writer):
+            accepted.append(writer)
+            connected.set()
+            try:
+                await reader.read()
+            finally:
+                closed.set()
+                writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        client = PowerPetDoorClient(
+            host="127.0.0.1",
+            port=port,
+            keepalive=30.0,
+            timeout=2.0,
+            reconnect=0.05,
+            loop=asyncio.get_running_loop(),
+        )
+        try:
+            task = asyncio.ensure_future(client.connect())
+            await asyncio.sleep(0)
+            client.shutdown()
+            await task
+
+            assert client._transport is None
+            assert client.available is False
+            assert client._keepalive is None
+            assert client._reconnect_task is None
+
+            # The device must see no surviving connection: either it was
+            # never accepted, or it was aborted immediately.
+            if accepted:
+                async with asyncio.timeout(2.0):
+                    await closed.wait()
+        finally:
+            client.shutdown()
+            for writer in accepted:
+                writer.close()
+            server.close()
+            await server.wait_closed()
+
+    async def test_a_genuine_reconnect_after_shutdown_still_works(self):
+        """reset_shutdown() + connect() must still produce a live connection."""
+        accepted: list[asyncio.StreamWriter] = []
+        connected = asyncio.Event()
+
+        async def handle(reader, writer):
+            accepted.append(writer)
+            connected.set()
+            await reader.read()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        client = PowerPetDoorClient(
+            host="127.0.0.1",
+            port=port,
+            keepalive=0,
+            timeout=2.0,
+            reconnect=0.05,
+            loop=asyncio.get_running_loop(),
+        )
+        try:
+            task = asyncio.ensure_future(client.connect())
+            await asyncio.sleep(0)
+            client.shutdown()
+            await task
+            assert client.available is False
+
+            connected.clear()
+            client.reset_shutdown()
+            await client.connect()
+            async with asyncio.timeout(2.0):
+                await connected.wait()
+
+            assert client.available is True
+        finally:
+            client.shutdown()
+            for writer in accepted:
+                writer.close()
+            server.close()
+            await server.wait_closed()
+
+
+# ============================================================================
+# connect() error funnelling (L1)
+# ============================================================================
+
+
+class TestConnectErrorFunnel:
+    """Every connect failure funnels through handle_connect_failure()."""
+
+    @pytest.mark.parametrize(
+        ("host", "port", "expected"),
+        [
+            # loop.create_connection() does not raise OSError for these:
+            ("a" * 64 + ".example", 3000, UnicodeEncodeError),
+            ("127.0.0.1", 99999, OverflowError),
+        ],
+    )
+    async def test_bad_host_or_port_logs_and_schedules_a_reconnect(
+        self, host, port, expected, caplog
+    ):
+        """A ValueError-family failure must not kill the client silently."""
+        client = PowerPetDoorClient(
+            host=host,
+            port=port,
+            keepalive=0,
+            timeout=2.0,
+            reconnect=30.0,
+            loop=asyncio.get_running_loop(),
+        )
+        try:
+            # Pin the premise: this really is not an OSError.
+            with pytest.raises(expected):
+                await asyncio.get_running_loop().create_connection(lambda: client, host, port)
+
+            with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+                await client.connect()  # must not raise
+
+            assert f"Unable to connect to Power Pet Door at {host}:{port}" in caplog.text
+            assert client._reconnect_task is not None
+            assert client._connecting is False
+        finally:
+            client.shutdown()
+
+    async def test_door_connect_reports_a_bad_port_as_connection_error(self):
+        """door.connect() promises ConnectionError, not OverflowError (L1)."""
+        from powerpetdoor.door import PowerPetDoor
+
+        door = PowerPetDoor("127.0.0.1", port=99999, keepalive=0, timeout=0.2, reconnect=30.0)
+        try:
+            with pytest.raises(ConnectionError):
+                await door.connect()
+        finally:
+            await door.disconnect()
+
+
+# ============================================================================
+# aclose(): async lifecycle handler teardown (T2)
+# ============================================================================
+
+
+class TestAclose:
+    """shutdown() leaves async handlers running; aclose() is the clean exit."""
+
+    async def test_aclose_without_handlers_is_a_no_op(self, mock_client):
+        client, _, _ = mock_client
+        await client.aclose()
+        assert client._shutdown is True
+        assert client._handler_tasks == set()
+
+    async def test_aclose_awaits_an_async_disconnect_handler(self, mock_client):
+        finished: list[str] = []
+
+        async def slow_disconnect():
+            await asyncio.sleep(0)
+            finished.append("done")
+
+        client, _, _ = mock_client
+        client.add_handlers("app", on_disconnect=slow_disconnect)
+
+        await client.aclose()
+
+        assert finished == ["done"]
+        assert client._handler_tasks == set()
+
+    async def test_aclose_cancels_a_handler_that_overruns(self, mock_client, caplog):
+        started = asyncio.Event()
+
+        async def wedged_disconnect():
+            started.set()
+            await asyncio.sleep(3600)
+
+        client, _, _ = mock_client
+        client.add_handlers("app", on_disconnect=wedged_disconnect)
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
+            await client.aclose(timeout=0.01)
+
+        assert started.is_set()
+        assert "did not finish in time" in caplog.text
+        assert client._handler_tasks == set()
 
 
 # ============================================================================

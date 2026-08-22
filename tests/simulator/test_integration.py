@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 import pytest
@@ -25,7 +24,6 @@ from powerpetdoor.const import (
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
-    DOOR_STATUS,
     FIELD_DOOR_STATUS,
     FIELD_SUCCESS,
     PING,
@@ -36,16 +34,17 @@ from powerpetdoor.simulator import (
     DoorSimulatorState,
     DoorTimingConfig,
 )
+from tests.simulator.wire import WireCapture
 
 #: The exact DOOR_STATUS broadcast sequence for an open that runs to
 #: HOLDING, and for a complete open/hold/close cycle.
 OPENING_SEQUENCE = [DOOR_STATE_RISING, DOOR_STATE_SLOWING, DOOR_STATE_HOLDING]
-FULL_CYCLE = [
-    *OPENING_SEQUENCE,
+CLOSING_SEQUENCE = [
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSED,
 ]
+FULL_CYCLE = [*OPENING_SEQUENCE, *CLOSING_SEQUENCE]
 
 # ============================================================================
 # Test Fixtures
@@ -75,98 +74,42 @@ async def simulator(timing_config):
     await sim.stop()
 
 
-class MessageCapture:
-    """Helper to capture messages from the simulator."""
+class MessageCapture(WireCapture):
+    """Poll-based capture: read with a deadline, then assert on the stream.
 
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        self.reader = reader
-        self.writer = writer
-        self.messages: list[dict[str, Any]] = []
-
-    async def send(self, msg: dict[str, Any]) -> None:
-        """Send a message to the simulator."""
-        data = json.dumps(msg).encode("ascii")
-        self.writer.write(data)
-        await self.writer.drain()
+    Framing (and everything else generic) lives in WireCapture, which uses
+    the production `extract_frames` scanner - see tests/simulator/wire.py
+    for why that matters.
+    """
 
     async def receive_all(self, timeout: float = 1.0) -> list[dict[str, Any]]:
         """Receive all available messages within timeout."""
-        messages = []
         try:
             data = await asyncio.wait_for(self.reader.read(8192), timeout=timeout)
-            if data:
-                messages.extend(self._parse_messages(data.decode("ascii")))
         except TimeoutError:
-            pass
-        self.messages.extend(messages)
-        return messages
+            return []
+        return self.feed(data) if data else []
 
     async def receive_until(
         self, predicate: callable, timeout: float = 5.0, poll_interval: float = 0.1
     ) -> list[dict[str, Any]]:
         """Receive messages until predicate returns True for any message."""
         start = asyncio.get_event_loop().time()
-        messages = []
+        messages: list[dict[str, Any]] = []
 
         while asyncio.get_event_loop().time() - start < timeout:
             try:
                 data = await asyncio.wait_for(self.reader.read(4096), timeout=poll_interval)
-                if data:
-                    new_msgs = self._parse_messages(data.decode("ascii"))
-                    messages.extend(new_msgs)
-                    self.messages.extend(new_msgs)
-                    for msg in new_msgs:
-                        if predicate(msg):
-                            return messages
             except TimeoutError:
                 continue
+            if data:
+                new_msgs = self.feed(data)
+                messages.extend(new_msgs)
+                for msg in new_msgs:
+                    if predicate(msg):
+                        return messages
 
         return messages
-
-    def _parse_messages(self, data: str) -> list[dict[str, Any]]:
-        """Parse multiple JSON objects from a string."""
-        messages = []
-        pos = 0
-        while pos < len(data):
-            if data[pos] != "{":
-                pos += 1
-                continue
-            depth = 0
-            end = pos
-            for i, c in enumerate(data[pos:], pos):
-                if c == "{":
-                    depth += 1
-                elif c == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-            if end > pos:
-                try:
-                    messages.append(json.loads(data[pos:end]))
-                except json.JSONDecodeError:
-                    pass
-            pos = end if end > pos else pos + 1
-        return messages
-
-    def find_message(self, cmd: str) -> dict[str, Any] | None:
-        """Find a message by CMD field."""
-        for msg in self.messages:
-            if msg.get("CMD") == cmd:
-                return msg
-        return None
-
-    def find_status_updates(self) -> list[dict[str, Any]]:
-        """Find all door status update messages."""
-        return [msg for msg in self.messages if FIELD_DOOR_STATUS in msg]
-
-    def get_status_sequence(self) -> list[str]:
-        """The exact sequence of unsolicited DOOR_STATUS broadcasts.
-
-        Command responses (OPEN, CLOSE, GET_DOOR_STATUS) also carry a
-        doorStatus field; only ``CMD: DOOR_STATUS`` frames are broadcasts.
-        """
-        return [msg[FIELD_DOOR_STATUS] for msg in self.messages if msg.get("CMD") == DOOR_STATUS]
 
     async def receive_status_sequence(self, expected: list[str], timeout: float = 5.0) -> list[str]:
         """Receive until the broadcast status sequence equals ``expected``.
@@ -178,11 +121,6 @@ class MessageCapture:
             lambda _msg: self.get_status_sequence() == expected, timeout=timeout
         )
         return self.get_status_sequence()
-
-    async def close(self):
-        """Close the connection."""
-        self.writer.close()
-        await self.writer.wait_closed()
 
 
 @pytest.fixture
@@ -245,24 +183,28 @@ class TestDoorOperationMessages:
         assert open_response[FIELD_SUCCESS] == "true"
 
     async def test_close_door_sends_status_updates(self, capture, simulator):
-        """Closing door should send status update messages."""
-        # First open the door
-        await simulator.open_door(hold=True)
-        await simulator.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+        """Closing from KEEPUP broadcasts the exact closing sequence.
 
-        # Clear any existing messages
-        await capture.receive_all(timeout=0.2)
+        The old version asserted only that a CLOSE response arrived, so it
+        passed with *every* door-status broadcast suppressed - it could not
+        fail for the thing it is named after (R3-L2).
+        """
+        # Open the door and wait until its final broadcast has been
+        # *captured* before clearing, so no in-flight KEEPUP frame lands in
+        # the sequence under test.
+        await simulator.open_door(hold=True)
+        await capture.receive_until(
+            lambda m: m.get(FIELD_DOOR_STATUS) == DOOR_STATE_KEEPUP, timeout=3.0
+        )
+        assert capture.get_status_sequence()[-1] == DOOR_STATE_KEEPUP
         capture.messages.clear()
 
         # Send CLOSE command
         await capture.send({CONFIG: CMD_CLOSE, "msgId": 1})
 
-        # Wait for close response and status updates
-        await capture.receive_until(
-            lambda m: m.get(FIELD_DOOR_STATUS) == DOOR_STATE_CLOSED, timeout=3.0
-        )
+        statuses = await capture.receive_status_sequence(CLOSING_SEQUENCE, timeout=3.0)
 
-        # Should have received close response
+        assert statuses == CLOSING_SEQUENCE
         close_response = capture.find_message(CMD_CLOSE)
         assert close_response is not None
         assert close_response[FIELD_SUCCESS] == "true"
@@ -307,25 +249,11 @@ class TestMultiClient:
             # Trigger door from one client via simulator API
             simulator.trigger_sensor("inside")
 
-            # Both clients should receive status updates
-            await cap1.receive_until(
-                lambda m: (
-                    m.get(FIELD_DOOR_STATUS) == DOOR_STATE_RISING
-                    or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_HOLDING
-                ),
-                timeout=2.0,
-            )
-            await cap2.receive_until(
-                lambda m: (
-                    m.get(FIELD_DOOR_STATUS) == DOOR_STATE_RISING
-                    or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_HOLDING
-                ),
-                timeout=2.0,
-            )
-
-            # Both should have received status updates
-            assert len(cap1.find_status_updates()) > 0
-            assert len(cap2.find_status_updates()) > 0
+            # Both clients see the same broadcasts, in the same order: a
+            # ">0 status updates" assertion could not tell a dropped state
+            # (or a command response) from a real broadcast (R3-L2).
+            assert await cap1.receive_status_sequence(OPENING_SEQUENCE, 3.0) == OPENING_SEQUENCE
+            assert await cap2.receive_status_sequence(OPENING_SEQUENCE, 3.0) == OPENING_SEQUENCE
 
         finally:
             await cap1.close()
@@ -345,30 +273,16 @@ class TestMultiClient:
             # Send OPEN from client 1
             await cap1.send({CONFIG: CMD_OPEN, "msgId": 1})
 
-            # Wait for BOTH the command response AND a status update on client 1
-            # The command response and status update may arrive in any order
-            await cap1.receive_until(
-                lambda m: (
-                    cap1.find_message(CMD_OPEN) is not None and len(cap1.find_status_updates()) > 0
-                ),
-                timeout=2.0,
-            )
+            # The issuing client gets the response *and* the same broadcast
+            # sequence every other client gets.
+            assert await cap1.receive_status_sequence(OPENING_SEQUENCE, 3.0) == OPENING_SEQUENCE
+            assert await cap2.receive_status_sequence(OPENING_SEQUENCE, 3.0) == OPENING_SEQUENCE
 
-            # Wait for status update on client 2
-            await cap2.receive_until(
-                lambda m: (
-                    m.get(FIELD_DOOR_STATUS) == DOOR_STATE_RISING
-                    or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_HOLDING
-                    or m.get(FIELD_DOOR_STATUS) == DOOR_STATE_KEEPUP
-                ),
-                timeout=2.0,
-            )
-
-            # Client 1 should have OPEN response
-            assert cap1.find_message(CMD_OPEN) is not None
-
-            # Both should have status updates
-            assert len(cap2.find_status_updates()) > 0
+            open_response = cap1.find_message(CMD_OPEN)
+            assert open_response is not None
+            assert open_response[FIELD_SUCCESS] == "true"
+            # The command response only reaches the client that issued it.
+            assert cap2.find_message(CMD_OPEN) is None
 
         finally:
             await cap1.close()

@@ -24,6 +24,17 @@ RUN_ALIASES = ["r", "file"]
 RUN_WAIT_KEYWORD = "wait"
 
 
+def format_script_status(running: str | None, queued: int) -> str:
+    """Render the runner's busy state as one operator-facing line."""
+    if running is None:
+        state = "Script: none running"
+    else:
+        state = f'Script: running "{running}"'
+    if queued:
+        state += f" ({queued} queued)"
+    return state
+
+
 def is_wait_run(command_line: str) -> bool:
     """Whether ``command_line`` is a synchronous ``run <script> wait``.
 
@@ -84,6 +95,16 @@ class ScriptsCommandsMixin:
                     return self._Script.from_file(candidate)
         return self._get_builtin_script(name)
 
+    def script_status(self) -> tuple[str | None, int]:
+        """The running script's name (or None) and the queue depth.
+
+        Serialized runs made "busy" a real state; this is the single place
+        that reports it, shared by ``status``, ``list`` and ``stop`` (M5).
+        """
+        running = self.script_runner.current_script if self.script_runner.busy else None
+        queued = self.script_queue.qsize() if self.script_queue else 0
+        return running, queued
+
     @command("list", ["/", "scripts"], "List runnable scripts", category="scripts")
     def list_scripts(self) -> CommandResult:
         """List available scripts (built-in plus any from --scripts-dir)."""
@@ -96,7 +117,28 @@ class ScriptsCommandsMixin:
             lines.append(f"Scripts from {self._scripts_dir}:")
             for name, desc in extra:
                 lines.append(f"  {name}: {desc}")
-        return CommandResult(True, "\n".join(lines), {"scripts": scripts + extra})
+        running, queued = self.script_status()
+        lines.append(format_script_status(running, queued))
+        return CommandResult(
+            True,
+            "\n".join(lines),
+            {"scripts": scripts + extra, "running": running, "queued": queued},
+        )
+
+    @command("stop", [], "Stop the running script", category="scripts")
+    def stop_script(self) -> CommandResult:
+        """Stop the script that is currently running.
+
+        This stops the *script*, not the simulator - ``shutdown`` does that.
+        The runner checks the request between steps, so the script ends at
+        its next step boundary and reports FAILED to whoever is waiting on
+        it.
+        """
+        running, _queued = self.script_status()
+        if running is None:
+            return CommandResult(False, "No script is running")
+        self.script_runner.stop()
+        return CommandResult(True, f"Stopping script: {running}")
 
     @command(
         RUN_COMMAND,
@@ -143,4 +185,6 @@ class ScriptsCommandsMixin:
                 status = "PASSED" if success else "FAILED"
                 return CommandResult(success, f"Script {status}: {script.name}")
         except Exception as e:
-            return CommandResult(False, f"Error: {e}")
+            # The transport already labels failures ("ERROR: ..."), so an
+            # inner "Error: " prefix only doubles it up (T2).
+            return CommandResult(False, str(e))

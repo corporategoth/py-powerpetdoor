@@ -13,7 +13,6 @@ wall-clock coupling (test-fanatic M5).
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Callable
 from typing import Any
 
@@ -26,15 +25,14 @@ from powerpetdoor.const import (
     DOOR_STATE_HOLDING,
     DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
-    FIELD_DOOR_STATUS,
 )
-from powerpetdoor.framing import extract_frames
 from powerpetdoor.simulator import (
     DoorSimulator,
     DoorSimulatorState,
     DoorTimingConfig,
 )
 from powerpetdoor.simulator.scripting import ScriptRunner
+from tests.simulator.wire import WireCapture
 
 #: The exact broadcast sequence of one full sensor-triggered door cycle.
 FULL_CYCLE = [
@@ -47,18 +45,17 @@ FULL_CYCLE = [
 ]
 
 
-class MessageCapture:
-    """Collects simulator wire messages with deterministic waiting.
+class MessageCapture(WireCapture):
+    """Background-listener capture with deterministic waiting.
 
     A background reader appends parsed messages and fires an event, so
     tests await conditions on the captured stream instead of sleeping.
+    Framing (and everything else generic) lives in WireCapture - see
+    tests/simulator/wire.py.
     """
 
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        self.reader = reader
-        self.writer = writer
-        self.messages: list[dict[str, Any]] = []
-        self._buffer = ""
+        super().__init__(reader, writer)
         self._new_message = asyncio.Event()
         self._listen_task: asyncio.Task | None = None
 
@@ -73,10 +70,7 @@ class MessageCapture:
                 data = await self.reader.read(4096)
                 if not data:
                     break
-                frames, self._buffer, _ = extract_frames(self._buffer + data.decode("ascii"))
-                for frame in frames:
-                    self.messages.append(json.loads(frame))
-                if frames:
+                if self.feed(data):
                     self._new_message.set()
         except asyncio.CancelledError:
             pass
@@ -89,14 +83,6 @@ class MessageCapture:
             while not predicate(self.messages):
                 self._new_message.clear()
                 await self._new_message.wait()
-
-    def find_messages(self, cmd: str) -> list[dict[str, Any]]:
-        """Find all messages with the given CMD value."""
-        return [msg for msg in self.messages if msg.get("CMD") == cmd]
-
-    def get_status_sequence(self) -> list[str]:
-        """Get the sequence of door statuses seen."""
-        return [msg[FIELD_DOOR_STATUS] for msg in self.messages if FIELD_DOOR_STATUS in msg]
 
     async def wait_for_status_sequence(
         self, expected: list[str], timeout: float = 10.0
@@ -122,11 +108,7 @@ class MessageCapture:
                 await self._listen_task
             except asyncio.CancelledError:
                 pass
-        self.writer.close()
-        try:
-            await self.writer.wait_closed()
-        except Exception:
-            pass
+        await super().close()
 
 
 @pytest.fixture
