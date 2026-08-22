@@ -908,6 +908,30 @@ class RecordingTransport:
         self.resume_calls += 1
 
 
+@pytest.fixture
+async def count_continuations():
+    """Count `_resume_pump` continuations armed on the running loop.
+
+    `_pump_scheduled` is a flag, so it reads True for one pending
+    continuation and for a thousand. The bound the guard actually provides
+    is only visible by counting the `call_soon` arms (round-8
+    test-fanatic M1).
+    """
+    loop = asyncio.get_running_loop()
+    original = loop.call_soon
+    armed = 0
+
+    def counting(callback, *args, **kwargs):
+        nonlocal armed
+        if getattr(callback, "__func__", None) is framing.FrameDispatcher._resume_pump:
+            armed += 1
+        return original(callback, *args, **kwargs)
+
+    loop.call_soon = counting
+    yield lambda: armed
+    loop.call_soon = original
+
+
 class TestFrameDispatcher:
     """One task per frame, created synchronously per read, was unbounded.
 
@@ -1149,8 +1173,17 @@ class TestPumpYieldsBetweenBatches:
         assert dispatcher.paused is False
         assert transport.resume_calls == 1
 
-    async def test_only_one_continuation_is_ever_scheduled(self):
-        """A second submit while a pump is pending must not stack call_soons."""
+    async def test_only_one_continuation_is_ever_scheduled(self, count_continuations):
+        """A second submit while a pump is pending must not stack call_soons.
+
+        The flag alone cannot observe this: `_pump_scheduled` is True
+        whether one continuation is pending or a thousand, so deleting the
+        dedupe guard left all three of this test's original assertions
+        satisfied and the whole suite green, while a stalled backlog armed
+        one `call_soon` per *read* - the per-read unbounded scheduling
+        `_pump()` exists to remove (round-8 test-fanatic M1). Count the
+        arms, not the flag.
+        """
         dispatched: list[str] = []
 
         def dispatch(frame):
@@ -1160,11 +1193,13 @@ class TestPumpYieldsBetweenBatches:
         dispatcher = framing.FrameDispatcher(dispatch, max_inflight=2, pause_at=1000)
         dispatcher.submit(["{1}", "{2}", "{3}", "{4}"], RecordingTransport())
         assert dispatcher._pump_scheduled is True
+        assert count_continuations() == 1
 
         # Re-entering submit() must find the pending continuation and not
         # arm a second one.
         dispatcher.submit(["{5}", "{6}"], RecordingTransport())
         assert dispatcher._pump_scheduled is True
+        assert count_continuations() == 1
 
         for _ in range(50):
             if not dispatcher.backlog:
@@ -1173,6 +1208,74 @@ class TestPumpYieldsBetweenBatches:
 
         assert dispatched == ["{1}", "{2}", "{3}", "{4}", "{5}", "{6}"]
         assert dispatcher._pump_scheduled is False
+
+    async def test_a_thousand_stalled_reads_still_arm_one_continuation(self, count_continuations):
+        """The scale the bound exists for: reads, not frames, drive the arms."""
+
+        def dispatch(frame):
+            return None
+
+        dispatcher = framing.FrameDispatcher(dispatch, max_inflight=2, pause_at=10**6)
+        transport = RecordingTransport()
+        # The first read stalls the backlog and arms the one continuation;
+        # 999 further reads land in the same loop turn and must find it.
+        dispatcher.submit(["{x0}"] * 4, transport)
+        for read in range(1, 1000):
+            dispatcher.submit([f"{{x{read}}}"], transport)
+
+        assert count_continuations() == 1
+
+        for _ in range(20000):
+            if not dispatcher.backlog:
+                break
+            await asyncio.sleep(0)
+        assert dispatcher.backlog == 0
+
+    async def test_a_raising_dispatch_still_updates_flow_control(self, request):
+        """Defence in depth: `_update_flow()` runs in a `finally`.
+
+        A decode that escaped `_dispatch_frame` skipped `_update_flow()`,
+        so the transport stayed paused after the backlog fell back under
+        the threshold - with `inflight` at 0 (no done-callback will ever
+        fire) and `_pump_scheduled` already cleared by `_resume_pump`.
+        Nothing could pump it, and because reading was paused the peer's
+        FIN was never read either: permanent, per raising callback, holding
+        an fd and a connection slot (round-8 security M1). The dispatcher
+        is a shared component and must not depend on its callback being
+        total; the `finally` makes the worst case one frame lost.
+        """
+        loop = asyncio.get_running_loop()
+        escaped: list[BaseException | None] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, ctx: escaped.append(ctx.get("exception")))
+        request.addfinalizer(lambda: loop.set_exception_handler(previous_handler))
+
+        def dispatch(frame):
+            if frame == "{poison}":
+                raise RuntimeError("callback is not total")
+            return None
+
+        transport = RecordingTransport()
+        dispatcher = framing.FrameDispatcher(dispatch, max_inflight=4, pause_at=1)
+        # Read 1 dispatches {a}..{d}, leaves [{poison}, {f}] - over the
+        # threshold, so reading pauses and a continuation is armed.
+        dispatcher.submit(["{a}", "{b}", "{c}", "{d}", "{poison}", "{f}"], transport)
+        assert dispatcher.paused is True
+        assert transport.pause_calls == 1
+
+        # The continuation dispatches {poison}, which raises.
+        await asyncio.sleep(0)
+
+        assert [type(exc) for exc in escaped] == [RuntimeError]
+        # One frame lost, not a wedge: the backlog is back under the
+        # threshold, so reading was resumed and the peer is readable again.
+        assert dispatcher.backlog == 1
+        assert dispatcher.paused is False
+        assert transport.resume_calls == 1
+
+        # ...and the next read drains what the raise left behind.
+        dispatcher.submit(["{g}"], transport)
+        assert dispatcher.backlog == 0
 
     async def test_a_reset_while_a_pump_is_pending_is_safe(self):
         """Fix interaction: the deferred pump meets `connection_lost`.

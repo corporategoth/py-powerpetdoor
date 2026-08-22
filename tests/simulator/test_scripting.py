@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1259,6 +1260,103 @@ class TestBuiltinScriptInfrastructure:
         assert "Failed to load script broken" in caplog.text
 
 
+@requires_yaml
+class TestDescriptionsAreCachedPerFileVersion:
+    """Every listing used to re-parse every file, on the door's own loop.
+
+    `list`, `--list-scripts` and every Tab keystroke share one renderer,
+    and it fully YAML-parsed every candidate every time: ~600 ms for a
+    200-script `--scripts-dir`, held on the event loop that serves the
+    door protocol (round-8 frontend M1). Descriptions are what the parse
+    is *for*, and they change only when the file does.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _empty_cache(self):
+        scripting._description_cache.clear()
+        yield
+        scripting._description_cache.clear()
+
+    def test_a_second_listing_does_not_re_parse(self, tmp_path, monkeypatch):
+        (tmp_path / "one.yaml").write_text("name: One\ndescription: first\nsteps:\n  - close\n")
+        monkeypatch.setattr(scripting, "SCRIPTS_DIR", tmp_path)
+        assert list_builtin_scripts() == [("one", "first")]
+
+        parses = []
+        original = scripting.Script.from_file
+        monkeypatch.setattr(
+            scripting.Script,
+            "from_file",
+            staticmethod(lambda path: (parses.append(path), original(path))[1]),
+        )
+
+        assert list_builtin_scripts() == [("one", "first")]
+        assert parses == []
+
+    def test_an_edited_script_is_picked_up_immediately(self, tmp_path, monkeypatch):
+        """The behaviour `list` relies on: no stale description, ever."""
+        script = tmp_path / "one.yaml"
+        script.write_text("name: One\ndescription: first\nsteps:\n  - close\n")
+        monkeypatch.setattr(scripting, "SCRIPTS_DIR", tmp_path)
+        assert list_builtin_scripts() == [("one", "first")]
+
+        script.write_text("name: One\ndescription: second!\nsteps:\n  - close\n")
+
+        assert list_builtin_scripts() == [("one", "second!")]
+
+    def test_a_same_size_edit_is_still_picked_up(self, tmp_path, monkeypatch):
+        """`st_size` alone is not enough; the key carries `st_mtime_ns` too."""
+        script = tmp_path / "one.yaml"
+        script.write_text("name: One\ndescription: aaaaa\nsteps:\n  - close\n")
+        monkeypatch.setattr(scripting, "SCRIPTS_DIR", tmp_path)
+        assert list_builtin_scripts() == [("one", "aaaaa")]
+
+        script.write_text("name: One\ndescription: bbbbb\nsteps:\n  - close\n")
+        assert script.stat().st_size == len("name: One\ndescription: aaaaa\nsteps:\n  - close\n")
+
+        assert list_builtin_scripts() == [("one", "bbbbb")]
+
+    def test_a_broken_script_is_reported_on_every_listing(self, tmp_path, monkeypatch, caplog):
+        """The cache is a *parse* cache, not a report cache."""
+        (tmp_path / "broken.yaml").write_text("steps: [unclosed")
+        monkeypatch.setattr(scripting, "SCRIPTS_DIR", tmp_path)
+
+        with caplog.at_level(logging.WARNING, logger=SCRIPT_LOGGER):
+            first = list_builtin_scripts()
+            second = list_builtin_scripts()
+
+        assert first == second
+        assert first[0][1].startswith("(Error loading: ")
+        assert caplog.text.count("Failed to load script broken") == 2
+
+    def test_a_file_that_vanishes_is_not_cached(self, tmp_path):
+        """Between listing and describing, a file can go away."""
+        script = tmp_path / "gone.yaml"
+        script.write_text("name: Gone\nsteps:\n  - close\n")
+        script.unlink()
+
+        description, error = scripting._describe_script(script)
+
+        assert description.startswith("(Error loading: ")
+        assert error is not None
+        assert scripting._description_cache == {}
+
+    def test_the_cache_is_bounded(self, tmp_path, monkeypatch):
+        """An edit adds a key rather than replacing one, so it needs a cap."""
+        monkeypatch.setattr(scripting, "MAX_DESCRIPTION_CACHE", 4)
+        script = tmp_path / "one.yaml"
+
+        for index in range(10):
+            script.write_text(f"name: One\ndescription: v{index}\nsteps:\n  - close\n")
+            assert scripting._describe_script(script) == (f"v{index}", None)
+
+        assert len(scripting._description_cache) <= 4
+
+    def test_the_cache_bound_is_512(self):
+        """Pinned by value: relaxing a resource cap must be argued for."""
+        assert scripting.MAX_DESCRIPTION_CACHE == 512
+
+
 # ============================================================================
 # script_completer Tests
 # ============================================================================
@@ -1304,9 +1402,35 @@ class TestScriptCompleter:
         assert "dir.yaml" not in as_dict
         assert "dir.yaml/" not in as_dict
 
-    def test_name_prefix_lists_same_candidates(self, completer_tree):
-        """A bare name prefix does not pre-filter (the caller filters)."""
-        assert script_completer("bas") == script_completer("")
+    def test_a_name_prefix_narrows_the_candidates_before_parsing(self, completer_tree):
+        """The prefix filters here now, not only downstream.
+
+        This used to `assert script_completer("bas") == script_completer("")`
+        - completing four characters that identify one file cost exactly as
+        much as completing nothing, because every candidate was fully
+        YAML-parsed and the whole set handed to prompt_toolkit to filter.
+        For a 200-script `--scripts-dir` that is ~600 ms on the door
+        server's own event loop, from one keystroke (round-8 frontend M1).
+        """
+        narrowed = script_completer("bas")
+
+        assert [name for name, _ in narrowed] == ["basic_cycle"]
+        assert len(script_completer("")) > len(narrowed)
+
+    def test_the_prefix_filter_is_case_insensitive(self, completer_tree):
+        """It has to match `prompt_common`'s downstream filter exactly.
+
+        That filter is `name.lower().startswith(word_before.lower())`, so a
+        case-sensitive pre-filter here would silently stop offering
+        completions the prompt would otherwise have shown.
+        """
+        assert [name for name, _ in script_completer("BAS")] == ["basic_cycle"]
+        assert [name for name, _ in script_completer("LOCAL.")] == ["local.yaml"]
+        assert [name for name, _ in script_completer("SUBDIR/")] == []
+        assert [name for name, _ in script_completer("SUBDI")] == ["subdir/"]
+
+    def test_a_prefix_matching_nothing_returns_nothing(self, completer_tree):
+        assert script_completer("zzz-no-such-script") == []
 
     def test_directory_prefix_lists_directory(self, completer_tree):
         """A './' prefix lists that directory's files and all subdirs."""
@@ -1618,6 +1742,174 @@ class TestScriptBooleanCoercion:
         assert held == [False, True]
 
 
+def _chain_names(function_name: str, variable: str) -> set[str]:
+    """The names one of `scripting`'s `x == "..."` dispatch chains accepts."""
+    source = Path(scripting.__file__).read_text()
+    body = source.split(f"def {function_name}", 1)[1].split("\n    def ", 1)[0]
+    return set(re.findall(rf'{variable} == "([a-z_]+)"', body))
+
+
+class TestUnknownNameErrorsNameTheAlternatives:
+    """Five of the DSL's seven "unknown name" errors named nothing.
+
+    The script DSL is the *CI* front end - these messages are read in a
+    build log with no terminal to experiment in, which is exactly where
+    naming the alternatives is worth the most - and every one of them had
+    the accepted set as a literal in the same function (round-8 frontend
+    L4). The sharpest was `Unknown assertion condition: door_closed`: the
+    single most natural assertion in a door simulator, and a name the
+    runner recognises *for the other action*.
+
+    Each published tuple is pinned against the chain it describes, so the
+    message cannot drift from the implementation.
+    """
+
+    @pytest.mark.parametrize(
+        ("published", "function_name", "variable"),
+        [
+            (scripting.ASSERT_CONDITIONS, "_assert_condition", "condition"),
+            (scripting.SET_SETTINGS, "_set_value", "name"),
+            (scripting.TOGGLE_SETTINGS, "_toggle_value", "name"),
+        ],
+        ids=["assert", "set", "toggle"],
+    )
+    def test_the_published_set_matches_the_chain(self, published, function_name, variable):
+        assert set(published) == _chain_names(function_name, variable)
+
+    def test_the_published_wait_for_set_matches_both_of_its_halves(self):
+        """`wait_for` dispatches through a status table *and* a polled chain."""
+        assert set(scripting.WAIT_FOR_CONDITIONS) == (
+            set(scripting._STATUS_WAIT_CONDITIONS) | _chain_names("_check_condition", "condition")
+        )
+
+    def test_every_published_set_is_sorted_and_unique(self):
+        """The message renders them in order; a duplicate would show twice."""
+        for published in (
+            scripting.ASSERT_CONDITIONS,
+            scripting.SET_SETTINGS,
+            scripting.TOGGLE_SETTINGS,
+            scripting.WAIT_FOR_CONDITIONS,
+        ):
+            assert list(published) == sorted(set(published))
+
+    def test_toggle_accepts_exactly_the_boolean_settings(self):
+        """The two `set`-only rows are the two non-boolean ones."""
+        assert set(scripting.SET_SETTINGS) - set(scripting.TOGGLE_SETTINGS) == {
+            "battery",
+            "hold_time",
+        }
+
+    def test_the_two_condition_vocabularies_are_disjoint(self):
+        """Which is what makes the cross-action hint unambiguous."""
+        assert set(scripting.WAIT_FOR_CONDITIONS) & set(scripting.ASSERT_CONDITIONS) == set()
+
+    @pytest.mark.parametrize(
+        ("step", "expected"),
+        [
+            (
+                ScriptStep(action="frobnicate"),
+                "Unknown action: frobnicate. Use: add_schedule, assert, battery, close, "
+                "inside, log, obstruction, open, outside, pet_off, pet_on, pet_presence, "
+                "remove_schedule, set, toggle, trigger, trigger_sensor, wait, wait_for",
+            ),
+            (
+                ScriptStep(action="set", params={"name": "powr", "value": "1"}),
+                "Unknown setting: powr. Use: auto, autoretract, battery, cmd_lockout, "
+                "hold_time, inside, outside, power, safety_lock",
+            ),
+            (
+                ScriptStep(action="toggle", params={"name": "powr"}),
+                "Unknown setting to toggle: powr. Use: auto, autoretract, cmd_lockout, "
+                "inside, outside, power, safety_lock",
+            ),
+            (
+                ScriptStep(action="assert", params={"condition": "bogus", "equals": "x"}),
+                "Unknown assertion condition: bogus. Use: auto, autoretract, battery, "
+                "cmd_lockout, door_status, hold_time, inside, outside, power, safety_lock, "
+                "total_auto_retracts, total_open_cycles",
+            ),
+            (
+                ScriptStep(action="wait_for", params={"condition": "door_stat", "timeout": 0.01}),
+                "Unknown condition: door_stat. Use: auto_off, auto_on, autoretract_off, "
+                "autoretract_on, cmd_lockout_off, cmd_lockout_on, door_closed, door_closing, "
+                "door_holding, door_keepup, door_open, door_rising, inside_disabled, "
+                "inside_enabled, outside_disabled, outside_enabled, power_off, power_on, "
+                "safety_lock_off, safety_lock_on",
+            ),
+        ],
+        ids=["action", "setting", "toggle", "assert", "condition"],
+    )
+    async def test_the_message_names_the_accepted_set(self, runner, simulator, step, expected):
+        with pytest.raises(ScriptError) as error:
+            await runner._execute_step(step)
+
+        assert str(error.value) == expected
+
+    @pytest.mark.parametrize(
+        ("step", "hint"),
+        [
+            (
+                ScriptStep(action="assert", params={"condition": "door_closed", "equals": "x"}),
+                "Unknown assertion condition: door_closed "
+                "(that name belongs to the 'wait_for' action).",
+            ),
+            (
+                ScriptStep(action="wait_for", params={"condition": "battery", "timeout": 0.01}),
+                "Unknown condition: battery (that name belongs to the 'assert' action).",
+            ),
+            (
+                ScriptStep(action="toggle", params={"name": "hold_time"}),
+                "Unknown setting to toggle: hold_time (that name belongs to the 'set' action).",
+            ),
+        ],
+        ids=[
+            "assert-gets-a-wait_for-name",
+            "wait_for-gets-an-assert-name",
+            "toggle-gets-a-set-name",
+        ],
+    )
+    async def test_a_name_valid_for_the_other_action_says_so(self, runner, simulator, step, hint):
+        """The trap round-7 frontend L1 described and fixed docs-only."""
+        with pytest.raises(ScriptError) as error:
+            await runner._execute_step(step)
+
+        assert str(error.value).startswith(hint)
+
+    async def test_a_name_valid_nowhere_gets_no_cross_action_hint(self, runner, simulator):
+        """The control: the hint must be specific, not decoration."""
+        with pytest.raises(ScriptError) as error:
+            await runner._execute_step(
+                ScriptStep(action="assert", params={"condition": "bogus", "equals": "x"})
+            )
+
+        assert "belongs to the" not in str(error.value)
+
+
+def _execute_step_body() -> str:
+    """The source of `ScriptRunner._execute_step`, for the drift guards."""
+    source = Path(scripting.__file__).read_text()
+    return source.split("async def _execute_step", 1)[1].split("\n    async def ", 1)[0]
+
+
+def _parameters_read_per_action() -> dict[str, set[str]]:
+    """Map action -> the `params.get("...")` names inside *its* branch.
+
+    Splits `_execute_step` on its own `if/elif action == "..."` chain, the
+    same extraction `test_every_executed_action_declares_its_parameters`
+    performs, so the two guards read the source the same way.
+    """
+    blocks = re.split(r'\n        (?:el)?if action == (?=")', _execute_step_body())
+    per_action: dict[str, set[str]] = {}
+    for block in blocks[1:]:
+        header, _, body = block.partition(":\n")
+        names = re.findall(r'"([a-z_]+)"', header)
+        assert names, f"could not read an action name from {header!r}"
+        read = set(re.findall(r'params\.get\(\s*"([a-z_]+)"', body))
+        for name in names:
+            per_action[name] = read
+    return per_action
+
+
 class TestUnknownNamesInStepsFailLoudly:
     """Every user-supplied name in this DSL must fail loudly when misspelled.
 
@@ -1676,17 +1968,31 @@ class TestUnknownNamesInStepsFailLoudly:
     @pytest.mark.parametrize(
         ("action", "params", "expected"),
         [
-            ("wait", {"duration": 8}, "Unknown parameter(s) for wait: duration. Use: seconds"),
+            (
+                "wait",
+                {"duration": 8},
+                "Unknown parameter(s) for wait: duration. Use: seconds "
+                "(plus the annotations comment, description, note)",
+            ),
             (
                 "trigger_sensor",
                 {"sensr": "inside"},
-                "Unknown parameter(s) for trigger_sensor: sensr. Use: sensor",
+                "Unknown parameter(s) for trigger_sensor: sensr. Use: sensor "
+                "(plus the annotations comment, description, note)",
             ),
-            ("close", {"hold": True}, "Unknown parameter(s) for close: hold. Use: none"),
+            # "Use: none" read as an instruction to pass the literal token
+            # `none` (round-8 frontend L4).
+            (
+                "close",
+                {"hold": True},
+                "Unknown parameter(s) for close: hold. close takes no parameters "
+                "(plus the annotations comment, description, note)",
+            ),
             (
                 "wait_for",
                 {"condition": "door_closed", "timout": 1, "zzz": 2},
-                "Unknown parameter(s) for wait_for: timout, zzz. Use: condition, timeout",
+                "Unknown parameter(s) for wait_for: timout, zzz. Use: condition, timeout "
+                "(plus the annotations comment, description, note)",
             ),
         ],
         ids=["wait-duration", "sensor-typo", "no-params-action", "two-unknowns"],
@@ -1703,6 +2009,63 @@ class TestUnknownNamesInStepsFailLoudly:
 
         assert result is False
         assert f"Script error at step 1: {expected}" in caplog.text
+
+    @pytest.mark.parametrize("annotation", sorted(scripting.STEP_ANNOTATION_KEYS))
+    async def test_a_documented_annotation_is_accepted_on_any_step(
+        self, runner, simulator, annotation
+    ):
+        """Making unknown parameters an error broke annotated user scripts.
+
+        `- action: wait / seconds: 1 / note: let the door settle` is an
+        ordinary thing for a YAML author to write, and it exited 0 before
+        round 7 and 1 after (round-8 frontend L3). A closed, documented set
+        of annotation keys keeps the strictness where it matters.
+        """
+        script = Script(
+            name="Annotated",
+            steps=[
+                ScriptStep(
+                    action="wait",
+                    params={"seconds": 0.01, annotation: "let the door settle"},
+                    line_number=1,
+                ),
+                ScriptStep(action="close", params={annotation: "and shut it"}, line_number=2),
+            ],
+        )
+
+        assert await runner.run(script, verbose=False) is True
+
+    async def test_an_annotation_does_not_excuse_a_typod_real_parameter(
+        self, runner, simulator, caplog
+    ):
+        """The strictness that motivated the change must survive it."""
+        script = Script(
+            name="Annotated typo",
+            steps=[
+                ScriptStep(
+                    action="wait",
+                    params={"duration": 8, "note": "why is this not waiting"},
+                    line_number=1,
+                )
+            ],
+        )
+
+        with caplog.at_level(logging.ERROR, logger=SCRIPT_LOGGER):
+            assert await runner.run(script, verbose=False) is False
+
+        assert "Unknown parameter(s) for wait: duration" in caplog.text
+        assert "note" not in caplog.text.split("Unknown parameter(s) for wait: ")[1].split(".")[0]
+
+    async def test_an_annotation_is_read_by_nothing(self, runner, simulator):
+        """`note:` must not shadow a real parameter or change behaviour."""
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        await runner._execute_step(
+            ScriptStep(action="wait", params={"seconds": 0.05, "note": "10"}, line_number=1)
+        )
+
+        assert 0.04 < loop.time() - started < 1.0
 
     async def test_the_typod_wait_no_longer_silently_shortens_the_wait(self, runner, simulator):
         """The observable substance: 8 s asked for, 1 s taken, PASSED reported."""
@@ -1733,24 +2096,85 @@ class TestUnknownNamesInStepsFailLoudly:
         parameters silently stop being validated, which is exactly the
         state this fix found the DSL in.
         """
-        import re
-
         source = Path(scripting.__file__).read_text()
         body = source.split("async def _execute_step", 1)[1].split("\n    async def ", 1)[0]
         dispatched = set(re.findall(r'action == "([a-z_]+)"', body))
 
         assert dispatched == set(scripting._ACTION_PARAMS)
 
-    def test_every_declared_parameter_is_actually_read(self):
-        """...and the table must not grow parameters nothing consumes."""
-        import re
+    def test_every_declared_parameter_is_actually_read_by_that_action(self):
+        """...and the table must not grow parameters nothing consumes.
 
-        source = Path(scripting.__file__).read_text()
-        body = source.split("async def _execute_step", 1)[1].split("\n    async def ", 1)[0]
+        This used to flatten both sides:
+        `set().union(*_ACTION_PARAMS.values()) - read == set()`, where
+        `read` was scraped from the whole `_execute_step` body. Six
+        parameter names are shared by more than one action (`condition`,
+        `duration`, `index`, `name`, `sensor`, `value`), so 11 of the 19
+        actions could gain a fictional parameter and the union check could
+        not notice - not merely "was not tested against one mutation", but
+        structurally incapable (round-8 test-fanatic M4).
+
+        The failure mode that protects against is round-7 frontend L3
+        restored: the progress log echoes the typo back as accepted, the
+        parameter does nothing, and `ctl run <name> wait` exits 0 - a green
+        CI result for a script that tested nothing.
+        """
+        per_action = _parameters_read_per_action()
+
+        assert per_action == {
+            action: set(params) for action, params in scripting._ACTION_PARAMS.items()
+        }
+
+    def test_the_union_check_this_replaced_really_was_blind(self):
+        """The reason the assertion above is per-action and not flattened.
+
+        The old check was `set().union(*_ACTION_PARAMS.values()) - read`,
+        with `read` scraped from the whole method body. Adding any already
+        declared name to any action leaves both sides unchanged, so the
+        check is *structurally* incapable of noticing - not merely
+        untested. Demonstrated exhaustively rather than asserted.
+        """
+        table = scripting._ACTION_PARAMS
+        body = _execute_step_body()
         read = set(re.findall(r'params\.get\(\s*"([a-z_]+)"', body))
+        declared = set().union(*table.values())
+        assert declared - read == set(), "the old check passes on the real table"
+
+        undetected = [
+            (action, name)
+            for action in table
+            for name in declared
+            if name not in table[action]
+            and (declared | {name}) - read == set()  # what the old check would compute
+        ]
+
+        assert len(undetected) == 19 * len(declared) - sum(len(p) for p in table.values())
+        assert len(table) == 19
+        assert len(declared) == 13
+        # ...and the per-action check sees every one of them.
+        per_action = _parameters_read_per_action()
+        for action, name in undetected:
+            grown = {**{a: set(p) for a, p in table.items()}, action: set(table[action]) | {name}}
+            assert grown != per_action
+
+    def test_eleven_of_nineteen_actions_share_a_parameter_name(self):
+        """Why the blindness is a *present-day* hole, not a hypothetical."""
+        table = scripting._ACTION_PARAMS
+        shared = {
+            name
+            for name in set().union(*table.values())
+            if sum(name in params for params in table.values()) > 1
+        }
+
+        assert shared == {"condition", "duration", "index", "name", "sensor", "value"}
+        assert sum(1 for params in table.values() if params & shared) == 11
+
+    def test_annotation_keys_never_collide_with_a_real_parameter(self):
+        """`note:` must stay a no-op, not shadow something an action reads."""
         declared = set().union(*scripting._ACTION_PARAMS.values())
 
-        assert declared - read == set()
+        assert scripting.STEP_ANNOTATION_KEYS & declared == set()
+        assert scripting.STEP_ANNOTATION_KEYS == {"comment", "description", "note"}
 
 
 class TestSimpleCommandShorthandDefaults:
@@ -1791,3 +2215,15 @@ class TestSimpleCommandShorthandDefaults:
             "condition": "door_status",
             "equals": "DOOR_CLOSED",
         }
+
+
+class TestTheAnnotationKeysAreDocumented:
+    """A closed set is only usable if it is written down."""
+
+    def test_the_docs_name_every_annotation_key(self):
+        doc = (Path(scripting.__file__).parents[3] / "docs" / "simulator.md").read_text()
+        section = " ".join(doc.split())
+
+        for key in scripting.STEP_ANNOTATION_KEYS:
+            assert f"`{key}`" in section
+        assert "accepted on any step and are read by nothing" in section

@@ -1724,7 +1724,21 @@ class PowerPetDoorClient(asyncio.Protocol):
         """
         try:
             msg = json.loads(frame)
-        except json.JSONDecodeError as err:
+        except (ValueError, RecursionError) as err:
+            # `json.JSONDecodeError` is a *subclass* of ValueError, not a
+            # superset of what json.loads raises. Two shapes well inside
+            # every declared bound escape it: an integer literal over
+            # `sys.get_int_max_str_digits()` (4300) digits raises a bare
+            # ValueError, and deep nesting raises RecursionError. Both are
+            # brace-balanced and under MAX_BUFFER_SIZE, so FrameScanner
+            # frames them and hands them straight here - and the escape
+            # killed the transport from `data_received` (a hot reconnect
+            # loop, because every attempt connects before dying and resets
+            # the backoff) or, from the `call_soon` re-arm, left the
+            # dispatcher permanently wedged (round-8 backend M1 /
+            # security M1). Widening the clause narrows nothing: a frame
+            # that fails to decode already took this exact path.
+            #
             # Throttled: this fires once per *frame*, so it is limited by
             # the peer's byte rate rather than its packet rate - `{x}` is
             # three bytes and used to buy a 135-byte ERROR, x28 write

@@ -459,7 +459,16 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         """
         try:
             msg = json.loads(frame)
-        except json.JSONDecodeError as err:
+        except (ValueError, RecursionError) as err:
+            # Twin of the client's clause, widened for the same reason: a
+            # >4300-digit integer literal raises a bare ValueError and deep
+            # nesting raises RecursionError, neither of which is a
+            # JSONDecodeError, and both used to escape into the loop's
+            # exception handler - fatal-erroring the transport or wedging
+            # the dispatcher with reading paused forever, which held the
+            # fd and the `DoorSimulator.protocols` slot after the peer
+            # walked away (round-8 security M1).
+            #
             # Throttled twin of the client's site: one unparseable frame is
             # three bytes and used to buy a whole WARNING record.
             if self._bad_frames.record(len(frame)):

@@ -605,17 +605,29 @@ class FrameDispatcher:
         order. The re-arm is only needed when the backlog stalls with
         dispatch slots free - if we stopped because ``max_inflight`` is
         reached, the running handlers' done-callbacks pump the rest.
+
+        ``_update_flow()`` runs in a ``finally`` because a raising
+        ``_dispatch`` used to skip it: the transport stayed paused with
+        ``_inflight`` at 0 (so no done-callback would ever fire) and
+        ``_pump_scheduled`` already cleared by ``_resume_pump``, so nothing
+        could drain the backlog and the peer's FIN was never read - a
+        permanent wedge, holding an fd and a connection slot, for one
+        raising callback (round-8 security M1). This dispatcher is a
+        shared component and must not depend on its callback being total;
+        with the ``finally`` the worst case is one frame lost.
         """
-        budget = self._max_inflight
-        while budget and self._backlog and self._inflight < self._max_inflight:
-            budget -= 1
-            task = self._dispatch(self._backlog.popleft())
-            if task is not None:
-                self._inflight += 1
-                task.add_done_callback(self._on_dispatched_done)
-        if self._backlog and self._inflight < self._max_inflight:
-            self._schedule_pump()
-        self._update_flow()
+        try:
+            budget = self._max_inflight
+            while budget and self._backlog and self._inflight < self._max_inflight:
+                budget -= 1
+                task = self._dispatch(self._backlog.popleft())
+                if task is not None:
+                    self._inflight += 1
+                    task.add_done_callback(self._on_dispatched_done)
+            if self._backlog and self._inflight < self._max_inflight:
+                self._schedule_pump()
+        finally:
+            self._update_flow()
 
     def _schedule_pump(self) -> None:
         """Continue pumping on the next event-loop turn (at most one pending)."""

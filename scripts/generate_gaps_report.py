@@ -13,6 +13,7 @@ Output:
     Writes directly to tests/TESTING_GAPS.md (or prints to stdout if --stdout).
 """
 
+import ast
 import io
 import json
 import os
@@ -31,12 +32,14 @@ PYPROJECT = Path("pyproject.toml")
 #: without an entry is still reported, just without the explanation, so a
 #: new pattern can never go undisclosed.
 _EXCLUSION_NOTES = {
-    "pragma: no cover": "Explicitly annotated lines (see Pragma Exclusions below)",
-    "def __repr__": "String representation methods",
-    "raise NotImplementedError": "Abstract method stubs",
-    "if TYPE_CHECKING:": "Type-checking-only imports",
-    "if __name__ == .__main__.:": "Script entry-point guards",
-    "@overload": "Typing overload declarations",
+    "#\\s*pragma:\\s*no\\s+cover\\s*($|\\()": (
+        "Explicitly annotated lines (see Pragma Exclusions below)"
+    ),
+    "^\\s*def __repr__": "String representation methods",
+    "^\\s*raise NotImplementedError": "Abstract method stubs",
+    "^\\s*if TYPE_CHECKING:": "Type-checking-only imports",
+    "^\\s*if __name__ == .__main__.:": "Script entry-point guards",
+    "^\\s*@overload\\s*$": "Typing overload declarations",
     "(^\\s*\\.\\.\\.\\s*$)|(:\\s*\\.\\.\\.\\s*$)": "Ellipsis stub bodies",
 }
 #: Gloss for each configured omit pattern.
@@ -95,6 +98,143 @@ def _comment_tokens(source: str) -> dict[int, tuple[int, str]]:
     except (tokenize.TokenError, SyntaxError, IndentationError):
         return {}
     return comments
+
+
+def _string_spans(source: str) -> dict[int, list[tuple[int, int]]]:
+    """Map line number -> column ranges occupied by string literals.
+
+    Used to tell an ``exclude_lines`` pattern that matched *code* from one
+    that matched *prose*. ``ast`` rather than ``tokenize`` because a
+    docstring is one node spanning many lines and f-strings tokenize
+    differently across the supported interpreters.
+
+    A file that will not parse contributes nothing, exactly as
+    :func:`_comment_tokens` reports no pragmas for one that will not
+    tokenize.
+    """
+    spans: dict[int, list[tuple[int, int]]] = {}
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    for node in ast.walk(tree):
+        is_str = isinstance(node, ast.Constant) and isinstance(node.value, str)
+        if not (is_str or isinstance(node, ast.JoinedStr)):
+            continue
+        # `end_lineno`/`end_col_offset` are Optional in the stubs only
+        # because ast nodes can be constructed by hand; ast.parse always
+        # locates what it produces.
+        assert node.end_lineno is not None and node.end_col_offset is not None
+        for line in range(node.lineno, node.end_lineno + 1):
+            start = node.col_offset if line == node.lineno else 0
+            end = node.end_col_offset if line == node.end_lineno else len(source)
+            spans.setdefault(line, []).append((start, end))
+    return spans
+
+
+def _statement_spans(source: str) -> list[tuple[int, int, bool]]:
+    """``(first_line, last_line, is_docstring)`` for every statement.
+
+    Coverage attributes a matched line to the statement *containing* it,
+    so a phrase buried on line 5 of a nine-line dict literal excludes the
+    whole assignment. The enclosing statement therefore has to be found by
+    span, not by first line.
+
+    ``is_docstring`` marks the case that costs nothing: coverage counts no
+    statement inside a docstring, so a pattern matching prose there is
+    untidy but removes nothing from the gate.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    docstrings = {
+        id(node.body[0])
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    }
+    return [
+        (node.lineno, node.end_lineno or node.lineno, id(node) in docstrings)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.stmt)
+    ]
+
+
+def _excludes_a_statement(spans: list[tuple[int, int, bool]], line: int) -> bool:
+    """Whether excluding ``line`` would remove a statement from the gate."""
+    enclosing = [span for span in spans if span[0] <= line <= span[1]]
+    if not enclosing:
+        return False
+    innermost = min(enclosing, key=lambda span: span[1] - span[0])
+    return not innermost[2]
+
+
+def find_prose_exclusions(source_dirs: tuple[Path, ...], patterns: list[str]) -> list[dict]:
+    """Find ``exclude_lines`` matches that landed in prose, not in code.
+
+    Every ``exclude_lines`` entry is a ``re.search`` against the whole
+    source line, so a bare phrase matches docstrings, f-strings and dict
+    keys as readily as the construct it names. That has now removed
+    statements from this project's 100% gate three rounds running - the
+    bare ``...`` (round 6), a replacement comment that re-excluded the line
+    it had just restored (round 7), and six bare phrases matching this
+    file's own ``_EXCLUSION_NOTES`` table (round 8).
+
+    A match is reported when it begins inside a string literal on a line
+    that carries a real statement: that is precisely the case where the
+    gate loses something it was measuring. A match inside a docstring is
+    ignored, because coverage counts no statement there.
+
+    Args:
+        source_dirs: Roots inside the coverage gate.
+        patterns: The configured ``exclude_lines`` entries.
+
+    Returns:
+        One dict per match, with ``file``, ``line``, ``pattern`` and
+        ``code``, sorted by file then line.
+    """
+    compiled = [(pattern, re.compile(pattern)) for pattern in patterns]
+    found: list[dict] = []
+    for source_dir in source_dirs:
+        for py_file in sorted(source_dir.rglob("*.py")):
+            if py_file.name in ("__init__.py", "__main__.py"):
+                continue
+            try:
+                source = py_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            spans = _string_spans(source)
+            statements = None
+            for number, text in enumerate(source.splitlines(), 1):
+                if number not in spans:
+                    continue
+                for pattern, regex in compiled:
+                    # Cheapest test first, then the span test, and only
+                    # then the statement lookup - which is linear in the
+                    # file's statement count and would otherwise run on
+                    # every line of every gated file.
+                    match = regex.search(text)
+                    if not match:
+                        continue
+                    if not any(start <= match.start() < end for start, end in spans[number]):
+                        continue
+                    if statements is None:
+                        statements = _statement_spans(source)
+                    if not _excludes_a_statement(statements, number):
+                        continue
+                    found.append(
+                        {
+                            "file": str(py_file).replace(os.sep, "/"),
+                            "line": number,
+                            "pattern": pattern,
+                            "code": text.strip(),
+                        }
+                    )
+    return sorted(found, key=lambda entry: (entry["file"], entry["line"]))
 
 
 def _collect_pragma_exclusions(source_dir: Path, root: Path | None = None) -> dict[str, list[dict]]:
@@ -361,6 +501,37 @@ def main() -> int:
     lines.append("")
     # Rendered from the live config, never hand-maintained (M2).
     lines.extend(render_automatic_exclusions())
+    lines.append("")
+
+    # Every pattern above is a `re.search` against the whole source line,
+    # so one can silently exclude a statement it merely *mentions*. This
+    # section is the gate's real perimeter as opposed to its intended one
+    # (round-8 test-fanatic H1); `tests/test_gaps_report.py` fails the
+    # build if it is ever non-empty.
+    prose = find_prose_exclusions(
+        tuple(d for d in (Path(SOURCE_PREFIX), Path(SCRIPTS_PREFIX)) if d.exists()),
+        coverage_config()[1],
+    )
+    lines.append("### Prose-Triggered Exclusions")
+    lines.append("")
+    if prose:
+        lines.append(
+            f"**{len(prose)} statement(s)** are excluded because an `exclude_lines` "
+            "pattern matched prose (a string literal), not the construct it names. "
+            "These are unintended and are outside the 100% gate."
+        )
+        lines.append("")
+        lines.append("| File | Line | Pattern | Code |")
+        lines.append("|------|------|---------|------|")
+        for entry in prose:
+            code = entry["code"].replace("|", "\\|")
+            pattern = entry["pattern"].replace("|", "\\|")
+            lines.append(f"| `{entry['file']}` | {entry['line']} | `{pattern}` | `{code}` |")
+    else:
+        lines.append(
+            "None. Every `exclude_lines` pattern above matches only the construct "
+            "it names, never a string literal on a line carrying a statement."
+        )
     lines.append("")
 
     if pragma_exclusions:

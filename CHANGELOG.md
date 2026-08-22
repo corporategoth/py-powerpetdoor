@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exported timezone helpers, `PRIORITY_*`, `week_0_*` and the schedule
   utilities are documented (`docs/door.md`, `docs/client.md`); a test now
   fails if any name in `__all__` appears in no prose doc
+- Simulator scripts: `note:`, `comment:` and `description:` are accepted as
+  documentation-only annotations on **any** step, and are read by nothing. They
+  give annotated scripts a spelling that is guaranteed not to collide with a
+  parameter name, now that an unrecognised parameter is an error (see Changed)
 
 ### Changed
 - Schedule serialization is now a single, explicitly-marked boundary
@@ -125,6 +129,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Packaging: replaced the `OS Independent` classifier with explicit
   Linux/macOS classifiers — the simulator's plain-stdin prompt fallback uses
   `loop.add_reader()`, which Windows' ProactorEventLoop does not implement
+
+#### Breaking (simulator script DSL)
+
+Both of these used to be silently ignored, which is what made them worth
+failing on: the progress log echoed the mistake back as if it had been
+accepted, and the run still exited 0.
+
+- **An unrecognised step parameter now fails the step.** `wait: {duration: 8}`
+  (`duration` is a real parameter name in this DSL — for `inside`/`outside`)
+  used to log `Step 1: wait(duration=8)`, wait the 1.0 s default instead of 8,
+  and report PASSED. *Remedy:* remove the unrecognised key, or — if it was a
+  human annotation rather than a typo — respell it as `note:`, `comment:` or
+  `description:`, which every step now accepts and nothing reads
+- **An unrecognised `sensor:` name now fails the step.** The engine's gates are
+  `if sensor == "inside"` / `elif sensor == "outside"`, so a one-character typo
+  matched neither, skipped the enable flags, the safety lock *and* the
+  schedule, and opened the door anyway — still reporting PASSED, which over
+  `ctl run <name> wait` is a green CI exit code. *Remedy:* use `inside` or
+  `outside`
+
+#### Other simulator changes
+
+- `--list-scripts` marks a shadowed built-in the way `list` already did, and
+  the marker now names the real file with its `.yaml`/`.yml` suffix
+  (`(shadowed by /path/to/basic_cycle.yaml)`) instead of a reconstructed
+  `<dir>/<name>` that looked like a path but was not one
+- The out-of-directory refusal is policy-aware: over the control channel it
+  ends `move it into the directory (paths are not accepted over the control
+  channel)` rather than pointing at a form the daemon refuses
+- `holdtime`, `inside`, `outside`, `charge_rate` and `discharge_rate` reject
+  `nan`/`inf` at the CLI, before anything is written
+- One rendering of a schedule's sensor scope across `add`, `list` and the
+  implicit line (`inside and outside sensors`, not `both sensor`)
+- Every "unknown name" error in the script DSL now names what it *would* have
+  accepted, and says so when the name belongs to the other action:
+  `Unknown assertion condition: door_closed (that name belongs to the
+  'wait_for' action). Use: ...`. `Use: none` for a parameterless action now
+  reads `<action> takes no parameters`
+- Script listing and tab completion no longer re-parse every YAML file on every
+  keystroke: the typed prefix filters before the parse, descriptions are cached
+  per file version, and the completer is threaded. A 200-script `--scripts-dir`
+  cost ~600 ms of the door server's own event loop per Tab; it is now ~4 ms
 
 ### Fixed
 - The 64 KiB framing cap bounds memory again, not just a character count: the
@@ -219,6 +265,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `InteractiveSession.format_output` was dead code, leaving the two live
   history-recall echoes as the only unsanitized terminal writes; replaced by
   `format_recall`, which both call sites use
+- `PowerPetDoor.hold_time` no longer goes stale on a device value it cannot
+  represent: a `holdTime` above `sys.float_info.max` made `value / 100.0` raise
+  `OverflowError` inside the client's listener isolation — one unthrottled
+  traceback per frame, with the cached value silently unchanged. The bound is
+  float representability, not a protocol ceiling: nothing a real device could
+  meaningfully send is refused
+- Coverage's `exclude_lines` patterns are anchored to the constructs they name.
+  Bare phrases are matched against the whole source line, so six of them also
+  matched prose — removing three executable statements in
+  `scripts/generate_gaps_report.py` from the 100% gate and letting arbitrary
+  never-executed code pass it. `tests/TESTING_GAPS.md` now reports the gate's
+  real perimeter, and a test sweeps every configured pattern over every gated
+  file
 
 ### Security
 - Bounded per-frame dispatch on both client and simulator: one `asyncio.Task`
@@ -299,6 +358,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently skipped while the run still reported PASSED
 - Dependabot now covers the composite action directory as well as the root;
   the pins no automation can reach are listed in `.claude/CLAUDE.md`
+- `data_received()` honours its documented "never raises on arbitrary input"
+  contract on both the client and the simulator. `json.JSONDecodeError` is a
+  *subclass* of `ValueError`, not a superset of what `json.loads` raises: an
+  integer literal over 4,300 digits raises a bare `ValueError` and deep nesting
+  raises `RecursionError`, and both escaped the decoder. Brace-balanced and
+  well under the 64 KiB framing cap, ~5.4 KB per victim connection, they either
+  fatal-errored the transport — the client then reconnected in a hot loop
+  forever, because every attempt *connects* before dying and so resets the
+  backoff — or, landing in the pump's `call_soon` continuation, left the
+  dispatcher permanently wedged with reading paused, holding the file
+  descriptor and the connection slot after the peer had closed its socket.
+  Both frames now take the same throttled bad-frame path an unparseable frame
+  already took; nothing that decoded before is refused now
+- `FrameDispatcher._pump()` updates flow control in a `finally`, so no raising
+  dispatch callback can leave the transport paused with an undrainable backlog
+- Simulator: the interactive completer runs off the event loop
+  (`ThreadedCompleter`), so no completer can stall the emulated door
 
 ## [0.3.0] - 2025-12-27
 

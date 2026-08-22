@@ -20,7 +20,7 @@ The Power Pet Door simulator is a full-featured testing tool that emulates the b
   - [Script Format](#script-format)
   - [Available Actions](#available-actions)
   - [Conditions](#conditions)
-  - [Settings](#settings)
+  - [Settings for `set`](#settings-for-set)
   - [Built-in Scripts](#built-in-scripts)
   - [Best Practices](#best-practices)
 - [Architecture](#architecture)
@@ -317,11 +317,16 @@ start the daemon can still discover them with `list`.
 A file in that directory that *resolves outside* it (a symlink pointing away)
 is not runnable by bare name, and is not listed by `list`, `--list-scripts`,
 the `Available:` hint or tab completion either — all four surfaces agree with
-the loader. Naming it explicitly answers `Script '<name>' resolves outside
-<dir> and cannot be run by name; move it into the directory or run it by path`.
-A scripts-dir script whose name matches a built-in **shadows** it; `list`
-marks the built-in `(shadowed by <dir>/<name>)` and tab completion offers the
-name once.
+the loader. Naming it explicitly over the control channel answers `Script
+'<name>' resolves outside <dir> and cannot be run by name; move it into the
+directory (paths are not accepted over the control channel)`. Locally — in the
+interactive CLI or via `--script` — the same refusal ends `move it into the
+directory or run it by path`, because there running it by path really is a
+remedy.
+A scripts-dir script whose name matches a built-in **shadows** it; both `list`
+and `--list-scripts` mark the built-in `(shadowed by <path-to-the-file>)`,
+naming the real file with its `.yaml`/`.yml` suffix, and tab completion offers
+the name once.
 
 Tab completion for those names works in the **simulator CLI only**.
 `ppd-simulator-ctl` is a separate process that never learns the daemon's
@@ -627,6 +632,20 @@ the progress log echoed them back as if accepted, so `wait: {duration: 8}`
 (`duration` is a real parameter name — for `inside`/`outside`) waited the
 1.0 s default instead of 8 and still reported PASSED.
 
+Three keys are exempt, because annotating a step is an ordinary thing to
+do and must not have to look like a typo. **`note`, `comment` and
+`description` are accepted on any step and are read by nothing**:
+
+```yaml
+- action: wait
+  seconds: 1
+  note: let the door settle before asserting
+```
+
+They are the only exemptions. A misspelled *real* parameter still fails
+loudly — that is the whole point of the check — so `duration:` on a `wait`
+is an error whether or not the step also carries a `note:`.
+
 #### Door Operations
 
 **trigger_sensor** / **trigger**
@@ -822,9 +841,7 @@ against an expectation, using this separate set:
 | `total_open_cycles` | Number |
 | `total_auto_retracts` | Number |
 
-### Settings
-
-Settings that can be used with `set` and `toggle`:
+### Settings for `set`
 
 | Setting | Type | Description |
 |---------|------|-------------|
@@ -837,6 +854,11 @@ Settings that can be used with `set` and `toggle`:
 | `cmd_lockout` | boolean | Command lockout |
 | `hold_time` | number | Seconds door stays open (fractional values allowed, e.g. `1.5`) |
 | `battery` | integer | Battery percentage (0-100) |
+
+`toggle` accepts the **boolean** rows only — the seven from `power` through
+`cmd_lockout`. `hold_time` and `battery` hold a value rather than a state,
+so `toggle hold_time` fails with `Unknown setting to toggle: hold_time`; use
+`set` for those two.
 
 Boolean values accept: `true`, `false`, `on`, `off`, `yes`, `no`, `1`, `0`, `enabled`, `disabled`
 

@@ -691,3 +691,143 @@ class TestAgainstTheRealRepository:
 
         assert gaps.coverage_config() == ([], [])
         assert gaps.render_automatic_exclusions() == []
+
+
+GATED_SOURCE_DIRS = (REPO_ROOT / "src" / "powerpetdoor", REPO_ROOT / "scripts")
+
+
+class TestTheCoverageConfigDoesNotExcludeProse:
+    """Coverage's own instrumentation, checked against the source it instruments.
+
+    Every `exclude_lines` entry is a `re.search` against the whole source
+    line, so a bare phrase matches docstrings, f-strings and dict keys as
+    readily as the construct it names. That has silently removed
+    statements from this project's 100% gate in three consecutive rounds:
+    the bare `...` (round 6), a replacement comment that re-excluded the
+    line it had just restored (round 7), and six bare phrases matching
+    `generate_gaps_report.py`'s own `_EXCLUSION_NOTES` table (round 8).
+
+    The round-7 mitigation was a comment asking humans not to write the
+    phrase in prose, and it was already violated in the file whose job is
+    to describe the project's exclusions. This is the executable version.
+    """
+
+    def test_no_configured_pattern_matches_prose_in_a_gated_file(self):
+        _, patterns = gaps.coverage_config()
+        assert patterns, "coverage.report.exclude_lines went missing from pyproject.toml"
+
+        found = gaps.find_prose_exclusions(GATED_SOURCE_DIRS, patterns)
+
+        assert found == [], (
+            "an exclude_lines pattern matched a string literal on a line carrying a "
+            "statement, silently removing it from the 100% gate: "
+            + "; ".join(f"{e['file']}:{e['line']} via {e['pattern']!r}" for e in found)
+        )
+
+    def test_the_sweep_catches_the_bare_phrases_round_8_replaced(self):
+        """Falsifiability: the pre-round-8 config over this repository.
+
+        Every one of the six bullets round 8 anchored is checked against
+        the exact file that motivated it - `_EXCLUSION_NOTES`, the table
+        whose entire job is to *disclose* the exclusions, plus the two
+        `lines.append(...)` statements that render the pragma section.
+        """
+        bare = [
+            "pragma: no cover",
+            "def __repr__",
+            "raise NotImplementedError",
+            "if TYPE_CHECKING:",
+            "if __name__ == .__main__.:",
+            "@overload",
+        ]
+
+        found = gaps.find_prose_exclusions((REPO_ROOT / "scripts",), bare)
+
+        assert {entry["pattern"] for entry in found} == set(bare)
+        assert {Path(entry["file"]).name for entry in found} == {"generate_gaps_report.py"}
+
+    def test_the_sweep_catches_the_bare_ellipsis_round_6_replaced(self):
+        """...and the first instance of the class, in the shipped library."""
+        found = gaps.find_prose_exclusions((REPO_ROOT / "src" / "powerpetdoor",), ["\\.\\.\\."])
+
+        assert found, "the bare `...` pattern used to remove 34 statements from the gate"
+        assert {Path(entry["file"]).suffix for entry in found} == {".py"}
+
+    def test_a_phrase_in_a_docstring_is_not_reported(self, tmp_path):
+        """Only statements matter: coverage counts none inside a docstring."""
+        module = tmp_path / "m.py"
+        module.write_text('"""Mentions pragma: no cover in prose."""\n\nX = 1\n')
+
+        assert gaps.find_prose_exclusions((tmp_path,), ["pragma: no cover"]) == []
+
+    def test_a_phrase_in_a_statement_is_reported(self, tmp_path):
+        """The hole a matched pair proved: new dead code passing at 100.00%."""
+        module = tmp_path / "m.py"
+        module.write_text('def unused():\n    return "mentions pragma: no cover in a string"\n')
+
+        found = gaps.find_prose_exclusions((tmp_path,), ["pragma: no cover"])
+
+        assert [(entry["line"], entry["pattern"]) for entry in found] == [(2, "pragma: no cover")]
+
+    def test_a_real_pragma_comment_is_not_reported(self, tmp_path):
+        """The anchored pattern's legitimate use must stay legitimate."""
+        _, patterns = gaps.coverage_config()
+        pragma_pattern = next(p for p in patterns if "pragma" in p)
+        module = tmp_path / "m.py"
+        module.write_text("X = 1  # pragma: no cover (deliberate)\n")
+
+        assert gaps.find_prose_exclusions((tmp_path,), [pragma_pattern]) == []
+
+    def test_an_unparseable_file_contributes_nothing(self, tmp_path):
+        """Same contract as the pragma scanner's untokenizable case."""
+        (tmp_path / "broken.py").write_text("def (:\n")
+
+        assert gaps.find_prose_exclusions((tmp_path,), ["pragma: no cover"]) == []
+        assert gaps._string_spans("def (:\n") == {}
+        assert gaps._statement_spans("def (:\n") == []
+        assert gaps._excludes_a_statement([], 1) is False
+
+    def test_an_undecodable_file_is_skipped(self, tmp_path):
+        (tmp_path / "binary.py").write_bytes(b"\xff\xfe# pragma: no cover\n")
+
+        assert gaps.find_prose_exclusions((tmp_path,), ["pragma: no cover"]) == []
+
+    def test_init_and_main_files_are_skipped_like_the_omit_list(self, tmp_path):
+        (tmp_path / "__init__.py").write_text('X = "pragma: no cover"\n')
+        (tmp_path / "__main__.py").write_text('X = "pragma: no cover"\n')
+
+        assert gaps.find_prose_exclusions((tmp_path,), ["pragma: no cover"]) == []
+
+    def test_the_report_discloses_the_real_perimeter(self, workspace, monkeypatch):
+        """`TESTING_GAPS.md` reported the intended perimeter, not the real one."""
+        write_coverage(workspace, FULL_COVERAGE)
+        monkeypatch.setattr(gaps, "PYPROJECT", REPO_ROOT / "pyproject.toml")
+        monkeypatch.setattr(sys, "argv", ["generate_gaps_report.py"])
+
+        gaps.main()
+        rendered = (workspace / "tests" / "TESTING_GAPS.md").read_text()
+
+        assert "### Prose-Triggered Exclusions" in rendered
+        assert "None. Every `exclude_lines` pattern above matches only" in rendered
+
+    def test_the_report_names_every_prose_exclusion_it_finds(self, workspace, monkeypatch):
+        """...and it renders them, pipes escaped, when there are any.
+
+        A regex alternation is the one thing that would break the markdown
+        table it is rendered into.
+        """
+        write_coverage(workspace, FULL_COVERAGE)
+        source_dir = workspace / "src" / "powerpetdoor"
+        source_dir.mkdir(parents=True)
+        (source_dir / "m.py").write_text('X = "mentions ham|eggs here"\n')
+        monkeypatch.setattr(gaps, "PYPROJECT", REPO_ROOT / "pyproject.toml")
+        monkeypatch.setattr(gaps, "coverage_config", lambda: ([], ["ham|eggs"]))
+        monkeypatch.setattr(sys, "argv", ["generate_gaps_report.py"])
+
+        gaps.main()
+        rendered = (workspace / "tests" / "TESTING_GAPS.md").read_text()
+
+        assert "**1 statement(s)** are excluded because an `exclude_lines` pattern" in rendered
+        assert (
+            '| `src/powerpetdoor/m.py` | 1 | `ham\\|eggs` | `X = "mentions ham\\|eggs here"` |'
+        ) in rendered

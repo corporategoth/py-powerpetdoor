@@ -125,6 +125,95 @@ _STATUS_WAIT_CONDITIONS: dict[str, tuple[str, ...]] = {
     "door_closing": (DOOR_STATE_CLOSING_TOP_OPEN, DOOR_STATE_CLOSING_MID_OPEN),
 }
 
+# The accepted vocabulary of each `Unknown X` message below.
+#
+# Five of the DSL's seven "unknown name" errors named no alternatives at
+# all, and the sharpest of them - `Unknown assertion condition:
+# door_closed` - is a name the runner recognises *for the other action*
+# (round-8 frontend L4). The script DSL is the **CI** front end: these
+# messages are read in a build log, with no terminal to experiment in,
+# which is exactly the context where naming the alternatives is worth the
+# most.
+#
+# Each tuple is pinned against the `== "..."` chain it describes by
+# `tests/simulator/test_scripting.py::TestUnknownNameErrorsNameTheAlternatives`,
+# so the message and the implementation cannot drift.
+
+#: Conditions ``wait_for`` polls, beyond :data:`_STATUS_WAIT_CONDITIONS`.
+_POLLED_WAIT_CONDITIONS: tuple[str, ...] = (
+    "auto_off",
+    "auto_on",
+    "autoretract_off",
+    "autoretract_on",
+    "cmd_lockout_off",
+    "cmd_lockout_on",
+    "inside_disabled",
+    "inside_enabled",
+    "outside_disabled",
+    "outside_enabled",
+    "power_off",
+    "power_on",
+    "safety_lock_off",
+    "safety_lock_on",
+)
+
+#: Every condition ``wait_for`` accepts.
+WAIT_FOR_CONDITIONS: tuple[str, ...] = tuple(
+    sorted({*_STATUS_WAIT_CONDITIONS, *_POLLED_WAIT_CONDITIONS})
+)
+
+#: Every condition ``assert`` accepts. Disjoint from
+#: :data:`WAIT_FOR_CONDITIONS`, which is why the two errors cross-reference
+#: each other.
+ASSERT_CONDITIONS: tuple[str, ...] = (
+    "auto",
+    "autoretract",
+    "battery",
+    "cmd_lockout",
+    "door_status",
+    "hold_time",
+    "inside",
+    "outside",
+    "power",
+    "safety_lock",
+    "total_auto_retracts",
+    "total_open_cycles",
+)
+
+#: Settings ``set`` accepts.
+SET_SETTINGS: tuple[str, ...] = (
+    "auto",
+    "autoretract",
+    "battery",
+    "cmd_lockout",
+    "hold_time",
+    "inside",
+    "outside",
+    "power",
+    "safety_lock",
+)
+
+#: Settings ``toggle`` accepts - the boolean subset of
+#: :data:`SET_SETTINGS`. ``hold_time`` and ``battery`` hold a value rather
+#: than a state, so there is nothing to invert.
+TOGGLE_SETTINGS: tuple[str, ...] = tuple(
+    name for name in SET_SETTINGS if name not in ("battery", "hold_time")
+)
+
+
+def _other_table_hint(name: str, other: tuple[str, ...], other_action: str) -> str:
+    """Name the *other* action when a rejected name is valid there.
+
+    ``assert door_closed`` is the single most natural assertion in a door
+    simulator, and it is a ``wait_for`` condition - so the runner
+    recognises the name, for the other action, and said only "Unknown
+    assertion condition". Round 7 fixed the docs; this fixes the message,
+    which is what the author who mistyped is actually looking at (round-8
+    frontend L4).
+    """
+    return f" (that name belongs to the '{other_action}' action)" if name in other else ""
+
+
 #: The parameters each script action understands.
 #:
 #: No step parameter used to be validated at all, and the progress log
@@ -161,6 +250,26 @@ _ACTION_PARAMS: dict[str, frozenset[str]] = {
     "remove_schedule": frozenset({"index"}),
     "battery": frozenset({"percent", "value"}),
 }
+
+#: Documentation-only keys accepted on **any** step and read by nothing.
+#:
+#: Making unknown parameters an error (round-7 frontend L3) is right - a
+#: typo'd real parameter must fail loudly - but it also broke existing user
+#: scripts that annotate their steps, which is an ordinary thing for a YAML
+#: author to do:
+#:
+#: .. code-block:: yaml
+#:
+#:     - action: wait
+#:       seconds: 1
+#:       note: let the door settle
+#:
+#: Allowing a *documented, closed* set keeps the strictness where it
+#: matters (``duration:`` on a ``wait`` is still a hard failure) while
+#: giving annotations a spelling that is guaranteed not to collide with a
+#: parameter name. None of these appears in :data:`_ACTION_PARAMS`, which
+#: ``test_annotation_keys_never_collide_with_a_real_parameter`` pins.
+STEP_ANNOTATION_KEYS = frozenset({"comment", "description", "note"})
 
 
 @dataclass
@@ -433,11 +542,20 @@ class ScriptRunner:
         # parameters of an action we do recognize.
         known_params = _ACTION_PARAMS.get(action)
         if known_params is not None:
-            unexpected = sorted(set(params) - known_params)
+            unexpected = sorted(set(params) - known_params - STEP_ANNOTATION_KEYS)
             if unexpected:
-                expected = ", ".join(sorted(known_params)) or "none"
+                # "Use: none" for a no-parameter action read as an
+                # instruction to pass the literal token `none` (round-8
+                # frontend L4).
+                accepted = (
+                    f"Use: {', '.join(sorted(known_params))}"
+                    if known_params
+                    else f"{action} takes no parameters"
+                )
+                annotations = ", ".join(sorted(STEP_ANNOTATION_KEYS))
                 raise ScriptError(
-                    f"Unknown parameter(s) for {action}: {', '.join(unexpected)}. Use: {expected}"
+                    f"Unknown parameter(s) for {action}: {', '.join(unexpected)}. "
+                    f"{accepted} (plus the annotations {annotations})"
                 )
 
         state = self.simulator.state
@@ -558,7 +676,7 @@ class ScriptRunner:
             self.simulator.set_battery(int(percent))
 
         else:
-            raise ScriptError(f"Unknown action: {action}")
+            raise ScriptError(f"Unknown action: {action}. Use: {', '.join(sorted(_ACTION_PARAMS))}")
 
     async def _sleep_or_stop(self, seconds: float) -> None:
         """Sleep, returning early if :meth:`stop` is requested meanwhile.
@@ -678,7 +796,11 @@ class ScriptRunner:
         elif condition == "cmd_lockout_off":
             return not state.cmd_lockout
         else:
-            raise ScriptError(f"Unknown condition: {condition}")
+            raise ScriptError(
+                f"Unknown condition: {condition}"
+                f"{_other_table_hint(condition, ASSERT_CONDITIONS, 'assert')}. "
+                f"Use: {', '.join(WAIT_FOR_CONDITIONS)}"
+            )
 
     @staticmethod
     def _script_number(value: object, name: str, minimum: float, maximum: float) -> float:
@@ -757,7 +879,7 @@ class ScriptRunner:
         elif name == "cmd_lockout":
             state.cmd_lockout = bool_value
         else:
-            raise ScriptError(f"Unknown setting: {name}")
+            raise ScriptError(f"Unknown setting: {name}. Use: {', '.join(SET_SETTINGS)}")
 
     def _toggle_value(self, name: str):
         """Toggle a boolean state value."""
@@ -779,7 +901,11 @@ class ScriptRunner:
         elif name == "cmd_lockout":
             state.cmd_lockout = not state.cmd_lockout
         else:
-            raise ScriptError(f"Unknown setting to toggle: {name}")
+            raise ScriptError(
+                f"Unknown setting to toggle: {name}"
+                f"{_other_table_hint(name, SET_SETTINGS, 'set')}. "
+                f"Use: {', '.join(TOGGLE_SETTINGS)}"
+            )
 
     def _assert_condition(self, condition: str, expected: str):
         """Assert a condition equals an expected value."""
@@ -813,7 +939,11 @@ class ScriptRunner:
         elif condition == "total_auto_retracts":
             actual = str(state.total_auto_retracts)
         else:
-            raise ScriptError(f"Unknown assertion condition: {condition}")
+            raise ScriptError(
+                f"Unknown assertion condition: {condition}"
+                f"{_other_table_hint(condition, WAIT_FOR_CONDITIONS, 'wait_for')}. "
+                f"Use: {', '.join(ASSERT_CONDITIONS)}"
+            )
 
         # Normalize expected value
         expected_normalized = expected.upper() if condition == "door_status" else expected.lower()
@@ -938,17 +1068,65 @@ def get_extra_script_files() -> dict[str, Path]:
     return _script_files_in(_extra_scripts_dir) if _extra_scripts_dir else {}
 
 
+#: Largest number of remembered script descriptions. Each entry is keyed
+#: on the file's identity *and* its stat, so editing a script adds a key
+#: rather than replacing one - without a cap, a long-lived daemon whose
+#: scripts are regenerated would grow the cache without bound. Clearing
+#: wholesale (rather than evicting) keeps the bookkeeping free; the next
+#: listing simply re-parses.
+MAX_DESCRIPTION_CACHE = 512
+
+#: ``(path, st_mtime_ns, st_size)`` -> ``(description, error_text | None)``.
+_description_cache: dict[tuple[str, int, int], tuple[str, str | None]] = {}
+
+
+def _describe_script(path: Path) -> tuple[str, str | None]:
+    """Read one script's description, remembering it per file version.
+
+    Every listing and every Tab keystroke used to fully YAML-parse every
+    candidate file - 200 scripts cost ~600 ms, on the same event loop that
+    serves the door protocol, so one keystroke stalled the emulated device
+    (round-8 frontend M1). Descriptions are what the parse is *for* and
+    they change only when the file does, so the stat tuple is the key: new
+    and edited files are still picked up immediately, which is the
+    behaviour ``list`` relies on.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        # Vanished between listing and describing; parse and let the
+        # failure be reported, but do not poison the cache with it.
+        return _read_description(path)
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    cached = _description_cache.get(key)
+    if cached is not None:
+        return cached
+    described = _read_description(path)
+    if len(_description_cache) >= MAX_DESCRIPTION_CACHE:
+        _description_cache.clear()
+    _description_cache[key] = described
+    return described
+
+
+def _read_description(path: Path) -> tuple[str, str | None]:
+    """Parse ``path`` and return ``(description, error_text | None)``."""
+    try:
+        return Script.from_file(path).description, None
+    except Exception as e:
+        return f"(Error loading: {sanitize_text(e)})", sanitize_text(e)
+
+
 def _describe_scripts(script_files: dict[str, Path]) -> list[tuple[str, str]]:
     """Build sorted (name, description) pairs for the given script files."""
     result = []
     for name, path in sorted(script_files.items()):
-        try:
-            script = Script.from_file(path)
-            result.append((name, script.description))
-        except Exception as e:
+        description, error = _describe_script(path)
+        if error is not None:
             # Both the name and the error text are file-derived (S3).
-            logger.warning(f"Failed to load script {sanitize_text(name)}: {sanitize_text(e)}")
-            result.append((name, f"(Error loading: {sanitize_text(e)})"))
+            # Reported on every listing, not only the first: the cache is
+            # a parse cache, not a report cache.
+            logger.warning(f"Failed to load script {sanitize_text(name)}: {error}")
+        result.append((name, description))
     return result
 
 
@@ -1042,6 +1220,19 @@ def render_script_listing(
     return ScriptListing(lines=lines, builtin=builtin, extra=extra)
 
 
+def matches_completion_prefix(candidate: str, prefix: str) -> bool:
+    """Whether ``candidate`` would survive the prompt's own completion filter.
+
+    The single definition of "this completion matches what was typed",
+    used both by the pre-filter inside :func:`script_completer` and by the
+    filter ``prompt_common.SimulatorCompleter`` applies to every candidate
+    it is handed. They have to agree: a case-*sensitive* pre-filter would
+    silently drop completions for uppercase input that the prompt would
+    otherwise have offered.
+    """
+    return candidate.lower().startswith(prefix.lower())
+
+
 def script_completer(prefix: str = "") -> list[tuple[str, str]]:
     """Return list of (script_name, description) for tab completion.
 
@@ -1055,6 +1246,16 @@ def script_completer(prefix: str = "") -> list[tuple[str, str]]:
     When this front end may not run scripts by path (ctl, whose daemon
     refuses them), only script *names* are offered - suggesting a local
     file there is suggesting a command that always fails (M1).
+
+    In the name branch the prefix filters *before* the parse. It used to
+    filter nowhere: every candidate was fully YAML-parsed and the whole
+    set handed to prompt_toolkit, so completing four characters that
+    already identify one file cost exactly as much as completing nothing -
+    ~600 ms for a 200-script directory, on the door server's own event
+    loop (round-8 frontend M1). The test is case-insensitive to match the
+    downstream filter in ``prompt_common``, which is
+    ``name.lower().startswith(word_before.lower())``; a case-sensitive
+    one here would silently change completion for uppercase input.
     """
     result: list[tuple[str, str]] = []
 
@@ -1117,27 +1318,29 @@ def script_completer(prefix: str = "") -> list[tuple[str, str]]:
             ({k: v for k, v in _get_script_files().items() if k not in extra_files}, "(builtin)"),
             (extra_files, "(scripts-dir)"),
         ):
-            if YAML_AVAILABLE:
-                for name, path in sorted(script_files.items()):
-                    try:
-                        script = Script.from_file(path)
-                        result.append((name, script.description or label))
-                    except Exception:
-                        result.append((name, label))
-            else:
-                for name in sorted(script_files.keys()):
+            for name in sorted(script_files):
+                if not matches_completion_prefix(name, prefix):
+                    continue
+                if not YAML_AVAILABLE:
                     result.append((name, label))
+                    continue
+                description, error = _describe_script(script_files[name])
+                result.append((name, label if error is not None else description or label))
 
         if _script_paths_allowed:
             # Add YAML files from current directory
             cwd = Path.cwd()
             for pattern in ("*.yaml", "*.yml"):
                 for path in cwd.glob(pattern):
-                    if path.is_file():
+                    if matches_completion_prefix(path.name, prefix) and path.is_file():
                         result.append((path.name, "(local file)"))
 
             # Add subdirectories that might contain scripts
             for subdir in cwd.iterdir():
+                if not matches_completion_prefix(subdir.name + "/", prefix):
+                    # Checked before the glob below, which is the expensive
+                    # half of this walk.
+                    continue
                 if subdir.is_dir() and not subdir.name.startswith("."):
                     # Check if it has any yaml files
                     has_yaml = any(subdir.glob("*.yaml")) or any(subdir.glob("*.yml"))

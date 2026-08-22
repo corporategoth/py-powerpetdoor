@@ -119,6 +119,7 @@ from powerpetdoor.const import (
     SUCCESS_TRUE,
 )
 from powerpetdoor.framing import MAX_BUFFER_SIZE
+from powerpetdoor.schedule import MAX_SCHEDULE_INDEX
 from powerpetdoor.simulator import (
     CommandRegistry,
     DoorSimulatorProtocol,
@@ -128,6 +129,7 @@ from powerpetdoor.simulator import (
 from powerpetdoor.simulator import protocol as protocol_module
 from powerpetdoor.simulator.engine import DoorMotionEngine
 from powerpetdoor.simulator.protocol import make_sensor_notification, sanitize_log_text
+from tests.conftest import GOLDEN_SCHEDULE_WIRE_TO_DEVICE, bigint_frame, nested_frame
 
 # ============================================================================
 # Test Fixtures
@@ -1942,6 +1944,171 @@ class TestWireValueValidation:
         assert "\\x1b[2J" in caplog.text
 
 
+class TestTheWireNumericBoundsAreInclusive:
+    """`_coerce_wire_number`'s upper bound is `<=`, and nothing pinned it.
+
+    Round 7's boundary sweep pinned the *string* sibling
+    (`_coerce_wire_string`'s `len(value) > max_length`) and the CLI's float
+    `max_value`, and missed this one adjacent site. Turning `<=` into `<`
+    rejects exactly the documented maximum on every field that uses it -
+    with a message that contradicts itself ("must be between 0 and 90000,
+    got 90000") - and left the whole suite green (round-8 test-fanatic M3).
+
+    This pins what the simulator accepts **today**; it changes and narrows
+    nothing on the wire. Three shipped constants, four wire call sites,
+    each at `limit - 1`, `limit` and `limit + 1` (CLAUDE.md rule 8).
+    """
+
+    async def _round_trip(self, protocol, mock_transport, msg):
+        await dispatch(protocol, {**msg, "msgId": 5})
+        return last_response(mock_transport)
+
+    @pytest.mark.parametrize("offset", [-1, 0], ids=["limit-1", "limit"])
+    async def test_hold_time_accepts_up_to_the_documented_maximum(
+        self, protocol, mock_transport, state, offset
+    ):
+        value = protocol_module.MAX_HOLD_TIME_CENTISECONDS + offset
+
+        response = await self._round_trip(
+            protocol, mock_transport, {CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: value}
+        )
+
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert state.hold_time == value / 100.0
+        assert response[FIELD_HOLD_TIME] == value
+
+    async def test_hold_time_rejects_one_above_the_documented_maximum(
+        self, protocol, mock_transport, state
+    ):
+        state.hold_time = 2.0
+        value = protocol_module.MAX_HOLD_TIME_CENTISECONDS + 1
+
+        response = await self._round_trip(
+            protocol, mock_transport, {CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: value}
+        )
+
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == (
+            f"holdTime must be between 0 and {protocol_module.MAX_HOLD_TIME_CENTISECONDS}, "
+            f"got {value}"
+        )
+        assert state.hold_time == 2.0
+
+    @pytest.mark.parametrize(
+        ("command", "field", "attribute"),
+        [
+            (
+                CMD_SET_SENSOR_TRIGGER_VOLTAGE,
+                FIELD_SENSOR_TRIGGER_VOLTAGE,
+                "sensor_trigger_voltage",
+            ),
+            (
+                CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+                FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+                "sleep_sensor_trigger_voltage",
+            ),
+        ],
+        ids=["sensor", "sleep"],
+    )
+    @pytest.mark.parametrize("offset", [-1, 0], ids=["limit-1", "limit"])
+    async def test_trigger_voltage_accepts_up_to_the_documented_maximum(
+        self, protocol, mock_transport, state, command, field, attribute, offset
+    ):
+        value = protocol_module.MAX_TRIGGER_VOLTAGE + offset
+
+        response = await self._round_trip(protocol, mock_transport, {CONFIG: command, field: value})
+
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert getattr(state, attribute) == value
+        assert response[field] == value
+
+    @pytest.mark.parametrize(
+        ("command", "field", "attribute"),
+        [
+            (
+                CMD_SET_SENSOR_TRIGGER_VOLTAGE,
+                FIELD_SENSOR_TRIGGER_VOLTAGE,
+                "sensor_trigger_voltage",
+            ),
+            (
+                CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+                FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+                "sleep_sensor_trigger_voltage",
+            ),
+        ],
+        ids=["sensor", "sleep"],
+    )
+    async def test_trigger_voltage_rejects_one_above_the_documented_maximum(
+        self, protocol, mock_transport, state, command, field, attribute
+    ):
+        before = getattr(state, attribute)
+        value = protocol_module.MAX_TRIGGER_VOLTAGE + 1
+
+        response = await self._round_trip(protocol, mock_transport, {CONFIG: command, field: value})
+
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == (
+            f"{field} must be between 0 and {protocol_module.MAX_TRIGGER_VOLTAGE}, got {value}"
+        )
+        assert getattr(state, attribute) == before
+
+    @pytest.mark.parametrize("offset", [-1, 0], ids=["limit-1", "limit"])
+    async def test_the_schedule_index_accepts_up_to_the_documented_maximum(
+        self, protocol, mock_transport, state, offset
+    ):
+        """The index reaches the same coercer through `_wire_schedule_index`.
+
+        Addressed by index rather than stored as a value, so "accepted"
+        means "answered about the schedule at that index" - here, the
+        honest "Schedule not found" rather than a range refusal.
+        """
+        index = MAX_SCHEDULE_INDEX + offset
+
+        response = await self._round_trip(
+            protocol, mock_transport, {CONFIG: CMD_GET_SCHEDULE, FIELD_INDEX: index}
+        )
+
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == "Schedule not found"
+
+    async def test_the_schedule_index_rejects_one_above_the_documented_maximum(
+        self, protocol, mock_transport, state
+    ):
+        index = MAX_SCHEDULE_INDEX + 1
+
+        response = await self._round_trip(
+            protocol, mock_transport, {CONFIG: CMD_GET_SCHEDULE, FIELD_INDEX: index}
+        )
+
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == (
+            f"index must be between 0 and {MAX_SCHEDULE_INDEX}, got {index}"
+        )
+
+    async def test_the_maximum_index_is_addressable_when_it_exists(
+        self, protocol, mock_transport, state
+    ):
+        """...and the boundary index really is usable, not merely tolerated."""
+        await dispatch(
+            protocol,
+            {
+                CONFIG: CMD_SET_SCHEDULE,
+                FIELD_SCHEDULE: {**GOLDEN_SCHEDULE_WIRE_TO_DEVICE, "index": MAX_SCHEDULE_INDEX},
+                "msgId": 6,
+            },
+        )
+        assert last_response(mock_transport)[FIELD_SUCCESS] == SUCCESS_TRUE
+
+        response = await self._round_trip(
+            protocol,
+            mock_transport,
+            {CONFIG: CMD_GET_SCHEDULE, FIELD_INDEX: MAX_SCHEDULE_INDEX},
+        )
+
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert response[FIELD_SCHEDULE]["index"] == MAX_SCHEDULE_INDEX
+
+
 class TestBoundedDispatchAndBackpressure:
     """The simulator's twin of the client's bounded frame dispatch.
 
@@ -2043,6 +2210,98 @@ class TestPerFrameLogThrottling:
         assert [record.getMessage() for record in caplog.records] == [
             "Simulator: 3 JSON parse error(s) (9 bytes) on this connection"
         ]
+
+
+class TestDecodeFailuresThatAreNotJSONDecodeError:
+    """Twin of `tests/test_client.py::TestDecodeFailuresThatAreNotJSONDecodeError`.
+
+    `json.JSONDecodeError` is a ValueError *subclass*, so catching it is
+    not the same as catching what `json.loads` raises. A >4300-digit
+    integer literal raises a bare ValueError and deep nesting raises
+    RecursionError. Escaping `_dispatch_frame` fatal-errored the transport
+    or - from the `call_soon` re-arm - wedged the dispatcher with reading
+    paused forever, which held the fd and the `DoorSimulator.protocols`
+    slot after the peer closed its socket (round-8 security M1).
+
+    Both frames are brace-balanced and under `MAX_BUFFER_SIZE`, so the
+    framing cap is provably not what stops them.
+    """
+
+    @pytest.mark.parametrize("frame", [bigint_frame(), nested_frame()], ids=["bigint", "nested"])
+    async def test_a_poisoned_frame_alone_does_not_escape_data_received(self, frame, protocol):
+        assert len(frame) < framing.MAX_BUFFER_SIZE
+
+        protocol.data_received(frame)
+        await protocol.drain()
+
+        assert protocol._dispatcher.backlog == 0
+        assert protocol._bad_frames.count == 1
+
+    @pytest.mark.parametrize("frame", [bigint_frame(), nested_frame()], ids=["bigint", "nested"])
+    async def test_a_poisoned_frame_in_the_re_arm_does_not_wedge_the_dispatcher(
+        self, frame, protocol
+    ):
+        """Budget burned by unparseable frames, then the frame, then a paused backlog."""
+        filler = framing.MAX_INFLIGHT_FRAMES
+        trailing = framing.MAX_FRAME_BACKLOG + 44
+
+        protocol.data_received(b"{x}" * filler + frame + b"{x}" * trailing)
+        assert protocol._dispatcher.paused is True
+        await protocol.drain()
+
+        assert protocol._dispatcher.backlog == 0
+        assert protocol._dispatcher.paused is False
+        assert protocol._bad_frames.count == filler + trailing + 1
+
+    async def test_deep_nesting_split_across_reads_is_not_caught_by_the_framing_cap(self, protocol):
+        """Delivered in network-sized pieces, so only the decoder can stop it."""
+        frame = nested_frame()
+
+        for start in range(0, len(frame), 1400):
+            protocol.data_received(frame[start : start + 1400])
+        await protocol.drain()
+
+        assert protocol._bad_frames.count == 1
+        assert protocol._dispatcher.backlog == 0
+
+    @pytest.mark.parametrize(
+        ("frame", "detail"),
+        [
+            (bigint_frame(), "Exceeds the limit (4300 digits)"),
+            (nested_frame(), "maximum recursion depth exceeded"),
+        ],
+        ids=["bigint", "nested"],
+    )
+    async def test_a_poisoned_frame_lands_on_the_existing_throttled_path(
+        self, frame, detail, protocol, caplog
+    ):
+        """Byte-identical treatment to `{x}`: same records, same schedule."""
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
+            protocol.data_received(b"{x}")
+            await protocol.drain()
+            # `record.msg` is the format string, i.e. the call site - stable
+            # across the differing detail text.
+            control_shape = [record.msg for record in caplog.records]
+            caplog.clear()
+            protocol._bad_frames.reset()
+
+            protocol.data_received(frame)
+            await protocol.drain()
+
+        assert [record.msg for record in caplog.records] == control_shape
+        assert detail in caplog.records[1].getMessage()
+
+    async def test_a_legitimate_command_after_a_poisoned_frame_is_still_answered(
+        self, protocol, mock_transport
+    ):
+        protocol.data_received(
+            bigint_frame()
+            + nested_frame()
+            + json.dumps({"config": CMD_GET_DOOR_STATUS, "dir": "p2d"}).encode()
+        )
+        await protocol.drain()
+
+        assert [reply["CMD"] for reply in all_responses(mock_transport)] == [CMD_GET_DOOR_STATUS]
 
 
 class TestShippedBoundsHaveTheirValuesPinned:

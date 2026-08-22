@@ -21,11 +21,13 @@ looks like a flaky network (round-6 frontend M1).
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import json
 import re
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -62,10 +64,16 @@ SIMULATOR_MD = REPO_ROOT / "docs" / "simulator.md"
 
 
 def _github_anchor(heading: str) -> str:
-    """Render a heading the way GitHub renders its own anchor."""
+    """Render a heading the way GitHub renders its own anchor.
+
+    Each space becomes a hyphen; runs are *not* collapsed. GitHub strips
+    punctuation first and hyphenates what is left character by character,
+    so ``## Battery & Hardware`` is ``#battery--hardware`` - which is what
+    ``docs/door.md`` links to, and what collapsing the run got wrong.
+    """
     slug = heading.strip().lower()
     slug = re.sub(r"[^\w\s-]", "", slug)
-    return re.sub(r"\s+", "-", slug)
+    return re.sub(r"\s", "-", slug)
 
 
 def _sections(path: Path) -> dict[str, str]:
@@ -74,12 +82,20 @@ def _sections(path: Path) -> dict[str, str]:
     A section owns its subsections: ``## Message Format`` includes the
     ``### Request Format`` block under it, which is what a reader following
     the link actually sees.
+
+    Fenced blocks are skipped when looking for headings: ``# Door protocol
+    on 3000`` inside a ```` ```bash ```` block is a shell comment, and
+    treating it as a heading truncated the Daemon Mode section six lines
+    in - which is why nothing had ever pinned the prose underneath it.
     """
     lines = path.read_text().splitlines()
     sections: dict[str, list[str]] = {}
     open_sections: list[tuple[int, list[str]]] = []
+    fenced = False
     for line in lines:
-        if line.startswith("#"):
+        if line.startswith("```"):
+            fenced = not fenced
+        if line.startswith("#") and not fenced:
             level = len(line) - len(line.lstrip("#"))
             heading = line.lstrip("#").strip()
             open_sections = [(lvl, body) for lvl, body in open_sections if lvl < level]
@@ -104,11 +120,11 @@ def _json_blocks(text: str) -> list[dict]:
     """
     blocks: list[dict] = []
     for body in re.findall(r"```json\n(.*?)```", text, re.DOTALL):
-        for line in body.strip().splitlines():
-            line = line.strip()
-            if not line.startswith("{"):
-                # Part of a pretty-printed multi-line object; handled below.
-                break
+        # A five-line loop here bound a local, broke, and discarded it; no
+        # branch below ever read it, so it could not influence a single
+        # extracted block. Inert code in the helper that feeds the
+        # keepalive pins reads like a check that is happening and is not
+        # (round-8 test-fanatic L5).
         try:
             blocks.append(json.loads(body))
             continue
@@ -118,6 +134,47 @@ def _json_blocks(text: str) -> list[dict]:
             if line.strip().startswith("{"):
                 blocks.append(json.loads(line.strip()))
     return blocks
+
+
+def _condition_names(body: str) -> set[str]:
+    """Every condition name a `condition ==` / `condition in (...)` tests.
+
+    Extracted with `ast`, not a regex. The `wait_for` extractor knew only
+    the `==` spelling while its sibling knew both, so adding a genuinely
+    working condition to `_check_condition` with `condition in ("a", "b")`
+    - the spelling the same file already uses for its *values* - left it
+    live, undocumented, and invisible to the test (round-8 test-fanatic
+    L1). Walking `Compare` nodes covers `==`, `in (...)` and `in {...}` at
+    once, so the two extractors cannot diverge again.
+    """
+    # The caller's split leaves a method fragment that can trail a
+    # decorator belonging to the *next* method, which will not parse. Keep
+    # the signature line plus everything indented under it.
+    lines = ("def _fragment" + body).splitlines()
+    kept = [lines[0]]
+    for line in lines[1:]:
+        if line.strip() and not line.startswith("        "):
+            break
+        kept.append(line)
+    module = ast.parse(textwrap.dedent("\n".join(kept)))
+    names: set[str] = set()
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Compare):
+            continue
+        if not (isinstance(node.left, ast.Name) and node.left.id == "condition"):
+            continue
+        for operator, comparator in zip(node.ops, node.comparators, strict=True):
+            if isinstance(operator, ast.Eq) and isinstance(comparator, ast.Constant):
+                names.add(comparator.value)
+            elif isinstance(operator, ast.In) and isinstance(
+                comparator, ast.Tuple | ast.List | ast.Set
+            ):
+                names.update(
+                    element.value
+                    for element in comparator.elts
+                    if isinstance(element, ast.Constant)
+                )
+    return names
 
 
 def _table_rows(text: str) -> list[list[str]]:
@@ -564,7 +621,7 @@ def test_the_wait_for_condition_table_matches_the_implementation():
     documented = {row[0].strip("`") for row in rows if row[0] != "Condition"}
     source = Path(scripting.__file__).read_text()
     body = source.split("def _check_condition", 1)[1].split("\n    def ", 1)[0]
-    implemented = set(re.findall(r'condition == "([a-z_]+)"', body))
+    implemented = _condition_names(body)
     implemented |= set(scripting._STATUS_WAIT_CONDITIONS)
 
     assert documented == implemented
@@ -577,8 +634,7 @@ def test_the_assert_condition_table_matches_the_implementation():
     documented = {row[0].strip("`") for row in rows if row[0] != "Condition"}
     source = Path(scripting.__file__).read_text()
     body = source.split("def _assert_condition", 1)[1].split("\n    def ", 1)[0]
-    implemented = set(re.findall(r'condition == "([a-z_]+)"', body))
-    implemented |= set(re.findall(r'condition in \("([a-z_]+)"', body))
+    implemented = _condition_names(body)
 
     assert documented == implemented
 
@@ -608,4 +664,159 @@ def test_every_script_action_is_documented():
     documented = set(re.findall(r"^\*\*([a-z_]+)\*\*", section, re.MULTILINE))
     documented |= set(re.findall(r"\*\* / \*\*([a-z_]+)\*\*", section))
 
-    assert set(scripting._ACTION_PARAMS) - documented == set()
+    # Both directions. One-directional, the docs could invent an action
+    # that does not exist - a reader copies it, the script fails with
+    # "Unknown action", and nothing in CI noticed the doc was wrong
+    # (round-8 test-fanatic L2). Verified equal on the current tree, so
+    # tightening it is free.
+    assert documented == set(scripting._ACTION_PARAMS)
+
+
+def _setting_names(function_name: str) -> set[str]:
+    """The setting names one of `scripting`'s `name == "..."` chains accepts."""
+    from powerpetdoor.simulator import scripting
+
+    source = Path(scripting.__file__).read_text()
+    body = source.split(f"def {function_name}", 1)[1].split("\n    def ", 1)[0]
+    return set(re.findall(r'name == "([a-z_]+)"', body))
+
+
+def test_the_settings_table_matches_what_set_accepts():
+    """The table said "Settings that can be used with `set` **and** `toggle`".
+
+    Two of its nine rows failed with `toggle` - the two non-boolean ones,
+    which the table's own `Type` column already identified, and which the
+    `**toggle**` action entry two sections up already described correctly
+    as "Toggle a boolean setting". Round-7 frontend L1 one screen away, and
+    none of the three docs-accuracy tests round 7 added covered this table
+    (round-8 frontend L2).
+    """
+    rows = _table_rows(_sections(SIMULATOR_MD)["settings-for-set"])
+    documented = {row[0].strip("`") for row in rows if row[0] != "Setting"}
+
+    assert documented == _setting_names("_set_value")
+
+
+def test_the_settings_table_marks_exactly_the_rows_toggle_accepts():
+    """`toggle` takes the boolean rows; the doc must name that set, not the table's."""
+    rows = [
+        row
+        for row in _table_rows(_sections(SIMULATOR_MD)["settings-for-set"])
+        if row[0] != "Setting"
+    ]
+    boolean_rows = {row[0].strip("`") for row in rows if row[1] == "boolean"}
+    other_rows = {row[0].strip("`") for row in rows if row[1] != "boolean"}
+    prose = _sections(SIMULATOR_MD)["settings-for-set"]
+
+    assert boolean_rows == _setting_names("_toggle_value")
+    assert other_rows == {"hold_time", "battery"}
+    # The prose names both excluded rows and the error they really produce.
+    for name in other_rows:
+        assert f"`{name}`" in prose
+    assert "Unknown setting to toggle: hold_time" in prose
+
+
+def test_the_daemon_mode_prose_quotes_the_real_out_of_directory_refusal():
+    """Round 7 fixed the message and left the doc that quotes it verbatim.
+
+    The paragraph is the *control-channel* documentation and the sentence
+    it quoted was the local-CLI variant, so round-7 frontend L6's
+    contradiction moved from the product into the manual (round-8 frontend
+    L1). Both policies are pinned, because the doc now states both.
+    """
+    from powerpetdoor.simulator import scripting
+
+    # Markdown reflows, so the quoted sentence can wrap mid-phrase.
+    prose = " ".join(_sections(SIMULATOR_MD)["daemon-mode"].split())
+    previous = scripting._script_paths_allowed
+    try:
+        scripting.set_script_paths_allowed(False)
+        assert scripting.describe_out_of_directory_remedy() in prose
+        scripting.set_script_paths_allowed(True)
+        assert scripting.describe_out_of_directory_remedy() in prose
+    finally:
+        scripting.set_script_paths_allowed(previous)
+
+
+def test_the_daemon_mode_prose_describes_the_real_shadow_marker(tmp_path, monkeypatch):
+    """`(shadowed by <dir>/<name>)` dropped the suffix; the code stopped emitting it."""
+    from powerpetdoor.simulator import scripting
+
+    builtin = tmp_path / "builtin"
+    extra = tmp_path / "extra"
+    builtin.mkdir()
+    extra.mkdir()
+    (builtin / "basic_cycle.yaml").write_text("name: B\nsteps:\n  - close\n")
+    shadowing = extra / "basic_cycle.yml"
+    shadowing.write_text("name: S\nsteps:\n  - close\n")
+    monkeypatch.setattr(scripting, "SCRIPTS_DIR", builtin)
+    scripting.set_extra_scripts_dir(extra)
+
+    lines = scripting.render_script_listing(str(extra)).lines
+
+    marker = f"(shadowed by {shadowing})"
+    assert any(marker in line for line in lines)
+    # The doc must not promise the reconstructed, suffix-less form.
+    prose = " ".join(_sections(SIMULATOR_MD)["daemon-mode"].split())
+    assert "(shadowed by <dir>/<name>)" not in prose
+    assert "(shadowed by <path-to-the-file>)" in prose
+    assert "`--list-scripts`" in prose
+
+
+def test_the_changelog_records_the_breaking_script_dsl_changes():
+    """Round 7's fixes broke existing user scripts and the changelog missed it.
+
+    `CHANGELOG.md` opens with "All notable changes to this project will be
+    documented in this file" and carries a detailed `[Unreleased]` section,
+    so the omission was a break with the project's own practice: a user
+    whose script suite started exiting 1 had the reference manual to read
+    *after* working out what happened, and nothing to say it was coming
+    (round-8 frontend L3). `.github/workflows/test.yml` now fails a PR that
+    touches `src/` without touching the changelog; this pins the content.
+    """
+    from powerpetdoor.simulator import scripting
+
+    changelog = " ".join((REPO_ROOT / "CHANGELOG.md").read_text().split())
+
+    assert "#### Breaking (simulator script DSL)" in changelog
+    # Both breaking errors, and a remedy for each.
+    assert "unrecognised step parameter now fails the step" in changelog
+    assert "unrecognised `sensor:` name now fails the step" in changelog
+    for annotation in sorted(scripting.STEP_ANNOTATION_KEYS):
+        assert f"`{annotation}:`" in changelog
+    assert "*Remedy:* use `inside` or `outside`" in changelog
+
+
+@pytest.mark.parametrize(
+    "path",
+    [PROTOCOL_MD, CLIENT_MD, SIMULATOR_MD, REPO_ROOT / "docs" / "door.md"],
+    ids=lambda path: path.name,
+)
+def test_every_same_file_anchor_link_resolves(path):
+    """A renamed heading must not leave the table of contents pointing at prose.
+
+    Round 6 found index links resolving to sections that documented
+    something else, and `docs/simulator.md` carried *two* `### Settings`
+    headings, so `#settings` silently resolved to the interactive-mode one
+    while the scripting table of contents meant the other. Renaming one of
+    them is exactly when this breaks, and nothing checked.
+    """
+    text = path.read_text()
+    anchors = set(_sections(path))
+    # GitHub disambiguates a repeated heading as `#name-1`, `#name-2`, ...
+    seen: dict[str, int] = {}
+    fenced = False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            fenced = not fenced
+            continue
+        if line.startswith("#") and not fenced:
+            base = _github_anchor(line.lstrip("#"))
+            count = seen.get(base, 0)
+            seen[base] = count + 1
+            if count:
+                anchors.add(f"{base}-{count}")
+
+    broken = [target for target in re.findall(r"\]\(#([\w-]+)\)", text) if target not in anchors]
+
+    assert broken == []

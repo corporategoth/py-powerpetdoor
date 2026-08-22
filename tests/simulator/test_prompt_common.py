@@ -190,6 +190,19 @@ class TestInteractiveSessionNonTty:
             )
             assert session.available is True
             assert session.history is not None
+            # The prompt is a task on the *same* asyncio loop as the door
+            # protocol server, so an unwrapped completer runs its work in
+            # the event loop: one Tab on a 200-script `--scripts-dir`
+            # stalled the emulated device for ~600 ms (round-8 frontend
+            # M1). Threading it makes that structurally impossible for any
+            # future completer, not just this one.
+            from prompt_toolkit.completion import ThreadedCompleter
+
+            from powerpetdoor.simulator.prompt_common import SimulatorCompleter
+
+            completer = session._session.completer
+            assert isinstance(completer, ThreadedCompleter)
+            assert isinstance(completer.completer, SimulatorCompleter)
         finally:
             os.close(master)
             os.close(slave)

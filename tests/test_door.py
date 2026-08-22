@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 
 import pytest
 
@@ -2135,14 +2136,22 @@ class TestFacadeCacheIsTypeGuarded:
         "value", [None, "1", 1, "maybe"], ids=["unrecognized", "str", "int", "make_bool-None"]
     )
     async def test_a_non_bool_battery_flag_keeps_the_cached_value(self, door, value):
-        """``make_bool`` returns None for a value it does not recognize."""
-        door._battery = BatteryInfo(percent=42, present=True, ac_present=True)
+        """``make_bool`` returns None for a value it does not recognize.
+
+        The cached value has to be *decisive*. Seeding ``present=True``
+        made "kept the cache" and "coerced the int" give the same answer
+        for the ``1`` parameter (``bool(1)`` is ``True``), so a `_keep_bool`
+        that coerced ints passed this test and the whole suite (round-8
+        test-fanatic L3, CLAUDE.md rules 8/9). Every parameter here is
+        truthy, and the cache is False.
+        """
+        door._battery = BatteryInfo(percent=42, present=False, ac_present=False)
 
         door._on_battery_update({FIELD_BATTERY_PRESENT: value, FIELD_AC_PRESENT: value})
 
-        assert door.battery_present is True
-        assert door.ac_present is True
-        assert door.battery.charging is True
+        assert door.battery_present is False
+        assert door.ac_present is False
+        assert door.battery.charging is False
         assert door.battery.discharging is False
 
     async def test_a_usable_battery_flag_is_cached(self, door):
@@ -2194,18 +2203,75 @@ class TestFacadeCacheIsTypeGuarded:
 
     @pytest.mark.parametrize(
         "value",
-        ["200", None, float("nan"), True, [200]],
-        ids=["str", "null", "nan", "bool", "list"],
+        ["200", None, float("nan"), True, [200], 10**400],
+        ids=["str", "null", "nan", "bool", "list", "huge-int"],
     )
-    async def test_a_bad_hold_time_keeps_the_cached_value_without_raising(self, door, value):
-        """A string used to raise ``TypeError`` straight out of the listener."""
-        door._hold_time = 4.0
+    @pytest.mark.parametrize("cached", [4.0, 0.29], ids=["exact-round-trip", "lossy-round-trip"])
+    async def test_a_bad_hold_time_keeps_the_cached_value_without_raising(
+        self, door, value, cached
+    ):
+        """A string used to raise ``TypeError`` straight out of the listener.
+
+        The cached seed has to be decisive too. ``_hold_time`` is populated
+        as ``centiseconds / 100.0``, and for 4,586 of the 90,001 centisecond
+        values a device can send (5.1%) ``int(x * 100) != round(x * 100)`` -
+        but ``4.0`` is one of the values where they agree, so replacing the
+        fallback's ``round()`` with ``int()`` silently rewrote the cache and
+        passed this test (round-8 test-fanatic L4). ``0.29`` is decisive:
+        ``0.29 * 100`` is ``28.999999999999996``.
+
+        ``10**400`` is the round-8 backend L1 / security L2 case: legal
+        JSON, an ``int``, and ``value / 100.0`` raises ``OverflowError``.
+        """
+        door._hold_time = cached
 
         door._on_hold_time_update(value)
 
-        assert door.hold_time == 4.0
+        assert door.hold_time == cached
 
     async def test_a_usable_hold_time_is_cached_in_seconds(self, door):
         door._on_hold_time_update(1500)
 
         assert door.hold_time == 15.0
+
+    async def test_an_unrepresentable_hold_time_is_rejected_at_the_representability_bound(
+        self, door, caplog
+    ):
+        """The bound is what ``float`` can hold, not what a protocol says.
+
+        ``docs/protocol.md`` is reverse-engineered, so the facade must not
+        refuse a device value for exceeding a bound this project invented.
+        It refuses it only when the arithmetic downstream (``/ 100.0``)
+        physically cannot be performed - which is exactly
+        ``sys.float_info.max``.
+        """
+        door._hold_time = 4.0
+        limit = int(sys.float_info.max)
+
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.door"):
+            door._on_hold_time_update(limit)
+            assert door.hold_time == limit / 100.0
+
+            door._hold_time = 4.0
+            door._on_hold_time_update(limit + 1)
+
+        assert door.hold_time == 4.0
+        assert any("keeping the cached value" in r.getMessage() for r in caplog.records)
+
+    async def test_the_representability_bound_is_not_applied_to_the_other_int_fields(self, door):
+        """Only the consumer that does float arithmetic passes ``maximum``.
+
+        Python ints are unbounded and these three merely store the value,
+        so bounding inside ``_keep_int`` for every caller would refuse
+        values that are harmless - and would contradict
+        ``test_a_huge_integer_percent_does_not_overflow_the_guard``.
+        """
+        huge = 10**400
+
+        door._on_battery_update({FIELD_BATTERY_PERCENT: huge})
+        door._on_total_cycles_update(FIELD_TOTAL_OPEN_CYCLES, huge)
+        door._on_total_retracts_update(FIELD_TOTAL_AUTO_RETRACTS, huge)
+
+        assert door.battery_percent == huge
+        assert door.total_open_cycles == huge
+        assert door.total_auto_retracts == huge

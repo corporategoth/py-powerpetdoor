@@ -76,6 +76,7 @@ from powerpetdoor.const import (
     PRIORITY_HIGH,
     PRIORITY_LOW,
 )
+from tests.conftest import bigint_frame, nested_frame
 
 # ============================================================================
 # Helper Function Tests
@@ -3867,6 +3868,119 @@ class TestBoundedFrameDispatch:
         assert client._dispatcher.backlog == 0
 
 
+class TestDecodeFailuresThatAreNotJSONDecodeError:
+    """`data_received` "never raises on arbitrary input" - it used to.
+
+    `json.JSONDecodeError` is a ValueError *subclass*, not a superset of
+    what `json.loads` raises. A >4300-digit integer literal raises a bare
+    ValueError and deep nesting raises RecursionError, and both escaped
+    `_dispatch_frame`. Landing inside `data_received` that fatal-errors
+    the transport, and because `_adopt_transport` resets
+    `_reconnect_attempts` on every successful connect, the client sat in a
+    hot reconnect loop at the base interval forever. Landing inside the
+    `call_soon` re-arm it left the dispatcher permanently wedged
+    (round-8 backend M1 / security M1).
+
+    Both frames are brace-balanced and under `MAX_BUFFER_SIZE`, so the
+    framing cap is provably not what stops them.
+    """
+
+    @pytest.mark.parametrize("frame", [bigint_frame(), nested_frame()], ids=["bigint", "nested"])
+    async def test_a_poisoned_frame_alone_does_not_escape_data_received(self, frame, mock_client):
+        client, _, _ = mock_client
+        assert len(frame) < framing.MAX_BUFFER_SIZE
+
+        client.data_received(frame)
+
+        assert client._dispatcher.backlog == 0
+        assert client._bad_frames.count == 1
+
+    @pytest.mark.parametrize("frame", [bigint_frame(), nested_frame()], ids=["bigint", "nested"])
+    async def test_a_poisoned_frame_in_the_re_arm_does_not_wedge_the_dispatcher(
+        self, frame, mock_client
+    ):
+        """The wedge shape: budget burned, then the frame, then a paused backlog.
+
+        64 unparseable frames use `_pump`'s per-invocation budget without
+        producing a task, so `_inflight` stays 0 and the poisoned frame is
+        dispatched from `_resume_pump`. The 300 trailing frames hold the
+        backlog above `MAX_FRAME_BACKLOG` so reading is paused. If the
+        decode escapes, nothing is left that can pump: `_pump_scheduled`
+        was cleared before `_pump()` ran, no done-callback will fire, and
+        the peer's FIN can never be read.
+        """
+        client, transport, _ = mock_client
+        filler = framing.MAX_INFLIGHT_FRAMES
+        trailing = framing.MAX_FRAME_BACKLOG + 44
+
+        client.data_received(b"{x}" * filler + frame + b"{x}" * trailing)
+        assert transport.reading_paused is True
+        for _ in range(5000):
+            if not client._dispatcher.backlog:
+                break
+            await asyncio.sleep(0)
+
+        assert client._dispatcher.backlog == 0
+        assert transport.reading_paused is False
+        assert client._bad_frames.count == filler + trailing + 1
+
+    async def test_deep_nesting_split_across_reads_is_not_caught_by_the_framing_cap(
+        self, mock_client
+    ):
+        """Delivered in network-sized pieces, so only the decoder can stop it."""
+        client, _, _ = mock_client
+        frame = nested_frame()
+
+        for start in range(0, len(frame), 1400):
+            client.data_received(frame[start : start + 1400])
+
+        assert client._bad_frames.count == 1
+        assert client._dispatcher.backlog == 0
+
+    @pytest.mark.parametrize(
+        ("frame", "detail"),
+        [
+            (bigint_frame(), "Exceeds the limit (4300 digits)"),
+            (nested_frame(), "maximum recursion depth exceeded"),
+        ],
+        ids=["bigint", "nested"],
+    )
+    async def test_a_poisoned_frame_lands_on_the_existing_throttled_path(
+        self, frame, detail, mock_client, caplog
+    ):
+        """Byte-identical treatment to `{x}`: same records, same schedule."""
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            control, _, _ = mock_client
+            control.data_received(b"{x}")
+            # `record.msg` is the format string, i.e. the call site - stable
+            # across the differing detail text.
+            control_shape = [record.msg for record in caplog.records]
+            caplog.clear()
+            control._bad_frames.reset()
+
+            control.data_received(frame)
+
+        assert [record.msg for record in caplog.records] == control_shape
+        assert detail in caplog.records[1].getMessage()
+
+    async def test_a_legitimate_frame_after_a_poisoned_one_is_still_handled(self, mock_client):
+        client, _, _ = mock_client
+        seen: list[dict] = []
+        client.process_message = lambda msg: _record(seen, msg)
+
+        client.data_received(bigint_frame() + nested_frame() + b'{"CMD":"AFTER"}')
+        for _ in range(100):
+            if seen:
+                break
+            await asyncio.sleep(0)
+
+        assert seen == [{"CMD": "AFTER"}]
+
+
+async def _record(seen: list[dict], msg: dict) -> None:
+    seen.append(msg)
+
+
 class TestPerFrameLogThrottling:
     """Per-frame log sites are limited by the peer's *byte* rate."""
 
@@ -4017,19 +4131,66 @@ class TestPerFrameLogThrottling:
         assert len(tallies) == 8  # 1, 2, 4, ... 128
         assert client._bad_messages.count == 200
 
-    async def test_disconnect_flushes_the_per_frame_tails(self, mock_client, caplog):
-        """Nothing counted is lost when the connection ends."""
+    @pytest.mark.parametrize(
+        ("attribute", "reads", "level", "tail"),
+        [
+            (
+                "_non_ascii",
+                [b"\xff", b"\xfe", b"\xfd"],
+                logging.ERROR,
+                "Received non-ASCII bytes from device; escaped them (affected frames are "
+                "dropped) - 3 chunks, 3 bytes so far on this connection",
+            ),
+            (
+                "_bad_frames",
+                [b"{x}" * 3],
+                logging.ERROR,
+                "Failed to decode 3 JSON frame(s) from device (9 bytes) on this connection",
+            ),
+            (
+                "_bad_messages",
+                [b"{}" * 3],
+                logging.WARNING,
+                "Ignored 3 malformed message(s) from device (6 bytes) on this connection",
+            ),
+            (
+                "_device_errors",
+                [b'{"CMD":"a","success":"false"}' * 3],
+                logging.WARNING,
+                "Device reported 3 error response(s) (96 bytes) on this connection",
+            ),
+        ],
+        ids=["non_ascii", "bad_frames", "bad_messages", "device_errors"],
+    )
+    async def test_disconnect_flushes_the_per_frame_tails(
+        self, mock_client, caplog, attribute, reads, level, tail
+    ):
+        """Nothing counted is lost when the connection ends.
+
+        The flush loop has four members and only two were driven by a test,
+        so removing `_device_errors` or `_bad_messages` from it left the
+        suite green (round-8 test-fanatic M5). Losing the flush drops the
+        suppressed tail of a burst - `EventThrottle` promises the counts are
+        "batched, never lost" - and losing the `reset()` carries the count
+        into the next connection, so its doubling schedule resumes far
+        along and a *fresh* burst there is under-reported. The loop's
+        membership is what is under test, not one element of it.
+        """
         client, _, _ = mock_client
-        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
-            client.data_received(b"{x}" * 3)
+        with caplog.at_level(level, logger="powerpetdoor.client"):
+            for read in reads:
+                client.data_received(read)
+            for _ in range(5000):
+                if not client._dispatcher.backlog and not client._dispatcher.inflight:
+                    break
+                await asyncio.sleep(0)
+            assert getattr(client, attribute).count == 3
             caplog.clear()
 
             client.disconnect()
 
-        assert [record.getMessage() for record in caplog.records] == [
-            "Failed to decode 3 JSON frame(s) from device (9 bytes) on this connection"
-        ]
-        assert client._bad_frames.count == 0
+        assert tail in [record.getMessage() for record in caplog.records]
+        assert getattr(client, attribute).count == 0
 
 
 class TestHardwareInfoPayload:

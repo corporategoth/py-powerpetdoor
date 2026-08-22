@@ -118,13 +118,28 @@ fail_under = 100
 show_missing = true
 skip_covered = false
 precision = 2
+# Every pattern here is a `re.search` against the WHOLE source line, so a
+# bare phrase matches docstrings, f-strings and dict keys exactly as
+# readily as the construct it names. Round 6 anchored the ellipsis pattern
+# for that reason and left the other six bare; they then excluded three
+# executable statements in `scripts/generate_gaps_report.py` from the gate
+# and let arbitrary never-executed code pass it at 100.00% — a hole that
+# grows with any future line containing one of these phrases in a message
+# string (round-8 test-fanatic H1, the third instance of this class).
+#
+# A comment convention is not a fix, and was already violated when it was
+# written. Anchor instead: comment patterns to an actual comment, and
+# structural patterns to the start of a line.
+# `tests/test_gaps_report.py::TestTheCoverageConfigDoesNotExcludeProse`
+# sweeps every pattern below over every gated file and fails if any match
+# lands inside a string literal on a line carrying a real statement.
 exclude_lines = [
-    "pragma: no cover",
-    "def __repr__",
-    "raise NotImplementedError",
-    "if TYPE_CHECKING:",
-    "if __name__ == .__main__.:",
-    "@overload",
+    "#\\s*pragma:\\s*no\\s+cover\\s*($|\\()",
+    "^\\s*def __repr__",
+    "^\\s*raise NotImplementedError",
+    "^\\s*if TYPE_CHECKING:",
+    "^\\s*if __name__ == .__main__.:",
+    "^\\s*@overload\\s*$",
     # Ellipsis *stub bodies* only. A bare `\.\.\.` is a `re.search` against the
     # whole source line, so it also matches log strings, comments and
     # `tuple[str, ...]` annotations — which silently removed 34 statements and

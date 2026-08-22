@@ -30,11 +30,12 @@ from .commands.base import (
 # ctl.py which otherwise only imports a subset of command mixins.
 from .commands.handler import CommandHandler  # noqa: F401
 from .commands.history import History
+from .scripting import matches_completion_prefix
 
 # Try to import prompt_toolkit for enhanced interactive features
 try:
     from prompt_toolkit import PromptSession
-    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.completion import Completer, Completion, ThreadedCompleter
     from prompt_toolkit.lexers import Lexer
     from prompt_toolkit.styles import Style
 
@@ -494,9 +495,11 @@ if PROMPT_TOOLKIT_AVAILABLE:
                             )
                         )
 
-                    # Yield matching completions (case-insensitive)
+                    # Yield matching completions (case-insensitive). One
+                    # definition, shared with `script_completer`'s
+                    # pre-filter so the two cannot disagree.
                     for name, desc in all_completions:
-                        if name.lower().startswith(word_before.lower()):
+                        if matches_completion_prefix(name, word_before):
                             yield Completion(
                                 name,
                                 start_position=-len(word_before),
@@ -570,7 +573,13 @@ class InteractiveSession:
 
             self._session = PromptSession(
                 history=self._history.prompt_toolkit_history,
-                completer=SimulatorCompleter(),
+                # Threaded so no completer can ever block the event loop:
+                # the interactive prompt is a task on the *same* loop as
+                # the door protocol server, so a slow completion stalled
+                # the emulated device from a keystroke (round-8 frontend
+                # M1). The pre-filter and description cache make that fast
+                # again; this makes it structurally impossible.
+                completer=ThreadedCompleter(SimulatorCompleter()),
                 complete_while_typing=False,
                 lexer=SimulatorLexer(),
                 style=SIMULATOR_STYLE,

@@ -2,7 +2,7 @@
 
 This file is **auto-generated** by CI after each test run. Do not edit manually.
 
-**Last updated:** 2026-08-22 15:33 UTC
+**Last updated:** 2026-08-22 19:06 UTC
 
 ## Summary
 
@@ -10,8 +10,8 @@ This file is **auto-generated** by CI after each test run. Do not edit manually.
 |--------|-------|
 | Line Coverage | 100.00% |
 | Branch Coverage | 100.00% |
-| Lines Covered | 6,662 / 6,662 |
-| Branches Covered | 2,368 / 2,368 |
+| Lines Covered | 6,775 / 6,775 |
+| Branches Covered | 2,410 / 2,410 |
 | Lines Missing | 0 |
 
 ## Coverage by Category
@@ -36,13 +36,17 @@ The following are excluded from coverage by configuration (`pyproject.toml`):
 
 - `*/__init__.py` - Package init files
 - `*/__main__.py` - Entry point files
-- `pragma: no cover` - Explicitly annotated lines (see Pragma Exclusions below)
-- `def __repr__` - String representation methods
-- `raise NotImplementedError` - Abstract method stubs
-- `if TYPE_CHECKING:` - Type-checking-only imports
-- `if __name__ == .__main__.:` - Script entry-point guards
-- `@overload` - Typing overload declarations
+- `#\s*pragma:\s*no\s+cover\s*($|\()` - Explicitly annotated lines (see Pragma Exclusions below)
+- `^\s*def __repr__` - String representation methods
+- `^\s*raise NotImplementedError` - Abstract method stubs
+- `^\s*if TYPE_CHECKING:` - Type-checking-only imports
+- `^\s*if __name__ == .__main__.:` - Script entry-point guards
+- `^\s*@overload\s*$` - Typing overload declarations
 - `(^\s*\.\.\.\s*$)|(:\s*\.\.\.\s*$)` - Ellipsis stub bodies
+
+### Prose-Triggered Exclusions
+
+None. Every `exclude_lines` pattern above matches only the construct it names, never a string literal on a line carrying a statement.
 
 ### Pragma Exclusions
 

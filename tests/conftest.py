@@ -51,12 +51,18 @@ def _reset_extra_scripts_dir():
     agree; a test that sets one must not leak it into the next.
     """
     yield
-    from powerpetdoor.simulator.scripting import set_extra_scripts_dir, set_script_paths_allowed
+    from powerpetdoor.simulator import scripting
 
-    set_extra_scripts_dir(None)
+    scripting.set_extra_scripts_dir(None)
     # ctl.main() declares that this process may not run scripts by path;
     # that must not leak into a test expecting the simulator CLI's completer.
-    set_script_paths_allowed(True)
+    scripting.set_script_paths_allowed(True)
+    # The description cache is keyed on (path, st_mtime_ns, st_size), so it
+    # is correct across real edits - but a test that monkeypatches
+    # `Script.from_file` is asking for a parse the cache legitimately
+    # skips, and a stale entry from an earlier test made that test's
+    # outcome depend on ordering.
+    scripting._description_cache.clear()
 
 
 # ============================================================================
@@ -300,6 +306,34 @@ def make_async_callback(callback_tracker):
         return callback
 
     return factory
+
+
+# ============================================================================
+# Frames that make json.loads raise something other than JSONDecodeError
+# ============================================================================
+#
+# `json.JSONDecodeError` is a *subclass* of ValueError, so catching it is
+# not the same as catching what `json.loads` raises. Two shapes escaped
+# both `_dispatch_frame` implementations (round-8 backend M1 / security
+# M1). Both are brace-balanced and under `MAX_BUFFER_SIZE`, so the framing
+# cap is provably not what stops them - the decoder is.
+#
+# They live here rather than in one test module because the client and the
+# simulator protocol are twins on this path and must be pinned together.
+
+
+def bigint_frame() -> bytes:
+    """A frame whose integer literal exceeds CPython's str->int digit cap.
+
+    `sys.get_int_max_str_digits()` is 4300 by default and the json scanner
+    surfaces the refusal as a bare ValueError, not a JSONDecodeError.
+    """
+    return b'{"CMD":"X","msgID":1' + b"0" * 4400 + b"}"
+
+
+def nested_frame(depth: int = 9999) -> bytes:
+    """A frame nested deeply enough that `json.loads` raises RecursionError."""
+    return b'{"a":' * depth + b"1" + b"}" * depth
 
 
 # ============================================================================

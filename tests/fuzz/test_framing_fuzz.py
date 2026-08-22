@@ -15,14 +15,19 @@ The example counts are deliberately bounded so the whole suite stays fast.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 from types import SimpleNamespace
 
-from hypothesis import given, settings
+import pytest
+from hypothesis import assume, event, given, settings
 from hypothesis import strategies as st
 
 from powerpetdoor import PowerPetDoorClient, framing
 from powerpetdoor.framing import MAX_BUFFER_SIZE, FrameScanner, extract_frames
+from powerpetdoor.simulator.protocol import DoorSimulatorProtocol
+from powerpetdoor.simulator.state import DoorSimulatorState
 
 # JSON payloads kept small: framing behavior does not depend on payload
 # size, and small examples keep the suite fast.
@@ -91,6 +96,85 @@ def _capture_client() -> tuple[PowerPetDoorClient, list[dict]]:
     client.process_message = _record
     client._track_task = lambda coro: coro.close()
     return client, received
+
+
+class _FlowTransport(asyncio.Transport):
+    """A transport that records the dispatcher's flow-control decisions."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.paused = False
+
+    def pause_reading(self) -> None:
+        self.paused = True
+
+    def resume_reading(self) -> None:
+        self.paused = False
+
+    def write(self, data: bytes) -> None:
+        """Answers are irrelevant here; the receive path is under test."""
+
+    def get_write_buffer_size(self) -> int:
+        return 0
+
+    def close(self) -> None:
+        """The properties never close a connection."""
+
+    def abort(self) -> None:
+        """Nor abort one."""
+
+    def is_closing(self) -> bool:
+        return False
+
+    def get_extra_info(self, name, default=None):
+        return ("127.0.0.1", 3000) if name == "peername" else default
+
+
+def _capture_simulator_protocol() -> DoorSimulatorProtocol:
+    """A connected `DoorSimulatorProtocol` over a flow-recording transport."""
+    protocol = DoorSimulatorProtocol(DoorSimulatorState())
+    protocol.connection_made(_FlowTransport())
+    return protocol
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _fuzz_event_loop():
+    """One loop for the whole module's byte-feeding properties.
+
+    `data_received` reaches `_schedule_pump`, which needs a *running*
+    loop - so these properties cannot be driven the way the older ones are
+    (those never stall the backlog, so the re-arm is never armed). Module
+    scope keeps the per-example cost off the hot path, and closing it here
+    keeps `filterwarnings = ["error"]` satisfied.
+    """
+    global _LOOP
+    _LOOP = asyncio.new_event_loop()
+    yield
+    _LOOP.close()
+    _LOOP = None
+
+
+_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _drain(feed, dispatcher) -> None:
+    """Run ``feed()`` on the module loop and let the dispatcher finish.
+
+    "Never wedges" is precisely "a backlog that survives every turn the
+    loop can give it", so the drain runs until the dispatcher is idle
+    rather than for a fixed number of turns - a wedge then shows up as the
+    bound being exhausted, which the caller's assertions catch.
+    """
+
+    async def _run() -> None:
+        feed()
+        for _ in range(20000):
+            if not dispatcher.backlog and not dispatcher.inflight:
+                return
+            await asyncio.sleep(0)
+
+    assert _LOOP is not None
+    _LOOP.run_until_complete(asyncio.wait_for(_run(), timeout=60))
 
 
 class TestFramingProperties:
@@ -262,3 +346,210 @@ class TestClientFramingProperties:
 
         assert received == objs
         assert client._buffer == ""
+
+
+# ============================================================================
+# Arbitrary raw bytes into data_received (round-8 backend M1 / security M1)
+# ============================================================================
+#
+# The properties above feed *well-formed* JSON: `_json_objects` are dicts
+# serialised with `json.dumps`, and `_garbage` explicitly excludes `{`, so
+# no frame they generate can fail to decode. The untrusted-input suite has
+# the mirror-image gap - it bounds integers at 10**9, caps `st.recursive`
+# at `max_leaves=8`, and hands post-parse Python objects to handlers rather
+# than JSON *text* to `data_received`.
+#
+# Between them, neither can produce the two shapes that made `json.loads`
+# raise something other than `JSONDecodeError` and escape `_dispatch_frame`:
+# an integer literal over `sys.get_int_max_str_digits()` digits (a bare
+# `ValueError`) and nesting deep enough for `RecursionError`. Both are
+# brace-balanced and under `MAX_BUFFER_SIZE`, so framing passes them
+# straight through to the decoder.
+#
+# These properties close that gap on both sides of the wire.
+
+#: `json.loads` raises RecursionError from 9999 levels of nesting, and the
+#: frame stops fitting under MAX_BUFFER_SIZE (65536) past 10922 - beyond
+#: that the scanner's overflow guard is what stops it, not the decoder, and
+#: the property would be testing the wrong thing.
+_RECURSION_DEPTH = 9999
+_MAX_NESTING_DEPTH = (MAX_BUFFER_SIZE - 1) // 6
+
+#: CPython's str->int conversion cap. Above it the json scanner surfaces a
+#: bare ValueError rather than a JSONDecodeError.
+_INT_DIGIT_CAP = sys.get_int_max_str_digits()
+
+
+def _nested_frame(depth: int) -> bytes:
+    """A brace-balanced frame nested ``depth`` levels deep."""
+    return b'{"a":' * depth + b"1" + b"}" * depth
+
+
+def _integer_frame(digits: int) -> bytes:
+    """A frame whose only value is an integer literal of ``digits`` digits."""
+    return b'{"n":1' + b"0" * (digits - 1) + b"}"
+
+
+# Both generators *straddle* their threshold rather than drawing "something
+# large" and hoping. Sampling the boundary explicitly is the same rule the
+# unit suite follows for numeric limits (CLAUDE.md rule 8), and it is what
+# makes the pathological shapes reachable at a rate worth measuring: a
+# uniform draw over 1..10922 lands in the RecursionError window less than a
+# tenth of the time, and hypothesis biases small.
+#
+# What is drawn is a *recipe*, not the bytes. A 60 KB `bytes` in a
+# hypothesis repr is unreadable, slow to shrink, and (under this project's
+# `filterwarnings = ["error"]`) turns hypothesis's own
+# "Generating overly large repr" warning into a second failure that hides
+# the first. `("nest", 9999)` shrinks to the threshold and prints as one
+# line.
+# Each threshold gets three branches - below, above, and the boundary
+# itself - because hypothesis biases integers small, so one uniform range
+# spanning the threshold would put almost every draw on the harmless side.
+_nesting_depths = st.one_of(
+    st.integers(min_value=1, max_value=_RECURSION_DEPTH - 1),
+    st.integers(min_value=_RECURSION_DEPTH, max_value=_MAX_NESTING_DEPTH),
+    st.sampled_from(
+        [_RECURSION_DEPTH - 1, _RECURSION_DEPTH, _RECURSION_DEPTH + 1, _MAX_NESTING_DEPTH]
+    ),
+)
+_digit_counts = st.one_of(
+    st.integers(min_value=1, max_value=_INT_DIGIT_CAP),
+    st.integers(min_value=_INT_DIGIT_CAP + 1, max_value=2 * _INT_DIGIT_CAP),
+    st.sampled_from([_INT_DIGIT_CAP - 1, _INT_DIGIT_CAP, _INT_DIGIT_CAP + 1]),
+)
+
+_pathological_recipes = st.one_of(
+    st.tuples(st.just("nest"), _nesting_depths),
+    st.tuples(st.just("int"), _digit_counts),
+    # Unbounded, so nothing about the magnitude is assumed - but recorded
+    # here as what it is: in 3,000 draws `st.integers()` never exceeded 128
+    # bits (39 digits), so it is provably *not* what reaches the digit cap.
+    # That is the same reason the existing suites cannot: they bound the
+    # value, not the literal.
+    st.tuples(st.just("unbounded-int"), st.integers()),
+)
+
+_hostile_recipes = st.one_of(
+    _pathological_recipes,
+    st.tuples(st.just("json"), _json_objects),
+    st.tuples(st.just("raw"), st.binary(max_size=64)),
+    st.tuples(
+        st.just("raw"),
+        st.sampled_from([b"{", b"}", b"{}", b"{x}", b'{"a":', b"\xff", b"", b" "]),
+    ),
+)
+
+
+def _materialise(recipe: tuple[str, object]) -> bytes:
+    """Turn a drawn recipe into the bytes a hostile peer would write."""
+    kind, value = recipe
+    if kind == "nest":
+        return _nested_frame(value)
+    if kind == "int":
+        return _integer_frame(value)
+    if kind == "unbounded-int":
+        return b'{"n":' + str(value).encode() + b"}"
+    if kind == "json":
+        return json.dumps(value).encode()
+    return value
+
+
+def _classify(payload: bytes) -> str:
+    """Name the shape a payload reached, for the draw-rate statistics.
+
+    Classified against the *decoded* text, because that is what reaches
+    `json.loads`: both `data_received` implementations decode with
+    `errors="backslashreplace"` before framing, so a raw non-ASCII byte
+    never arrives at the decoder as bytes. Counting the resulting
+    `UnicodeDecodeError` as a "bare ValueError" would inflate the very
+    rate these statistics exist to report.
+    """
+    try:
+        json.loads(payload.decode("ascii", errors="backslashreplace"))
+    except RecursionError:
+        return "decode: RecursionError"
+    except json.JSONDecodeError:
+        return "decode: JSONDecodeError"
+    except ValueError:
+        return "decode: bare ValueError"
+    return "decode: ok"
+
+
+class TestArbitraryBytesNeverRaiseAndNeverWedge:
+    """`data_received` "never raises on arbitrary input", on both sides.
+
+    Two documented contracts (`framing.py`'s module docstring and
+    `client.data_received`'s) said so and were false. The consequences
+    differed by where in the pump the poisoned frame landed - a hot
+    reconnect loop from inside `data_received`, a permanently wedged
+    dispatcher from inside the `call_soon` re-arm - so both the "never
+    raises" and the "never wedges" halves are asserted here.
+    """
+
+    @staticmethod
+    def _assert_drained(dispatcher, transport) -> None:
+        """No backlog, no phantom inflight, reading not left paused."""
+        assert dispatcher.backlog == 0
+        assert dispatcher.inflight == 0
+        assert dispatcher.paused is False
+        assert transport.paused is False
+
+    @settings(max_examples=300, deadline=None)
+    @given(recipes=st.lists(_hostile_recipes, min_size=1, max_size=6))
+    def test_the_client_never_raises_and_never_wedges(self, recipes):
+        payloads = [_materialise(recipe) for recipe in recipes]
+        for payload in payloads:
+            event(_classify(payload))
+        client, _ = _capture_client()
+        transport = _FlowTransport()
+        client._transport = transport
+        client._dispatcher._transport = transport
+
+        _drain(
+            lambda: [client.data_received(payload) for payload in payloads],
+            client._dispatcher,
+        )
+
+        self._assert_drained(client._dispatcher, transport)
+
+    @settings(max_examples=300, deadline=None)
+    @given(recipes=st.lists(_hostile_recipes, min_size=1, max_size=6))
+    def test_the_simulator_never_raises_and_never_wedges(self, recipes):
+        payloads = [_materialise(recipe) for recipe in recipes]
+        for payload in payloads:
+            event(_classify(payload))
+        protocol = _capture_simulator_protocol()
+        transport = protocol.transport
+
+        _drain(
+            lambda: [protocol.data_received(payload) for payload in payloads],
+            protocol._dispatcher,
+        )
+
+        self._assert_drained(protocol._dispatcher, transport)
+
+    @settings(max_examples=100, deadline=None)
+    @given(recipe=_pathological_recipes, chunk_size=st.integers(min_value=1, max_value=4096))
+    def test_a_poisoned_frame_split_across_reads_is_stopped_by_the_decoder(
+        self, recipe, chunk_size
+    ):
+        """Delivered in network-sized pieces, the 64 KiB cap cannot be what stops it."""
+        payload = _materialise(recipe)
+        assume(len(payload) < MAX_BUFFER_SIZE)
+        event(_classify(payload))
+        client, received = _capture_client()
+        transport = _FlowTransport()
+        client._transport = transport
+        client._dispatcher._transport = transport
+
+        _drain(
+            lambda: [
+                client.data_received(payload[i : i + chunk_size])
+                for i in range(0, len(payload), chunk_size)
+            ],
+            client._dispatcher,
+        )
+
+        self._assert_drained(client._dispatcher, transport)
+        assert len(received) == (1 if _classify(payload) == "decode: ok" else 0)

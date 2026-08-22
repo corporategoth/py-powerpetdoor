@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -159,19 +160,53 @@ logger = logging.getLogger(__name__)
 # diagnosing a firmware variant has both halves in the same place.
 
 
-def _keep_int(value: Any, cached: int, field_name: str) -> int:
-    """Coerce a device value to ``int``, or keep the cached one."""
+#: The largest magnitude an ``int`` can have and still survive conversion
+#: to ``float``. Python ints are unbounded; ``float`` is not, so
+#: ``huge_int / 100.0`` raises ``OverflowError`` rather than returning
+#: ``inf``.
+#:
+#: This is a **representability** limit, deliberately not a protocol one.
+#: ``docs/protocol.md`` is reverse-engineered and is not authority over
+#: what real firmware sends, so the facade must not refuse a device value
+#: for being larger than a bound this project invented - it refuses it only
+#: for being a value the arithmetic downstream physically cannot perform.
+_FLOAT_REPRESENTABLE_MAX = sys.float_info.max
+
+
+def _keep_int(value: Any, cached: int, field_name: str, *, maximum: float | None = None) -> int:
+    """Coerce a device value to ``int``, or keep the cached one.
+
+    Args:
+        value: The value the device sent.
+        cached: The value to keep if ``value`` is not usable.
+        field_name: Field name, for the rejection log line.
+        maximum: Optional inclusive magnitude bound. Left ``None`` by
+            every caller that merely *stores* the result - Python ints are
+            unbounded and ``battery_percent`` publishes one verbatim, so
+            bounding here globally would refuse values that are perfectly
+            harmless (and would contradict
+            ``test_a_huge_integer_percent_does_not_overflow_the_guard``).
+            Pass it only where the consumer does float arithmetic on the
+            result; see :meth:`PowerPetDoor._on_hold_time_update`.
+    """
     # bool is an int subclass; True must not become 1 in a counter field.
     if not isinstance(value, bool):
+        coerced: int | None = None
         if isinstance(value, int):
-            return value
+            coerced = value
         # json.loads accepts NaN/Infinity by default, and int() raises on
         # both, so finiteness is checked before the conversion rather than
-        # after. isinstance(int) above already returned, so an arbitrarily
-        # large integer never reaches math.isfinite (which would overflow).
-        if isinstance(value, float) and math.isfinite(value):
-            return int(value)
-    _log_rejected(field_name, value, "int")
+        # after. isinstance(int) above already matched, so an arbitrarily
+        # large integer never reaches math.isfinite (which would overflow)
+        # - the `maximum` check below is what handles that case, and only
+        # for the callers that need it.
+        elif isinstance(value, float) and math.isfinite(value):
+            coerced = int(value)
+        if coerced is not None and (maximum is None or -maximum <= coerced <= maximum):
+            return coerced
+    _log_rejected(
+        field_name, value, "int" if maximum is None else f"int of magnitude <= {maximum:g}"
+    )
     return cached
 
 
@@ -1411,8 +1446,26 @@ class PowerPetDoor:
         full traceback *per frame* while the cache stayed silently stale;
         and ``NaN`` (which ``json.loads`` accepts) was cached straight into
         a property documented ``-> float``.
+
+        The guard closed the string and NaN spellings and left one open:
+        an arbitrary-precision *integer* is legal JSON, passes every type
+        check, and then makes ``value / 100.0`` raise ``OverflowError`` -
+        one unthrottled traceback per frame through the client's listener
+        isolation, with the cache left silently stale, which is the exact
+        shape described above (round-8 backend L1 / security L2). This is
+        the one retained facade value with float arithmetic on it, so it
+        is the one that passes ``maximum``. The bound is float
+        representability, **not** a protocol ceiling: bounding it at the
+        simulator's ``MAX_HOLD_TIME_CENTISECONDS`` would make the shipped
+        facade refuse a device value on the authority of a
+        reverse-engineered constant.
         """
-        centiseconds = _keep_int(value, round(self._hold_time * 100), "hold_time")
+        centiseconds = _keep_int(
+            value,
+            round(self._hold_time * 100),
+            "hold_time",
+            maximum=_FLOAT_REPRESENTABLE_MAX,
+        )
         self._hold_time = centiseconds / 100.0
 
     def _on_timezone_update(self, value: str) -> None:

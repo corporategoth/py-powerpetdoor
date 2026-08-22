@@ -23,6 +23,7 @@ from powerpetdoor.const import (
     SENSOR_STATE_ON,
 )
 from powerpetdoor.simulator import DoorSimulatorState, DoorTimingConfig
+from powerpetdoor.simulator import engine as engine_module
 from powerpetdoor.simulator.engine import DoorMotionEngine
 
 FULL_OPEN_CLOSE_SEQUENCE = [
@@ -895,9 +896,87 @@ class TestEngineBoundsHaveTheirValuesPinned:
     (round-7 test-fanatic L1)."""
 
     def test_the_blocked_recheck_floor_is_100ms(self):
-        from powerpetdoor.simulator import engine as engine_module
-
         assert engine_module.MIN_BLOCKED_RECHECK == 0.1
+
+
+class TestTheBlockedRecheckFloorActuallyStopsTheSpin:
+    """The constant's *value* was pinned; its *purpose* was not.
+
+    `_hold_open`'s blocked branch is a `while True` whose only yield is
+    `_wait_for_wake(max(hold_time, MIN_BLOCKED_RECHECK))`. Deleting the
+    `max()` leaves the suite green because every other test uses the 2.0 s
+    default hold time - 20x the floor - so the floor is never the operand
+    that decides (CLAUDE.md rule 9). With `hold_time = 0`, which the wire
+    coercer explicitly permits (`_coerce_wire_number(..., 0, ...)`),
+    `asyncio.timeout(0)` returns immediately and the loop spins at 72% of a
+    core for as long as the pet stands in the doorway (round-8
+    test-fanatic M2).
+
+    Measured by counting yields over a fixed number of loop turns rather
+    than by wall clock, so it is deterministic under `-n auto`.
+    """
+
+    @staticmethod
+    def _count_waits(engine):
+        """Record every timeout `_hold_open` asks `_wait_for_wake` for."""
+        timeouts: list[float] = []
+        original = engine._wait_for_wake
+
+        async def counting(timeout):
+            timeouts.append(timeout)
+            await original(timeout)
+
+        engine._wait_for_wake = counting
+        return timeouts
+
+    async def _hold_blocked(self, engine, state, hold_time):
+        """Reach a blocked HOLDING with the counter already installed.
+
+        Installed *before* `open()`: by the time HOLDING is observable the
+        hold loop is already parked inside its first `_wait_for_wake`, and
+        a counter installed after that would see nothing until the wait
+        expires. `_hold_open` is the only caller.
+        """
+        state.hold_time = hold_time
+        engine.simulate_obstruction()
+        timeouts = self._count_waits(engine)
+        engine.open()
+        await engine.wait_for_status(DOOR_STATE_HOLDING, timeout=2.0)
+        assert state.is_sensor_blocking_close() is True
+        return timeouts
+
+    async def test_a_zero_hold_time_does_not_busy_spin_while_blocked(self, engine, state):
+        timeouts = await self._hold_blocked(engine, state, 0.0)
+
+        for _ in range(500):
+            await asyncio.sleep(0)
+
+        assert state.door_status == DOOR_STATE_HOLDING
+        # 500 loop turns take far less than the 0.1 s floor, so a floored
+        # wait covers all of them. Without the floor this is ~500.
+        assert len(timeouts) <= 2
+
+    @pytest.mark.parametrize(
+        ("hold_time", "expected"),
+        [
+            (0.0, engine_module.MIN_BLOCKED_RECHECK),
+            (engine_module.MIN_BLOCKED_RECHECK / 2, engine_module.MIN_BLOCKED_RECHECK),
+            (engine_module.MIN_BLOCKED_RECHECK, engine_module.MIN_BLOCKED_RECHECK),
+            (engine_module.MIN_BLOCKED_RECHECK * 1.5, engine_module.MIN_BLOCKED_RECHECK * 1.5),
+        ],
+        ids=["zero", "below-floor", "at-floor", "above-floor"],
+    )
+    async def test_the_recheck_wait_is_hold_time_floored_at_the_minimum(
+        self, engine, state, hold_time, expected
+    ):
+        """Both operands of the `max()` decide, at and either side of the floor."""
+        timeouts = await self._hold_blocked(engine, state, hold_time)
+
+        for _ in range(50):
+            await asyncio.sleep(0)
+
+        assert timeouts
+        assert timeouts[0] == pytest.approx(expected)
 
 
 class TestUnknownSensorNames:
