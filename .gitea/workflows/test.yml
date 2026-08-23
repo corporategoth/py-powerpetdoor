@@ -201,7 +201,7 @@ jobs:
           COVERAGE_FILE: .coverage.py${{ matrix.python-version }}
       - name: Upload coverage data
         if: ${{ always() }}
-        uses: christopherhx/gitea-upload-artifact@81f940d004763f986ba3582c007fd842dd5cb0d7 # v4
+        uses: christopherhx/gitea-upload-artifact@62ac910c5d3dfa85c7cb2df15afe2e342b2407c2 # untagged head
         with:
           name: coverage-py${{ matrix.python-version }}
           path: |
@@ -294,7 +294,7 @@ jobs:
           flags: python
           fail_ci_if_error: false
       - name: Upload coverage report
-        uses: christopherhx/gitea-upload-artifact@81f940d004763f986ba3582c007fd842dd5cb0d7 # v4
+        uses: christopherhx/gitea-upload-artifact@62ac910c5d3dfa85c7cb2df15afe2e342b2407c2 # untagged head
         with:
           name: coverage-report
           path: |

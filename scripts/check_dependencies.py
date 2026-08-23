@@ -220,6 +220,14 @@ def latest_release_sha(repo: str) -> tuple[str, str] | None:
             if versioned:
                 tag = max(versioned, key=_version_key)
     if not tag:
+        # No releases and no tags at all - the Gitea artifact shims are like
+        # this. The only meaningful staleness signal left is the default
+        # branch's head. Flagged separately by the caller, because moving a
+        # pin to an untagged head is a supply-chain decision, not a routine
+        # version bump.
+        head = _github_json(f"https://api.github.com/repos/{repo}/commits?per_page=1")
+        if isinstance(head, list) and head and isinstance(head[0], dict):
+            return "HEAD (untagged)", str(head[0]["sha"])
         return None
     ref = _github_json(f"https://api.github.com/repos/{repo}/commits/{tag}")
     if not isinstance(ref, dict) or "sha" not in ref:
@@ -259,6 +267,8 @@ def check_action_pins() -> list[str]:
         tag, latest_sha = latest
         if latest_sha != sha:
             stale.append(f"{repo} {comment or sha[:8]} -> {tag} ({latest_sha})")
+        elif tag.startswith("HEAD"):
+            print(f"  {repo}: at branch head; upstream publishes no tags")
 
     if not stale:
         print("  every action pin is at its upstream's latest release")
