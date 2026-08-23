@@ -134,13 +134,18 @@ See [docs/simulator.md](docs/simulator.md) for complete documentation.
 
 ```
 powerpetdoor/
+├── __init__.py        # Public API surface (see __all__)
 ├── door.py            # PowerPetDoor high-level interface
 ├── client.py          # PowerPetDoorClient low-level client
 ├── const.py           # Protocol constants and commands
 ├── framing.py         # Shared JSON frame scanner for the wire protocol
+├── i18n.py            # t() translation lookup for user-facing text
+├── locales/           # Translation catalogue and per-language files
+│   └── messages.json      # Generated key -> English catalogue
 ├── sanitize.py        # Terminal-safety helper for untrusted text (shared)
 ├── schedule.py        # Schedule utilities
 ├── tz_utils.py        # Timezone utilities
+├── py.typed           # PEP 561 marker; downstream mypy sees real types
 └── simulator/         # Door simulator submodule
     ├── state.py           # Simulator state dataclasses
     ├── protocol.py        # Protocol handler (asyncio Protocol + command registry)

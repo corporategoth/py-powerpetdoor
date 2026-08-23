@@ -244,9 +244,9 @@ arguments and subcommands. Extra arguments in `[brackets]` are optional.
 |---------|---------|--------|
 | `inside [duration]` | `i` | Activate the inside sensor (pet going out). `duration` is seconds active (default 0.5); `0` = toggle on/off indefinitely |
 | `outside [duration]` | `o` | Activate the outside sensor (pet coming in); same `duration` semantics |
-| `cycle` | `y` | Full door cycle — open, hold, close (like pressing the door button; bypasses sensor enable checks) |
+| `open` | `hold`, `h` | Open the door and hold it open until something closes it |
+| `cycle` | `y` | Full door cycle — open, hold for `hold_time`, close (like pressing the door button; bypasses sensor enable checks) |
 | `close` | `c` | Close the door |
-| `hold` | `h`, `open` | Open the door and hold it open |
 
 ### Simulation Events
 
@@ -757,10 +757,19 @@ Activating one sensor clears the other — they are mutually exclusive, as on
 the real door.
 
 **open**
-Open the door directly.
+Open the door and hold it open — the door parks in `DOOR_KEEPUP` and stays
+there until a `close` step (or the hold is otherwise broken). Takes no
+parameters; for the timed open that closes itself, use `cycle`.
 ```yaml
 - action: open
-  hold: false       # Optional: true for "open and hold"
+```
+
+**cycle**
+Run a full door cycle: the door rises, sits in `DOOR_HOLDING` for
+`hold_time`, then closes itself — the same motion a sensor trigger
+produces, but bypassing the sensor enable checks.
+```yaml
+- action: cycle
 ```
 
 **close**

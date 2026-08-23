@@ -526,12 +526,12 @@ class PowerPetDoor:
 
        **Commands issued while disconnected are queued, not refused, and
        they execute on the next connection.** This is a *physical* door.
-       ``open()``/``open_and_hold()``/``close()``/``toggle()``/``cycle()``
-       are fire-and-forget: with no transport there is nothing to write to,
+       ``open()``/``close()``/``toggle()``/``cycle()`` are
+       fire-and-forget: with no transport there is nothing to write to,
        so the message sits in the client's priority queue until a
        connection appears - and then the door opens, unattended, for a
        request the caller was told nothing about. Measured against a real
-       device emulation: ``open_and_hold()`` returned in 0.000 s during a
+       device emulation: ``open()`` returned in 0.000 s during a
        reconnect window and the door latched open 4.0 s later.
 
        This is deliberate (:class:`~powerpetdoor.PowerPetDoorClient` flushes
@@ -862,11 +862,14 @@ class PowerPetDoor:
         return position_map.get(self._status, 0)
 
     async def open(self) -> None:
-        """Open the door (will auto-close after hold time)."""
-        self._client.send_message(envelope_for_command(CMD_OPEN), CMD_OPEN)
+        """Open the door and keep it open until :meth:`close` is called.
 
-    async def open_and_hold(self) -> None:
-        """Open the door and keep it open until manually closed."""
+        Sends ``OPEN_AND_HOLD``, which parks the door in
+        :attr:`DoorStatus.KEEPUP`. "Open" means the door is open and stays
+        open: the hold timer does not apply, and only an explicit
+        :meth:`close` (or the door's own button) brings it down. For the
+        timed open that closes itself, see :meth:`cycle`.
+        """
         self._client.send_message(envelope_for_command(CMD_OPEN_AND_HOLD), CMD_OPEN_AND_HOLD)
 
     async def close(self) -> None:
@@ -874,7 +877,11 @@ class PowerPetDoor:
         self._client.send_message(envelope_for_command(CMD_CLOSE), CMD_CLOSE)
 
     async def toggle(self) -> None:
-        """Toggle the door - open if closed, close if open."""
+        """Toggle the door - open if closed, close if open.
+
+        Opening goes through :meth:`open`, so a toggled-open door stays
+        open until it is toggled back. Does nothing mid-travel.
+        """
         if self.is_closed:
             await self.open()
         elif self.is_open:
@@ -882,12 +889,14 @@ class PowerPetDoor:
         # If closing, do nothing
 
     async def cycle(self) -> None:
-        """Perform a full door cycle (open, hold for hold_time, close).
+        """Run a full door cycle: open, hold for ``hold_time``, close.
 
-        This simulates a pet triggering the sensor - the door opens,
-        holds for the configured hold time, then automatically closes.
+        Sends ``OPEN``, the timed open - the same thing a pet triggering a
+        sensor gets. The door rises, sits in :attr:`DoorStatus.HOLDING` for
+        the configured hold time, then closes itself. Use :meth:`open` for
+        an open that stays open.
         """
-        await self.open()
+        self._client.send_message(envelope_for_command(CMD_OPEN), CMD_OPEN)
 
     # =========================================================================
     # Sensors

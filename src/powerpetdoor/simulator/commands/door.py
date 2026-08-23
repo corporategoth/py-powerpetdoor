@@ -112,9 +112,9 @@ class DoorCommandsMixin:
         asyncio.create_task(self.simulator.close_door())
         return CommandResult(True, t("simulator.commands.door.closing_door", "Closing door"))
 
-    @command("hold", ["h", "open"], "Open and hold the door", category="door")
-    def hold(self) -> CommandResult:
-        """Open the door and hold it open."""
+    @command("open", ["hold", "h"], "Open the door and hold it open", category="door")
+    def open(self) -> CommandResult:
+        """Open the door and hold it open until it is closed."""
         asyncio.create_task(self.simulator.open_door(hold=True))
         return CommandResult(
             True, t("simulator.commands.door.opening_holding", "Opening and holding")
@@ -122,7 +122,7 @@ class DoorCommandsMixin:
 
     @command("cycle", ["y"], "Full door cycle (like pressing door button)", category="door")
     def cycle(self) -> CommandResult:
-        """Run a full door cycle - open, hold, close.
+        """Run a full door cycle - open, hold for hold_time, close.
 
         This simulates pressing the physical button on the door,
         which opens the door, holds for hold_time, then closes.

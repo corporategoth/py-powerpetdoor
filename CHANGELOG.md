@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-23
+
+### Changed — breaking
+
+- `PowerPetDoor.open()` now sends `OPEN_AND_HOLD` instead of `OPEN`, and
+  `PowerPetDoor.cycle()` now sends `OPEN` instead of being an alias for
+  `open()`. `PowerPetDoor.open_and_hold()` is **removed**; call `open()`.
+
+  The wire is unchanged - both commands existed and both still do. What was
+  wrong was which Python name each one answered to. `OPEN` is the *timed*
+  open: the door rises, holds for `hold_time` and closes itself, which is
+  what a pet triggering a sensor gets. Binding that to `open()` meant the
+  library's plainest verb opened the door and then shut it again with no
+  second command, so every caller that wanted "open" had to know not to call
+  `open()`. Both downstream consumers had independently worked around it:
+  `ha-powerpetdoor` called `open_and_hold()` from both its cover entity and
+  its Open button, each with a comment explaining why, and the Ostinato
+  plugin's facade did the same. When every caller has to route around a
+  name, the name is the defect.
+
+  Now `open()` opens and stays open, `close()` closes, and `cycle()` is the
+  timed open under the name that already described it. `toggle()` is
+  unchanged in signature and opens through `open()`, so a door toggled open
+  no longer closes itself.
+
+  Migration: `door.open_and_hold()` -> `door.open()`, and any existing call
+  to `door.open()` that *wanted* the auto-closing behaviour -> `door.cycle()`.
+
+- Simulator CLI: the `hold` command is now named `open`, with `hold` and `h`
+  kept as aliases - every spelling that worked before still works, including
+  the old `open` alias, which now resolves to the command it names.
+- Simulator scripts: the `open` action opens and holds and no longer takes a
+  `hold` parameter; the new `cycle` action is the timed open. A script step
+  of `- action: open` with `hold: true` becomes plain `- action: open`, and
+  one with `hold: false` becomes `- action: cycle`. Passing `hold` to `open`
+  is now a validation error rather than a silent change of meaning.
+
+### Fixed
+- `powerpetdoor.__version__` reported `0.3.0` in the released 0.4.0 package.
+  The wheel is named from `pyproject.toml`, so the artifact was correctly
+  labelled while the package it contained misreported itself to anyone who
+  asked. PyPI will not accept a re-upload of a filename it has already
+  seen, so 0.4.0 cannot be replaced in place: 0.4.1 is the fix, and 0.4.0
+  should be yanked.
+- README's "Library Structure" tree was missing `i18n.py`, `locales/`,
+  `__init__.py` and `py.typed` - the whole translation subsystem was
+  undocumented in the one place a contributor looks for the layout.
+
+### Added
+- `TestTheVersionGate` - `__version__` must equal `pyproject.toml`'s version,
+  and must never fall behind the newest `v*` git tag. Both directions of the
+  drift that produced the bug above are now caught.
+- `TestReadmeLibraryTreeMatchesTheSource` - every top-level module in
+  `src/powerpetdoor/` must appear in the README tree, and the tree must not
+  list modules that are gone. Deliberately shallow: `simulator/` internals
+  are summarised on purpose and are not policed.
+
 ## [0.4.0] - 2026-08-23
 
 ### Added — internationalization
@@ -713,7 +770,8 @@ accepted, and the run still exited 0.
 - Async/await interface using asyncio
 - Support for Python 3.11, 3.12, 3.13, and 3.14
 
-[Unreleased]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.1.0...v0.2.0

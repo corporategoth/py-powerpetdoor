@@ -377,3 +377,64 @@ class TestOperationMdSensorGating:
         assert state.is_sensor_blocking_close() is True
         state.safety_lock = True
         assert state.is_sensor_blocking_close() is False
+
+
+class TestReadmeLibraryTreeMatchesTheSource:
+    """The README's "Library Structure" tree lists every shipped module.
+
+    That tree is the first thing a contributor reads to find their way
+    around, and it silently rotted: `i18n.py` and `locales/` were added and
+    the tree was never updated, so the documented layout was missing the
+    whole translation subsystem. Nothing else in the suite looks at it, so
+    it could only ever be caught by someone noticing.
+
+    Deliberately one-directional and shallow. It asserts that every
+    top-level module in `src/powerpetdoor/` is MENTIONED, not that the tree
+    is formatted a particular way or that every file in every subpackage is
+    listed - `simulator/` is summarised on purpose and pinning its contents
+    would make the doc fight every refactor. Prose-shaped assertions were
+    removed from this suite once already for exactly that reason.
+    """
+
+    #: Not modules a reader needs pointed out.
+    IGNORED = {"__pycache__"}
+
+    def test_every_top_level_module_appears_in_the_tree(self):
+        source = REPO_ROOT / "src" / "powerpetdoor"
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+        match = re.search(r"## Library Structure\s*\n+```(.*?)```", readme, re.S)
+        assert match, "README.md no longer has a fenced 'Library Structure' tree"
+        tree = match.group(1)
+
+        expected = sorted(
+            entry.name
+            for entry in source.iterdir()
+            if entry.name not in self.IGNORED
+            and (entry.suffix == ".py" or entry.is_dir() or entry.name == "py.typed")
+        )
+        missing = [name for name in expected if name not in tree]
+        assert not missing, (
+            "README.md's Library Structure tree does not mention: "
+            f"{', '.join(missing)}. A reader looking for these would conclude "
+            "they do not exist."
+        )
+
+    def test_the_tree_does_not_list_modules_that_are_gone(self):
+        """The other direction: a removed module still documented."""
+        source = REPO_ROOT / "src" / "powerpetdoor"
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        match = re.search(r"## Library Structure\s*\n+```(.*?)```", readme, re.S)
+        assert match
+        tree = match.group(1)
+
+        # Only top-level entries of the tree, i.e. lines whose box-drawing
+        # prefix has no leading indentation - nested lines describe
+        # simulator/ internals, which this test deliberately does not police.
+        listed = re.findall(r"^[├└]── ([\w.]+)", tree, re.M)
+        actual = {entry.name for entry in source.iterdir()}
+        stale = [name for name in listed if name.rstrip("/") not in actual]
+        assert not stale, (
+            f"README.md's Library Structure tree still lists: {', '.join(stale)}, "
+            "which no longer exist in src/powerpetdoor/."
+        )

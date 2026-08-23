@@ -200,3 +200,81 @@ class TestBothRunnersGetTheSamePipeline:
         assert "".join(lines) == github, (
             ".gitea/workflows/test.yml has drifted from .github/workflows/test.yml"
         )
+
+
+class TestTheVersionGate:
+    """`__version__`, pyproject and the git tags all say the same thing.
+
+    v0.4.0 shipped to PyPI with `powerpetdoor.__version__` still reading
+    "0.3.0". Nothing caught it: pyproject is what the wheel is built from,
+    so the artifact was correctly *named* 0.4.0 while the package it
+    contained reported the previous release to anyone who asked. A consumer
+    pinning behaviour on `__version__` - or a bug report quoting it - was
+    given the wrong answer, and PyPI will not take a re-upload of a
+    filename it has already seen, so the only fix is a whole new release.
+    """
+
+    @staticmethod
+    def _declared_version() -> str:
+        import re
+
+        text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+        assert match, "pyproject.toml has no [project] version"
+        return match.group(1)
+
+    @staticmethod
+    def _package_version() -> str:
+        import re
+
+        text = (REPO_ROOT / "src/powerpetdoor/__init__.py").read_text(encoding="utf-8")
+        match = re.search(r'^__version__\s*=\s*"([^"]+)"', text, re.M)
+        assert match, "src/powerpetdoor/__init__.py has no __version__"
+        return match.group(1)
+
+    @staticmethod
+    def _version_key(version: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in version.split(".") if part.isdigit())
+
+    def test_package_version_matches_pyproject(self):
+        assert self._package_version() == self._declared_version(), (
+            f"src/powerpetdoor/__init__.py says __version__ = "
+            f"{self._package_version()!r} but pyproject.toml says "
+            f"{self._declared_version()!r}. The wheel is named from pyproject, "
+            "so this ships a package that misreports its own version."
+        )
+
+    def test_version_is_at_least_the_newest_tag(self):
+        """The declared version never falls behind an already-published tag.
+
+        Catches the other half of the same failure: bumping the tag but not
+        the source, so `main` claims to be a release that is already out.
+        Equality is correct at the moment of tagging; anything above it is
+        an unreleased version in progress.
+        """
+        import re
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "tag", "--list", "v*"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            pytest.skip("not a git checkout, or git unavailable")
+
+        tags = [
+            tag.lstrip("v") for tag in result.stdout.split() if re.fullmatch(r"v\d+(\.\d+)*", tag)
+        ]
+        if not tags:
+            pytest.skip("no version tags yet")
+
+        newest = max(tags, key=self._version_key)
+        declared = self._declared_version()
+        assert self._version_key(declared) >= self._version_key(newest), (
+            f"pyproject.toml declares {declared} but v{newest} is already "
+            "tagged. main must never claim a version older than a published "
+            "release."
+        )

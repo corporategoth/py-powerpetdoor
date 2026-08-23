@@ -126,8 +126,8 @@ callbacks fire around each transition.
 > executes on the next connection.** This is a physical door: it can open
 > minutes after the call that asked for it, unattended.
 
-The fire-and-forget methods - `open()`, `open_and_hold()`, `close()`,
-`toggle()`, `cycle()` - send with `notify=False`. With no transport there
+The fire-and-forget methods - `open()`, `close()`, `toggle()`, `cycle()`
+- send with `notify=False`. With no transport there
 is nothing to write to, so the message sits in the client's priority queue
 until a connection appears, and the client flushes that queue as soon as
 one does. Measured against a running door emulation:
@@ -135,7 +135,7 @@ one does. Measured against a running door emulation:
 ```
 connected: True | door_status: DOOR_CLOSED
 device went away -> door.connected = False
-open_and_hold() during the reconnect window -> returned in 0.000s, no error
+open() during the reconnect window -> returned in 0.000s, no error
 device back at t+1.0s; reconnect completes
 t+4.0s after the button press: connected=True  door_status=DOOR_KEEPUP
 ```
@@ -178,12 +178,25 @@ to clear the queue and fail every outstanding future with
 ### Control Methods
 
 ```python
-await door.open()           # Open door (auto-closes after hold time)
-await door.open_and_hold()  # Open and keep open until manually closed
-await door.close()          # Close the door
-await door.toggle()         # Open if closed, close if open
-await door.cycle()          # Full door cycle (same as open, auto-closes after hold time)
+await door.open()    # Open and keep open until closed (OPEN_AND_HOLD)
+await door.close()   # Close the door (CLOSE)
+await door.toggle()  # Open if closed, close if open; nothing mid-travel
+await door.cycle()   # Timed open: rise, hold for hold_time, close (OPEN)
 ```
+
+The method names describe what the door *does*, which is not the spelling
+of the wire command underneath:
+
+| Method | Wire command | Result |
+|--------|--------------|--------|
+| `open()` | `OPEN_AND_HOLD` | Door rises and stays up (`DOOR_KEEPUP`) until something closes it |
+| `cycle()` | `OPEN` | Door rises, sits in `DOOR_HOLDING` for `hold_time`, closes itself |
+| `close()` | `CLOSE` | Door comes down |
+
+`OPEN` is the *timed* open - what a pet triggering a sensor gets - so it is
+exposed as `cycle()`. An `open()` that reopened and then shut itself would
+not be an open, which is why the plain word is bound to `OPEN_AND_HOLD`.
+`toggle()` opens through `open()`, so a door toggled open stays open.
 
 ## Door Status
 
@@ -208,7 +221,7 @@ DoorStatus.CLOSED          # Door fully closed
 DoorStatus.RISING          # Door opening
 DoorStatus.SLOWING         # Door slowing near top
 DoorStatus.HOLDING         # Door open, holding before auto-close
-DoorStatus.KEEPUP          # Door locked open (open_and_hold)
+DoorStatus.KEEPUP          # Door locked open (open)
 DoorStatus.CLOSING_TOP_OPEN   # Door closing from top
 DoorStatus.CLOSING_MID_OPEN   # Door closing from middle
 DoorStatus.UNKNOWN         # Unrecognized status string from the device

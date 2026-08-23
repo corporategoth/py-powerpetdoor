@@ -292,11 +292,11 @@ steps:
         assert script.steps[0].params == {}
 
     def test_from_simple_commands_remaining_forms(self):
-        """open/close/schedule/pet commands parse to the expected params."""
+        """open/cycle/close/schedule/pet commands parse to the expected params."""
         script = Script.from_simple_commands(
             [
-                "open hold",
                 "open",
+                "cycle",
                 "close",
                 "obstruction",
                 "pet_on",
@@ -309,8 +309,8 @@ steps:
         )
         params = [step.params for step in script.steps]
         assert params == [
-            {"hold": True},
-            {"hold": False},
+            {},
+            {},
             {},
             {},
             {},
@@ -1840,7 +1840,12 @@ class TestScriptBooleanCoercion:
 
         assert simulator.state.schedules[4].enabled is True
 
-    async def test_a_quoted_false_hold_no_longer_holds_the_door(self, runner, simulator):
+    async def test_open_holds_and_cycle_does_not(self, runner, simulator):
+        """The two actions differ only in the flag they pass through.
+
+        They dispatch to the same `open_door`, so nothing downstream can
+        tell them apart - this is the only place the split is visible.
+        """
         held: list[bool] = []
 
         async def record(hold=False):
@@ -1848,10 +1853,10 @@ class TestScriptBooleanCoercion:
 
         simulator.open_door = record
 
-        await runner._execute_step(ScriptStep(action="open", params={"hold": "off"}))
-        await runner._execute_step(ScriptStep(action="open", params={"hold": "on"}))
+        await runner._execute_step(ScriptStep(action="open", params={}))
+        await runner._execute_step(ScriptStep(action="cycle", params={}))
 
-        assert held == [False, True]
+        assert held == [True, False]
 
 
 def _chain_names(function_name: str, variable: str) -> set[str]:
@@ -1921,8 +1926,9 @@ class TestUnknownNameErrorsNameTheAlternatives:
             (
                 ScriptStep(action="frobnicate"),
                 "Unknown action: frobnicate. Use: add_schedule, assert, battery, close, "
-                "inside, log, obstruction, open, outside, pet_off, pet_on, pet_presence, "
-                "remove_schedule, set, toggle, trigger, trigger_sensor, wait, wait_for",
+                "cycle, inside, log, obstruction, open, outside, pet_off, pet_on, "
+                "pet_presence, remove_schedule, set, toggle, trigger, trigger_sensor, "
+                "wait, wait_for",
             ),
             (
                 ScriptStep(action="set", params={"name": "powr", "value": "1"}),
@@ -2099,6 +2105,15 @@ class TestUnknownNamesInStepsFailLoudly:
                 "Unknown parameter(s) for close: hold. close takes no parameters "
                 "(plus the annotations comment, description, note)",
             ),
+            # `open` used to take `hold`, and `hold: false` meant what is
+            # now `cycle`. A script carrying the old spelling must fail
+            # rather than hold a door the author asked to let close.
+            (
+                "open",
+                {"hold": False},
+                "Unknown parameter(s) for open: hold. open takes no parameters "
+                "(plus the annotations comment, description, note)",
+            ),
             (
                 "wait_for",
                 {"condition": "door_closed", "timout": 1, "zzz": 2},
@@ -2106,7 +2121,13 @@ class TestUnknownNamesInStepsFailLoudly:
                 "(plus the annotations comment, description, note)",
             ),
         ],
-        ids=["wait-duration", "sensor-typo", "no-params-action", "two-unknowns"],
+        ids=[
+            "wait-duration",
+            "sensor-typo",
+            "no-params-action",
+            "retired-open-hold",
+            "two-unknowns",
+        ],
     )
     async def test_an_unknown_parameter_fails_the_script(
         self, runner, simulator, caplog, action, params, expected
@@ -2259,9 +2280,9 @@ class TestUnknownNamesInStepsFailLoudly:
             and (declared | {name}) - read == set()  # what the old check would compute
         ]
 
-        assert len(undetected) == 19 * len(declared) - sum(len(p) for p in table.values())
-        assert len(table) == 19
-        assert len(declared) == 13
+        assert len(undetected) == 20 * len(declared) - sum(len(p) for p in table.values())
+        assert len(table) == 20
+        assert len(declared) == 12
         # ...and the per-action check sees every one of them.
         per_action = _parameters_read_per_action()
         for action, name in undetected:

@@ -394,24 +394,26 @@ class TestOutsideCommand:
         assert state.inside_sensor_active is False
 
 
-class TestHoldAndCloseCommands:
-    async def test_hold_opens_and_keeps_up(self, command_handler):
+class TestOpenAndCloseCommands:
+    async def test_open_opens_and_keeps_up(self, command_handler):
         sim = command_handler.simulator
-        result = await command_handler.execute("hold")
+        result = await command_handler.execute("open")
         assert result.success is True
         assert result.message == "Opening and holding"
         status = await sim.wait_for_status(DOOR_STATE_KEEPUP, timeout=5)
         assert status == DOOR_STATE_KEEPUP
 
-    async def test_open_alias_for_hold(self, command_handler):
+    @pytest.mark.parametrize("spelling", ["hold", "h"])
+    async def test_the_old_spellings_still_reach_open(self, command_handler, spelling):
+        """`hold` was the command's name before `open` was; both are aliases now."""
         sim = command_handler.simulator
-        result = await command_handler.execute("open")
+        result = await command_handler.execute(spelling)
         assert result.message == "Opening and holding"
         await sim.wait_for_status(DOOR_STATE_KEEPUP, timeout=5)
 
     async def test_close_after_hold(self, command_handler):
         sim = command_handler.simulator
-        await command_handler.execute("hold")
+        await command_handler.execute("open")
         await sim.wait_for_status(DOOR_STATE_KEEPUP, timeout=5)
 
         result = await command_handler.execute("close")

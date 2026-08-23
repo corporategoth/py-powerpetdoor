@@ -168,7 +168,7 @@ from .tz_utils import (
     parse_posix_tz_string,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.1"
 __all__ = [
     # Door facade
     "BatteryInfo",

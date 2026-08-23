@@ -70,7 +70,6 @@ steps:
   - action: log
     message: "=== Test 5: Open and Hold ==="
   - action: open
-    hold: true
   - action: wait_for
     condition: door_keepup
     timeout: 5

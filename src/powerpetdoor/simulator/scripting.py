@@ -31,7 +31,8 @@ Available actions:
   - outside: Activate outside sensor with optional duration (default 0.5s)
   - obstruction: Simulate obstruction (sets inside sensor active indefinitely)
   - pet_presence: Set pet in doorway (inside sensor active indefinitely)
-  - open: Open door (optionally with hold)
+  - open: Open the door and hold it open until closed
+  - cycle: Full door cycle - open, hold for hold_time, close
   - close: Close door
   - wait: Wait for specified seconds
   - wait_for: Wait for a condition (with timeout)
@@ -236,7 +237,8 @@ _ACTION_PARAMS: dict[str, frozenset[str]] = {
     "pet_off": frozenset(),
     "inside": frozenset({"duration"}),
     "outside": frozenset({"duration"}),
-    "open": frozenset({"hold"}),
+    "open": frozenset(),
+    "cycle": frozenset(),
     "close": frozenset(),
     "wait": frozenset({"seconds"}),
     "wait_for": frozenset({"condition", "timeout"}),
@@ -438,9 +440,7 @@ class Script:
                 params["equals"] = parts[2] if len(parts) > 2 else ""
             elif action == "log":
                 params["message"] = " ".join(parts[1:])
-            elif action == "open":
-                params["hold"] = "hold" in parts
-            elif action in ("close", "obstruction", "pet_on", "pet_off"):
+            elif action in ("open", "cycle", "close", "obstruction", "pet_on", "pet_off"):
                 pass  # No params needed
             elif action == "add_schedule":
                 params["index"] = int(parts[1]) if len(parts) > 1 else 1
@@ -723,8 +723,10 @@ class ScriptRunner:
             self.simulator.activate_sensor("outside", duration)
 
         elif action == "open":
-            hold = self._script_bool(params.get("hold", False))
-            await self.simulator.open_door(hold=hold)
+            await self.simulator.open_door(hold=True)
+
+        elif action == "cycle":
+            await self.simulator.open_door(hold=False)
 
         elif action == "close":
             await self.simulator.close_door()

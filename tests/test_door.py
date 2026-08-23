@@ -33,6 +33,7 @@ from powerpetdoor.const import (
     CMD_GET_SCHEDULE_LIST,
     CMD_GET_SETTINGS,
     CMD_OPEN,
+    CMD_OPEN_AND_HOLD,
     COMMAND,
     CONFIG,
     DOOR_OPTION_AUTORETRACT,
@@ -728,12 +729,12 @@ class TestPowerPetDoorStatus:
         assert door.position == 0
 
     async def test_status_after_open(self, door, simulator):
-        """After open() the door reaches the stable HOLDING state."""
+        """After open() the door reaches the stable KEEPUP state."""
         await door.open()
 
-        await wait_for_door_status(door, DoorStatus.HOLDING)
+        await wait_for_door_status(door, DoorStatus.KEEPUP)
 
-        assert door.status == DoorStatus.HOLDING
+        assert door.status == DoorStatus.KEEPUP
         assert door.is_open is True
         assert door.is_closed is False
 
@@ -746,21 +747,31 @@ class TestPowerPetDoorStatus:
 class TestPowerPetDoorControl:
     """Test door control methods."""
 
-    async def test_open_door(self, door, simulator):
-        """open() should open the door to the stable HOLDING state."""
+    async def test_open_holds_the_door_up(self, door, simulator):
+        """open() sends OPEN_AND_HOLD: the door goes up and stays up.
+
+        The hold timer is 1s here, so a door that had merely been sent OPEN
+        would be closing by the time the motion task finishes. Awaiting that
+        task is what makes "it did not close itself" a fact rather than a
+        guess about timing.
+        """
         await door.open()
 
-        await wait_for_door_status(door, DoorStatus.HOLDING)
-
+        await wait_for_door_status(door, DoorStatus.KEEPUP)
         assert door.is_open
 
-    async def test_open_and_hold(self, door, simulator):
-        """open_and_hold() should keep door open."""
-        await door.open_and_hold()
-
-        await wait_for_door_status(door, DoorStatus.KEEPUP)
+        await asyncio.gather(simulator.engine._task, return_exceptions=True)
 
         assert door.status == DoorStatus.KEEPUP
+        assert door.is_closed is False
+
+    async def test_open_and_hold_is_gone(self, door):
+        """The old name is removed, not silently aliased.
+
+        A caller still on `open_and_hold()` must fail loudly rather than get
+        a method that quietly means something else now.
+        """
+        assert not hasattr(door, "open_and_hold")
 
     async def test_close_door(self, door, simulator):
         """close() should close the door."""
@@ -775,12 +786,12 @@ class TestPowerPetDoorControl:
         assert door.is_closed
 
     async def test_toggle_opens_when_closed(self, door, simulator):
-        """toggle() should open when door is closed."""
+        """toggle() should open when door is closed, and leave it open."""
         assert door.is_closed
 
         await door.toggle()
 
-        await wait_for_door_status(door, DoorStatus.HOLDING)
+        await wait_for_door_status(door, DoorStatus.KEEPUP)
         assert door.is_open
 
     async def test_toggle_closes_when_open(self, door, simulator):
@@ -795,14 +806,22 @@ class TestPowerPetDoorControl:
         await wait_for_door_status(door, DoorStatus.CLOSED)
         assert door.is_closed
 
-    async def test_cycle_opens_door(self, door, simulator):
-        """cycle() should open the door (and it auto-closes after hold_time)."""
+    async def test_cycle_opens_then_closes_itself(self, door, simulator):
+        """cycle() sends OPEN: the door rises, holds, then closes unbidden.
+
+        The close is the point of the method - no CLOSE is sent here, so a
+        cycle() that had been wired to OPEN_AND_HOLD would park in KEEPUP
+        and never reach CLOSED.
+        """
         assert door.is_closed
 
         await door.cycle()
 
         await wait_for_door_status(door, DoorStatus.HOLDING)
         assert door.is_open
+
+        await wait_for_door_status(door, DoorStatus.CLOSED)
+        assert door.is_closed
 
 
 # ============================================================================
@@ -2727,7 +2746,7 @@ class TestTheFacadeSendsEveryCommandUnderTheRightEnvelopeKey:
         "call",
         [
             pytest.param(lambda d: d.open(), id="open"),
-            pytest.param(lambda d: d.open_and_hold(), id="open_and_hold"),
+            pytest.param(lambda d: d.cycle(), id="cycle"),
             pytest.param(lambda d: d.close(), id="close"),
             pytest.param(lambda d: d.set_inside_sensor(True), id="set_inside_sensor"),
             pytest.param(lambda d: d.set_outside_sensor(False), id="set_outside_sensor"),
@@ -2772,7 +2791,27 @@ class TestTheFacadeSendsEveryCommandUnderTheRightEnvelopeKey:
 
         await door.open()
 
-        assert sent == [(COMMAND, CMD_OPEN)]
+        assert sent == [(COMMAND, CMD_OPEN_AND_HOLD)]
+
+    async def test_open_and_cycle_send_the_commands_their_names_promise(self):
+        """`open()` holds the door up; `cycle()` is the timed open.
+
+        Both are door motion on the same envelope, so the envelope test
+        above cannot tell them apart - swap the two and it still passes.
+        This pins which wire command each name reaches.
+        """
+        door = PowerPetDoor("127.0.0.1")
+        sent = self._recorder(door)
+
+        await door.open()
+        await door.cycle()
+        await door.toggle()
+
+        assert sent == [
+            (COMMAND, CMD_OPEN_AND_HOLD),
+            (COMMAND, CMD_OPEN),
+            (COMMAND, CMD_OPEN_AND_HOLD),
+        ]
 
     async def test_a_setting_command_really_is_the_config_envelope(self):
         door = PowerPetDoor("127.0.0.1")
