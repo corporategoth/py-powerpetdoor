@@ -165,3 +165,27 @@ class TestTheStaticAnalysisGates:
 
         _assert_step_can_fail_the_build(step)
         assert step["run"].split() == command
+
+
+class TestBothRunnersGetTheSamePipeline:
+    """Gitea reads only `.gitea/workflows/`; GitHub reads only
+    `.github/workflows/`. The pipeline therefore has to exist twice, and the
+    copies have to stay identical - this project ran for its whole history
+    with CI defined only under `.github/`, so the Gitea runner never executed
+    a single test.
+    """
+
+    def test_the_gitea_copy_matches_the_github_one(self):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        github = (root / ".github/workflows/test.yml").read_text()
+        gitea = (root / ".gitea/workflows/test.yml").read_text()
+        # The Gitea copy carries an explanatory comment header; strip the
+        # leading comment lines and the rest must be byte-identical.
+        lines = gitea.splitlines(keepends=True)
+        while lines and lines[0].startswith("#"):
+            lines.pop(0)
+        assert "".join(lines) == github, (
+            ".gitea/workflows/test.yml has drifted from .github/workflows/test.yml"
+        )

@@ -1,0 +1,302 @@
+# NOTE: this file is a byte-identical copy of .github/workflows/test.yml.
+# Gitea Actions only reads .gitea/workflows/, and GitHub only reads
+# .github/workflows/, so the same pipeline has to exist in both places for
+# both runners to execute it. tests/test_ci_gates.py asserts the two files
+# are identical below this header, so they cannot drift.
+name: Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  # Weekly unseeded fuzz exploration (see the fuzz-tests job).
+  schedule:
+    - cron: "17 4 * * 1"
+
+# Only one run per ref at a time. The CI host is a single shared act_runner,
+# so two concurrent runs of this workflow compete for host-level resources
+# (the action cache, etc.). Cancelling the older in-progress run when a new
+# commit arrives avoids those collisions and saves runner capacity.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+# Reference version used for linting and single-version jobs.
+# Update REFERENCE_PYTHON when a new Python version becomes the latest stable release.
+env:
+  REFERENCE_PYTHON: "3.14"
+
+jobs:
+  # Pre-warm the act_runner action cache sequentially to prevent race conditions.
+  # Without this, parallel matrix jobs all try to git-clone/pull the same action
+  # into the shared /data/act-cache/ directory simultaneously, corrupting checkouts.
+  cache-actions:
+    name: Cache Actions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-uv-with-retry
+        with:
+          python-version: ${{ env.REFERENCE_PYTHON }}
+
+  lint:
+    name: Lint
+    needs: [cache-actions]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-uv-with-retry
+        with:
+          python-version: ${{ env.REFERENCE_PYTHON }}
+      # uv.lock is committed and carries a sha256 for every artifact.
+      # --locked fails loudly if the lock has drifted from pyproject.toml,
+      # so CI can never silently resolve a fresh (unpinned, unhashed)
+      # dependency set from PyPI.
+      - name: Install dependencies
+        run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+      - name: Check linting
+        run: ruff check src tests
+      - name: Check formatting
+        run: ruff format --check src tests
+      - name: Check types
+        run: mypy src
+
+  # A breaking change with no CHANGELOG entry leaves a user whose scripts
+  # started exiting 1 with nothing to tell them it was coming.
+  changelog:
+    name: Changelog
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      # BASE_REF is passed via env, never interpolated into the script: a ref
+      # name is attacker-controllable on a fork PR and would otherwise be
+      # executed by the shell. On a push there is no base_ref, so diff against
+      # the commit's own parent — otherwise this job could never run on the
+      # direct-to-main pushes this project actually uses.
+      - name: CHANGELOG.md moves whenever src/ does
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          # `HEAD^` inspects only the *tip* commit of a push, so a src/
+          # change in any earlier commit of a multi-commit push was missed.
+          # `github.event.before` is the ref's previous tip, i.e. the whole
+          # push. It is all-zeroes for a newly created branch, where there
+          # is no previous tip to diff against, and can point at a commit
+          # this shallow clone lacks - both fall back to HEAD^.
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            base="origin/$BASE_REF"
+          elif [ -n "$PUSH_BEFORE" ] \
+            && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
+            base="$PUSH_BEFORE"
+          else
+            base="HEAD^"
+          fi
+          # An unresolvable base used to leave `changed` empty, so the job
+          # printed "OK: 0 file(s) under src/ changed" and exited 0 - a
+          # silent pass on a guard whose entire job is not to have one.
+          if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+            echo "::error::changelog guard cannot resolve base ref '$base'; refusing to pass."
+            exit 1
+          fi
+          if ! changed="$(git diff --name-only "$base"...HEAD 2>/dev/null)"; then
+            if ! changed="$(git diff --name-only "$base" HEAD)"; then
+              echo "::error::changelog guard could not diff '$base'..HEAD; refusing to pass."
+              exit 1
+            fi
+          fi
+          if echo "$changed" | grep -q '^src/' && ! echo "$changed" | grep -q '^CHANGELOG\.md$'; then
+            echo "::error::src/ changed but CHANGELOG.md did not."
+            echo "Add an entry under [Unreleased], or explain why the change is not user-visible."
+            echo "Changed files under src/:"
+            echo "$changed" | grep '^src/'
+            exit 1
+          fi
+          echo "OK: $(echo "$changed" | grep -c '^src/' || true) file(s) under src/ changed"
+
+  # The published artifacts, asserted rather than assumed. The sdist used to
+  # carry 9 test modules and none of the machinery that runs them, and the
+  # wheel shipped 121 annotated names with no PEP 561 marker (so every
+  # downstream consumer type-checked the library as `Any`). Both are
+  # invisible to every other job here: they are properties of the *built*
+  # artifact.
+  packaging:
+    name: Packaging
+    needs: [cache-actions]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-uv-with-retry
+        with:
+          python-version: ${{ env.REFERENCE_PYTHON }}
+      - name: Install dependencies
+        run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+      - name: Build the artifacts
+        run: uv build
+      - name: The wheel carries the PEP 561 marker
+        run: |
+          wheel="$(echo dist/*.whl)"
+          if ! unzip -l "$wheel" | grep -q ' powerpetdoor/py.typed$'; then
+            echo "::error::py.typed is missing from $wheel; downstream mypy sees this library as Any."
+            unzip -l "$wheel"
+            exit 1
+          fi
+          echo "OK: py.typed present in $wheel"
+      - name: The sdist ships a suite that actually runs
+        run: |
+          rm -rf /tmp/sdist && mkdir -p /tmp/sdist
+          tar xzf dist/*.tar.gz -C /tmp/sdist
+          root="$(echo /tmp/sdist/*/)"
+          for required in \
+            tests/conftest.py tests/__init__.py tests/fuzz/__init__.py \
+            tests/simulator/__init__.py docs/protocol.md
+          do
+            if [ ! -e "$root$required" ]; then
+              echo "::error::$required is missing from the sdist."
+              exit 1
+            fi
+          done
+          cd "$root"
+          # The same interpreter and the same `dev` extra a third party gets
+          # from `pip install .[dev]`; PYTHONPATH stands in for the install
+          # so this measures the *artifact*, not the checkout.
+          PYTHONPATH="$PWD:$PWD/src" pytest -q --timeout=180
+
+  # Unit tests run the FULL Python matrix and every matrix entry uploads its
+  # coverage data. Version-specific code paths (sys.version_info branches,
+  # stdlib behavior differences) are only exercised on some interpreters, so
+  # coverage is combined across ALL supported versions before the 100% gate.
+  unit-tests:
+    name: Unit Tests (py${{ matrix.python-version }})
+    needs: [cache-actions]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-uv-with-retry
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+      - name: Run unit tests
+        run: pytest --ignore=tests/fuzz --tb=line -q --cov --cov-report=xml --cov-fail-under=0
+        env:
+          COVERAGE_FILE: .coverage.py${{ matrix.python-version }}
+      - name: Upload coverage data
+        if: ${{ always() }}
+        uses: christopherhx/gitea-upload-artifact@81f940d004763f986ba3582c007fd842dd5cb0d7 # v4
+        with:
+          name: coverage-py${{ matrix.python-version }}
+          path: |
+            .coverage.py${{ matrix.python-version }}
+            coverage.xml
+
+  # Runs on every push and PR: the property suite is ~2s and has caught real
+  # framing bugs — excluding it from PR CI would let property regressions
+  # merge green and only fail after the fact on main.
+  fuzz-tests:
+    name: Fuzz Tests
+    needs: [cache-actions]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-uv-with-retry
+        with:
+          python-version: ${{ env.REFERENCE_PYTHON }}
+      - name: Install dependencies
+        run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+      # Push/PR runs are seeded so a failure is exactly reproducible from
+      # the log. A fixed seed with no persisted .hypothesis database means
+      # CI replays the same example set forever, though, so the weekly
+      # schedule run drops the seed and explores a fresh one - that is
+      # where new counterexamples actually come from (R3-T3).
+      - name: Run fuzz tests (seeded, reproducible)
+        if: ${{ github.event_name != 'schedule' }}
+        run: pytest tests/fuzz -v --hypothesis-seed=0
+      - name: Run fuzz tests (weekly, unseeded exploration)
+        if: ${{ github.event_name == 'schedule' }}
+        run: pytest tests/fuzz -v
+
+  coverage-report:
+    name: Coverage Report
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [unit-tests]
+    if: ${{ always() }}
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-uv-with-retry
+        with:
+          python-version: ${{ env.REFERENCE_PYTHON }}
+      - name: Install dependencies
+        run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+      - name: Download py3.11 coverage
+        uses: christopherhx/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # v4
+        with:
+          name: coverage-py3.11
+          path: coverage-data/py3.11
+        continue-on-error: true
+      - name: Download py3.12 coverage
+        uses: christopherhx/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # v4
+        with:
+          name: coverage-py3.12
+          path: coverage-data/py3.12
+        continue-on-error: true
+      - name: Download py3.13 coverage
+        uses: christopherhx/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # v4
+        with:
+          name: coverage-py3.13
+          path: coverage-data/py3.13
+        continue-on-error: true
+      - name: Download py3.14 coverage
+        uses: christopherhx/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # v4
+        with:
+          name: coverage-py3.14
+          path: coverage-data/py3.14
+        continue-on-error: true
+      - name: Combine Python coverage
+        run: |
+          cp coverage-data/py3.11/.coverage.py3.11 . 2>/dev/null || true
+          cp coverage-data/py3.12/.coverage.py3.12 . 2>/dev/null || true
+          cp coverage-data/py3.13/.coverage.py3.13 . 2>/dev/null || true
+          cp coverage-data/py3.14/.coverage.py3.14 . 2>/dev/null || true
+          coverage combine
+          coverage xml
+          coverage html
+          coverage json
+          coverage report --show-missing --fail-under=0
+      - name: Upload coverage to Codecov
+        if: ${{ env.CODECOV_TOKEN != '' }}
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
+        with:
+          token: ${{ env.CODECOV_TOKEN }}
+          files: coverage.xml
+          flags: python
+          fail_ci_if_error: false
+      - name: Upload coverage report
+        uses: christopherhx/gitea-upload-artifact@81f940d004763f986ba3582c007fd842dd5cb0d7 # v4
+        with:
+          name: coverage-report
+          path: |
+            coverage_html/
+            coverage.json
+          if-no-files-found: ignore
+      # The real gate: pyproject's fail_under=100 applies here, on the
+      # coverage combined across every Python version in the matrix.
+      - name: Enforce 100% coverage
+        run: coverage report --fail-under=100
