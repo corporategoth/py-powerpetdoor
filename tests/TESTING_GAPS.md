@@ -2,7 +2,7 @@
 
 This file is **auto-generated** by CI after each test run. Do not edit manually.
 
-**Last updated:** 2026-08-23 10:26 UTC
+**Last updated:** 2026-08-23 10:58 UTC
 
 ## Summary
 
@@ -10,15 +10,15 @@ This file is **auto-generated** by CI after each test run. Do not edit manually.
 |--------|-------|
 | Line Coverage | 100.00% |
 | Branch Coverage | 100.00% |
-| Lines Covered | 6,455 / 6,455 |
-| Branches Covered | 2,276 / 2,276 |
+| Lines Covered | 6,586 / 6,586 |
+| Branches Covered | 2,302 / 2,302 |
 | Lines Missing | 0 |
 
 ## Coverage by Category
 
 | Category | Files | Coverage | Status |
 |----------|-------|----------|--------|
-| Core Library | 7 | 100.0% | :green_circle: |
+| Core Library | 8 | 100.0% | :green_circle: |
 | Simulator | 5 | 100.0% | :green_circle: |
 | Simulator CLI | 3 | 100.0% | :green_circle: |
 | Simulator Commands | 12 | 100.0% | :green_circle: |
@@ -64,11 +64,11 @@ None. Every `exclude_lines` and `partial_branches` pattern above matches only th
 
 | Lines | Type | Reason | Code |
 |-------|------|--------|------|
-| 127 | no branch | defensive: enable() always installs a handler | `if self._handler:` |
-| 832 | no branch | bound after start() | `if simulator.server and simulator.server.sockets:` |
+| 128 | no branch | defensive: enable() always installs a handler | `if self._handler:` |
+| 962 | no branch | bound after start() | `if simulator.server and simulator.server.sockets:` |
 
 #### `simulator/ctl.py` (1 lines)
 
 | Lines | Type | Reason | Code |
 |-------|------|--------|------|
-| 657 | no cover | defensive: socket_reader swallows its own cancellation; only an outer cancel landing exactly on this await would raise | `except asyncio.CancelledError:` |
+| 675 | no cover | defensive: socket_reader swallows its own cancellation; only an outer cancel landing exactly on this await would raise | `except asyncio.CancelledError:` |
