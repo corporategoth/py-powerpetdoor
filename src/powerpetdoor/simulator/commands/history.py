@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from ...i18n import t
 from .base import CommandResult
 
 logger = logging.getLogger(__name__)
@@ -108,8 +109,12 @@ class History:
                     # to continue" the operator had to dismiss, repeatedly,
                     # for the life of the session.
                     logger.warning(
-                        f"Could not use history file {history_file}: {e}; "
-                        "history is in-memory for this session"
+                        t(
+                            "simulator.commands.history.could_use_history_file_history",
+                            "Could not use history file {history_file}: {e}; history is in-memory for this session",
+                            history_file=history_file,
+                            e=e,
+                        )
                     )
                     self._history = InMemoryHistory()
                 else:
@@ -166,7 +171,13 @@ class History:
                 self._rewrite_history_file()
             return True
         except Exception as e:
-            logger.debug(f"Error removing last history entry: {e}")
+            logger.debug(
+                t(
+                    "simulator.commands.history.error_removing_last_history_entry",
+                    "Error removing last history entry: {e}",
+                    e=e,
+                )
+            )
             return False
 
     def replace_last_entry(self, new_command: str) -> bool:
@@ -194,7 +205,13 @@ class History:
                 self._rewrite_history_file()
             return True
         except Exception as e:
-            logger.error(f"Error replacing last history entry: {e}")
+            logger.error(
+                t(
+                    "simulator.commands.history.error_replacing_last_history_entry",
+                    "Error replacing last history entry: {e}",
+                    e=e,
+                )
+            )
             return False
 
     def _rewrite_history_file(self) -> None:
@@ -237,7 +254,13 @@ class History:
             self._clear_backend()
             return True
         except Exception as e:
-            logger.debug(f"Error clearing history: {e}")
+            logger.debug(
+                t(
+                    "simulator.commands.history.error_clearing_history",
+                    "Error clearing history: {e}",
+                    e=e,
+                )
+            )
             return False
 
     @staticmethod
@@ -351,21 +374,47 @@ class History:
             try:
                 self._clear_backend()
             except Exception as e:
-                return CommandResult(False, f"Error clearing history: {e}")
-            return CommandResult(True, "History cleared")
+                return CommandResult(
+                    False,
+                    t(
+                        "simulator.commands.history.error_clearing_history",
+                        "Error clearing history: {e}",
+                        e=e,
+                    ),
+                )
+            return CommandResult(
+                True, t("simulator.commands.history.history_cleared", "History cleared")
+            )
 
         limit = DEFAULT_HISTORY_LIMIT
         if arg:
             try:
                 limit = int(arg)
             except ValueError:
-                return CommandResult(False, f"Invalid argument: {arg}. Use 'clear' or a number.")
+                return CommandResult(
+                    False,
+                    t(
+                        "simulator.commands.history.invalid_argument_use_clear_number",
+                        "Invalid argument: {arg}. Use 'clear' or a number.",
+                        arg=arg,
+                    ),
+                )
             if limit <= 0:
-                return CommandResult(False, "Number must be positive")
+                return CommandResult(
+                    False,
+                    t("simulator.commands.history.number_must_positive", "Number must be positive"),
+                )
 
         try:
             # get_strings() returns oldest first, which is what we want for indexing
             entries = list(self._history.get_strings())
         except Exception as e:
-            return CommandResult(False, f"Error reading history: {e}")
+            return CommandResult(
+                False,
+                t(
+                    "simulator.commands.history.error_reading_history",
+                    "Error reading history: {e}",
+                    e=e,
+                ),
+            )
         return CommandResult(True, self._render(entries, limit))

@@ -9,6 +9,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0] - 2026-08-23
 
+### Added — internationalization
+
+All user-facing text now goes through `powerpetdoor.i18n.t()`: 350 strings
+across the simulator CLI, exception messages and log messages. English is
+the second argument at every call site, so it lives in the source and there
+is no `en_us.json` for it to drift out of step with — a key with no
+translation renders its default, which is why adding a language cannot break
+anything. Output with no locale selected is byte-identical to before.
+
+Protocol text is deliberately *not* translatable: everything in `const.py`
+goes to a device whose firmware cannot be changed, so it is not user-facing
+text at all.
+
+- `t()` never raises. A missing locale directory, corrupt JSON, a file that
+  is not an object, or a translation whose placeholders do not match its
+  call site each fall back to English rather than raising from underneath
+  whatever the caller was trying to report
+- It does not format unless given keyword arguments, so the `%`-style
+  placeholders that the logging module applies later survive untouched
+- `POWERPETDOOR_LOCALE` selects a language, falling back to `LC_ALL`,
+  `LC_MESSAGES` then `LANG`; `C`/`POSIX` mean English. An unknown locale
+  renders English rather than failing
+- Locale files live in `src/powerpetdoor/locales/` and are declared as
+  package data, so they reach a wheel. See `docs/translations.md`
+- Locale files carry a `.po`-style header: `_language` (the language's own
+  name), `_translators` (attribution, string or list) and `_updated`. Header
+  values may be lists where a translation may not; `get_locale_metadata()`,
+  `get_translators()` and `get_locale_name()` read them
+- `scripts/check_translations.py` audits orphaned entries, missing
+  translations, key-collision artifacts, a stale catalogue and any
+  user-facing string not wrapped at all. CI and the pre-commit hooks fail on
+  everything except *missing*, since a locale legitimately lags the source
+- `--init-locale de_de` writes a ready-to-translate file, header stub and
+  all. `--locate PATTERN` and `--locations` answer *where is this string
+  used*, which is what a translator needs to word it — "Closed" differs for
+  a door, a connection and a schedule window. `--json` makes that pipeable
+- `messages.json` is committed (its diff shows a reworded string in review)
+  and a pre-commit hook regenerates it so it cannot drift. Source locations
+  are deliberately *not* committed: line numbers move on every unrelated
+  edit, so a stored copy would be stale immediately
+
+### Added — developer environment and dependency automation
+
+- `scripts/setup-dev.sh` is the single entry point for a fresh clone: it
+  syncs the extras, installs both git hook stages and reports dependency
+  freshness. Hooks were the one thing a clone never got
+- `.pre-commit-config.yaml` splits by stage. Commit time holds what finishes
+  in seconds (ruff, mypy, translations, the 2887-test fast slice); push time
+  holds the real gate (full suite at 100% line+branch, dependency freshness)
+- `scripts/check_dependencies.py` reports lockfile drift, available
+  upgrades, stale CI action pins and published advisories. Dependabot cannot
+  do this job here: the GitHub remote is a push-mirror, so its PRs target a
+  branch the next mirror sync overwrites
+- `.envrc` is tracked, so `direnv allow` activates `.venv` on a fresh clone
+
+### Fixed — CI
+
+- `actions/checkout` v4 → v7.0.1, `astral-sh/setup-uv` v7 → v10.0.1 and
+  `codecov/codecov-action` v4 → v7.0.0. The stale majors were what produced
+  ten Node-version deprecation warnings on every GitHub run
+- The `TESTING_GAPS.md` bot commit now only runs on the forge that is the
+  source of truth. On the GitHub mirror it could never push, and produced a
+  failed-step annotation on every run
+- `test_notification_state_log_is_sanitized` gathered *all* of
+  `client._tasks`, which includes the keepalive loop, so it awaited that
+  loop's first 30 s sleep. It was 30 s of the suite's 39 s wall time and sat
+  one slow runner away from the 60 s per-test timeout
+
 ### Fixed — proven against a real door (firmware 1.7.18)
 
 A physical Power Pet Door was probed for the first time. It disproved a

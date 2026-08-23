@@ -124,6 +124,7 @@ from ..const import (
     TIME_FORMAT,
 )
 from ..framing import FrameScanner
+from ..i18n import t
 from ..sanitize import MAX_LOGGED_LENGTH, sanitize_field, sanitize_text
 from ..schedule import MAX_SCHEDULE_INDEX, wire_bool_string, wire_int_flag
 from .engine import DoorMotionEngine
@@ -183,11 +184,34 @@ def _coerce_wire_number(value: object, name: str, minimum: float, maximum: float
     """
     # bool is an int subclass; `true` is not a number on this wire.
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise WireValueError(f"{name} must be a number, got {value!r}")
+        raise WireValueError(
+            t(
+                "simulator.protocol.must_number_got",
+                "{name} must be a number, got {value!r}",
+                name=name,
+                value=value,
+            )
+        )
     if not math.isfinite(value):
-        raise WireValueError(f"{name} must be a finite number, got {value!r}")
+        raise WireValueError(
+            t(
+                "simulator.protocol.must_finite_number_got",
+                "{name} must be a finite number, got {value!r}",
+                name=name,
+                value=value,
+            )
+        )
     if not minimum <= value <= maximum:
-        raise WireValueError(f"{name} must be between {minimum} and {maximum}, got {value!r}")
+        raise WireValueError(
+            t(
+                "simulator.protocol.must_between_got",
+                "{name} must be between {minimum} and {maximum}, got {value!r}",
+                name=name,
+                minimum=minimum,
+                maximum=maximum,
+                value=value,
+            )
+        )
     return float(value)
 
 
@@ -207,9 +231,24 @@ def _coerce_wire_string(value: object, name: str, max_length: int) -> str:
         WireValueError: If the value is not a string, or is too long.
     """
     if not isinstance(value, str):
-        raise WireValueError(f"{name} must be a string, got {value!r}")
+        raise WireValueError(
+            t(
+                "simulator.protocol.must_string_got",
+                "{name} must be a string, got {value!r}",
+                name=name,
+                value=value,
+            )
+        )
     if len(value) > max_length:
-        raise WireValueError(f"{name} must be at most {max_length} characters, got {len(value)}")
+        raise WireValueError(
+            t(
+                "simulator.protocol.must_most_characters_got",
+                "{name} must be at most {max_length} characters, got {arg0}",
+                name=name,
+                max_length=max_length,
+                arg0=len(value),
+            )
+        )
     return value
 
 
@@ -314,11 +353,19 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     def connection_made(self, transport):
         peername = transport.get_extra_info("peername")
-        logger.info("Simulator: Client connected from %s", peername)
+        logger.info(
+            t(
+                "simulator.protocol.simulator_client_connected",
+                "Simulator: Client connected from %s",
+            ),
+            peername,
+        )
         self.transport = transport
 
     def connection_lost(self, exc):
-        logger.info("Simulator: Client disconnected")
+        logger.info(
+            t("simulator.protocol.simulator_client_disconnected", "Simulator: Client disconnected")
+        )
         self._scanner.reset()
         for task in list(self._tasks):
             task.cancel()
@@ -359,10 +406,17 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         # and is skipped on its own; later frames still arrive.
         text = data.decode("ascii", errors="backslashreplace")
         if len(text) != len(data):
-            logger.warning("Simulator: escaped non-ASCII bytes in a received chunk")
+            logger.warning(
+                t(
+                    "simulator.protocol.simulator_escaped_non_ascii_bytes",
+                    "Simulator: escaped non-ASCII bytes in a received chunk",
+                )
+            )
 
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Simulator RX: %s", sanitize_log_text(text))
+            logger.debug(
+                t("simulator.protocol.simulator_rx", "Simulator RX: %s"), sanitize_log_text(text)
+            )
 
         frames, diag = self._scanner.feed(text)
         if diag.overflow:
@@ -380,7 +434,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
                 # the transport and holds the fd plus the
                 # `DoorSimulator.protocols` slot after the client walks away.
                 logger.warning(
-                    "Simulator: JSON parse error: %s (frame: %s)",
+                    t(
+                        "simulator.protocol.simulator_json_parse_error_frame",
+                        "Simulator: JSON parse error: %s (frame: %s)",
+                    ),
                     err,
                     sanitize_field(frame, MAX_LOGGED_LENGTH),
                 )
@@ -397,17 +454,29 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     def _on_task_done(self, task: asyncio.Task) -> None:
         self._tasks.discard(task)
         if not task.cancelled() and task.exception() is not None:
-            logger.error("Simulator: message handler task failed", exc_info=task.exception())
+            logger.error(
+                t(
+                    "simulator.protocol.simulator_message_handler_task_failed",
+                    "Simulator: message handler task failed",
+                ),
+                exc_info=task.exception(),
+            )
 
     def _report_unknown_command(self, cmd: object) -> None:
         """Log an unknown command."""
-        logger.warning("Simulator: Unknown command: %s", sanitize_field(cmd, MAX_LOGGED_LENGTH))
+        logger.warning(
+            t("simulator.protocol.simulator_unknown_command", "Simulator: Unknown command: %s"),
+            sanitize_field(cmd, MAX_LOGGED_LENGTH),
+        )
 
     def _send(self, msg: dict):
         """Send a message to the client."""
         data = json.dumps(msg).encode("ascii")
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Simulator TX: %s", sanitize_log_text(str(msg)))
+            logger.debug(
+                t("simulator.protocol.simulator_tx", "Simulator TX: %s"),
+                sanitize_log_text(str(msg)),
+            )
         if not self.transport:
             return
         self.transport.write(data)
@@ -425,7 +494,13 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         ``abort()`` discards the unsent tail and delivers
         ``connection_lost`` immediately.
         """
-        logger.error("Simulator: %s; dropping the connection", reason)
+        logger.error(
+            t(
+                "simulator.protocol.simulator_dropping_connection",
+                "Simulator: %s; dropping the connection",
+            ),
+            reason,
+        )
         if self.transport:
             self.transport.abort()
 
@@ -494,7 +569,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         # only against hardware.
         if envelope == COMMAND and cmd not in COMMAND_ENVELOPE_COMMANDS:
             logger.warning(
-                "Simulator: %s was sent as %r; a real door only accepts %s that way",
+                t(
+                    "simulator.protocol.simulator_sent_as_real_door",
+                    "Simulator: %s was sent as %r; a real door only accepts %s that way",
+                ),
                 sanitize_field(cmd, MAX_LOGGED_LENGTH),
                 COMMAND,
                 "/".join(sorted(COMMAND_ENVELOPE_COMMANDS)),
@@ -526,7 +604,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         except SilentDropError:
             # The device answers nothing at all - see `_handle_set_time`.
             logger.info(
-                "Simulator: %s answered with silence, as the device does",
+                t(
+                    "simulator.protocol.simulator_answered_silence_as_device",
+                    "Simulator: %s answered with silence, as the device does",
+                ),
                 sanitize_field(cmd, MAX_LOGGED_LENGTH),
             )
             return
@@ -535,13 +616,19 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             # field and refused it before touching state. Report the actual
             # reason so a legitimate client can fix its payload.
             logger.warning(
-                "Simulator: Rejected %s: %s",
+                t("simulator.protocol.simulator_rejected", "Simulator: Rejected %s: %s"),
                 sanitize_field(cmd, MAX_LOGGED_LENGTH),
                 sanitize_field(err, MAX_LOGGED_LENGTH),
             )
             response = self._error_envelope(cmd, str(err))
         except Exception:
-            logger.exception("Simulator: Error handling command %s", sanitize_field(cmd))
+            logger.exception(
+                t(
+                    "simulator.protocol.simulator_error_handling_command",
+                    "Simulator: Error handling command %s",
+                ),
+                sanitize_field(cmd),
+            )
             response = self._error_envelope(cmd, "Command failed")
 
         self._send_response(response)
@@ -752,7 +839,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             # Untrusted wire data: reject malformed schedules rather than
             # storing something that raises later during evaluation.
             logger.warning(
-                "Simulator: Rejected schedule: %s",
+                t(
+                    "simulator.protocol.simulator_rejected_schedule",
+                    "Simulator: Rejected schedule: %s",
+                ),
                 sanitize_field(err, MAX_LOGGED_LENGTH),
             )
             response[FIELD_SUCCESS] = SUCCESS_FALSE
@@ -760,7 +850,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             return
         self.state.schedules[schedule.index] = schedule
         response[FIELD_SCHEDULE] = schedule.to_dict()
-        logger.info("Simulator: Schedule %s saved", sanitize_log_text(schedule.index))
+        logger.info(
+            t("simulator.protocol.simulator_schedule_saved", "Simulator: Schedule %s saved"),
+            sanitize_log_text(schedule.index),
+        )
 
     @CommandRegistry.handler(CMD_DELETE_SCHEDULE)
     async def _handle_delete_schedule(self, msg: dict, response: dict) -> None:
@@ -769,7 +862,13 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             del self.state.schedules[index]
             # The real device echoes the deleted index in the response
             response[FIELD_INDEX] = index
-            logger.info("Simulator: Schedule %s deleted", sanitize_log_text(index))
+            logger.info(
+                t(
+                    "simulator.protocol.simulator_schedule_deleted",
+                    "Simulator: Schedule %s deleted",
+                ),
+                sanitize_log_text(index),
+            )
         else:
             response[FIELD_SUCCESS] = SUCCESS_FALSE
             response[FIELD_REASON] = "Schedule not found"
@@ -787,17 +886,33 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         with a reason the way docs/protocol.md says every ``SET_*`` is.
         """
         if FIELD_SCHEDULES not in msg:
-            raise WireValueError(f"{FIELD_SCHEDULES} is required")
+            raise WireValueError(
+                t(
+                    "simulator.protocol.required",
+                    "{FIELD_SCHEDULES} is required",
+                    FIELD_SCHEDULES=FIELD_SCHEDULES,
+                )
+            )
         schedules_data = msg[FIELD_SCHEDULES]
         if not isinstance(schedules_data, list):
-            raise WireValueError(f"{FIELD_SCHEDULES} must be a list, got {schedules_data!r}")
+            raise WireValueError(
+                t(
+                    "simulator.protocol.must_list_got",
+                    "{FIELD_SCHEDULES} must be a list, got {schedules_data!r}",
+                    FIELD_SCHEDULES=FIELD_SCHEDULES,
+                    schedules_data=schedules_data,
+                )
+            )
         try:
             parsed = [Schedule.from_dict(sched_data) for sched_data in schedules_data]
         except ValueError as err:
             # Reject the whole list atomically: a partial load would
             # leave the simulator in a state no client asked for.
             logger.warning(
-                "Simulator: Rejected schedule list: %s",
+                t(
+                    "simulator.protocol.simulator_rejected_schedule_list",
+                    "Simulator: Rejected schedule list: %s",
+                ),
                 sanitize_field(err, MAX_LOGGED_LENGTH),
             )
             response[FIELD_SUCCESS] = SUCCESS_FALSE
@@ -807,7 +922,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         self.state.schedules.clear()
         for schedule in parsed:
             self.state.schedules[schedule.index] = schedule
-        logger.info("Simulator: Loaded %d schedules", len(schedules_data))
+        logger.info(
+            t("simulator.protocol.simulator_loaded_schedules", "Simulator: Loaded %d schedules"),
+            len(schedules_data),
+        )
         response[FIELD_SCHEDULES] = self.state.get_schedule_list()
 
     # ==========================================================================
@@ -881,13 +999,13 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     async def _handle_power_on(self, msg: dict, response: dict) -> None:
         self.state.power = True
         response[FIELD_POWER] = wire_int_flag(True)
-        logger.info("Simulator: Power ON")
+        logger.info(t("simulator.protocol.simulator_power", "Simulator: Power ON"))
 
     @CommandRegistry.handler(CMD_POWER_OFF)
     async def _handle_power_off(self, msg: dict, response: dict) -> None:
         self.state.power = False
         response[FIELD_POWER] = wire_int_flag(False)
-        logger.info("Simulator: Power OFF")
+        logger.info(t("simulator.protocol.simulator_power_off", "Simulator: Power OFF"))
         # If door is open, close it when power goes off
         if self.state.door_status != DOOR_STATE_CLOSED:
             self.engine.close()
@@ -896,25 +1014,45 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     async def _handle_enable_safety_lock(self, msg: dict, response: dict) -> None:
         self.state.safety_lock = True
         response[FIELD_SETTINGS] = {FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: wire_bool_string(True)}
-        logger.info("Simulator: Outside sensor safety lock ENABLED")
+        logger.info(
+            t(
+                "simulator.protocol.simulator_outside_sensor_safety_lock",
+                "Simulator: Outside sensor safety lock ENABLED",
+            )
+        )
 
     @CommandRegistry.handler(CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK)
     async def _handle_disable_safety_lock(self, msg: dict, response: dict) -> None:
         self.state.safety_lock = False
         response[FIELD_SETTINGS] = {FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: wire_bool_string(False)}
-        logger.info("Simulator: Outside sensor safety lock DISABLED")
+        logger.info(
+            t(
+                "simulator.protocol.simulator_outside_sensor_safety_lock_1",
+                "Simulator: Outside sensor safety lock DISABLED",
+            )
+        )
 
     @CommandRegistry.handler(CMD_ENABLE_CMD_LOCKOUT)
     async def _handle_enable_cmd_lockout(self, msg: dict, response: dict) -> None:
         self.state.cmd_lockout = True
         response[FIELD_SETTINGS] = {FIELD_CMD_LOCKOUT: wire_bool_string(True)}
-        logger.info("Simulator: Command lockout ENABLED")
+        logger.info(
+            t(
+                "simulator.protocol.simulator_command_lockout_enabled",
+                "Simulator: Command lockout ENABLED",
+            )
+        )
 
     @CommandRegistry.handler(CMD_DISABLE_CMD_LOCKOUT)
     async def _handle_disable_cmd_lockout(self, msg: dict, response: dict) -> None:
         self.state.cmd_lockout = False
         response[FIELD_SETTINGS] = {FIELD_CMD_LOCKOUT: wire_bool_string(False)}
-        logger.info("Simulator: Command lockout DISABLED")
+        logger.info(
+            t(
+                "simulator.protocol.simulator_command_lockout_disabled",
+                "Simulator: Command lockout DISABLED",
+            )
+        )
 
     @CommandRegistry.handler(CMD_ENABLE_AUTORETRACT)
     async def _handle_enable_autoretract(self, msg: dict, response: dict) -> None:
@@ -922,13 +1060,23 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         # Verified against firmware 1.7.18: these two answer with the WHOLE
         # settings object, not just the field they changed.
         response[FIELD_SETTINGS] = self.state.get_settings()
-        logger.info("Simulator: Auto-retract ENABLED")
+        logger.info(
+            t(
+                "simulator.protocol.simulator_auto_retract_enabled",
+                "Simulator: Auto-retract ENABLED",
+            )
+        )
 
     @CommandRegistry.handler(CMD_DISABLE_AUTORETRACT)
     async def _handle_disable_autoretract(self, msg: dict, response: dict) -> None:
         self.state.autoretract = False
         response[FIELD_SETTINGS] = self.state.get_settings()
-        logger.info("Simulator: Auto-retract DISABLED")
+        logger.info(
+            t(
+                "simulator.protocol.simulator_auto_retract_disabled",
+                "Simulator: Auto-retract DISABLED",
+            )
+        )
 
     # ==========================================================================
     # Command Handlers - Set Commands
@@ -957,7 +1105,13 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             )
             # Convert centiseconds to seconds for internal storage
             self.state.hold_time = centiseconds / 100.0
-            logger.info("Simulator: Hold time set to %ss", self.state.hold_time)
+            logger.info(
+                t(
+                    "simulator.protocol.simulator_hold_time_set_s",
+                    "Simulator: Hold time set to %ss",
+                ),
+                self.state.hold_time,
+            )
         # Convert seconds to centiseconds for protocol response
         response[FIELD_HOLD_TIME] = int(self.state.hold_time * 100)
 
@@ -1012,7 +1166,13 @@ class DoorSimulatorProtocol(asyncio.Protocol):
                 in range.
         """
         if FIELD_VOLTAGE not in msg:
-            raise WireValueError(f"{FIELD_VOLTAGE} is required")
+            raise WireValueError(
+                t(
+                    "simulator.protocol.required_1",
+                    "{FIELD_VOLTAGE} is required",
+                    FIELD_VOLTAGE=FIELD_VOLTAGE,
+                )
+            )
         # Nothing does arithmetic on this today, so an arbitrary JSON value
         # is currently inert - it is the same latent trap as holdTime, so
         # bound it at the door rather than later.
@@ -1074,4 +1234,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         if notification is None:
             return
         self._send(notification)
-        logger.debug("Simulator: Sent %s sensor %s notification", sensor, state)
+        logger.debug(
+            t(
+                "simulator.protocol.simulator_sent_sensor_notification",
+                "Simulator: Sent %s sensor %s notification",
+            ),
+            sensor,
+            state,
+        )

@@ -7,6 +7,7 @@
 
 from typing import TYPE_CHECKING
 
+from ...i18n import t
 from .base import ArgSpec, CommandResult, command, subcommand
 
 if TYPE_CHECKING:
@@ -72,7 +73,15 @@ class NotifyCommandsMixin:
         # Broadcast notification settings change to connected PPD clients
         self.simulator.broadcast_notification_settings()
 
-        return CommandResult(True, f"Notification {name}: {new_state}")
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.notifications.notification",
+                "Notification {name}: {new_state}",
+                name=name,
+                new_state=new_state,
+            ),
+        )
 
     @command("notify", [], "Manage notification settings", category="settings")
     def notify(self) -> CommandResult:

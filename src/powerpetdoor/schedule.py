@@ -51,6 +51,7 @@ from .const import (
     FIELD_SCHEDULE,
     FIELD_START_TIME_SUFFIX,
 )
+from .i18n import t
 from .sanitize import sanitize_field, sanitize_text
 
 _LOGGER = logging.getLogger(__name__)
@@ -78,9 +79,24 @@ def coerce_schedule_int(value: object, name: str, maximum: int) -> int:
         # `1e400` escapes as an unhandled exception and the caller reports a
         # generic "Command failed" plus a stack trace for a value this
         # validator meant to reject cleanly.
-        raise ValueError(f"Schedule {name} must be a number, got {value!r}") from None
+        raise ValueError(
+            t(
+                "schedule.schedule_must_number_got",
+                "Schedule {name} must be a number, got {value!r}",
+                name=name,
+                value=value,
+            )
+        ) from None
     if not 0 <= result <= maximum:
-        raise ValueError(f"Schedule {name} must be between 0 and {maximum}, got {result}")
+        raise ValueError(
+            t(
+                "schedule.schedule_must_between_got",
+                "Schedule {name} must be between 0 and {maximum}, got {result}",
+                name=name,
+                maximum=maximum,
+                result=result,
+            )
+        )
     return result
 
 
@@ -99,7 +115,14 @@ def coerce_schedule_day(value: object, position: int) -> bool:
     """
     flag = make_bool(value) if isinstance(value, (bool, int, str)) else None
     if not isinstance(flag, bool):
-        raise ValueError(f"Schedule daysOfWeek[{position}] must be 0 or 1, got {value!r}")
+        raise ValueError(
+            t(
+                "schedule.schedule_daysofweek_must_got",
+                "Schedule daysOfWeek[{position}] must be 0 or 1, got {value!r}",
+                position=position,
+                value=value,
+            )
+        )
     return flag
 
 
@@ -124,13 +147,23 @@ def coerce_schedule_days(value: object) -> list[bool]:
         # Legacy bitmask -> [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
         if not 0 <= value <= MAX_DAYS_BITMASK:
             raise ValueError(
-                f"Schedule daysOfWeek bitmask must be between 0 and {MAX_DAYS_BITMASK}, "
-                f"got {value!r}"
+                t(
+                    "schedule.schedule_daysofweek_bitmask_must_between",
+                    "Schedule daysOfWeek bitmask must be between 0 and {MAX_DAYS_BITMASK}, got {value!r}",
+                    MAX_DAYS_BITMASK=MAX_DAYS_BITMASK,
+                    value=value,
+                )
             )
         return [bool((value >> i) & 1) for i in range(7)]
     if isinstance(value, list) and len(value) == 7:
         return [coerce_schedule_day(day, i) for i, day in enumerate(value)]
-    raise ValueError(f"Schedule daysOfWeek must be a list of 7 values, got {value!r}")
+    raise ValueError(
+        t(
+            "schedule.schedule_daysofweek_must_list_values",
+            "Schedule daysOfWeek must be a list of 7 values, got {value!r}",
+            value=value,
+        )
+    )
 
 
 def coerce_schedule_flag(value: object, name: str) -> bool:
@@ -153,7 +186,10 @@ def coerce_schedule_flag(value: object, name: str) -> bool:
     flag = make_bool(value) if isinstance(value, (bool, int, str)) else None
     if flag is None:
         _LOGGER.debug(
-            "Schedule %s is not a recognizable flag (%s); treating it as off",
+            t(
+                "schedule.schedule_recognizable_flag_treating_as",
+                "Schedule %s is not a recognizable flag (%s); treating it as off",
+            ),
             name,
             sanitize_field(value),
         )
@@ -168,7 +204,13 @@ def require_schedule_field(data: dict, key: str) -> object:
         ValueError: If ``key`` is missing.
     """
     if key not in data:
-        raise ValueError(f"Schedule is missing required field {key!r}")
+        raise ValueError(
+            t(
+                "schedule.schedule_missing_required_field",
+                "Schedule is missing required field {key!r}",
+                key=key,
+            )
+        )
     return data[key]
 
 
@@ -191,9 +233,24 @@ def coerce_schedule_time(value: object, name: str, *, require_hour: bool = True)
             times, or the hour is absent and ``require_hour`` is set.
     """
     if not isinstance(value, dict):
-        raise ValueError(f"Schedule {name} must be an object, got {value!r}")
+        raise ValueError(
+            t(
+                "schedule.schedule_must_object_got",
+                "Schedule {name} must be an object, got {value!r}",
+                name=name,
+                value=value,
+            )
+        )
     if require_hour and FIELD_HOUR not in value:
-        raise ValueError(f"Schedule {name} must specify {FIELD_HOUR}, got {value!r}")
+        raise ValueError(
+            t(
+                "schedule.schedule_must_specify_got",
+                "Schedule {name} must specify {FIELD_HOUR}, got {value!r}",
+                name=name,
+                FIELD_HOUR=FIELD_HOUR,
+                value=value,
+            )
+        )
     hour = coerce_schedule_int(value.get(FIELD_HOUR, 0), f"{name} hour", 24)
     minute = coerce_schedule_int(value.get(FIELD_MINUTE, 0), f"{name} minute", 59)
     return hour, minute
@@ -235,17 +292,32 @@ def validate_schedule_entry(sched: dict) -> bool:
     try:
         # Check required fields exist
         if FIELD_INDEX not in sched:
-            _LOGGER.debug("Schedule entry missing index field: %s", sanitize_text(sched))
+            _LOGGER.debug(
+                t(
+                    "schedule.schedule_entry_missing_index_field",
+                    "Schedule entry missing index field: %s",
+                ),
+                sanitize_text(sched),
+            )
             return False
 
         if FIELD_DAYSOFWEEK not in sched:
-            _LOGGER.debug("Schedule entry missing daysOfWeek field: %s", sanitize_text(sched))
+            _LOGGER.debug(
+                t(
+                    "schedule.schedule_entry_missing_daysofweek_field",
+                    "Schedule entry missing daysOfWeek field: %s",
+                ),
+                sanitize_text(sched),
+            )
             return False
 
         # Validate daysOfWeek is a list of 7 elements
         if not isinstance(sched[FIELD_DAYSOFWEEK], list) or len(sched[FIELD_DAYSOFWEEK]) != 7:
             _LOGGER.debug(
-                "Schedule entry has invalid daysOfWeek format: %s",
+                t(
+                    "schedule.schedule_entry_has_invalid_daysofweek",
+                    "Schedule entry has invalid daysOfWeek format: %s",
+                ),
                 sanitize_text(sched[FIELD_DAYSOFWEEK]),
             )
             return False
@@ -255,17 +327,29 @@ def validate_schedule_entry(sched: dict) -> bool:
             in_start_key = FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX
             in_end_key = FIELD_INSIDE_PREFIX + FIELD_END_TIME_SUFFIX
             if in_start_key not in sched or in_end_key not in sched:
-                _LOGGER.debug("Schedule entry missing inside time fields: %s", sanitize_text(sched))
+                _LOGGER.debug(
+                    t(
+                        "schedule.schedule_entry_missing_inside_time",
+                        "Schedule entry missing inside time fields: %s",
+                    ),
+                    sanitize_text(sched),
+                )
                 return False
             if FIELD_HOUR not in sched[in_start_key] or FIELD_MINUTE not in sched[in_start_key]:
                 _LOGGER.debug(
-                    "Schedule entry has invalid inside start time: %s",
+                    t(
+                        "schedule.schedule_entry_has_invalid_inside",
+                        "Schedule entry has invalid inside start time: %s",
+                    ),
                     sanitize_text(sched[in_start_key]),
                 )
                 return False
             if FIELD_HOUR not in sched[in_end_key] or FIELD_MINUTE not in sched[in_end_key]:
                 _LOGGER.debug(
-                    "Schedule entry has invalid inside end time: %s",
+                    t(
+                        "schedule.schedule_entry_has_invalid_inside_1",
+                        "Schedule entry has invalid inside end time: %s",
+                    ),
                     sanitize_text(sched[in_end_key]),
                 )
                 return False
@@ -275,25 +359,39 @@ def validate_schedule_entry(sched: dict) -> bool:
             out_end_key = FIELD_OUTSIDE_PREFIX + FIELD_END_TIME_SUFFIX
             if out_start_key not in sched or out_end_key not in sched:
                 _LOGGER.debug(
-                    "Schedule entry missing outside time fields: %s", sanitize_text(sched)
+                    t(
+                        "schedule.schedule_entry_missing_outside_time",
+                        "Schedule entry missing outside time fields: %s",
+                    ),
+                    sanitize_text(sched),
                 )
                 return False
             if FIELD_HOUR not in sched[out_start_key] or FIELD_MINUTE not in sched[out_start_key]:
                 _LOGGER.debug(
-                    "Schedule entry has invalid outside start time: %s",
+                    t(
+                        "schedule.schedule_entry_has_invalid_outside",
+                        "Schedule entry has invalid outside start time: %s",
+                    ),
                     sanitize_text(sched[out_start_key]),
                 )
                 return False
             if FIELD_HOUR not in sched[out_end_key] or FIELD_MINUTE not in sched[out_end_key]:
                 _LOGGER.debug(
-                    "Schedule entry has invalid outside end time: %s",
+                    t(
+                        "schedule.schedule_entry_has_invalid_outside_1",
+                        "Schedule entry has invalid outside end time: %s",
+                    ),
                     sanitize_text(sched[out_end_key]),
                 )
                 return False
 
         return True
     except Exception as e:
-        _LOGGER.error("Error validating schedule entry: %s", e, exc_info=True)
+        _LOGGER.error(
+            t("schedule.error_validating_schedule_entry", "Error validating schedule entry: %s"),
+            e,
+            exc_info=True,
+        )
         return False
 
 
@@ -479,7 +577,13 @@ def build_set_schedule_message(schedule: dict[str, Any]) -> dict[str, Any]:
         ValueError: If the payload carries no ``index`` to address.
     """
     if FIELD_INDEX not in schedule:
-        raise ValueError(f"Schedule payload is missing required field {FIELD_INDEX!r}")
+        raise ValueError(
+            t(
+                "schedule.schedule_payload_missing_required_field",
+                "Schedule payload is missing required field {FIELD_INDEX!r}",
+                FIELD_INDEX=FIELD_INDEX,
+            )
+        )
     return {FIELD_INDEX: schedule[FIELD_INDEX], FIELD_SCHEDULE: schedule}
 
 
@@ -512,17 +616,38 @@ def _require_complete_entry(sched: dict, position: int) -> None:
         ValueError: With a clear message identifying the offending entry.
     """
     if not isinstance(sched, dict):
-        raise ValueError(f"Schedule entry {position} is not a dict: {sched!r}")
+        raise ValueError(
+            t(
+                "schedule.schedule_entry_dict",
+                "Schedule entry {position} is not a dict: {sched!r}",
+                position=position,
+                sched=sched,
+            )
+        )
 
     days = sched.get(FIELD_DAYSOFWEEK)
     if not isinstance(days, list) or len(days) != 7:
         raise ValueError(
-            f"Schedule entry {position} needs a 7-element {FIELD_DAYSOFWEEK!r} list: {sched!r}"
+            t(
+                "schedule.schedule_entry_needs_element_list",
+                "Schedule entry {position} needs a 7-element {FIELD_DAYSOFWEEK!r} list: {sched!r}",
+                position=position,
+                FIELD_DAYSOFWEEK=FIELD_DAYSOFWEEK,
+                sched=sched,
+            )
         )
 
     for flag in (FIELD_INSIDE, FIELD_OUTSIDE):
         if flag not in sched:
-            raise ValueError(f"Schedule entry {position} is missing {flag!r}: {sched!r}")
+            raise ValueError(
+                t(
+                    "schedule.schedule_entry_missing",
+                    "Schedule entry {position} is missing {flag!r}: {sched!r}",
+                    position=position,
+                    flag=flag,
+                    sched=sched,
+                )
+            )
 
     time_keys = (
         FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX,
@@ -538,8 +663,15 @@ def _require_complete_entry(sched: dict, position: int) -> None:
             or FIELD_MINUTE not in time_field
         ):
             raise ValueError(
-                f"Schedule entry {position} is missing time field {key!r} "
-                f"(expected a dict with {FIELD_HOUR!r}/{FIELD_MINUTE!r}): {sched!r}"
+                t(
+                    "schedule.schedule_entry_missing_time_field",
+                    "Schedule entry {position} is missing time field {key!r} (expected a dict with {FIELD_HOUR!r}/{FIELD_MINUTE!r}): {sched!r}",
+                    position=position,
+                    key=key,
+                    FIELD_HOUR=FIELD_HOUR,
+                    FIELD_MINUTE=FIELD_MINUTE,
+                    sched=sched,
+                )
             )
 
 
@@ -810,7 +942,10 @@ def compute_schedule_diff(
             index = coerce_schedule_int(entry.get(FIELD_INDEX), "index", MAX_SCHEDULE_INDEX)
         except ValueError as err:
             _LOGGER.warning(
-                "Ignoring a current schedule entry that has no usable index: %s",
+                t(
+                    "schedule.ignoring_current_schedule_entry_has",
+                    "Ignoring a current schedule entry that has no usable index: %s",
+                ),
                 sanitize_text(err),
             )
             continue

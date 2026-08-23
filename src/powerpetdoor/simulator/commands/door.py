@@ -8,6 +8,7 @@
 import asyncio
 from typing import TYPE_CHECKING
 
+from ...i18n import t
 from .base import ArgSpec, CommandResult, command
 
 if TYPE_CHECKING:
@@ -45,8 +46,22 @@ class DoorCommandsMixin:
         self.simulator.activate_sensor("inside", duration)
         if duration == 0:
             state = "activated" if self.simulator.state.inside_sensor_active else "deactivated"
-            return CommandResult(True, f"Inside sensor {state} (toggle)")
-        return CommandResult(True, f"Inside sensor activated for {duration}s")
+            return CommandResult(
+                True,
+                t(
+                    "simulator.commands.door.inside_sensor_toggle",
+                    "Inside sensor {state} (toggle)",
+                    state=state,
+                ),
+            )
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.door.inside_sensor_activated_s",
+                "Inside sensor activated for {duration}s",
+                duration=duration,
+            ),
+        )
 
     @command(
         "outside",
@@ -74,20 +89,36 @@ class DoorCommandsMixin:
         self.simulator.activate_sensor("outside", duration)
         if duration == 0:
             state = "activated" if self.simulator.state.outside_sensor_active else "deactivated"
-            return CommandResult(True, f"Outside sensor {state} (toggle)")
-        return CommandResult(True, f"Outside sensor activated for {duration}s")
+            return CommandResult(
+                True,
+                t(
+                    "simulator.commands.door.outside_sensor_toggle",
+                    "Outside sensor {state} (toggle)",
+                    state=state,
+                ),
+            )
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.door.outside_sensor_activated_s",
+                "Outside sensor activated for {duration}s",
+                duration=duration,
+            ),
+        )
 
     @command("close", ["c"], "Close the door", category="door")
     def close(self) -> CommandResult:
         """Close the door."""
         asyncio.create_task(self.simulator.close_door())
-        return CommandResult(True, "Closing door")
+        return CommandResult(True, t("simulator.commands.door.closing_door", "Closing door"))
 
     @command("hold", ["h", "open"], "Open and hold the door", category="door")
     def hold(self) -> CommandResult:
         """Open the door and hold it open."""
         asyncio.create_task(self.simulator.open_door(hold=True))
-        return CommandResult(True, "Opening and holding")
+        return CommandResult(
+            True, t("simulator.commands.door.opening_holding", "Opening and holding")
+        )
 
     @command("cycle", ["y"], "Full door cycle (like pressing door button)", category="door")
     def cycle(self) -> CommandResult:
@@ -98,4 +129,6 @@ class DoorCommandsMixin:
         Unlike sensor triggers, this bypasses sensor enable checks.
         """
         asyncio.create_task(self.simulator.open_door(hold=False))
-        return CommandResult(True, "Starting door cycle")
+        return CommandResult(
+            True, t("simulator.commands.door.starting_door_cycle", "Starting door cycle")
+        )

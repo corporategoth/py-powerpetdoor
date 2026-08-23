@@ -238,5 +238,11 @@ class TestThePep561Marker:
         )
         package_data = pyproject["tool"]["setuptools"]["package-data"]
 
-        assert "powerpetdoor" not in package_data
-        assert package_data == {"powerpetdoor.simulator": ["scripts/*.yaml", "scripts/*.yml"]}
+        assert "py.typed" not in package_data.get("powerpetdoor", [])
+        assert package_data == {
+            "powerpetdoor.simulator": ["scripts/*.yaml", "scripts/*.yml"],
+            # Locale files, unlike py.typed, are not shipped unless declared:
+            # without this a wheel installs with no translations at all and
+            # every `t()` silently renders English.
+            "powerpetdoor": ["locales/*.json"],
+        }

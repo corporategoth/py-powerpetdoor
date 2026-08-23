@@ -15,6 +15,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TypeVar, cast
 
+from ...i18n import t
+
 #: Preserves the decorated function's exact signature through @command/@subcommand
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -75,7 +77,9 @@ class BoolToggleCommandMixin:
             if func:
                 func(new_val)
 
-        return CommandResult(True, f"{name}: {state}")
+        return CommandResult(
+            True, t("simulator.commands.base.text", "{name}: {state}", name=name, state=state)
+        )
 
 
 @dataclass
@@ -244,7 +248,9 @@ def _parse_time_str(time_str: str) -> tuple[int, int]:
     hour = int(parts[0])
     minute = int(parts[1]) if len(parts) > 1 else 0
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        raise ValueError(f"Invalid time: {time_str}")
+        raise ValueError(
+            t("simulator.commands.base.invalid_time", "Invalid time: {time_str}", time_str=time_str)
+        )
     return hour, minute
 
 
@@ -275,7 +281,12 @@ def _parse_days_str(days_str: str) -> list[bool]:
             days[DAY_NAMES.index(day)] = True
         else:
             raise ValueError(
-                f"Unknown day: {day}. Use: {', '.join(DAY_NAMES)} or all/weekdays/weekends"
+                t(
+                    "simulator.commands.base.unknown_day_use_all_weekdays",
+                    "Unknown day: {day}. Use: {arg0} or all/weekdays/weekends",
+                    day=day,
+                    arg0=", ".join(DAY_NAMES),
+                )
             )
     return days
 
@@ -300,18 +311,41 @@ def parse_args(
     if len(parts) > len(arg_specs):
         extra = " ".join(parts[len(arg_specs) :])
         return [], CommandResult(
-            False, f"Unexpected argument(s): {extra}\nUsage: {cmd_str} {usage}"
+            False,
+            t(
+                "simulator.commands.base.unexpected_argument_s_usage",
+                "Unexpected argument(s): {extra}\nUsage: {cmd_str} {usage}",
+                extra=extra,
+                cmd_str=cmd_str,
+                usage=usage,
+            ),
         )
 
     for i, spec in enumerate(arg_specs):
         if i < len(parts):
             value, error = parse_arg(parts[i], spec)
             if error:
-                return [], CommandResult(False, f"{error}\nUsage: {cmd_str} {usage}")
+                return [], CommandResult(
+                    False,
+                    t(
+                        "simulator.commands.base.usage",
+                        "{error}\nUsage: {cmd_str} {usage}",
+                        error=error,
+                        cmd_str=cmd_str,
+                        usage=usage,
+                    ),
+                )
             parsed.append(value)
         elif spec.required:
             return [], CommandResult(
-                False, f"Missing required argument: {spec.name}\nUsage: {cmd_str} {usage}"
+                False,
+                t(
+                    "simulator.commands.base.missing_required_argument_usage",
+                    "Missing required argument: {name}\nUsage: {cmd_str} {usage}",
+                    name=spec.name,
+                    cmd_str=cmd_str,
+                    usage=usage,
+                ),
             )
         else:
             parsed.append(spec.default)

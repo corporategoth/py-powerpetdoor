@@ -132,6 +132,7 @@ from .const import (
     FIELD_TOTAL_OPEN_CYCLES,
     TIME_FORMAT,
 )
+from .i18n import t
 from .sanitize import MAX_LOGGED_LENGTH, sanitize_field, sanitize_text
 from .schedule import (
     MAX_SCHEDULE_INDEX,
@@ -265,7 +266,10 @@ def _keep_str(value: Any, cached: str, field_name: str) -> str:
 def _log_rejected(field_name: str, value: Any, expected: str) -> None:
     """Record a device value the facade refused to cache."""
     logger.debug(
-        "Ignoring %s from device for %s (expected %s); keeping the cached value",
+        t(
+            "door.ignoring_device_expected_keeping_cached",
+            "Ignoring %s from device for %s (expected %s); keeping the cached value",
+        ),
         sanitize_text(value, MAX_LOGGED_LENGTH),
         field_name,
         expected,
@@ -301,7 +305,8 @@ class DoorStatus(Enum):
             if status.value == value:
                 return status
         logger.warning(
-            "Unknown door status from device: %s", sanitize_field(value, MAX_LOGGED_LENGTH)
+            t("door.unknown_door_status_device", "Unknown door status from device: %s"),
+            sanitize_field(value, MAX_LOGGED_LENGTH),
         )
         return cls.UNKNOWN
 
@@ -442,7 +447,13 @@ class Schedule:
                 a field is not coercible / out of its protocol range.
         """
         if not isinstance(data, dict):
-            raise ValueError(f"Schedule must be an object, got {data!r}")
+            raise ValueError(
+                t(
+                    "door.schedule_must_object_got",
+                    "Schedule must be an object, got {data!r}",
+                    data=data,
+                )
+            )
 
         # Identity and day mask first, so a bad index reports the bad index
         # rather than whatever the time block happens to complain about.
@@ -704,7 +715,13 @@ class PowerPetDoor:
                 safely be retried.
         """
         if self.connected:
-            logger.warning("Ignoring connect(): already connected to %s", self._host)
+            logger.warning(
+                t(
+                    "door.ignoring_connect_already_connected",
+                    "Ignoring connect(): already connected to %s",
+                ),
+                self._host,
+            )
             return
 
         # Re-arm the client in case disconnect() was called earlier.
@@ -772,7 +789,12 @@ class PowerPetDoor:
             self._client.del_listener("_door_facade")
             self._client.del_handlers("_door_facade")
             raise ConnectionError(
-                f"Failed to connect to Power Pet Door at {self._host}:{self._port}"
+                t(
+                    "door.failed_connect_power_pet_door",
+                    "Failed to connect to Power Pet Door at {host}:{port}",
+                    host=self._host,
+                    port=self._port,
+                )
             ) from None
 
         await self.refresh()
@@ -1198,7 +1220,11 @@ class PowerPetDoor:
             return datetime.strptime(self._device_time, TIME_FORMAT)
         except ValueError:
             logger.debug(
-                "Device reported an unparseable time: %s", sanitize_text(self._device_time)
+                t(
+                    "door.device_reported_unparseable_time",
+                    "Device reported an unparseable time: %s",
+                ),
+                sanitize_text(self._device_time),
             )
             return None
 
@@ -1410,7 +1436,10 @@ class PowerPetDoor:
         # rate-limits between messages.
         if not isinstance(indices, list):
             logger.warning(
-                "Device sent a non-list schedule index list: %s",
+                t(
+                    "door.device_sent_non_list_schedule",
+                    "Device sent a non-list schedule index list: %s",
+                ),
                 sanitize_text(indices, MAX_LOGGED_LENGTH),
             )
             self._schedules = []
@@ -1433,9 +1462,15 @@ class PowerPetDoor:
                 # %s, not %d: the index is only an int if the device says
                 # so, and a string index turned this warning into a
                 # logging-internal formatting error on stderr.
-                logger.warning("Timeout fetching schedule %s", sanitize_text(idx))
+                logger.warning(
+                    t("door.timeout_fetching_schedule", "Timeout fetching schedule %s"),
+                    sanitize_text(idx),
+                )
             except Exception:
-                logger.exception("Error fetching schedule %s", sanitize_text(idx))
+                logger.exception(
+                    t("door.error_fetching_schedule", "Error fetching schedule %s"),
+                    sanitize_text(idx),
+                )
 
         # Sorted for the same reason _on_schedule_update sorts: the public
         # `schedules` property must not be ordered by whichever code path
@@ -1488,7 +1523,9 @@ class PowerPetDoor:
         """
         for name, result in zip(names, results, strict=True):
             if isinstance(result, BaseException):
-                logger.warning("Refresh step %s failed: %r", name, result)
+                logger.warning(
+                    t("door.refresh_step_failed", "Refresh step %s failed: %r"), name, result
+                )
 
     async def refresh(self, *, timeout: float | None = None) -> None:
         """Refresh all cached state from the door.
@@ -1595,7 +1632,10 @@ class PowerPetDoor:
             # whatever the device sent; the facade must not cache a value
             # its three public properties would then choke on.
             logger.warning(
-                "Ignoring non-mapping hardware info: %s",
+                t(
+                    "door.ignoring_non_mapping_hardware_info",
+                    "Ignoring non-mapping hardware info: %s",
+                ),
                 sanitize_text(result, MAX_LOGGED_LENGTH),
             )
         return self._hw_info.copy()
@@ -1613,7 +1653,7 @@ class PowerPetDoor:
                 try:
                     callback(new_status)
                 except Exception:
-                    logger.exception("Error in status callback")
+                    logger.exception(t("door.error_status_callback", "Error in status callback"))
 
     def _on_settings(self, settings: dict[str, Any]) -> None:
         """Handle settings update from client.
@@ -1662,7 +1702,7 @@ class PowerPetDoor:
             try:
                 callback(settings)
             except Exception:
-                logger.exception("Error in settings callback")
+                logger.exception(t("door.error_settings_callback", "Error in settings callback"))
 
     # Sensor listeners are invoked by the client as callback(field, value);
     # the cached state is left untouched unless the value is a real bool
@@ -1783,7 +1823,11 @@ class PowerPetDoor:
         """
         if not isinstance(data, dict):
             logger.warning(
-                "Ignoring non-mapping hardware info: %s", sanitize_field(data, MAX_LOGGED_LENGTH)
+                t(
+                    "door.ignoring_non_mapping_hardware_info",
+                    "Ignoring non-mapping hardware info: %s",
+                ),
+                sanitize_field(data, MAX_LOGGED_LENGTH),
             )
             return
         self._hw_info = data
@@ -1830,12 +1874,17 @@ class PowerPetDoor:
             try:
                 await self.refresh()
             except Exception:
-                logger.exception("Error refreshing state after reconnect")
+                logger.exception(
+                    t(
+                        "door.error_refreshing_state_after_reconnect",
+                        "Error refreshing state after reconnect",
+                    )
+                )
         for callback in self._connect_callbacks:
             try:
                 callback()
             except Exception:
-                logger.exception("Error in connect callback")
+                logger.exception(t("door.error_connect_callback", "Error in connect callback"))
 
     async def _on_disconnect(self) -> None:
         """Handle connection lost."""
@@ -1845,7 +1894,9 @@ class PowerPetDoor:
             try:
                 callback()
             except Exception:
-                logger.exception("Error in disconnect callback")
+                logger.exception(
+                    t("door.error_disconnect_callback", "Error in disconnect callback")
+                )
 
     def _on_ping(self, latency_ms: int) -> None:
         """Handle ping response with latency measurement.
@@ -1869,7 +1920,10 @@ class PowerPetDoor:
             # `err` embeds `{value!r}` of the untrusted payload, so it is
             # length-capped before it reaches the log.
             logger.warning(
-                "Ignoring malformed schedule update from device: %s",
+                t(
+                    "door.ignoring_malformed_schedule_update_device",
+                    "Ignoring malformed schedule update from device: %s",
+                ),
                 sanitize_field(err, MAX_LOGGED_LENGTH),
             )
             return
@@ -1897,4 +1951,4 @@ class PowerPetDoor:
             try:
                 callback(schedules_copy)
             except Exception:
-                logger.exception("Error in schedule callback")
+                logger.exception(t("door.error_schedule_callback", "Error in schedule callback"))

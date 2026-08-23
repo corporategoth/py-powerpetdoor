@@ -10,6 +10,7 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
+from ...i18n import t
 from .base import (
     ArgSpec,
     CommandInfo,
@@ -140,8 +141,12 @@ class CommandHandler(
                 # Find the root command
                 if not parent_path or parent_path[0] not in _command_registry:
                     logger.warning(
-                        f"Parent command '{parent_path[0] if parent_path else '?'}' "
-                        f"not found for subcommand '{sub_info.name}'"
+                        t(
+                            "simulator.commands.handler.parent_command_found_subcommand",
+                            "Parent command '{arg0}' not found for subcommand '{name}'",
+                            arg0=parent_path[0] if parent_path else "?",
+                            name=sub_info.name,
+                        )
                     )
                     continue
 
@@ -151,8 +156,13 @@ class CommandHandler(
                 for i, part in enumerate(parent_path[1:], 1):
                     if part not in parent_info.subcommands:
                         logger.warning(
-                            f"Subcommand '{part}' not found in path "
-                            f"{parent_path[:i]} for '{sub_info.name}'"
+                            t(
+                                "simulator.commands.handler.subcommand_found_path",
+                                "Subcommand '{part}' not found in path {arg0} for '{name}'",
+                                part=part,
+                                arg0=parent_path[:i],
+                                name=sub_info.name,
+                            )
                         )
                         path_broken = True
                         break
@@ -268,29 +278,59 @@ class CommandHandler(
         _command_registry = get_command_registry()
 
         if not command_str:
-            return CommandResult(False, "Empty command")
+            return CommandResult(
+                False, t("simulator.commands.handler.empty_command", "Empty command")
+            )
 
         parts = command_str.split()
         cmd = parts[0].lower()
 
         # Look up command in registry
         if cmd not in _command_registry:
-            return CommandResult(False, f"Unknown command: {cmd}. Type 'help' for commands.")
+            return CommandResult(
+                False,
+                t(
+                    "simulator.commands.handler.unknown_command_type_help_commands",
+                    "Unknown command: {cmd}. Type 'help' for commands.",
+                    cmd=cmd,
+                ),
+            )
 
         # Check for interactive-only commands (hide them when not in interactive mode)
         cmd_info = _command_registry[cmd]
         if cmd_info.interactive_only and not self._interactive_mode:
-            return CommandResult(False, f"Unknown command: {cmd}. Type 'help' for commands.")
+            return CommandResult(
+                False,
+                t(
+                    "simulator.commands.handler.unknown_command_type_help_commands",
+                    "Unknown command: {cmd}. Type 'help' for commands.",
+                    cmd=cmd,
+                ),
+            )
 
         # Reject local_only commands when running as daemon control port
         # In CLI mode (_cli_mode=True) or interactive mode, these are handled normally
         # Daemon control port has _interactive_mode=False and _cli_mode=False
         if cmd_info.local_only and not self._cli_mode and not self._interactive_mode:
-            return CommandResult(False, f"Unknown command: {cmd}. Type 'help' for commands.")
+            return CommandResult(
+                False,
+                t(
+                    "simulator.commands.handler.unknown_command_type_help_commands",
+                    "Unknown command: {cmd}. Type 'help' for commands.",
+                    cmd=cmd,
+                ),
+            )
 
         # Hide history command when prompt_toolkit is not available
         if cmd in ("history", "hist") and not self._is_history_available():
-            return CommandResult(False, f"Unknown command: {cmd}. Type 'help' for commands.")
+            return CommandResult(
+                False,
+                t(
+                    "simulator.commands.handler.unknown_command_type_help_commands",
+                    "Unknown command: {cmd}. Type 'help' for commands.",
+                    cmd=cmd,
+                ),
+            )
 
         info: SubcommandInfo = _command_registry[cmd]
         cmd_path = [_command_registry[cmd].name]  # Track command path for help
@@ -329,7 +369,13 @@ class CommandHandler(
                 cmd_str = " ".join(cmd_path)
                 return CommandResult(
                     False,
-                    f"Unknown {cmd_str} subcommand: {subcmd}\nAvailable: {', '.join(subnames)}",
+                    t(
+                        "simulator.commands.handler.unknown_subcommand_available",
+                        "Unknown {cmd_str} subcommand: {subcmd}\nAvailable: {arg0}",
+                        cmd_str=cmd_str,
+                        subcmd=subcmd,
+                        arg0=", ".join(subnames),
+                    ),
                 )
 
         # Build remaining argument parts
@@ -337,7 +383,14 @@ class CommandHandler(
 
         # Get the handler
         if info.handler is None:
-            return CommandResult(False, f"No handler for: {' '.join(parts[:part_idx])}")
+            return CommandResult(
+                False,
+                t(
+                    "simulator.commands.handler.handler",
+                    "No handler for: {arg0}",
+                    arg0=" ".join(parts[:part_idx]),
+                ),
+            )
 
         handler = getattr(self, info.handler.__name__)
 
@@ -367,12 +420,23 @@ class CommandHandler(
                 if remaining_parts[0].lower() in ("help", "?"):
                     cmd_str = " ".join(cmd_path)
                     return CommandResult(
-                        True, f"{cmd_str}: {info.description or 'No help available.'}"
+                        True,
+                        t(
+                            "simulator.commands.handler.text",
+                            "{cmd_str}: {arg0}",
+                            cmd_str=cmd_str,
+                            arg0=info.description or "No help available.",
+                        ),
                     )
                 cmd_str = " ".join(cmd_path)
                 return CommandResult(
                     False,
-                    f"Unexpected argument(s): {' '.join(remaining_parts)}\nUsage: {cmd_str}",
+                    t(
+                        "simulator.commands.handler.unexpected_argument_s_usage",
+                        "Unexpected argument(s): {arg0}\nUsage: {cmd_str}",
+                        arg0=" ".join(remaining_parts),
+                        cmd_str=cmd_str,
+                    ),
                 )
             # Call handler with no arguments
             try:

@@ -9,6 +9,7 @@ import math
 import random
 from typing import TYPE_CHECKING
 
+from ...i18n import t
 from ...tz_utils import get_available_timezones
 from .base import (
     ArgSpec,
@@ -151,13 +152,34 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
         programmatic callers of the command mixin.
         """
         if seconds is None:
-            return CommandResult(True, f"Hold time: {self.simulator.state.hold_time}s")
+            return CommandResult(
+                True,
+                t(
+                    "simulator.commands.settings.hold_time_s",
+                    "Hold time: {hold_time}s",
+                    hold_time=self.simulator.state.hold_time,
+                ),
+            )
         if not math.isfinite(seconds):
-            return CommandResult(False, f"Hold time must be a finite number, got {seconds}")
+            return CommandResult(
+                False,
+                t(
+                    "simulator.commands.settings.hold_time_must_finite_number",
+                    "Hold time must be a finite number, got {seconds}",
+                    seconds=seconds,
+                ),
+            )
         self.simulator.state.hold_time = seconds
         # Broadcast hold time change to connected PPD clients
         self.simulator.broadcast_hold_time()
-        return CommandResult(True, f"Hold time set to {seconds}s")
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.settings.hold_time_set_s",
+                "Hold time set to {seconds}s",
+                seconds=seconds,
+            ),
+        )
 
     @command(
         "battery",
@@ -179,17 +201,28 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
     def battery(self, percent: int | None = None) -> CommandResult:
         """Set or show battery level."""
         if percent is None:
-            return CommandResult(True, f"Battery: {self.simulator.state.battery_percent}%")
+            return CommandResult(
+                True,
+                t(
+                    "simulator.commands.settings.battery_2",
+                    "Battery: {battery_percent}%",
+                    battery_percent=self.simulator.state.battery_percent,
+                ),
+            )
         pct = max(0, min(100, percent))
         self.simulator.set_battery(pct)
-        return CommandResult(True, f"Battery set to {pct}%")
+        return CommandResult(
+            True, t("simulator.commands.settings.battery_set", "Battery set to {pct}%", pct=pct)
+        )
 
     @subcommand("battery", "random", [], "Set a random battery level (10-100)")
     def battery_random(self) -> CommandResult:
         """Set a random battery level."""
         pct = random.randint(10, 100)
         self.simulator.set_battery(pct)
-        return CommandResult(True, f"Battery set to {pct}%")
+        return CommandResult(
+            True, t("simulator.commands.settings.battery_set", "Battery set to {pct}%", pct=pct)
+        )
 
     @command(
         "ac",
@@ -213,19 +246,25 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
         present = not self.simulator.state.ac_present
         self.simulator.set_ac_present(present)
         state = "connected" if present else "disconnected"
-        return CommandResult(True, f"AC set to {state}")
+        return CommandResult(
+            True, t("simulator.commands.settings.ac_set", "AC set to {state}", state=state)
+        )
 
     @subcommand("ac", "connect", ["c"], "Connect AC power")
     def ac_connect(self) -> CommandResult:
         """Connect AC power."""
         self.simulator.set_ac_present(True)
-        return CommandResult(True, "AC set to connected")
+        return CommandResult(
+            True, t("simulator.commands.settings.ac_set_connected", "AC set to connected")
+        )
 
     @subcommand("ac", "disconnect", ["d"], "Disconnect AC power")
     def ac_disconnect(self) -> CommandResult:
         """Disconnect AC power."""
         self.simulator.set_ac_present(False)
-        return CommandResult(True, "AC set to disconnected")
+        return CommandResult(
+            True, t("simulator.commands.settings.ac_set_disconnected", "AC set to disconnected")
+        )
 
     @subcommand("ac", "toggle", ["t"], "Toggle AC connection")
     def ac_toggle(self) -> CommandResult:
@@ -233,7 +272,9 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
         present = not self.simulator.state.ac_present
         self.simulator.set_ac_present(present)
         state = "connected" if present else "disconnected"
-        return CommandResult(True, f"AC set to {state}")
+        return CommandResult(
+            True, t("simulator.commands.settings.ac_set", "AC set to {state}", state=state)
+        )
 
     @command(
         "battery_present",
@@ -258,7 +299,9 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
             present = value
         self.simulator.set_battery_present(present)
         state = "installed" if present else "removed"
-        return CommandResult(True, f"Battery: {state}")
+        return CommandResult(
+            True, t("simulator.commands.settings.battery", "Battery: {state}", state=state)
+        )
 
     @subcommand("battery_present", "toggle", ["t"], "Toggle battery presence")
     def battery_present_toggle(self) -> CommandResult:
@@ -266,7 +309,9 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
         present = not self.simulator.state.battery_present
         self.simulator.set_battery_present(present)
         state = "installed" if present else "removed"
-        return CommandResult(True, f"Battery: {state}")
+        return CommandResult(
+            True, t("simulator.commands.settings.battery", "Battery: {state}", state=state)
+        )
 
     @command(
         "charge_rate",
@@ -288,11 +333,27 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
         if rate is not None:
             self.simulator.set_charge_rate(rate)
             if rate == 0:
-                return CommandResult(True, "Charging disabled")
-            return CommandResult(True, f"Charge rate: {rate}%/min")
+                return CommandResult(
+                    True, t("simulator.commands.settings.charging_disabled", "Charging disabled")
+                )
+            return CommandResult(
+                True,
+                t(
+                    "simulator.commands.settings.charge_rate_min",
+                    "Charge rate: {rate}%/min",
+                    rate=rate,
+                ),
+            )
         else:
             current_rate = self.simulator.state.battery_config.charge_rate
-            return CommandResult(True, f"Charge rate: {current_rate}%/min")
+            return CommandResult(
+                True,
+                t(
+                    "simulator.commands.settings.charge_rate_min_1",
+                    "Charge rate: {current_rate}%/min",
+                    current_rate=current_rate,
+                ),
+            )
 
     @command(
         "discharge_rate",
@@ -314,11 +375,28 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
         if rate is not None:
             self.simulator.set_discharge_rate(rate)
             if rate == 0:
-                return CommandResult(True, "Discharging disabled")
-            return CommandResult(True, f"Discharge rate: {rate}%/min")
+                return CommandResult(
+                    True,
+                    t("simulator.commands.settings.discharging_disabled", "Discharging disabled"),
+                )
+            return CommandResult(
+                True,
+                t(
+                    "simulator.commands.settings.discharge_rate_min",
+                    "Discharge rate: {rate}%/min",
+                    rate=rate,
+                ),
+            )
         else:
             current_rate = self.simulator.state.battery_config.discharge_rate
-            return CommandResult(True, f"Discharge rate: {current_rate}%/min")
+            return CommandResult(
+                True,
+                t(
+                    "simulator.commands.settings.discharge_rate_min_1",
+                    "Discharge rate: {current_rate}%/min",
+                    current_rate=current_rate,
+                ),
+            )
 
     @command(
         "timezone",
@@ -357,21 +435,41 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
                 posix = get_posix_tz_string(current)
                 if posix:
                     display = f"{current} ({posix})"
-            return CommandResult(True, f"Timezone: {display}")
+            return CommandResult(
+                True,
+                t("simulator.commands.settings.timezone", "Timezone: {display}", display=display),
+            )
 
         # Validate and set timezone
         # Check if it's an IANA timezone
         if "/" in tz or tz in ("UTC", "GMT"):
             available = get_available_timezones()
             if available and tz not in available:
-                return CommandResult(False, f"Unknown timezone: {tz}")
+                return CommandResult(
+                    False,
+                    t(
+                        "simulator.commands.settings.unknown_timezone",
+                        "Unknown timezone: {tz}",
+                        tz=tz,
+                    ),
+                )
             self.simulator.state.timezone = tz
             # Broadcast timezone change to connected PPD clients
             self.simulator.broadcast_timezone()
             posix = get_posix_tz_string(tz) if is_cache_initialized() else None
             if posix:
-                return CommandResult(True, f"Timezone set to {tz} ({posix})")
-            return CommandResult(True, f"Timezone set to {tz}")
+                return CommandResult(
+                    True,
+                    t(
+                        "simulator.commands.settings.timezone_set_2",
+                        "Timezone set to {tz} ({posix})",
+                        tz=tz,
+                        posix=posix,
+                    ),
+                )
+            return CommandResult(
+                True, t("simulator.commands.settings.timezone_set", "Timezone set to {tz}", tz=tz)
+            )
 
         # Try to parse as POSIX TZ string
         parsed = parse_posix_tz_string(tz)
@@ -380,10 +478,15 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
             self.simulator.state.timezone = tz
             # Broadcast timezone change to connected PPD clients
             self.simulator.broadcast_timezone()
-            return CommandResult(True, f"Timezone set to {tz}")
+            return CommandResult(
+                True, t("simulator.commands.settings.timezone_set", "Timezone set to {tz}", tz=tz)
+            )
 
         return CommandResult(
             False,
-            f"Invalid timezone: {tz}. Use IANA name (e.g., 'America/New_York') "
-            "or POSIX string (e.g., 'EST5EDT,M3.2.0,M11.1.0')",
+            t(
+                "simulator.commands.settings.invalid_timezone_use_iana_name",
+                "Invalid timezone: {tz}. Use IANA name (e.g., 'America/New_York') or POSIX string (e.g., 'EST5EDT,M3.2.0,M11.1.0')",
+                tz=tz,
+            ),
         )

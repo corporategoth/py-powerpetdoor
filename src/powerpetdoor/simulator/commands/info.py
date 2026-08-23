@@ -8,6 +8,7 @@
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from ...i18n import t
 from .base import (
     ArgSpec,
     CommandInfo,
@@ -235,7 +236,9 @@ class InfoCommandsMixin:
     def _require_clients(self) -> CommandResult | None:
         """Check if clients are connected. Returns error result if not."""
         if not self.simulator.protocols:
-            return CommandResult(False, "No clients connected")
+            return CommandResult(
+                False, t("simulator.commands.info.clients_connected", "No clients connected")
+            )
         return None
 
     @command("broadcast", ["bc"], "Broadcast data to connected clients", category="info")
@@ -251,7 +254,14 @@ class InfoCommandsMixin:
         if err := self._require_clients():
             return err
         self.simulator._broadcast_door_status()
-        return CommandResult(True, f"Broadcast status: {self.simulator.state.door_status}")
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.info.broadcast_status",
+                "Broadcast status: {door_status}",
+                door_status=self.simulator.state.door_status,
+            ),
+        )
 
     @subcommand("broadcast", "settings", [], "Broadcast all settings")
     def broadcast_settings(self) -> CommandResult:
@@ -259,7 +269,9 @@ class InfoCommandsMixin:
         if err := self._require_clients():
             return err
         self.simulator.broadcast_settings()
-        return CommandResult(True, "Broadcast settings")
+        return CommandResult(
+            True, t("simulator.commands.info.broadcast_settings", "Broadcast settings")
+        )
 
     @subcommand("broadcast", "battery", [], "Broadcast battery status")
     def broadcast_battery(self) -> CommandResult:
@@ -269,7 +281,15 @@ class InfoCommandsMixin:
         self.simulator._broadcast_battery_status()
         pct = self.simulator.state.battery_percent
         ac = "AC" if self.simulator.state.ac_present else "no AC"
-        return CommandResult(True, f"Broadcast battery: {pct}% ({ac})")
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.info.broadcast_battery",
+                "Broadcast battery: {pct}% ({ac})",
+                pct=pct,
+                ac=ac,
+            ),
+        )
 
     @subcommand("broadcast", "hwinfo", [], "Broadcast hardware info")
     def broadcast_hwinfo(self) -> CommandResult:
@@ -280,8 +300,15 @@ class InfoCommandsMixin:
         s = self.simulator.state
         return CommandResult(
             True,
-            f"Broadcast hwinfo: fw {s.fw_major}.{s.fw_minor}.{s.fw_patch}, "
-            f"hw {s.hw_ver} rev {s.hw_rev}",
+            t(
+                "simulator.commands.info.broadcast_hwinfo_fw_hw_rev",
+                "Broadcast hwinfo: fw {fw_major}.{fw_minor}.{fw_patch}, hw {hw_ver} rev {hw_rev}",
+                fw_major=s.fw_major,
+                fw_minor=s.fw_minor,
+                fw_patch=s.fw_patch,
+                hw_ver=s.hw_ver,
+                hw_rev=s.hw_rev,
+            ),
         )
 
     @subcommand("broadcast", "stats", [], "Broadcast door statistics")
@@ -293,7 +320,12 @@ class InfoCommandsMixin:
         s = self.simulator.state
         return CommandResult(
             True,
-            f"Broadcast stats: {s.total_open_cycles} cycles, {s.total_auto_retracts} retracts",
+            t(
+                "simulator.commands.info.broadcast_stats_cycles_retracts",
+                "Broadcast stats: {total_open_cycles} cycles, {total_auto_retracts} retracts",
+                total_open_cycles=s.total_open_cycles,
+                total_auto_retracts=s.total_auto_retracts,
+            ),
         )
 
     @subcommand("broadcast", "schedules", [], "Broadcast schedule list")
@@ -303,7 +335,14 @@ class InfoCommandsMixin:
             return err
         self.simulator.broadcast_schedules()
         count = len(self.simulator.state.schedules)
-        return CommandResult(True, f"Broadcast schedules: {count} schedule(s)")
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.info.broadcast_schedules_schedule_s",
+                "Broadcast schedules: {count} schedule(s)",
+                count=count,
+            ),
+        )
 
     @subcommand("broadcast", "notifications", [], "Broadcast notification settings")
     def broadcast_notifications(self) -> CommandResult:
@@ -311,7 +350,9 @@ class InfoCommandsMixin:
         if err := self._require_clients():
             return err
         self.simulator.broadcast_notifications()
-        return CommandResult(True, "Broadcast notifications")
+        return CommandResult(
+            True, t("simulator.commands.info.broadcast_notifications", "Broadcast notifications")
+        )
 
     @subcommand("broadcast", "all", [], "Broadcast everything")
     def broadcast_all(self) -> CommandResult:
@@ -319,7 +360,9 @@ class InfoCommandsMixin:
         if err := self._require_clients():
             return err
         self.simulator.broadcast_all()
-        return CommandResult(True, "Broadcast all data")
+        return CommandResult(
+            True, t("simulator.commands.info.broadcast_all_data", "Broadcast all data")
+        )
 
     @command(
         "history",

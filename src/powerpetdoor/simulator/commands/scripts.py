@@ -11,6 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
+from ...i18n import t
 from ..scripting import (
     describe_out_of_directory_remedy,
     describe_script_argument,
@@ -229,8 +230,10 @@ class ScriptsCommandsMixin:
         """Load a script by bare name only (no paths, no traversal)."""
         if "/" in script_ref or "\\" in script_ref or script_ref.startswith("."):
             raise ValueError(
-                "Script paths are not allowed over the control channel; "
-                "use a bare script name (see 'list')"
+                t(
+                    "simulator.commands.scripts.script_paths_allowed_over_control",
+                    "Script paths are not allowed over the control channel; use a bare script name (see 'list')",
+                )
             )
         return self._load_script_by_name(script_ref)
 
@@ -255,8 +258,13 @@ class ScriptsCommandsMixin:
                 # Never follow a resolved path out of the base dir.
                 if script_escapes_directory(candidate, base):
                     raise ValueError(
-                        f"Script '{name}' resolves outside {self._scripts_dir} and cannot be "
-                        f"run by name; {describe_out_of_directory_remedy()}"
+                        t(
+                            "simulator.commands.scripts.script_resolves_outside_cannot_run",
+                            "Script '{name}' resolves outside {scripts_dir} and cannot be run by name; {arg0}",
+                            name=name,
+                            scripts_dir=self._scripts_dir,
+                            arg0=describe_out_of_directory_remedy(),
+                        )
                     )
                 return self._Script.from_file(candidate.resolve())
         return self._get_builtin_script(name)
@@ -343,25 +351,45 @@ class ScriptsCommandsMixin:
             dropped = self.script_queue.clear()
         if status.running is None:
             if dropped:
-                return CommandResult(True, f"Dropped {len(dropped)} queued script(s)")
+                return CommandResult(
+                    True,
+                    t(
+                        "simulator.commands.scripts.dropped_queued_script_s",
+                        "Dropped {arg0} queued script(s)",
+                        arg0=len(dropped),
+                    ),
+                )
             if scope == STOP_ALL_KEYWORD:
                 # "leave nothing running or queued" is already true, so a
                 # CI wrapper doing `ctl stop all || fail` must not see a
                 # failure for having nothing to do.
-                return CommandResult(True, "Nothing running or queued")
+                return CommandResult(
+                    True,
+                    t(
+                        "simulator.commands.scripts.nothing_running_queued",
+                        "Nothing running or queued",
+                    ),
+                )
             if status.queued:
                 # A claimed-but-not-started run: something *is* pending
                 # even though nothing is running, so the flat "No script is
                 # running" was wrong and left the operator polling `list`.
                 return CommandResult(
                     False,
-                    f"No script is running; {status.queued} queued "
-                    f"(use 'stop all' to discard them)",
+                    t(
+                        "simulator.commands.scripts.script_running_queued_use_stop",
+                        "No script is running; {queued} queued (use 'stop all' to discard them)",
+                        queued=status.queued,
+                    ),
                 )
             # `stop` used to be an alias for `shutdown`, so muscle memory is
             # the likeliest reason it lands on an idle simulator.
             return CommandResult(
-                False, "No script is running (use 'shutdown' to stop the simulator)"
+                False,
+                t(
+                    "simulator.commands.scripts.script_running_use_shutdown_stop",
+                    "No script is running (use 'shutdown' to stop the simulator)",
+                ),
             )
         if dropped:
             suffix = f" (dropped {len(dropped)} queued)"
@@ -377,9 +405,25 @@ class ScriptsCommandsMixin:
         if status.stopping:
             # Repeating `stop` used to answer with a fresh success, which
             # reads as if the first one had not registered.
-            return CommandResult(True, f"Stop already requested for: {status.running}{suffix}")
+            return CommandResult(
+                True,
+                t(
+                    "simulator.commands.scripts.stop_already_requested",
+                    "Stop already requested for: {running}{suffix}",
+                    running=status.running,
+                    suffix=suffix,
+                ),
+            )
         self.script_runner.stop()
-        return CommandResult(True, f"Stopping script: {status.running}{suffix}")
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.scripts.stopping_script",
+                "Stopping script: {running}{suffix}",
+                running=status.running,
+                suffix=suffix,
+            ),
+        )
 
     @command(
         RUN_COMMAND,
@@ -421,12 +465,27 @@ class ScriptsCommandsMixin:
                 # The name goes onto the queue with the reference: `list`
                 # reports names, and the loader has already resolved it.
                 await self.script_queue.put(script_ref, script.name)
-                return CommandResult(True, f"Queued script: {script.name}")
+                return CommandResult(
+                    True,
+                    t(
+                        "simulator.commands.scripts.queued_script",
+                        "Queued script: {name}",
+                        name=script.name,
+                    ),
+                )
             else:
                 # Run directly (no queue configured, or 'wait' requested)
                 success = await self.script_runner.run(script, queue_if_busy=False)
                 status = "PASSED" if success else "FAILED"
-                return CommandResult(success, f"Script {status}: {script.name}")
+                return CommandResult(
+                    success,
+                    t(
+                        "simulator.commands.scripts.script",
+                        "Script {status}: {name}",
+                        status=status,
+                        name=script.name,
+                    ),
+                )
         except Exception as e:
             # The transport already labels failures ("ERROR: ..."), so an
             # inner "Error: " prefix only doubles it up.

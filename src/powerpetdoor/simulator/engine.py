@@ -46,6 +46,7 @@ from ..const import (
     DOOR_STATE_SLOWING,
     SENSOR_STATE_ON,
 )
+from ..i18n import t
 from ..sanitize import MAX_LOGGED_LENGTH, sanitize_text
 from .state import DoorSimulatorState
 
@@ -190,12 +191,22 @@ class DoorMotionEngine:
                 try:
                     self.broadcast_status()
                 except Exception:
-                    logger.exception("Simulator: door status broadcast failed")
+                    logger.exception(
+                        t(
+                            "simulator.engine.simulator_door_status_broadcast_failed",
+                            "Simulator: door status broadcast failed",
+                        )
+                    )
             for callback in list(self._status_listeners):
                 try:
                     callback(status)
                 except Exception:
-                    logger.exception("Simulator: door status listener failed")
+                    logger.exception(
+                        t(
+                            "simulator.engine.simulator_door_status_listener_failed",
+                            "Simulator: door status listener failed",
+                        )
+                    )
         finally:
             self._dispatch_depth -= 1
         for statuses, future in list(self._status_waiters):
@@ -220,10 +231,20 @@ class DoorMotionEngine:
         current = self.state.door_status
 
         if current in (DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP):
-            logger.debug("Simulator: Open command ignored (already open)")
+            logger.debug(
+                t(
+                    "simulator.engine.simulator_open_command_ignored_already",
+                    "Simulator: Open command ignored (already open)",
+                )
+            )
             return False
         if current in (DOOR_STATE_RISING, DOOR_STATE_SLOWING):
-            logger.debug("Simulator: Open command ignored (already opening)")
+            logger.debug(
+                t(
+                    "simulator.engine.simulator_open_command_ignored_already_1",
+                    "Simulator: Open command ignored (already opening)",
+                )
+            )
             return False
 
         if self._defer_sequence(_INTENT_OPEN, hold):
@@ -234,10 +255,20 @@ class DoorMotionEngine:
         # CLOSED -> RISING
         if current == DOOR_STATE_CLOSING_TOP_OPEN:
             start_state = DOOR_STATE_SLOWING
-            logger.info("Simulator: Reversing close at top, continuing to open")
+            logger.info(
+                t(
+                    "simulator.engine.simulator_reversing_close_top_continuing",
+                    "Simulator: Reversing close at top, continuing to open",
+                )
+            )
         elif current == DOOR_STATE_CLOSING_MID_OPEN:
             start_state = DOOR_STATE_RISING
-            logger.info("Simulator: Reversing close at mid, continuing to open")
+            logger.info(
+                t(
+                    "simulator.engine.simulator_reversing_close_mid_continuing",
+                    "Simulator: Reversing close at mid, continuing to open",
+                )
+            )
         else:
             start_state = DOOR_STATE_RISING
 
@@ -258,10 +289,20 @@ class DoorMotionEngine:
         current = self.state.door_status
 
         if current == DOOR_STATE_CLOSED:
-            logger.debug("Simulator: Close command ignored (already closed)")
+            logger.debug(
+                t(
+                    "simulator.engine.simulator_close_command_ignored_already",
+                    "Simulator: Close command ignored (already closed)",
+                )
+            )
             return False
         if current in (DOOR_STATE_CLOSING_TOP_OPEN, DOOR_STATE_CLOSING_MID_OPEN):
-            logger.debug("Simulator: Close command ignored (already closing)")
+            logger.debug(
+                t(
+                    "simulator.engine.simulator_close_command_ignored_already_1",
+                    "Simulator: Close command ignored (already closing)",
+                )
+            )
             return False
 
         if self._defer_sequence(_INTENT_CLOSE, False):
@@ -272,10 +313,20 @@ class DoorMotionEngine:
         # HOLDING/KEEPUP -> CLOSING_TOP_OPEN
         if current == DOOR_STATE_RISING:
             start_state = DOOR_STATE_CLOSING_MID_OPEN
-            logger.info("Simulator: Reversing open at rising, closing from mid")
+            logger.info(
+                t(
+                    "simulator.engine.simulator_reversing_open_rising_closing",
+                    "Simulator: Reversing open at rising, closing from mid",
+                )
+            )
         elif current == DOOR_STATE_SLOWING:
             start_state = DOOR_STATE_CLOSING_TOP_OPEN
-            logger.info("Simulator: Reversing open at slowing, closing from top")
+            logger.info(
+                t(
+                    "simulator.engine.simulator_reversing_open_slowing_closing",
+                    "Simulator: Reversing open at slowing, closing from top",
+                )
+            )
         else:
             start_state = DOOR_STATE_CLOSING_TOP_OPEN
 
@@ -357,7 +408,10 @@ class DoorMotionEngine:
         if sensor in SENSOR_NAMES:
             return True
         logger.warning(
-            "Simulator: Ignoring unknown sensor %s (use: %s)",
+            t(
+                "simulator.engine.simulator_ignoring_unknown_sensor_use",
+                "Simulator: Ignoring unknown sensor %s (use: %s)",
+            ),
             sanitize_text(sensor, MAX_LOGGED_LENGTH),
             ", ".join(SENSOR_NAMES),
         )
@@ -432,14 +486,22 @@ class DoorMotionEngine:
 
         blocked = self.sensor_open_block_reason(sensor)
         if blocked is not None:
-            logger.info("Simulator: %s sensor ignored (%s)", sensor.capitalize(), blocked)
+            logger.info(
+                t("simulator.engine.simulator_sensor_ignored", "Simulator: %s sensor ignored (%s)"),
+                sensor.capitalize(),
+                blocked,
+            )
             return
 
         # If door is already open/holding, re-trigger extends hold time
         if state.door_status in (DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP):
             if now - self._last_sensor_trigger > state.timing.sensor_retrigger_window:
                 logger.info(
-                    "Simulator: %s sensor re-triggered, extending hold", sensor.capitalize()
+                    t(
+                        "simulator.engine.simulator_sensor_re_triggered_extending",
+                        "Simulator: %s sensor re-triggered, extending hold",
+                    ),
+                    sensor.capitalize(),
                 )
                 self.extend_hold()
                 self._last_sensor_trigger = now
@@ -448,7 +510,13 @@ class DoorMotionEngine:
 
         # If door is closing, activate the sensor to trigger auto-retract
         if state.door_status in (DOOR_STATE_CLOSING_TOP_OPEN, DOOR_STATE_CLOSING_MID_OPEN):
-            logger.info("Simulator: %s sensor during close, activating sensor", sensor.capitalize())
+            logger.info(
+                t(
+                    "simulator.engine.simulator_sensor_during_close_activating",
+                    "Simulator: %s sensor during close, activating sensor",
+                ),
+                sensor.capitalize(),
+            )
             # Activate the appropriate sensor (mutually exclusive)
             if sensor == "inside":
                 state.inside_sensor_active = True
@@ -462,7 +530,13 @@ class DoorMotionEngine:
             return
 
         # Door is closed, trigger open
-        logger.info("Simulator: %s sensor triggered, opening door", sensor.capitalize())
+        logger.info(
+            t(
+                "simulator.engine.simulator_sensor_triggered_opening_door",
+                "Simulator: %s sensor triggered, opening door",
+            ),
+            sensor.capitalize(),
+        )
         self._last_sensor_trigger = now
         self._notify_sensor(sensor, SENSOR_STATE_ON)
         self.open(hold=False)
@@ -496,12 +570,21 @@ class DoorMotionEngine:
             if duration == 0:
                 state.inside_sensor_active = not state.inside_sensor_active
                 logger.info(
-                    "Simulator: Inside sensor %s (toggle)",
+                    t(
+                        "simulator.engine.simulator_inside_sensor_toggle",
+                        "Simulator: Inside sensor %s (toggle)",
+                    ),
                     "activated" if state.inside_sensor_active else "deactivated",
                 )
             else:
                 state.inside_sensor_active = True
-                logger.info("Simulator: Inside sensor activated for %ss", duration)
+                logger.info(
+                    t(
+                        "simulator.engine.simulator_inside_sensor_activated_s",
+                        "Simulator: Inside sensor activated for %ss",
+                    ),
+                    duration,
+                )
                 self._arm_sensor_timer(sensor, duration)
         else:
             # `else`, not `elif sensor == "outside"`: the guard above has
@@ -511,12 +594,21 @@ class DoorMotionEngine:
             if duration == 0:
                 state.outside_sensor_active = not state.outside_sensor_active
                 logger.info(
-                    "Simulator: Outside sensor %s (toggle)",
+                    t(
+                        "simulator.engine.simulator_outside_sensor_toggle",
+                        "Simulator: Outside sensor %s (toggle)",
+                    ),
                     "activated" if state.outside_sensor_active else "deactivated",
                 )
             else:
                 state.outside_sensor_active = True
-                logger.info("Simulator: Outside sensor activated for %ss", duration)
+                logger.info(
+                    t(
+                        "simulator.engine.simulator_outside_sensor_activated_s",
+                        "Simulator: Outside sensor activated for %ss",
+                    ),
+                    duration,
+                )
                 self._arm_sensor_timer(sensor, duration)
         self.notify_sensors_changed()
 
@@ -530,10 +622,23 @@ class DoorMotionEngine:
             # the sensor enables or the schedule window.
             blocked = self.sensor_open_block_reason(sensor)
             if blocked is None:
-                logger.info("Simulator: %s sensor triggering door cycle", sensor.capitalize())
+                logger.info(
+                    t(
+                        "simulator.engine.simulator_sensor_triggering_door_cycle",
+                        "Simulator: %s sensor triggering door cycle",
+                    ),
+                    sensor.capitalize(),
+                )
                 self.open(hold=False)
             else:
-                logger.info("Simulator: %s sensor ignored (%s)", sensor.capitalize(), blocked)
+                logger.info(
+                    t(
+                        "simulator.engine.simulator_sensor_ignored",
+                        "Simulator: %s sensor ignored (%s)",
+                    ),
+                    sensor.capitalize(),
+                    blocked,
+                )
 
     def _cancel_sensor_timer(self, sensor: str) -> None:
         """Cancel a pending auto-deactivation timer for ``sensor``, if any."""
@@ -554,11 +659,21 @@ class DoorMotionEngine:
         state = self.state
         if sensor == "inside" and state.inside_sensor_active:
             state.inside_sensor_active = False
-            logger.info("Simulator: Inside sensor deactivated (duration expired)")
+            logger.info(
+                t(
+                    "simulator.engine.simulator_inside_sensor_deactivated_duration",
+                    "Simulator: Inside sensor deactivated (duration expired)",
+                )
+            )
             self.notify_sensors_changed()
         elif sensor == "outside" and state.outside_sensor_active:
             state.outside_sensor_active = False
-            logger.info("Simulator: Outside sensor deactivated (duration expired)")
+            logger.info(
+                t(
+                    "simulator.engine.simulator_outside_sensor_deactivated_duration",
+                    "Simulator: Outside sensor deactivated (duration expired)",
+                )
+            )
             self.notify_sensors_changed()
 
     def simulate_obstruction(self) -> None:
@@ -576,15 +691,41 @@ class DoorMotionEngine:
         self.notify_sensors_changed()
 
         if state.door_status == DOOR_STATE_CLOSED:
-            logger.info("Simulator: Obstruction set (will block close when door opens)")
+            logger.info(
+                t(
+                    "simulator.engine.simulator_obstruction_set_will_block",
+                    "Simulator: Obstruction set (will block close when door opens)",
+                )
+            )
         elif state.door_status in (DOOR_STATE_RISING, DOOR_STATE_SLOWING):
-            logger.info("Simulator: Obstruction set (will block close when door reaches top)")
+            logger.info(
+                t(
+                    "simulator.engine.simulator_obstruction_set_will_block_1",
+                    "Simulator: Obstruction set (will block close when door reaches top)",
+                )
+            )
         elif state.door_status in (DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP):
-            logger.info("Simulator: Obstruction set (blocking close)")
+            logger.info(
+                t(
+                    "simulator.engine.simulator_obstruction_set_blocking_close",
+                    "Simulator: Obstruction set (blocking close)",
+                )
+            )
         elif state.door_status in (DOOR_STATE_CLOSING_TOP_OPEN, DOOR_STATE_CLOSING_MID_OPEN):
-            logger.info("Simulator: Obstruction during close (will trigger retract)")
+            logger.info(
+                t(
+                    "simulator.engine.simulator_obstruction_during_close_will",
+                    "Simulator: Obstruction during close (will trigger retract)",
+                )
+            )
         else:
-            logger.info("Simulator: Obstruction set (door status: %s)", state.door_status)
+            logger.info(
+                t(
+                    "simulator.engine.simulator_obstruction_set_door_status",
+                    "Simulator: Obstruction set (door status: %s)",
+                ),
+                state.door_status,
+            )
 
     def extend_hold(self) -> None:
         """Reset the hold-open timer to a full hold_time from now."""
@@ -605,7 +746,12 @@ class DoorMotionEngine:
             try:
                 self.notify_sensor(sensor, sensor_state)
             except Exception:
-                logger.exception("Simulator: sensor notification callback failed")
+                logger.exception(
+                    t(
+                        "simulator.engine.simulator_sensor_notification_callback_failed",
+                        "Simulator: sensor notification callback failed",
+                    )
+                )
 
     # =========================================================================
     # Sequence runner (single owner task)
@@ -667,7 +813,12 @@ class DoorMotionEngine:
                 # hold_time long (MIN_BLOCKED_RECHECK is only a floor that
                 # keeps a near-zero hold_time from spinning), so an
                 # out-of-band mutation is noticed within one hold_time.
-                logger.debug("Simulator: Sensor blocking close, resetting hold timer")
+                logger.debug(
+                    t(
+                        "simulator.engine.simulator_sensor_blocking_close_resetting",
+                        "Simulator: Sensor blocking close, resetting hold timer",
+                    )
+                )
                 await self._wait_for_wake(max(float(self.state.hold_time), MIN_BLOCKED_RECHECK))
                 self._hold_deadline = loop.time() + float(self.state.hold_time)
                 continue
@@ -693,7 +844,12 @@ class DoorMotionEngine:
         """
         state = self.state
         if state.is_sensor_blocking_close() and state.autoretract:
-            logger.info("Simulator: Sensor blocking close! Auto-retracting...")
+            logger.info(
+                t(
+                    "simulator.engine.simulator_sensor_blocking_close_auto",
+                    "Simulator: Sensor blocking close! Auto-retracting...",
+                )
+            )
             # Clear the active sensors
             state.inside_sensor_active = False
             state.outside_sensor_active = False

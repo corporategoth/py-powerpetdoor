@@ -7,6 +7,7 @@
 
 from typing import TYPE_CHECKING
 
+from ...i18n import t
 from .base import ArgSpec, CommandResult, SubcommandInfo, command, subcommand
 
 if TYPE_CHECKING:
@@ -27,13 +28,18 @@ class SimulationCommandsMixin:
     def obstruction(self) -> CommandResult:
         """Simulate an obstruction."""
         self.simulator.simulate_obstruction()
-        return CommandResult(True, "Simulating obstruction")
+        return CommandResult(
+            True,
+            t("simulator.commands.simulation.simulating_obstruction", "Simulating obstruction"),
+        )
 
     def _set_pet_presence(self, present: bool) -> CommandResult:
         """Apply pet presence and build the result message."""
         self.simulator.set_pet_in_doorway(present)
         state = "in doorway" if present else "left doorway"
-        return CommandResult(True, f"Pet {state}")
+        return CommandResult(
+            True, t("simulator.commands.simulation.pet", "Pet {state}", state=state)
+        )
 
     @command(
         "pet",

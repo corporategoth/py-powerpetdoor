@@ -23,10 +23,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 #: Advisories with no fixed version yet, or that provably cannot apply to
 #: this project. Each entry needs a reason; an empty dict is the goal.
@@ -141,6 +145,130 @@ def check_vulnerabilities() -> list[dict] | None:
     return found
 
 
+# ---------------------------------------------------------------------------
+# CI action pins
+#
+# Dependabot covers these on GitHub, but this repository's GitHub side is a
+# push-mirror of Gitea: a Dependabot PR there cannot be merged into the
+# source of truth, and the next mirror push overwrites whatever it did. So
+# the same question has to be answerable locally, and on the Gitea runner.
+# ---------------------------------------------------------------------------
+
+#: `uses: owner/repo@<40-hex sha>  # v4`
+_USES = re.compile(
+    r"uses:\s*(?P<repo>[\w.-]+/[\w.-]+)"
+    r"(?P<path>(?:/[\w.-]+)*)"
+    r"@(?P<ref>[0-9a-f]{40})"
+    r"\s*(?:#\s*(?P<comment>\S+))?"
+)
+
+WORKFLOW_ROOTS = (".github/workflows", ".gitea/workflows", ".github/actions")
+
+#: Hosts other than github.com that `uses:` can point at. Their pins cannot
+#: be resolved through the GitHub API, so they are reported as unresolvable
+#: rather than silently treated as current - the Gitea reusable workflow is
+#: the one `uses:` in this repo that receives a secret.
+NON_GITHUB_OWNERS = {"neuromancy"}
+
+
+def iter_action_pins() -> list[tuple[Path, str, str, str | None]]:
+    """(file, owner/repo, pinned sha, version comment) for every `uses:` pin."""
+    pins = []
+    for root in WORKFLOW_ROOTS:
+        base = Path(root)
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*.y*ml")):
+            for match in _USES.finditer(path.read_text(encoding="utf-8")):
+                pins.append((path, match["repo"], match["ref"], match["comment"]))
+    return pins
+
+
+def _github_json(url: str) -> object | None:
+    """GET a public GitHub API endpoint, or None if it cannot be read."""
+    request = Request(url, headers={"Accept": "application/vnd.github+json"})
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urlopen(request, timeout=20) as response:
+            return json.loads(response.read())
+    except (URLError, TimeoutError, ValueError, OSError):
+        return None
+
+
+def latest_release_sha(repo: str) -> tuple[str, str] | None:
+    """(tag, commit sha) of a repo's newest release, or None.
+
+    Falls back to the tag list, because plenty of actions - the Gitea
+    artifact shims among them - publish tags without ever cutting a GitHub
+    "release", and reporting those as unresolvable forever is the same
+    silent staleness this script exists to prevent.
+    """
+    release = _github_json(f"https://api.github.com/repos/{repo}/releases/latest")
+    tag = ""
+    if isinstance(release, dict) and "tag_name" in release:
+        tag = str(release["tag_name"])
+    else:
+        tags = _github_json(f"https://api.github.com/repos/{repo}/tags")
+        if isinstance(tags, list):
+            versioned = [
+                str(entry["name"])
+                for entry in tags
+                if isinstance(entry, dict) and re.match(r"v?\d", str(entry.get("name", "")))
+            ]
+            if versioned:
+                tag = max(versioned, key=_version_key)
+    if not tag:
+        return None
+    ref = _github_json(f"https://api.github.com/repos/{repo}/commits/{tag}")
+    if not isinstance(ref, dict) or "sha" not in ref:
+        return None
+    return tag, str(ref["sha"])
+
+
+def _version_key(tag: str) -> tuple[int, ...]:
+    """Sort key for a `v1.2.3`-ish tag; non-numeric parts sort as zero."""
+    return tuple(int(part) if part.isdigit() else 0 for part in re.findall(r"\d+|\w+", tag))
+
+
+def check_action_pins() -> list[str]:
+    """Action pins that are behind their upstream's latest release."""
+    pins = iter_action_pins()
+    if not pins:
+        print("  no pinned actions found")
+        return []
+
+    # One network round trip and one line of output per repo, not per pin:
+    # the same action is used a dozen times across these workflows.
+    by_repo: dict[str, tuple[str, str | None, set[Path]]] = {}
+    for path, repo, sha, comment in pins:
+        entry = by_repo.setdefault(repo, (sha, comment, set()))
+        entry[2].add(path)
+
+    stale: list[str] = []
+    for repo, (sha, comment, paths) in sorted(by_repo.items()):
+        if repo.split("/")[0] in NON_GITHUB_OWNERS:
+            where = ", ".join(sorted(str(p) for p in paths))
+            print(f"  {repo}: not on github.com - track by hand ({where})")
+            continue
+        latest = latest_release_sha(repo)
+        if latest is None:
+            print(f"  {repo}: could not resolve a latest release or tag")
+            continue
+        tag, latest_sha = latest
+        if latest_sha != sha:
+            stale.append(f"{repo} {comment or sha[:8]} -> {tag} ({latest_sha})")
+
+    if not stale:
+        print("  every action pin is at its upstream's latest release")
+        return []
+    print(f"  {len(stale)} action pin(s) behind:")
+    for entry in sorted(set(stale)):
+        print(f"    {entry}")
+    return sorted(set(stale))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -161,6 +289,9 @@ def main() -> int:
     print("\nAvailable upgrades:")
     moves = check_upgrades_available(args.fix)
 
+    print("\nCI action pins:")
+    stale_actions = check_action_pins()
+
     print("\nSecurity advisories:")
     vulns = check_vulnerabilities()
 
@@ -171,11 +302,12 @@ def main() -> int:
     if vulns:
         print(f"FAIL: {len(vulns)} known advisor{'y' if len(vulns) == 1 else 'ies'}")
         return 1
-    if moves and args.strict:
-        print(f"FAIL (--strict): {len(moves)} dependency update(s) available")
+    pending = len(moves) + len(stale_actions)
+    if pending and args.strict:
+        print(f"FAIL (--strict): {pending} dependency/action update(s) available")
         return 1
-    if moves:
-        print(f"OK, with {len(moves)} update(s) available - run with --fix to apply")
+    if pending:
+        print(f"OK, with {pending} update(s) available - run with --fix to apply the lock ones")
         return 0
     print("OK: dependencies are current and free of known advisories")
     return 0

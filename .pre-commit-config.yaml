@@ -75,6 +75,30 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
+      # Orphaned translations fail; missing ones only warn, because a locale
+      # legitimately lags the source between a string landing and a
+      # translator getting to it. --untranslated is what measures whether
+      # new user-facing text got wrapped at all.
+      # Regenerates the committed catalogue in place. If it moved, the hook
+      # fails the way a formatter does and the regenerated file is staged on
+      # the next commit - so messages.json cannot silently drift from the
+      # source it is extracted from.
+      - id: translation-catalog
+        name: Translation catalogue is current
+        entry: uv run python scripts/check_translations.py --write-catalog
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: translations
+        name: Translation coverage
+        entry: uv run python scripts/check_translations.py --untranslated
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
+
       - id: dependency-freshness
         name: Dependencies are current
         entry: uv run python scripts/check_dependencies.py

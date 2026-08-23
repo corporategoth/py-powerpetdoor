@@ -9,6 +9,7 @@ commands (commands/{buttons,notifications,simulation,door,control,scripts}.py).
 
 from __future__ import annotations
 
+import json
 import logging
 from unittest.mock import MagicMock
 
@@ -515,3 +516,75 @@ class TestListCommand:
             result = await command_handler.execute(alias)
             assert result.success is True
             assert result.message.startswith("Built-in scripts:")
+
+
+class TestTheSelectedLocaleReachesRealCommandOutput:
+    """End-to-end proof that `t()` is wired up, not just importable.
+
+    Every other i18n test drives `powerpetdoor.i18n` directly. This one goes
+    through a real command handler, so it fails if the wrapping at the call
+    site is wrong even when the module underneath is perfect - and it pins
+    the property the whole design rests on: with no locale selected, output
+    is byte-identical to what it was before any of this existed.
+    """
+
+    @pytest.fixture
+    def german(self, tmp_path, monkeypatch):
+        from powerpetdoor import i18n
+
+        monkeypatch.setattr(i18n, "LOCALES_DIR", tmp_path)
+        i18n.reset_for_testing()
+        (tmp_path / "de_de.json").write_text(
+            json.dumps(
+                {
+                    "_language": "Deutsch",
+                    "simulator.commands.control.debug_logging_enabled": "Debug-Protokoll aktiviert",
+                    "simulator.commands.control.debug_logging": "Debug-Protokoll: {arg0}",
+                }
+            ),
+            encoding="utf-8",
+        )
+        yield i18n
+        i18n.reset_for_testing()
+
+    async def test_english_is_what_ships(self, command_handler, root_logger_level, german):
+        """No locale selected: the exact English the tests above assert."""
+        root_logger_level.setLevel(logging.INFO)
+        result = await command_handler.execute("debug on")
+        assert result.message == "Debug logging enabled"
+
+    async def test_a_translated_key_renders_in_the_selected_locale(
+        self, command_handler, root_logger_level, german
+    ):
+        german.set_locale("de_de")
+        root_logger_level.setLevel(logging.INFO)
+
+        result = await command_handler.execute("debug on")
+
+        assert result.message == "Debug-Protokoll aktiviert"
+
+    async def test_interpolation_survives_translation(
+        self, command_handler, root_logger_level, german
+    ):
+        """The `{arg0}` the codemod generated must still receive its value."""
+        german.set_locale("de_de")
+        root_logger_level.setLevel(logging.DEBUG)
+
+        result = await command_handler.execute("debug")
+
+        assert result.message == "Debug-Protokoll: on"
+
+    async def test_an_untranslated_key_falls_back_to_english(
+        self, command_handler, root_logger_level, german
+    ):
+        """de_de.json has no entry for the 'disabled' message."""
+        german.set_locale("de_de")
+        root_logger_level.setLevel(logging.DEBUG)
+
+        result = await command_handler.execute("debug off")
+
+        assert result.message == "Debug logging disabled"
+        assert (
+            "de_de",
+            "simulator.commands.control.debug_logging_disabled",
+        ) in german.missing_keys()

@@ -122,6 +122,7 @@ from .const import (
     SUCCESS_TRUE,
 )
 from .framing import MAX_BUFFER_SIZE, FrameScanner, find_frame_end
+from .i18n import t
 from .sanitize import MAX_LOGGED_LENGTH, sanitize_field, sanitize_text
 
 _LOGGER = logging.getLogger(__name__)
@@ -505,7 +506,12 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._msg_sequence = 0  # Counter for FIFO ordering within same priority
 
         if loop is not None:
-            _LOGGER.info("Latching onto an existing event loop.")
+            _LOGGER.info(
+                t(
+                    "client.latching_onto_existing_event_loop",
+                    "Latching onto an existing event loop.",
+                )
+            )
             self._eventLoop = loop
 
         self.msgId = 1
@@ -594,11 +600,19 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._tasks.discard(task)
         self._handler_tasks.discard(task)
         if not task.cancelled() and task.exception() is not None:
-            _LOGGER.error("Background client task failed", exc_info=task.exception())
+            _LOGGER.error(
+                t("client.background_client_task_failed", "Background client task failed"),
+                exc_info=task.exception(),
+            )
 
     def run_coroutine_threadsafe(self, coro: Coroutine[Any, Any, Any]) -> concurrent.futures.Future:
         if self._eventLoop is None:
-            raise RuntimeError("run_coroutine_threadsafe() requires the client to be started first")
+            raise RuntimeError(
+                t(
+                    "client.run_coroutine_threadsafe_requires_client",
+                    "run_coroutine_threadsafe() requires the client to be started first",
+                )
+            )
         return asyncio.run_coroutine_threadsafe(coro, self._eventLoop)
 
     def add_handlers(
@@ -854,7 +868,13 @@ class PowerPetDoorClient(asyncio.Protocol):
             try:
                 callback(*args)
             except Exception:
-                _LOGGER.exception("Listener %r raised while handling an update", name)
+                _LOGGER.exception(
+                    t(
+                        "client.listener_raised_while_handling_update",
+                        "Listener %r raised while handling an update",
+                    ),
+                    name,
+                )
 
     @staticmethod
     def _resolve_future(future: asyncio.Future | None, result: Any) -> None:
@@ -1099,7 +1119,10 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._notify_listeners(self.hw_info_listeners, fw_info)
         else:
             _LOGGER.warning(
-                "Device sent a non-mapping %s payload; not notifying hw_info listeners: %s",
+                t(
+                    "client.device_sent_non_mapping_payload",
+                    "Device sent a non-mapping %s payload; not notifying hw_info listeners: %s",
+                ),
                 FIELD_FWINFO,
                 sanitize_field(msg[FIELD_FWINFO], MAX_LOGGED_LENGTH),
             )
@@ -1265,7 +1288,11 @@ class PowerPetDoorClient(asyncio.Protocol):
         for event in (NOTIFY_SENSOR_INDOOR, NOTIFY_SENSOR_OUTDOOR, NOTIFY_LOW_BATTERY):
             if event in msg:
                 state = msg.get(FIELD_SENSOR_STATE)
-                _LOGGER.debug("Notification event: %s (state=%s)", event, sanitize_field(state))
+                _LOGGER.debug(
+                    t("client.notification_event_state", "Notification event: %s (state=%s)"),
+                    event,
+                    sanitize_field(state),
+                )
                 self._notify_listeners(self.notification_event_listeners, event, state)
                 return True
         return False
@@ -1278,7 +1305,9 @@ class PowerPetDoorClient(asyncio.Protocol):
         try:
             result = callback()
         except Exception:
-            _LOGGER.exception("Connection handler %r raised", name)
+            _LOGGER.exception(
+                t("client.connection_handler_raised", "Connection handler %r raised"), name
+            )
             return
         if inspect.isawaitable(result):
             self._track_task(result, transient=False)
@@ -1303,10 +1332,10 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._track_task(self.connect())
 
         if self._ownLoop:
-            _LOGGER.info("Starting up our own event loop.")
+            _LOGGER.info(t("client.starting_up_our_own_event", "Starting up our own event loop."))
             self._eventLoop.run_forever()
             self._eventLoop.close()
-            _LOGGER.info("Connection shut down.")
+            _LOGGER.info(t("client.connection_shut_down", "Connection shut down."))
 
     def stop(self) -> None:
         """Stop the client and close the connection (thread-safe).
@@ -1317,7 +1346,12 @@ class PowerPetDoorClient(asyncio.Protocol):
         """
         self._shutdown = True
 
-        _LOGGER.info("Shutting down Power Pet Door client connection...")
+        _LOGGER.info(
+            t(
+                "client.shutting_down_power_pet_door",
+                "Shutting down Power Pet Door client connection...",
+            )
+        )
         if self._eventLoop is None:
             return
         self._eventLoop.call_soon_threadsafe(self.disconnect)
@@ -1368,7 +1402,12 @@ class PowerPetDoorClient(asyncio.Protocol):
         finally:
             for task in pending:
                 if not task.done():
-                    _LOGGER.warning("Cancelling a connection handler that did not finish in time")
+                    _LOGGER.warning(
+                        t(
+                            "client.cancelling_connection_handler_did_finish",
+                            "Cancelling a connection handler that did not finish in time",
+                        )
+                    )
                     task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
 
@@ -1392,17 +1431,35 @@ class PowerPetDoorClient(asyncio.Protocol):
         OverflowError. No-op after shutdown()/stop().
         """
         if self._shutdown:
-            _LOGGER.debug("Ignoring connect() while shut down")
+            _LOGGER.debug(
+                t("client.ignoring_connect_while_shut_down", "Ignoring connect() while shut down")
+            )
             return
         if self._transport is not None:
-            _LOGGER.warning("Ignoring connect(): already connected to %s", self.cfg_host)
+            _LOGGER.warning(
+                t(
+                    "client.ignoring_connect_already_connected",
+                    "Ignoring connect(): already connected to %s",
+                ),
+                self.cfg_host,
+            )
             return
         if self._connecting:
-            _LOGGER.warning("Ignoring connect(): a connection attempt is already in progress")
+            _LOGGER.warning(
+                t(
+                    "client.ignoring_connect_connection_attempt_already",
+                    "Ignoring connect(): a connection attempt is already in progress",
+                )
+            )
             return
         loop = self._get_loop()
         _LOGGER.info(
-            "Started to connect to Power Pet Door... at %s:%s", self.cfg_host, self.cfg_port
+            t(
+                "client.started_connect_power_pet_door",
+                "Started to connect to Power Pet Door... at %s:%s",
+            ),
+            self.cfg_host,
+            self.cfg_port,
         )
         self._connecting = True
         try:
@@ -1415,7 +1472,10 @@ class PowerPetDoorClient(asyncio.Protocol):
                 )
         except (OSError, TimeoutError, ValueError, OverflowError) as err:
             _LOGGER.error(
-                "Unable to connect to Power Pet Door at %s:%s: %s",
+                t(
+                    "client.unable_connect_power_pet_door_1",
+                    "Unable to connect to Power Pet Door at %s:%s: %s",
+                ),
                 self.cfg_host,
                 self.cfg_port,
                 err,
@@ -1445,16 +1505,26 @@ class PowerPetDoorClient(asyncio.Protocol):
             # flight. disconnect() already ran, so nothing holds a reference
             # that would ever close this socket - abandon it here instead of
             # leaving a "shut down" client keepalive-pinging the device.
-            _LOGGER.info("Discarding a connection that completed after shutdown")
+            _LOGGER.info(
+                t(
+                    "client.discarding_connection_completed_after_shutdown",
+                    "Discarding a connection that completed after shutdown",
+                )
+            )
             transport.abort()
             return False
         if self._transport is not None:
             # Belt and braces behind connect()'s guard: never let a second
             # transport orphan the live one.
-            _LOGGER.warning("Rejecting a second connection; one is already established")
+            _LOGGER.warning(
+                t(
+                    "client.rejecting_second_connection_one_already",
+                    "Rejecting a second connection; one is already established",
+                )
+            )
             transport.abort()
             return False
-        _LOGGER.info("Connection Successful!")
+        _LOGGER.info(t("client.connection_successful", "Connection Successful!"))
         self._transport = transport
         self._was_connected = True
         self._reconnect_attempts = 0
@@ -1494,11 +1564,21 @@ class PowerPetDoorClient(asyncio.Protocol):
             # already scheduled; asyncio simply delivers the socket's loss a
             # loop iteration later. Reporting a server-side close nobody saw
             # and burning a second reconnect would be wrong.
-            _LOGGER.debug("Ignoring connection_lost() for an already-closed connection")
+            _LOGGER.debug(
+                t(
+                    "client.ignoring_connection_lost_already_closed",
+                    "Ignoring connection_lost() for an already-closed connection",
+                )
+            )
             return
         self.disconnect()
         if not self._shutdown:
-            _LOGGER.error("The server closed the connection. Reconnecting...")
+            _LOGGER.error(
+                t(
+                    "client.server_closed_connection_reconnecting",
+                    "The server closed the connection. Reconnecting...",
+                )
+            )
             self._schedule_reconnect()
 
     def _drop_connection(self) -> None:
@@ -1554,7 +1634,9 @@ class PowerPetDoorClient(asyncio.Protocol):
         was_connected = self._was_connected
         self._was_connected = False
         if was_connected:
-            _LOGGER.debug("Closing connection with server...")
+            _LOGGER.debug(
+                t("client.closing_connection_server", "Closing connection with server...")
+            )
         self._can_dequeue = False
         self._last_ping = None
         self._last_command = None
@@ -1610,7 +1692,12 @@ class PowerPetDoorClient(asyncio.Protocol):
     def handle_connect_failure(self) -> None:
         """Handler for if we fail to connect to the power pet door."""
         if not self._shutdown:
-            _LOGGER.error("Unable to connect to power pet door. Reconnecting...")
+            _LOGGER.error(
+                t(
+                    "client.unable_connect_power_pet_door",
+                    "Unable to connect to power pet door. Reconnecting...",
+                )
+            )
             self.disconnect()
             self._schedule_reconnect()
 
@@ -1622,12 +1709,18 @@ class PowerPetDoorClient(asyncio.Protocol):
                 self._failed_pings += 1
                 if self._failed_pings < MAX_FAILED_PINGS:
                     _LOGGER.warning(
-                        "Last PING not responded to %d of %d...",
+                        t("client.last_ping_responded", "Last PING not responded to %d of %d..."),
                         self._failed_pings,
                         MAX_FAILED_PINGS,
                     )
                 else:
-                    _LOGGER.error("Last PING not responded to %d times.", self._failed_pings)
+                    _LOGGER.error(
+                        t(
+                            "client.last_ping_responded_times",
+                            "Last PING not responded to %d times.",
+                        ),
+                        self._failed_pings,
+                    )
                     self._drop_connection()
                     return
 
@@ -1654,13 +1747,19 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._failed_msg += 1
             if self._failed_msg < MAX_FAILED_MSG:
                 _LOGGER.warning(
-                    "Did not receive a response to a %s message in more than %s seconds, retrying.",
+                    t(
+                        "client.did_receive_response_message_more",
+                        "Did not receive a response to a %s message in more than %s seconds, retrying.",
+                    ),
                     self._last_command,
                     self.cfg_timeout,
                 )
             else:
                 _LOGGER.error(
-                    "Did not receive a response to a %s message in more than %s seconds %s times, dropped.",
+                    t(
+                        "client.did_receive_response_message_more_1",
+                        "Did not receive a response to a %s message in more than %s seconds %s times, dropped.",
+                    ),
                     self._last_command,
                     self.cfg_timeout,
                     self._failed_msg,
@@ -1697,7 +1796,12 @@ class PowerPetDoorClient(asyncio.Protocol):
 
     async def _send_data(self, rawdata) -> None:
         if not self._transport:
-            _LOGGER.warning("Attempted to write to the stream without a connection active")
+            _LOGGER.warning(
+                t(
+                    "client.attempted_write_stream_without_connection",
+                    "Attempted to write to the stream without a connection active",
+                )
+            )
             return
 
         if self._keepalive:
@@ -1711,9 +1815,14 @@ class PowerPetDoorClient(asyncio.Protocol):
             # meantime and cleared the transport.
             transport = self._transport
             if transport is None or transport.is_closing():
-                _LOGGER.warning("Connection closed while waiting to send; dropping message")
+                _LOGGER.warning(
+                    t(
+                        "client.connection_closed_while_waiting_send",
+                        "Connection closed while waiting to send; dropping message",
+                    )
+                )
                 return
-            _LOGGER.debug("TX > %s", rawdata)
+            _LOGGER.debug(t("client.tx", "TX > %s"), rawdata)
             transport.write(rawdata)
             self._last_send = time.monotonic()
 
@@ -1726,17 +1835,29 @@ class PowerPetDoorClient(asyncio.Protocol):
                 await self.dequeue_data()
 
         except (RuntimeError, OSError) as err:
-            _LOGGER.error("Failed to write to the stream. (%s)", err)
+            _LOGGER.error(
+                t("client.failed_write_stream", "Failed to write to the stream. (%s)"), err
+            )
             self._drop_connection()
 
     async def dequeue_data(self) -> None:
         """Send the next queued message, if the connection is idle."""
         if not self._transport:
-            _LOGGER.warning("Attempted to write to the stream without a connection active")
+            _LOGGER.warning(
+                t(
+                    "client.attempted_write_stream_without_connection",
+                    "Attempted to write to the stream without a connection active",
+                )
+            )
             return
 
         if self._check_receipt:
-            _LOGGER.warning("Attempted to send data while another message is still outstanding")
+            _LOGGER.warning(
+                t(
+                    "client.attempted_send_data_while_another",
+                    "Attempted to send data while another message is still outstanding",
+                )
+            )
             return
 
         if not self._queue:
@@ -1752,7 +1873,9 @@ class PowerPetDoorClient(asyncio.Protocol):
         elif PING in data:
             self._last_command = PONG
         else:
-            _LOGGER.warning("Sending unknown command type")
+            _LOGGER.warning(
+                t("client.sending_unknown_command_type", "Sending unknown command type")
+            )
             self._last_command = None
 
         # Track the in-flight msgId so check_receipt can fail its future
@@ -1784,7 +1907,10 @@ class PowerPetDoorClient(asyncio.Protocol):
         decoded = data.decode("ascii", errors="backslashreplace")
         if len(decoded) != len(data):
             _LOGGER.error(
-                "Received non-ASCII bytes from device; escaped them (affected frames are dropped)"
+                t(
+                    "client.received_non_ascii_bytes_device",
+                    "Received non-ASCII bytes from device; escaped them (affected frames are dropped)",
+                )
             )
 
         # Device bytes reach an operator's terminal through the host
@@ -1792,7 +1918,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         # and friends must be escaped before they get there. Guarded because
         # sanitize_text is ~20x the cost of the suppressed debug call.
         if _LOGGER.isEnabledFor(logging.DEBUG):
-            _LOGGER.debug("RX < %s", sanitize_text(decoded))
+            _LOGGER.debug(t("client.rx", "RX < %s"), sanitize_text(decoded))
         frames, diag = self._scanner.feed(decoded)
 
         if diag.overflow:
@@ -1802,8 +1928,10 @@ class PowerPetDoorClient(asyncio.Protocol):
             # ran - a complete, legitimate frame vanishing with nothing in
             # the log to say so. Report the loss instead of hiding it.
             _LOGGER.error(
-                "Receive buffer exceeded %d bytes without a complete message; disconnecting "
-                "(discarding %d complete frame(s) received in the same read)",
+                t(
+                    "client.receive_buffer_exceeded_bytes_without",
+                    "Receive buffer exceeded %d bytes without a complete message; disconnecting (discarding %d complete frame(s) received in the same read)",
+                ),
                 MAX_BUFFER_SIZE,
                 len(frames),
             )
@@ -1826,7 +1954,7 @@ class PowerPetDoorClient(asyncio.Protocol):
                 # every attempt connects before dying and resets the
                 # backoff.
                 _LOGGER.error(
-                    "Failed to decode JSON frame (%s): %s",
+                    t("client.failed_decode_json_frame", "Failed to decode JSON frame (%s): %s"),
                     err,
                     sanitize_field(frame, MAX_LOGGED_LENGTH),
                 )
@@ -1847,7 +1975,13 @@ class PowerPetDoorClient(asyncio.Protocol):
             msg: The decoded message.
         """
         if not isinstance(msg, dict):
-            _LOGGER.warning("Ignoring non-object message from device: %r", msg)
+            _LOGGER.warning(
+                t(
+                    "client.ignoring_non_object_message_device",
+                    "Ignoring non-object message from device: %r",
+                ),
+                msg,
+            )
             return
 
         cmd = msg.get(FIELD_CMD)
@@ -1860,7 +1994,10 @@ class PowerPetDoorClient(asyncio.Protocol):
         success = msg.get(FIELD_SUCCESS)
         if cmd is None and success is None:
             _LOGGER.warning(
-                "Ignoring malformed message from device: %s",
+                t(
+                    "client.ignoring_malformed_message_device",
+                    "Ignoring malformed message from device: %s",
+                ),
                 sanitize_text(json.dumps(msg), MAX_LOGGED_LENGTH),
             )
             return
@@ -1878,7 +2015,10 @@ class PowerPetDoorClient(asyncio.Protocol):
                     future = outstanding
             else:
                 _LOGGER.warning(
-                    "Ignoring unusable msgID %s in device response; no future to resolve",
+                    t(
+                        "client.ignoring_unusable_msgid_device_response",
+                        "Ignoring unusable msgID %s in device response; no future to resolve",
+                    ),
                     sanitize_field(reply_msg_id, MAX_LOGGED_LENGTH),
                 )
 
@@ -1907,7 +2047,7 @@ class PowerPetDoorClient(asyncio.Protocol):
                         handler(self, msg, future)
                     except Exception:
                         _LOGGER.exception(
-                            "Error handling %s response: %s",
+                            t("client.error_handling_response", "Error handling %s response: %s"),
                             cmd,
                             sanitize_text(json.dumps(msg), MAX_LOGGED_LENGTH),
                         )
@@ -1925,7 +2065,7 @@ class PowerPetDoorClient(asyncio.Protocol):
             else:
                 reason = msg.get(FIELD_REASON)
                 _LOGGER.warning(
-                    "Error reported by device: %s",
+                    t("client.error_reported_by_device", "Error reported by device: %s"),
                     sanitize_text(json.dumps(msg), MAX_LOGGED_LENGTH),
                 )
                 if future is not None and not future.done():
@@ -2065,7 +2205,12 @@ class _ConnectionAttempt(asyncio.Protocol):
         if current is not None and current is not self._transport:
             # disconnect() dropped this socket and a newer connection has
             # since been established; this event is stale.
-            _LOGGER.debug("Ignoring connection_lost() from a superseded transport")
+            _LOGGER.debug(
+                t(
+                    "client.ignoring_connection_lost_superseded_transport",
+                    "Ignoring connection_lost() from a superseded transport",
+                )
+            )
             return
         # Goes straight to the client's teardown: the identity checks above
         # are this shim's equivalent of the counting the public

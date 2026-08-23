@@ -36,6 +36,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from .i18n import t
+
 _LOGGER = logging.getLogger(__name__)
 
 #: Hard cap (in characters) on the un-parsed receive buffer retained
@@ -293,12 +295,19 @@ class FrameScanner:
 
         if diag.discarded:
             _LOGGER.warning(
-                "Discarded %d bytes of non-JSON garbage while framing messages", diag.discarded
+                t(
+                    "framing.discarded_bytes_non_json_garbage",
+                    "Discarded %d bytes of non-JSON garbage while framing messages",
+                ),
+                diag.discarded,
             )
 
         if retained > self._max_buffer:
             _LOGGER.error(
-                "Un-parsed receive buffer exceeded %d bytes without a complete message; clearing it",
+                t(
+                    "framing.un_parsed_receive_buffer_exceeded",
+                    "Un-parsed receive buffer exceeded %d bytes without a complete message; clearing it",
+                ),
                 self._max_buffer,
             )
             diag.overflow = True

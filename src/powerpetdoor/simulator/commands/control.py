@@ -9,6 +9,7 @@ import logging
 import sys
 from collections.abc import Callable
 
+from ...i18n import t
 from .base import ArgSpec, CommandResult, command
 
 
@@ -30,7 +31,9 @@ class ControlCommandsMixin:
         the simulator.
         """
         self.stop_callback()
-        return CommandResult(True, "Shutting down...")
+        return CommandResult(
+            True, t("simulator.commands.control.shutting_down", "Shutting down...")
+        )
 
     @command(
         "debug",
@@ -58,14 +61,26 @@ class ControlCommandsMixin:
         if state is None:
             # Show current state
             is_debug = current_level <= logging.DEBUG
-            return CommandResult(True, f"Debug logging: {'on' if is_debug else 'off'}")
+            return CommandResult(
+                True,
+                t(
+                    "simulator.commands.control.debug_logging",
+                    "Debug logging: {arg0}",
+                    arg0="on" if is_debug else "off",
+                ),
+            )
 
         if state:
             root_logger.setLevel(logging.DEBUG)
-            return CommandResult(True, "Debug logging enabled")
+            return CommandResult(
+                True, t("simulator.commands.control.debug_logging_enabled", "Debug logging enabled")
+            )
         else:
             root_logger.setLevel(logging.INFO)
-            return CommandResult(True, "Debug logging disabled")
+            return CommandResult(
+                True,
+                t("simulator.commands.control.debug_logging_disabled", "Debug logging disabled"),
+            )
 
     @command(
         "exit",
@@ -83,7 +98,13 @@ class ControlCommandsMixin:
         exit/q/quit are aliases for shutdown.
         """
         # This is a placeholder - ctl intercepts exit locally
-        return CommandResult(True, "Exit is handled locally by the control client")
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.control.exit_handled_locally_by_control",
+                "Exit is handled locally by the control client",
+            ),
+        )
 
     @command(
         "clear",

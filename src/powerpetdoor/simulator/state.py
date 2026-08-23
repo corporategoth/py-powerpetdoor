@@ -40,6 +40,7 @@ from ..const import (
     FIELD_START_TIME_SUFFIX,
     FIELD_TZ,
 )
+from ..i18n import t
 from ..schedule import (
     MAX_SCHEDULE_INDEX,
     SCHEDULE_WIRE_FROM_DEVICE,
@@ -185,7 +186,13 @@ class Schedule:
                 envelope.
         """
         if not isinstance(data, dict):
-            raise ValueError(f"Schedule must be an object, got {data!r}")
+            raise ValueError(
+                t(
+                    "simulator.state.schedule_must_object_got",
+                    "Schedule must be an object, got {data!r}",
+                    data=data,
+                )
+            )
 
         # Identity and day mask first, so a bad index reports the bad index
         # rather than whatever the time block happens to complain about.
@@ -492,8 +499,10 @@ class DoorSimulatorState:
 
         if self._tz_warned_for != self.timezone:
             logger.warning(
-                "Simulator: cannot resolve timezone %r; falling back to UTC "
-                "for schedule evaluation",
+                t(
+                    "simulator.state.simulator_cannot_resolve_timezone_falling",
+                    "Simulator: cannot resolve timezone %r; falling back to UTC for schedule evaluation",
+                ),
                 self.timezone,
             )
             self._tz_warned_for = self.timezone

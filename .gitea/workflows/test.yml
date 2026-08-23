@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-uv-with-retry
         with:
           python-version: ${{ env.REFERENCE_PYTHON }}
@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-uv-with-retry
         with:
           python-version: ${{ env.REFERENCE_PYTHON }}
@@ -63,6 +63,11 @@ jobs:
         run: ruff format --check src tests
       - name: Check types
         run: mypy src
+      # Orphaned translations and unwrapped user-facing text both fail here.
+      # Missing translations do not: a locale legitimately lags the source
+      # between a string landing and a translator reaching it.
+      - name: Check translations
+        run: python scripts/check_translations.py --untranslated --strict
 
   # A breaking change with no CHANGELOG entry leaves a user whose scripts
   # started exiting 1 with nothing to tell them it was coming.
@@ -71,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       # BASE_REF is passed via env, never interpolated into the script: a ref
@@ -133,7 +138,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-uv-with-retry
         with:
           python-version: ${{ env.REFERENCE_PYTHON }}
@@ -184,7 +189,7 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-uv-with-retry
         with:
           python-version: ${{ matrix.python-version }}
@@ -212,7 +217,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-uv-with-retry
         with:
           python-version: ${{ env.REFERENCE_PYTHON }}
@@ -239,7 +244,7 @@ jobs:
     env:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-uv-with-retry
         with:
           python-version: ${{ env.REFERENCE_PYTHON }}
@@ -282,7 +287,7 @@ jobs:
           coverage report --show-missing --fail-under=0
       - name: Upload coverage to Codecov
         if: ${{ env.CODECOV_TOKEN != '' }}
-        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           token: ${{ env.CODECOV_TOKEN }}
           files: coverage.xml
@@ -300,8 +305,12 @@ jobs:
       # coverage combined across every Python version in the matrix.
       - name: Generate gaps report
         run: python scripts/generate_gaps_report.py
+      # Only on the forge that is the source of truth. The GitHub side is a
+      # push-mirror: a commit pushed there is overwritten by the next mirror
+      # sync, and the token it would need does not exist, so this step only
+      # ever produced a failed-step annotation on every GitHub run.
       - name: Commit updated TESTING_GAPS.md
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && !contains(github.server_url, 'github.com')
         run: |
           git config user.name "CI Bot"
           git config user.email "ci@neuromancy.net"

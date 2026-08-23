@@ -76,6 +76,7 @@ from ..const import (
     SENSOR_STATE_ON,
     SUCCESS_TRUE,
 )
+from ..i18n import t
 from ..schedule import wire_bool_string, wire_int_flag
 from ..tz_utils import async_init_timezone_cache
 from .engine import DoorMotionEngine
@@ -174,7 +175,11 @@ class DoorSimulator:
         self._running = True
         self._battery_task = asyncio.create_task(self._battery_simulation_loop())
 
-        logger.info("Door simulator listening on %s:%s", self.host, self.port)
+        logger.info(
+            t("simulator.server.door_simulator_listening", "Door simulator listening on %s:%s"),
+            self.host,
+            self.port,
+        )
 
     async def stop(self):
         """Stop the simulator server and all of its tasks."""
@@ -199,7 +204,7 @@ class DoorSimulator:
         if self.server:
             self.server.close()
             await self.server.wait_closed()
-            logger.info("Door simulator stopped")
+            logger.info(t("simulator.server.door_simulator_stopped", "Door simulator stopped"))
 
     # =========================================================================
     # Deterministic status hooks (delegated to the engine)
@@ -239,7 +244,9 @@ class DoorSimulator:
             except asyncio.CancelledError:
                 break
             except Exception:
-                logger.exception("Error in battery simulation")
+                logger.exception(
+                    t("simulator.server.error_battery_simulation", "Error in battery simulation")
+                )
 
     def _battery_tick(self):
         """Apply one battery charge/discharge step.
@@ -281,7 +288,7 @@ class DoorSimulator:
 
         state.battery_percent = new_percent
         logger.debug(
-            "Battery %s: %s%% -> %s%%",
+            t("simulator.server.battery", "Battery %s: %s%% -> %s%%"),
             "charging" if step > 0 else "discharging",
             old_percent,
             new_percent,
@@ -321,7 +328,13 @@ class DoorSimulator:
         if self.state.low_battery:
             for protocol in self.protocols:
                 protocol._send({NOTIFY_LOW_BATTERY: ""})
-            logger.info("Simulator: Low battery notification (%s%%)", self.state.battery_percent)
+            logger.info(
+                t(
+                    "simulator.server.simulator_low_battery_notification",
+                    "Simulator: Low battery notification (%s%%)",
+                ),
+                self.state.battery_percent,
+            )
 
     def _broadcast_sensor_notification(self, sensor: str, sensor_state: str = SENSOR_STATE_ON):
         """Send a sensor notification event to all connected clients.
@@ -334,7 +347,14 @@ class DoorSimulator:
             return
         for protocol in self.protocols:
             protocol._send(notification)
-        logger.debug("Simulator: Sent %s sensor %s notification", sensor, sensor_state)
+        logger.debug(
+            t(
+                "simulator.server.simulator_sent_sensor_notification",
+                "Simulator: Sent %s sensor %s notification",
+            ),
+            sensor,
+            sensor_state,
+        )
 
     def broadcast_settings(self):
         """Broadcast settings to all connected clients."""
@@ -635,7 +655,10 @@ class DoorSimulator:
         else:
             self.state.inside_sensor_active = False
         self.engine.notify_sensors_changed()
-        logger.info("Simulator: Pet %s doorway", "in" if present else "left")
+        logger.info(
+            t("simulator.server.simulator_pet_doorway", "Simulator: Pet %s doorway"),
+            "in" if present else "left",
+        )
 
     # =========================================================================
     # Door Control
@@ -684,7 +707,10 @@ class DoorSimulator:
             return
 
         self.state.ac_present = present
-        logger.info("Simulator: AC %s", "connected" if present else "disconnected")
+        logger.info(
+            t("simulator.server.simulator_ac", "Simulator: AC %s"),
+            "connected" if present else "disconnected",
+        )
         self._broadcast_battery_status()
 
     def set_battery_present(self, present: bool):
@@ -697,7 +723,10 @@ class DoorSimulator:
             return
 
         self.state.battery_present = present
-        logger.info("Simulator: Battery %s", "installed" if present else "removed")
+        logger.info(
+            t("simulator.server.simulator_battery", "Simulator: Battery %s"),
+            "installed" if present else "removed",
+        )
         self._broadcast_battery_status()
 
     def set_charge_rate(self, rate: float):
@@ -707,7 +736,13 @@ class DoorSimulator:
             rate: Charge rate in percent per minute. Set to 0 to disable charging.
         """
         self.state.battery_config.charge_rate = max(0.0, rate)
-        logger.info("Simulator: Charge rate set to %s%%/min", rate)
+        logger.info(
+            t(
+                "simulator.server.simulator_charge_rate_set_min",
+                "Simulator: Charge rate set to %s%%/min",
+            ),
+            rate,
+        )
 
     def set_discharge_rate(self, rate: float):
         """Set battery discharge rate (percent per minute).
@@ -716,12 +751,20 @@ class DoorSimulator:
             rate: Discharge rate in percent per minute. Set to 0 to disable discharging.
         """
         self.state.battery_config.discharge_rate = max(0.0, rate)
-        logger.info("Simulator: Discharge rate set to %s%%/min", rate)
+        logger.info(
+            t(
+                "simulator.server.simulator_discharge_rate_set_min",
+                "Simulator: Discharge rate set to %s%%/min",
+            ),
+            rate,
+        )
 
     def set_power(self, enabled: bool):
         """Set power state."""
         self.state.power = enabled
-        logger.info("Simulator: Power %s", "ON" if enabled else "OFF")
+        logger.info(
+            t("simulator.server.simulator_power", "Simulator: Power %s"), "ON" if enabled else "OFF"
+        )
 
     # =========================================================================
     # Schedule Management
@@ -730,12 +773,18 @@ class DoorSimulator:
     def add_schedule(self, schedule: Schedule):
         """Add or update a schedule."""
         self.state.schedules[schedule.index] = schedule
-        logger.info("Simulator: Added schedule %s", schedule.index)
+        logger.info(
+            t("simulator.server.simulator_added_schedule", "Simulator: Added schedule %s"),
+            schedule.index,
+        )
         self.broadcast_schedule(schedule)
 
     def remove_schedule(self, index: int):
         """Remove a schedule by index."""
         if index in self.state.schedules:
             del self.state.schedules[index]
-            logger.info("Simulator: Removed schedule %s", index)
+            logger.info(
+                t("simulator.server.simulator_removed_schedule", "Simulator: Removed schedule %s"),
+                index,
+            )
             self.broadcast_schedule_delete(index)

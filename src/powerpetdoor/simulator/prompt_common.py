@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..i18n import t
 from ..sanitize import sanitize_text
 from .commands.base import (
     DAY_NAMES,
@@ -795,7 +796,7 @@ class InteractiveSession:
                 # Handle history recall (!!, !n, !-n)
                 resolved_line, was_history_recall, error = self.resolve_history_recall(line)
                 if error:
-                    print(f">>> {error}")
+                    print(t("simulator.prompt_common.text", ">>> {error}", error=error))
                     continue
 
                 yield InputLine(

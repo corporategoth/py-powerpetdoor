@@ -7,6 +7,7 @@
 
 from typing import TYPE_CHECKING
 
+from ...i18n import t
 from ...schedule import MAX_SCHEDULE_INDEX
 from .base import DAY_NAMES, DAY_PRESETS, ArgSpec, CommandResult, command, subcommand
 
@@ -76,9 +77,12 @@ class ScheduleCommandsMixin:
             auto_status = "ON" if self.simulator.state.auto else "OFF"
             return CommandResult(
                 True,
-                f"Schedules (auto mode {auto_status}):\n"
-                f"  (implicit): {self._format_sensor_scope(True, True)}, "
-                "all days, 00:00-23:59",
+                t(
+                    "simulator.commands.schedules.schedules_auto_mode_implicit_all",
+                    "Schedules (auto mode {auto_status}):\n  (implicit): {arg0}, all days, 00:00-23:59",
+                    auto_status=auto_status,
+                    arg0=self._format_sensor_scope(True, True),
+                ),
             )
 
         auto_status = "ON" if self.simulator.state.auto else "OFF"
@@ -139,7 +143,10 @@ class ScheduleCommandsMixin:
         while idx in existing:
             idx += 1
         if idx > MAX_SCHEDULE_INDEX:
-            return CommandResult(False, "No free schedule slots")
+            return CommandResult(
+                False,
+                t("simulator.commands.schedules.free_schedule_slots", "No free schedule slots"),
+            )
 
         # Create schedule
         schedule = self._Schedule(
@@ -157,15 +164,28 @@ class ScheduleCommandsMixin:
 
         return CommandResult(
             True,
-            f"Added schedule #{idx}: {self._format_sensor_scope(inside, outside)}, "
-            f"{self._format_days(days)}, "
-            f"{self._format_time(start_h, start_m)}-{self._format_time(end_h, end_m)}",
+            t(
+                "simulator.commands.schedules.added_schedule",
+                "Added schedule #{idx}: {arg0}, {arg1}, {arg2}-{arg3}",
+                idx=idx,
+                arg0=self._format_sensor_scope(inside, outside),
+                arg1=self._format_days(days),
+                arg2=self._format_time(start_h, start_m),
+                arg3=self._format_time(end_h, end_m),
+            ),
         )
 
     def _get_schedule(self, idx: int) -> "Schedule | CommandResult":
         """Get a schedule by index, or a failure CommandResult if not found."""
         if idx not in self.simulator.state.schedules:
-            return CommandResult(False, f"Schedule #{idx} not found")
+            return CommandResult(
+                False,
+                t(
+                    "simulator.commands.schedules.schedule_found",
+                    "Schedule #{idx} not found",
+                    idx=idx,
+                ),
+            )
         return self.simulator.state.schedules[idx]
 
     @subcommand(
@@ -178,14 +198,23 @@ class ScheduleCommandsMixin:
         """Delete all schedules."""
         schedules = self.simulator.state.schedules
         if not schedules:
-            return CommandResult(True, "No schedules to clear")
+            return CommandResult(
+                True, t("simulator.commands.schedules.schedules_clear", "No schedules to clear")
+            )
 
         count = len(schedules)
         # Remove all schedules
         for idx in list(schedules.keys()):
             self.simulator.remove_schedule(idx)
 
-        return CommandResult(True, f"Cleared {count} schedule(s)")
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.schedules.cleared_schedule_s",
+                "Cleared {count} schedule(s)",
+                count=count,
+            ),
+        )
 
     @subcommand(
         "schedule",
@@ -207,7 +236,14 @@ class ScheduleCommandsMixin:
         if isinstance(sched, CommandResult):
             return sched
         self.simulator.remove_schedule(index)
-        return CommandResult(True, f"Deleted schedule #{index}")
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.schedules.deleted_schedule",
+                "Deleted schedule #{index}",
+                index=index,
+            ),
+        )
 
     @subcommand(
         "schedule",
@@ -230,7 +266,14 @@ class ScheduleCommandsMixin:
             return sched
         sched.enabled = True
         self.simulator.broadcast_schedule(sched)
-        return CommandResult(True, f"Schedule #{index} enabled")
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.schedules.schedule_enabled",
+                "Schedule #{index} enabled",
+                index=index,
+            ),
+        )
 
     @subcommand(
         "schedule",
@@ -253,7 +296,14 @@ class ScheduleCommandsMixin:
             return sched
         sched.enabled = False
         self.simulator.broadcast_schedule(sched)
-        return CommandResult(True, f"Schedule #{index} disabled")
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.schedules.schedule_disabled",
+                "Schedule #{index} disabled",
+                index=index,
+            ),
+        )
 
     @subcommand(
         "schedule",
@@ -281,7 +331,15 @@ class ScheduleCommandsMixin:
             return sched
         sched.days_of_week = days
         self.simulator.broadcast_schedule(sched)
-        return CommandResult(True, f"Schedule #{index} days: {self._format_days(days)}")
+        return CommandResult(
+            True,
+            t(
+                "simulator.commands.schedules.schedule_days",
+                "Schedule #{index} days: {arg0}",
+                index=index,
+                arg0=self._format_days(days),
+            ),
+        )
 
     @subcommand(
         "schedule",
@@ -315,6 +373,11 @@ class ScheduleCommandsMixin:
         self.simulator.broadcast_schedule(sched)
         return CommandResult(
             True,
-            f"Schedule #{index} time: "
-            f"{self._format_time(start_h, start_m)}-{self._format_time(end_h, end_m)}",
+            t(
+                "simulator.commands.schedules.schedule_time",
+                "Schedule #{index} time: {arg0}-{arg1}",
+                index=index,
+                arg0=self._format_time(start_h, start_m),
+                arg1=self._format_time(end_h, end_m),
+            ),
         )

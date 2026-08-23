@@ -20,6 +20,7 @@ import logging
 import re
 import threading
 
+from .i18n import t
 from .sanitize import sanitize_field
 
 _LOGGER = logging.getLogger(__name__)
@@ -104,7 +105,13 @@ def _build_timezone_caches() -> None:
     for tz_name in all_tzs:
         posix = _extract_posix_from_tzif(tz_name)
         if not posix:
-            _LOGGER.debug("Skipping %s: no POSIX rule in its TZif footer", tz_name)
+            _LOGGER.debug(
+                t(
+                    "tz_utils.skipping_posix_rule_tzif_footer",
+                    "Skipping %s: no POSIX rule in its TZif footer",
+                ),
+                tz_name,
+            )
             continue
         usable.append(tz_name)
         _iana_to_posix[tz_name] = posix
@@ -116,7 +123,10 @@ def _build_timezone_caches() -> None:
 
     _cache_initialized = True
     _LOGGER.debug(
-        "Timezone cache initialized: %d timezones, %d POSIX mappings",
+        t(
+            "tz_utils.timezone_cache_initialized_timezones_posix",
+            "Timezone cache initialized: %d timezones, %d POSIX mappings",
+        ),
         len(_iana_timezones),
         len(_iana_to_posix),
     )
@@ -162,7 +172,12 @@ def get_available_timezones() -> list[str]:
     internal cache. Returns empty list if cache not initialized.
     """
     if _iana_timezones is None:
-        _LOGGER.warning("Timezone cache not initialized, returning empty list")
+        _LOGGER.warning(
+            t(
+                "tz_utils.timezone_cache_initialized_returning_empty",
+                "Timezone cache not initialized, returning empty list",
+            )
+        )
         return []
     return list(_iana_timezones)
 
@@ -223,7 +238,10 @@ def parse_posix_tz_string(posix_tz: str) -> dict | None:
     match = _POSIX_TZ_RE.match(tz_part)
     if not match:
         # Device-supplied: never log it raw (ANSI injection into host logs).
-        _LOGGER.debug("Could not parse POSIX TZ string: %s", sanitize_field(posix_tz))
+        _LOGGER.debug(
+            t("tz_utils.could_parse_posix_tz_string", "Could not parse POSIX TZ string: %s"),
+            sanitize_field(posix_tz),
+        )
         return None
 
     result["std_abbrev"] = match.group(1).strip("<>")

@@ -69,6 +69,7 @@ from ..const import (
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
 )
+from ..i18n import t
 from ..sanitize import sanitize_text
 from ..schedule import MAX_SCHEDULE_INDEX, coerce_schedule_flag
 from .engine import SENSOR_NAMES
@@ -301,14 +302,26 @@ class Script:
     def from_yaml(cls, content: str, source_file: str | None = None) -> "Script":
         """Parse a script from YAML content."""
         if not YAML_AVAILABLE:
-            raise ScriptError("PyYAML is required for script support: pip install pyyaml")
+            raise ScriptError(
+                t(
+                    "simulator.scripting.pyyaml_required_script_support_pip",
+                    "PyYAML is required for script support: pip install pyyaml",
+                )
+            )
 
         try:
             data = yaml.safe_load(content)
         except yaml.YAMLError as err:
-            raise ScriptError(f"Invalid script YAML: {err}") from err
+            raise ScriptError(
+                t("simulator.scripting.invalid_script_yaml", "Invalid script YAML: {err}", err=err)
+            ) from err
         if not isinstance(data, dict):
-            raise ScriptError("Script must be a YAML dictionary")
+            raise ScriptError(
+                t(
+                    "simulator.scripting.script_must_yaml_dictionary",
+                    "Script must be a YAML dictionary",
+                )
+            )
 
         # Top-level keys have the worst blast radius of any misspelling
         # class in this DSL: a step-parameter typo loses one step, `stpes:`
@@ -320,8 +333,12 @@ class Script:
         unknown = sorted(set(data) - SCRIPT_TOP_LEVEL_KEYS)
         if unknown:
             raise ScriptError(
-                f"Unknown top-level key(s): {', '.join(str(key) for key in unknown)}. "
-                f"Use: {', '.join(sorted(SCRIPT_TOP_LEVEL_KEYS))}"
+                t(
+                    "simulator.scripting.unknown_top_level_key_s",
+                    "Unknown top-level key(s): {arg0}. Use: {arg1}",
+                    arg0=", ".join(str(key) for key in unknown),
+                    arg1=", ".join(sorted(SCRIPT_TOP_LEVEL_KEYS)),
+                )
             )
 
         name = data.get("name", "Unnamed Script")
@@ -329,7 +346,7 @@ class Script:
         steps_data = data.get("steps", [])
 
         if not isinstance(steps_data, list):
-            raise ScriptError("'steps' must be a list")
+            raise ScriptError(t("simulator.scripting.steps_must_list", "'steps' must be a list"))
 
         steps = []
         for i, step_data in enumerate(steps_data, 1):
@@ -339,10 +356,22 @@ class Script:
             elif isinstance(step_data, dict):
                 action = step_data.pop("action", None)
                 if not action:
-                    raise ScriptError(f"Step {i}: missing 'action' field")
+                    raise ScriptError(
+                        t(
+                            "simulator.scripting.step_missing_action_field",
+                            "Step {i}: missing 'action' field",
+                            i=i,
+                        )
+                    )
                 steps.append(ScriptStep(action=action, params=step_data, line_number=i))
             else:
-                raise ScriptError(f"Step {i}: invalid step format")
+                raise ScriptError(
+                    t(
+                        "simulator.scripting.step_invalid_step_format",
+                        "Step {i}: invalid step format",
+                        i=i,
+                    )
+                )
 
         return cls(
             name=name,
@@ -361,7 +390,14 @@ class Script:
         try:
             content = path.read_text()
         except OSError as err:
-            raise ScriptError(f"Cannot read script file '{path}': {err}") from err
+            raise ScriptError(
+                t(
+                    "simulator.scripting.cannot_read_script_file",
+                    "Cannot read script file '{path}': {err}",
+                    path=path,
+                    err=err,
+                )
+            ) from err
         return cls.from_yaml(content, source_file=str(path))
 
     @classmethod
@@ -481,7 +517,13 @@ class ScriptRunner:
                 is False.
         """
         if not queue_if_busy and self.busy:
-            raise ScriptError(f"Another script is already running: {self.current_script}")
+            raise ScriptError(
+                t(
+                    "simulator.scripting.another_script_already_running",
+                    "Another script is already running: {current_script}",
+                    current_script=self.current_script,
+                )
+            )
         async with self._lock:
             if on_start is not None and not on_start():
                 return False
@@ -503,18 +545,42 @@ class ScriptRunner:
             # PyYAML's "\e" escape puts a real ESC in a file that looks
             # clean. Sanitize at the source, exactly as the protocol
             # channel does.
-            logger.info(f"Running script: {sanitize_text(script.name)}")
+            logger.info(
+                t(
+                    "simulator.scripting.running_script",
+                    "Running script: {arg0}",
+                    arg0=sanitize_text(script.name),
+                )
+            )
             if script.description:
-                logger.info(f"  {sanitize_text(script.description)}")
+                logger.info(
+                    t(
+                        "simulator.scripting.text",
+                        "  {arg0}",
+                        arg0=sanitize_text(script.description),
+                    )
+                )
 
         try:
             for step in script.steps:
                 if self._stop_requested:
-                    logger.info("Script stopped by request")
+                    logger.info(
+                        t(
+                            "simulator.scripting.script_stopped_by_request",
+                            "Script stopped by request",
+                        )
+                    )
                     return False
 
                 if verbose:
-                    logger.info(f"  Step {step.line_number}: {sanitize_text(step)}")
+                    logger.info(
+                        t(
+                            "simulator.scripting.step",
+                            "  Step {line_number}: {arg0}",
+                            line_number=step.line_number,
+                            arg0=sanitize_text(step),
+                        )
+                    )
 
                 await self._execute_step(step)
 
@@ -523,21 +589,50 @@ class ScriptRunner:
                 # discarded: the loop simply ended and the run reported
                 # PASSED with exit code 0, the opposite of what `stop`
                 # documents and the one signal a CI abort relies on.
-                logger.info("Script stopped by request")
+                logger.info(
+                    t("simulator.scripting.script_stopped_by_request", "Script stopped by request")
+                )
                 return False
 
             if verbose:
-                logger.info(f"Script '{sanitize_text(script.name)}' completed successfully")
+                logger.info(
+                    t(
+                        "simulator.scripting.script_completed_successfully",
+                        "Script '{arg0}' completed successfully",
+                        arg0=sanitize_text(script.name),
+                    )
+                )
             return True
 
         except ScriptAssertionError as e:
-            logger.error(f"Assertion failed at step {step.line_number}: {sanitize_text(e)}")
+            logger.error(
+                t(
+                    "simulator.scripting.assertion_failed_step",
+                    "Assertion failed at step {line_number}: {arg0}",
+                    line_number=step.line_number,
+                    arg0=sanitize_text(e),
+                )
+            )
             return False
         except ScriptError as e:
-            logger.error(f"Script error at step {step.line_number}: {sanitize_text(e)}")
+            logger.error(
+                t(
+                    "simulator.scripting.script_error_step",
+                    "Script error at step {line_number}: {arg0}",
+                    line_number=step.line_number,
+                    arg0=sanitize_text(e),
+                )
+            )
             return False
         except Exception as e:
-            logger.error(f"Unexpected error at step {step.line_number}: {sanitize_text(e)}")
+            logger.error(
+                t(
+                    "simulator.scripting.unexpected_error_step",
+                    "Unexpected error at step {line_number}: {arg0}",
+                    line_number=step.line_number,
+                    arg0=sanitize_text(e),
+                )
+            )
             return False
         finally:
             self.running = False
@@ -568,8 +663,14 @@ class ScriptRunner:
                 )
                 annotations = ", ".join(sorted(STEP_ANNOTATION_KEYS))
                 raise ScriptError(
-                    f"Unknown parameter(s) for {action}: {', '.join(unexpected)}. "
-                    f"{accepted} (plus the annotations {annotations})"
+                    t(
+                        "simulator.scripting.unknown_parameter_s_plus_annotations",
+                        "Unknown parameter(s) for {action}: {arg0}. {accepted} (plus the annotations {annotations})",
+                        action=action,
+                        arg0=", ".join(unexpected),
+                        accepted=accepted,
+                        annotations=annotations,
+                    )
                 )
 
         state = self.simulator.state
@@ -585,7 +686,14 @@ class ScriptRunner:
             # fails loudly.
             sensor = params.get("sensor", "inside")
             if sensor not in SENSOR_NAMES:
-                raise ScriptError(f"Unknown sensor: {sensor}. Use: {', '.join(SENSOR_NAMES)}")
+                raise ScriptError(
+                    t(
+                        "simulator.scripting.unknown_sensor_use",
+                        "Unknown sensor: {sensor}. Use: {arg0}",
+                        sensor=sensor,
+                        arg0=", ".join(SENSOR_NAMES),
+                    )
+                )
             self.simulator.trigger_sensor(sensor)
 
         elif action == "obstruction":
@@ -656,7 +764,9 @@ class ScriptRunner:
             message = params.get("message", "")
             # Script-supplied text reaching an operator's terminal: same
             # rule as the wire channel.
-            logger.info(f"  [SCRIPT] {sanitize_text(message)}")
+            logger.info(
+                t("simulator.scripting.script", "  [SCRIPT] {arg0}", arg0=sanitize_text(message))
+            )
 
         elif action == "add_schedule":
             # Bounded like every other writer of a schedule index: a script
@@ -692,7 +802,14 @@ class ScriptRunner:
             self.simulator.set_battery(int(percent))
 
         else:
-            raise ScriptError(f"Unknown action: {action}. Use: {', '.join(sorted(_ACTION_PARAMS))}")
+            raise ScriptError(
+                t(
+                    "simulator.scripting.unknown_action_use",
+                    "Unknown action: {action}. Use: {arg0}",
+                    action=action,
+                    arg0=", ".join(sorted(_ACTION_PARAMS)),
+                )
+            )
 
     async def _sleep_or_stop(self, seconds: float) -> None:
         """Sleep, returning early if :meth:`stop` is requested meanwhile.
@@ -720,7 +837,12 @@ class ScriptRunner:
         wait immediately.
         """
         if self._stop_requested:
-            raise ScriptError("Script stopped while waiting")
+            raise ScriptError(
+                t(
+                    "simulator.scripting.script_stopped_while_waiting",
+                    "Script stopped while waiting",
+                )
+            )
         # Validates the condition name up front (raises on unknown)
         if self._check_condition(condition):
             return
@@ -734,12 +856,23 @@ class ScriptRunner:
         deadline = loop.time() + timeout
         while loop.time() < deadline:
             if self._stop_requested:
-                raise ScriptError("Script stopped while waiting")
+                raise ScriptError(
+                    t(
+                        "simulator.scripting.script_stopped_while_waiting",
+                        "Script stopped while waiting",
+                    )
+                )
             if self._check_condition(condition):
                 return
             await asyncio.sleep(0.05)
 
-        raise ScriptError(f"Timeout waiting for condition: {condition}")
+        raise ScriptError(
+            t(
+                "simulator.scripting.timeout_waiting_condition",
+                "Timeout waiting for condition: {condition}",
+                condition=condition,
+            )
+        )
 
     async def _wait_for_status(
         self, condition: str, statuses: tuple[str, ...], timeout: float
@@ -758,10 +891,21 @@ class ScriptRunner:
             await asyncio.gather(waiter, stopper, return_exceptions=True)
 
         if stopper in done:
-            raise ScriptError("Script stopped while waiting")
+            raise ScriptError(
+                t(
+                    "simulator.scripting.script_stopped_while_waiting",
+                    "Script stopped while waiting",
+                )
+            )
         if waiter in done and not waiter.cancelled() and waiter.exception() is None:
             return
-        raise ScriptError(f"Timeout waiting for condition: {condition}")
+        raise ScriptError(
+            t(
+                "simulator.scripting.timeout_waiting_condition",
+                "Timeout waiting for condition: {condition}",
+                condition=condition,
+            )
+        )
 
     def _check_condition(self, condition: str) -> bool:
         """Check if a condition is true."""
@@ -813,9 +957,13 @@ class ScriptRunner:
             return not state.cmd_lockout
         else:
             raise ScriptError(
-                f"Unknown condition: {condition}"
-                f"{_other_table_hint(condition, ASSERT_CONDITIONS, 'assert')}. "
-                f"Use: {', '.join(WAIT_FOR_CONDITIONS)}"
+                t(
+                    "simulator.scripting.unknown_condition_use",
+                    "Unknown condition: {condition}{arg0}. Use: {arg1}",
+                    condition=condition,
+                    arg0=_other_table_hint(condition, ASSERT_CONDITIONS, "assert"),
+                    arg1=", ".join(WAIT_FOR_CONDITIONS),
+                )
             )
 
     @staticmethod
@@ -834,11 +982,34 @@ class ScriptRunner:
         try:
             number = float(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
-            raise ScriptError(f"{name} must be a number, got {sanitize_text(value)!r}") from None
+            raise ScriptError(
+                t(
+                    "simulator.scripting.must_number_got",
+                    "{name} must be a number, got {arg0!r}",
+                    name=name,
+                    arg0=sanitize_text(value),
+                )
+            ) from None
         if not math.isfinite(number):
-            raise ScriptError(f"{name} must be a finite number, got {number!r}")
+            raise ScriptError(
+                t(
+                    "simulator.scripting.must_finite_number_got",
+                    "{name} must be a finite number, got {number!r}",
+                    name=name,
+                    number=number,
+                )
+            )
         if not minimum <= number <= maximum:
-            raise ScriptError(f"{name} must be between {minimum} and {maximum}, got {number!r}")
+            raise ScriptError(
+                t(
+                    "simulator.scripting.must_between_got",
+                    "{name} must be between {minimum} and {maximum}, got {number!r}",
+                    name=name,
+                    minimum=minimum,
+                    maximum=maximum,
+                    number=number,
+                )
+            )
         return number
 
     @staticmethod
@@ -895,7 +1066,14 @@ class ScriptRunner:
         elif name == "cmd_lockout":
             state.cmd_lockout = bool_value
         else:
-            raise ScriptError(f"Unknown setting: {name}. Use: {', '.join(SET_SETTINGS)}")
+            raise ScriptError(
+                t(
+                    "simulator.scripting.unknown_setting_use",
+                    "Unknown setting: {name}. Use: {arg0}",
+                    name=name,
+                    arg0=", ".join(SET_SETTINGS),
+                )
+            )
 
     def _toggle_value(self, name: str):
         """Toggle a boolean state value."""
@@ -918,9 +1096,13 @@ class ScriptRunner:
             state.cmd_lockout = not state.cmd_lockout
         else:
             raise ScriptError(
-                f"Unknown setting to toggle: {name}"
-                f"{_other_table_hint(name, SET_SETTINGS, 'set')}. "
-                f"Use: {', '.join(TOGGLE_SETTINGS)}"
+                t(
+                    "simulator.scripting.unknown_setting_toggle_use",
+                    "Unknown setting to toggle: {name}{arg0}. Use: {arg1}",
+                    name=name,
+                    arg0=_other_table_hint(name, SET_SETTINGS, "set"),
+                    arg1=", ".join(TOGGLE_SETTINGS),
+                )
             )
 
     @staticmethod
@@ -975,9 +1157,13 @@ class ScriptRunner:
             actual = str(state.total_auto_retracts)
         else:
             raise ScriptError(
-                f"Unknown assertion condition: {condition}"
-                f"{_other_table_hint(condition, WAIT_FOR_CONDITIONS, 'wait_for')}. "
-                f"Use: {', '.join(ASSERT_CONDITIONS)}"
+                t(
+                    "simulator.scripting.unknown_assertion_condition_use",
+                    "Unknown assertion condition: {condition}{arg0}. Use: {arg1}",
+                    condition=condition,
+                    arg0=_other_table_hint(condition, WAIT_FOR_CONDITIONS, "wait_for"),
+                    arg1=", ".join(ASSERT_CONDITIONS),
+                )
             )
 
         # Normalize both sides to text, then compare case-insensitively.
@@ -986,7 +1172,13 @@ class ScriptRunner:
 
         if actual_text.casefold() != expected_text.casefold():
             raise ScriptAssertionError(
-                f"{condition}: expected '{expected_text}', got '{actual_text}'"
+                t(
+                    "simulator.scripting.expected_got",
+                    "{condition}: expected '{expected_text}', got '{actual_text}'",
+                    condition=condition,
+                    expected_text=expected_text,
+                    actual_text=actual_text,
+                )
             )
 
 
@@ -1085,7 +1277,10 @@ def _script_files_in(directory: Path) -> dict[str, Path]:
                 # DEBUG, not WARNING: tab completion calls this on every
                 # keystroke. `run <name>` explains the refusal in full.
                 logger.debug(
-                    "Not listing %s: it resolves outside %s",
+                    t(
+                        "simulator.scripting.listing_resolves_outside",
+                        "Not listing %s: it resolves outside %s",
+                    ),
                     sanitize_text(path.name),
                     base,
                 )
@@ -1160,7 +1355,14 @@ def _describe_scripts(script_files: dict[str, Path]) -> list[tuple[str, str]]:
             # Both the name and the error text are file-derived.
             # Reported on every listing, not only the first: the cache is
             # a parse cache, not a report cache.
-            logger.warning(f"Failed to load script {sanitize_text(name)}: {error}")
+            logger.warning(
+                t(
+                    "simulator.scripting.failed_load_script",
+                    "Failed to load script {arg0}: {error}",
+                    arg0=sanitize_text(name),
+                    error=error,
+                )
+            )
         result.append((name, description))
     return result
 
@@ -1177,7 +1379,14 @@ def get_builtin_script(name: str) -> Script:
         available = ", ".join(sorted({*script_files, *get_extra_script_files()}))
         # "built-in" would read as if the --scripts-dir names in that same
         # Available: list were built-ins too.
-        raise ScriptError(f"Unknown script: {name}. Available: {available}")
+        raise ScriptError(
+            t(
+                "simulator.scripting.unknown_script_available",
+                "Unknown script: {name}. Available: {available}",
+                name=name,
+                available=available,
+            )
+        )
     return Script.from_file(script_files[name])
 
 

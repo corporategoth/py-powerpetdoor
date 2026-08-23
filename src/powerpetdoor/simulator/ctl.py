@@ -16,6 +16,7 @@ import socket
 import sys
 from typing import TYPE_CHECKING, cast
 
+from ..i18n import t
 from ..sanitize import sanitize_text
 from ..tz_utils import async_init_timezone_cache
 
@@ -81,7 +82,7 @@ class LocalCommandHandler(InfoCommandsMixin, ControlCommandsMixin):
         Returns a result with a special marker that the caller checks.
         """
         # Return a marker that execute() will detect
-        return CommandResult(True, "__EXIT_CTL__")
+        return CommandResult(True, t("simulator.ctl.exit_ctl", "__EXIT_CTL__"))
 
     def is_local_command(self, line: str) -> bool:
         """Check if a command should be handled locally.
@@ -403,18 +404,30 @@ async def interactive_mode_async(
     # Check connection first
     connected, error = check_connection(host, port, timeout)
     if not connected:
-        print(f"Error: {error}")
+        print(t("simulator.ctl.error", "Error: {error}", error=error))
         sys.exit(1)
 
-    print(f"Connected to simulator control port at {host}:{port}")
-    print("Type 'help' for commands, 'exit' to quit, 'shutdown' to stop daemon")
+    print(
+        t(
+            "simulator.ctl.connected_simulator_control_port",
+            "Connected to simulator control port at {host}:{port}",
+            host=host,
+            port=port,
+        )
+    )
+    print(
+        t(
+            "simulator.ctl.type_help_commands_exit_quit",
+            "Type 'help' for commands, 'exit' to quit, 'shutdown' to stop daemon",
+        )
+    )
     print()
 
     # Connect with asyncio for persistent connection
     try:
         reader, writer = await asyncio.open_connection(host, port)
     except Exception as e:
-        print(f"Error connecting: {e}")
+        print(t("simulator.ctl.error_connecting", "Error connecting: {e}", e=e))
         sys.exit(1)
 
     stop_event = asyncio.Event()
@@ -458,7 +471,12 @@ async def interactive_mode_async(
                     line = await reader.readline()
                     if not line:
                         # Connection closed
-                        print("\n>>> Simulator disconnected.")
+                        print(
+                            t(
+                                "simulator.ctl.simulator_disconnected",
+                                "\n>>> Simulator disconnected.",
+                            )
+                        )
                         stop_event.set()
                         break
                     decoded = line.decode(errors="replace").strip()
@@ -490,7 +508,7 @@ async def interactive_mode_async(
                     break
         except Exception as e:
             if not stop_event.is_set():
-                print(f"\n>>> Connection error: {e}")
+                print(t("simulator.ctl.connection_error", "\n>>> Connection error: {e}", e=e))
                 stop_event.set()
 
     async def await_response(silence_timeout: float | None) -> tuple[bool, str]:
@@ -618,7 +636,7 @@ async def interactive_mode_async(
                 line
             )
             if recall_error:
-                print(f">>> {recall_error}")
+                print(t("simulator.ctl.text", ">>> {recall_error}", recall_error=recall_error))
                 continue
 
             input_line = InputLine(
@@ -648,7 +666,7 @@ async def interactive_mode_async(
                 print(render_result(response))
 
     except KeyboardInterrupt:
-        print("\nExiting.")
+        print(t("simulator.ctl.exiting", "\nExiting."))
     finally:
         stop_event.set()
         reader_task.cancel()
@@ -742,8 +760,11 @@ command to see available simulator commands.
     # takes", so a sentinel here would be a second one.
     if args.timeout <= 0:
         parser.error(
-            f"--timeout {args.timeout:g}: must be greater than 0 "
-            "(use 'run <script> wait' to wait as long as a script takes)"
+            t(
+                "simulator.ctl.timeout_must_greater_than_use",
+                "--timeout {timeout:g}: must be greater than 0 (use 'run <script> wait' to wait as long as a script takes)",
+                timeout=args.timeout,
+            )
         )
 
     # The daemon refuses script paths over the control channel, so this
@@ -770,7 +791,7 @@ command to see available simulator commands.
                 # both halves - the command was never a command, and raising
                 # the timeout only makes the hang longer. A shell wrapper
                 # expanding an unset variable lands here immediately.
-                parser.error("empty command")
+                parser.error(t("simulator.ctl.empty_command", "empty command"))
             success, response = send_command(args.host, args.port, command, args.timeout)
             print(response)
             sys.exit(0 if success else 1)
@@ -778,7 +799,7 @@ command to see available simulator commands.
             parser.print_help()
             sys.exit(1)
     except KeyboardInterrupt:
-        print("\nInterrupted.")
+        print(t("simulator.ctl.interrupted", "\nInterrupted."))
         # Interrupted runs must not report success (128 + SIGINT)
         sys.exit(130)
 

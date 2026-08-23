@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..i18n import t
 from ..sanitize import sanitize_text
 from ..tz_utils import async_init_timezone_cache
 from .commands import CommandHandler
@@ -212,7 +213,16 @@ DEFAULT_CONTROL_HOST = "127.0.0.1"
 def _validate_port(parser, flag: str, value: int) -> None:
     """Refuse an out-of-range port with a usage line, like every other flag."""
     if not MIN_PORT <= value <= MAX_PORT:
-        parser.error(f"{flag} {value}: port must be {MIN_PORT}-{MAX_PORT}")
+        parser.error(
+            t(
+                "simulator.cli.port_must",
+                "{flag} {value}: port must be {MIN_PORT}-{MAX_PORT}",
+                flag=flag,
+                value=value,
+                MIN_PORT=MIN_PORT,
+                MAX_PORT=MAX_PORT,
+            )
+        )
 
 
 def _validate_host(parser, flag: str, value: str) -> None:
@@ -226,7 +236,15 @@ def _validate_host(parser, flag: str, value: str) -> None:
     try:
         socket.getaddrinfo(value, None, type=socket.SOCK_STREAM)
     except OSError as err:
-        parser.error(f"{flag} {value}: {err.strerror or err}")
+        parser.error(
+            t(
+                "simulator.cli.text",
+                "{flag} {value}: {arg0}",
+                flag=flag,
+                value=value,
+                arg0=err.strerror or err,
+            )
+        )
 
 
 class _ControlLogHandler(logging.Handler):
@@ -341,7 +359,14 @@ class ControlChannel:
         self.server = await asyncio.start_server(
             self._handle_client, self.host, self.port, limit=MAX_CONTROL_LINE
         )
-        logger.info(f"Control server listening on {self.host}:{self.bound_port}")
+        logger.info(
+            t(
+                "simulator.cli.control_server_listening",
+                "Control server listening on {host}:{bound_port}",
+                host=self.host,
+                bound_port=self.bound_port,
+            )
+        )
 
         self.log_handler = _ControlLogHandler(self.clients)
         self.log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
@@ -383,7 +408,9 @@ class ControlChannel:
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle a control connection."""
         addr = writer.get_extra_info("peername")
-        logger.info(f"Control connection from {addr}")
+        logger.info(
+            t("simulator.cli.control_connection", "Control connection from {addr}", addr=addr)
+        )
         self.clients.add(writer)
         try:
             # Send initial door-client status so ctl can color its prompt
@@ -401,7 +428,13 @@ class ControlChannel:
                     # internal ("Separator is found, but chunk is longer
                     # than limit") at ERROR - which _ControlLogHandler then
                     # broadcast into every other operator's ctl session.
-                    logger.info("Control client %s sent an over-long command line", addr)
+                    logger.info(
+                        t(
+                            "simulator.cli.control_client_sent_over_long",
+                            "Control client %s sent an over-long command line",
+                        ),
+                        addr,
+                    )
                     writer.write(
                         f"ERROR: Command line too long (max {MAX_CONTROL_LINE} bytes)\n".encode()
                     )
@@ -439,9 +472,16 @@ class ControlChannel:
             # normal hang-up at ERROR - and broadcasting it to every other
             # ctl session via _ControlLogHandler - trains operators to
             # ignore the one severity that should never be ignorable.
-            logger.debug(f"Control client {addr} hung up: {e}")
+            logger.debug(
+                t(
+                    "simulator.cli.control_client_hung_up",
+                    "Control client {addr} hung up: {e}",
+                    addr=addr,
+                    e=e,
+                )
+            )
         except Exception as e:
-            logger.error(f"Control client error: {e}")
+            logger.error(t("simulator.cli.control_client_error", "Control client error: {e}", e=e))
         finally:
             self.clients.discard(writer)
             writer.close()
@@ -449,7 +489,13 @@ class ControlChannel:
                 await writer.wait_closed()
             except Exception:
                 pass
-            logger.info(f"Control connection closed from {addr}")
+            logger.info(
+                t(
+                    "simulator.cli.control_connection_closed",
+                    "Control connection closed from {addr}",
+                    addr=addr,
+                )
+            )
 
 
 def _build_state(
@@ -502,17 +548,42 @@ async def _process_script_queue(
                     # window cancels it, and the run is abandoned rather
                     # than started seconds later.
                     if not script_queue.start(entry):
-                        logger.info(f"Dropped queued script: {sanitize_text(name)}")
+                        logger.info(
+                            t(
+                                "simulator.cli.dropped_queued_script",
+                                "Dropped queued script: {arg0}",
+                                arg0=sanitize_text(name),
+                            )
+                        )
                         return False
-                    logger.info(f"Running queued script: {sanitize_text(name)}")
+                    logger.info(
+                        t(
+                            "simulator.cli.running_queued_script",
+                            "Running queued script: {arg0}",
+                            arg0=sanitize_text(name),
+                        )
+                    )
                     return True
 
                 success = await script_runner.run(script, on_start=_on_start)
                 if not entry.cancelled:
                     status = "PASSED" if success else "FAILED"
-                    logger.info(f"Script {status}: {sanitize_text(script.name)}")
+                    logger.info(
+                        t(
+                            "simulator.cli.script",
+                            "Script {status}: {arg0}",
+                            status=status,
+                            arg0=sanitize_text(script.name),
+                        )
+                    )
             except Exception as e:
-                logger.error(f"Error running queued script: {sanitize_text(e)}")
+                logger.error(
+                    t(
+                        "simulator.cli.error_running_queued_script",
+                        "Error running queued script: {arg0}",
+                        arg0=sanitize_text(e),
+                    )
+                )
             finally:
                 # Also covers a load failure, which never reaches on_start.
                 script_queue.release(entry)
@@ -552,23 +623,41 @@ async def _run_startup_scripts(
     try:
         # Wait for client connection if requested
         if wait_for_client:
-            status_print(">>> Waiting for client connection...")
+            status_print(
+                t("simulator.cli.waiting_client_connection", ">>> Waiting for client connection...")
+            )
             while not simulator.protocols:
                 if stop_event.is_set():
                     return
                 await asyncio.sleep(0.1)
-            status_print(">>> Client connected, starting scripts")
+            status_print(
+                t(
+                    "simulator.cli.client_connected_starting_scripts",
+                    ">>> Client connected, starting scripts",
+                )
+            )
 
         while True:
             # Check for client disconnect if wait_for_client
             if wait_for_client and not simulator.protocols:
-                status_print(">>> Client disconnected, stopping scripts")
+                status_print(
+                    t(
+                        "simulator.cli.client_disconnected_stopping_scripts",
+                        ">>> Client disconnected, stopping scripts",
+                    )
+                )
                 break
 
             run_count += 1
             completed = 0
             if loop_scripts:
-                status_print(f"\n>>> Script run #{run_count}")
+                status_print(
+                    t(
+                        "simulator.cli.script_run",
+                        "\n>>> Script run #{run_count}",
+                        run_count=run_count,
+                    )
+                )
 
             for i, script_ref in enumerate(scripts):
                 # Check for disconnect before each script
@@ -576,12 +665,23 @@ async def _run_startup_scripts(
                     # Flushed like every other progress line: this is the
                     # one that explains why the remaining scripts never
                     # ran, and it died in the buffer.
-                    status_print(">>> Client disconnected, stopping scripts")
+                    status_print(
+                        t(
+                            "simulator.cli.client_disconnected_stopping_scripts",
+                            ">>> Client disconnected, stopping scripts",
+                        )
+                    )
                     break
 
                 # Add delay between scripts (not before first one)
                 if i > 0 and script_delay > 0:
-                    status_print(f">>> Waiting {script_delay}s before next script...")
+                    status_print(
+                        t(
+                            "simulator.cli.waiting_s_before_next_script",
+                            ">>> Waiting {script_delay}s before next script...",
+                            script_delay=script_delay,
+                        )
+                    )
                     await asyncio.sleep(script_delay)
 
                 try:
@@ -591,16 +691,27 @@ async def _run_startup_scripts(
                     # puts a real ESC in a file that looks clean, and this
                     # goes straight to the operator's terminal.
                     name = sanitize_text(script.name)
-                    status_print(f"\n>>> Running script: {name}")
+                    status_print(
+                        t("simulator.cli.running_script", "\n>>> Running script: {name}", name=name)
+                    )
                     success = await script_runner.run(script)
                     if not success:
                         all_success = False
-                        status_print(f">>> Script FAILED: {name}")
+                        status_print(
+                            t("simulator.cli.script_failed", ">>> Script FAILED: {name}", name=name)
+                        )
                     else:
-                        status_print(f">>> Script PASSED: {name}")
+                        status_print(
+                            t("simulator.cli.script_passed", ">>> Script PASSED: {name}", name=name)
+                        )
                 except Exception as e:
                     status_print(
-                        f"Error running script '{sanitize_text(script_ref)}': {sanitize_text(e)}"
+                        t(
+                            "simulator.cli.error_running_script",
+                            "Error running script '{arg0}': {arg1}",
+                            arg0=sanitize_text(script_ref),
+                            arg1=sanitize_text(e),
+                        )
                     )
                     all_success = False
                 completed += 1
@@ -611,7 +722,13 @@ async def _run_startup_scripts(
 
                 # Delay before next loop iteration
                 if script_delay > 0:
-                    status_print(f">>> Waiting {script_delay}s before next loop...")
+                    status_print(
+                        t(
+                            "simulator.cli.waiting_s_before_next_loop",
+                            ">>> Waiting {script_delay}s before next loop...",
+                            script_delay=script_delay,
+                        )
+                    )
                     await asyncio.sleep(script_delay)
                 continue
 
@@ -626,11 +743,24 @@ async def _run_startup_scripts(
             # No verdict: leave script_result[0] at None so main() exits
             # non-zero, and report what actually happened instead.
             if oneshot:
-                status_print(f"\n>>> Interrupted after {completed} of {len(scripts)} script(s)")
+                status_print(
+                    t(
+                        "simulator.cli.interrupted_after_script_s",
+                        "\n>>> Interrupted after {completed} of {arg0} script(s)",
+                        completed=completed,
+                        arg0=len(scripts),
+                    )
+                )
         else:
             script_result[0] = all_success
             if oneshot:
-                status_print(f"\n>>> All scripts {'PASSED' if all_success else 'FAILED'}")
+                status_print(
+                    t(
+                        "simulator.cli.all_scripts",
+                        "\n>>> All scripts {arg0}",
+                        arg0="PASSED" if all_success else "FAILED",
+                    )
+                )
                 stop_event.set()
 
 
@@ -824,7 +954,7 @@ async def run_simulator(
     try:
         await simulator.start()
     except OSError as err:
-        raise SimulatorStartupError("door", host, port, err) from err
+        raise SimulatorStartupError(t("simulator.cli.door", "door"), host, port, err) from err
 
     # The actual bound port (differs from `port` when an ephemeral port 0 was
     # requested, e.g. in tests)
@@ -858,7 +988,10 @@ async def run_simulator(
         from .scripting import list_extra_scripts
 
         if not list_extra_scripts():
-            logger.warning("No *.yaml/*.yml scripts found in %s", scripts_dir)
+            logger.warning(
+                t("simulator.cli.yaml_yml_scripts_found", "No *.yaml/*.yml scripts found in %s"),
+                scripts_dir,
+            )
 
     # Determine mode
     interactive = not scripts and not daemon
@@ -883,13 +1016,29 @@ async def run_simulator(
             await control_channel.start()
         except OSError as err:
             await simulator.stop()
-            raise SimulatorStartupError("control", control_host, control_port, err) from err
+            raise SimulatorStartupError(
+                t("simulator.cli.control", "control"), control_host, control_port, err
+            ) from err
         channel_holder[0] = control_channel
 
     # Print startup info
-    status_print(f"Simulator started on {host}:{actual_port}")
+    status_print(
+        t(
+            "simulator.cli.simulator_started",
+            "Simulator started on {host}:{actual_port}",
+            host=host,
+            actual_port=actual_port,
+        )
+    )
     if control_channel:
-        status_print(f"Control channel: {control_host}:{control_channel.bound_port}")
+        status_print(
+            t(
+                "simulator.cli.control_channel",
+                "Control channel: {control_host}:{bound_port}",
+                control_host=control_host,
+                bound_port=control_channel.bound_port,
+            )
+        )
     if interactive:
         status_print("=" * 65)
         status_print(cmd_handler.get_help())
@@ -1012,14 +1161,25 @@ async def run_simulator(
         else:
             # Not daemon mode as the docs define it (no control channel is
             # started on this path) - just headless.
-            logger.warning("stdin not available, running without interactive input")
+            logger.warning(
+                t(
+                    "simulator.cli.stdin_available_running_without_interactive",
+                    "stdin not available, running without interactive input",
+                )
+            )
 
     # Handle run_for timeout
     if run_for:
 
         async def timeout_shutdown():
             await asyncio.sleep(run_for)
-            logger.info(f"Run time ({run_for}s) elapsed, shutting down")
+            logger.info(
+                t(
+                    "simulator.cli.run_time_s_elapsed_shutting",
+                    "Run time ({run_for}s) elapsed, shutting down",
+                    run_for=run_for,
+                )
+            )
             stop_event.set()
 
         asyncio.create_task(timeout_shutdown())
@@ -1181,7 +1341,13 @@ def main():
     # happily and the first sign of trouble was an "Unknown script" error
     # from a ctl user much later.
     if args.scripts_dir is not None and not Path(args.scripts_dir).is_dir():
-        parser.error(f"--scripts-dir {args.scripts_dir}: not a directory")
+        parser.error(
+            t(
+                "simulator.cli.scripts_dir_directory",
+                "--scripts-dir {scripts_dir}: not a directory",
+                scripts_dir=args.scripts_dir,
+            )
+        )
 
     # Bind-time values were the one class of bad argument this parser did
     # not check, so `--port 99999` reached socket.bind() and exited with a
@@ -1198,7 +1364,13 @@ def main():
     # immediately", logging `Run time (-5.0s) elapsed, shutting down` as if
     # five negative seconds had passed.
     if args.run_for is not None and args.run_for <= 0:
-        parser.error(f"--run-for {args.run_for:g}: must be greater than 0")
+        parser.error(
+            t(
+                "simulator.cli.run_must_greater_than",
+                "--run-for {run_for:g}: must be greater than 0",
+                run_for=args.run_for,
+            )
+        )
 
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
@@ -1231,7 +1403,12 @@ def main():
 
     # Validate mutually exclusive options
     if args.scripts and daemon:
-        parser.error("--script and --daemon are mutually exclusive")
+        parser.error(
+            t(
+                "simulator.cli.script_daemon_mutually_exclusive",
+                "--script and --daemon are mutually exclusive",
+            )
+        )
 
     # Mode-scoped flags: silently ignoring them is a repeatability trap in
     # CI wrappers (e.g. `ppd-simulator --oneshot` with no script exits 0
@@ -1248,10 +1425,24 @@ def main():
             # In daemon mode --script is itself refused, so "use --script"
             # would just send the operator round a second time.
             if daemon:
-                parser.error(f"{', '.join(unusable)} is not available in daemon mode")
-            parser.error(f"{', '.join(unusable)} cannot be used without --script")
+                parser.error(
+                    t(
+                        "simulator.cli.available_daemon_mode",
+                        "{arg0} is not available in daemon mode",
+                        arg0=", ".join(unusable),
+                    )
+                )
+            parser.error(
+                t(
+                    "simulator.cli.cannot_used_without_script",
+                    "{arg0} cannot be used without --script",
+                    arg0=", ".join(unusable),
+                )
+            )
     if not daemon and args.control_host != DEFAULT_CONTROL_HOST:
-        parser.error("--control-host requires --daemon")
+        parser.error(
+            t("simulator.cli.control_host_requires_daemon", "--control-host requires --daemon")
+        )
 
     if daemon:
         # -1 means use default (port + CONTROL_PORT_OFFSET), otherwise the
@@ -1272,10 +1463,20 @@ def main():
         try:
             parts = args.firmware.split(".")
             if len(parts) != 3:
-                parser.error("Firmware version must be in format major.minor.patch (e.g., '1.2.3')")
+                parser.error(
+                    t(
+                        "simulator.cli.firmware_version_must_format_major",
+                        "Firmware version must be in format major.minor.patch (e.g., '1.2.3')",
+                    )
+                )
             firmware = (int(parts[0]), int(parts[1]), int(parts[2]))
         except ValueError:
-            parser.error("Firmware version must contain only numbers (e.g., '1.2.3')")
+            parser.error(
+                t(
+                    "simulator.cli.firmware_version_must_contain_only",
+                    "Firmware version must contain only numbers (e.g., '1.2.3')",
+                )
+            )
 
     # Parse hardware version if provided
     hardware = None
@@ -1283,12 +1484,22 @@ def main():
         try:
             parts = args.hardware.split(".")
             if len(parts) != 2:
-                parser.error("Hardware version must be in format ver.rev (e.g., '1.1')")
+                parser.error(
+                    t(
+                        "simulator.cli.hardware_version_must_format_ver",
+                        "Hardware version must be in format ver.rev (e.g., '1.1')",
+                    )
+                )
             # Integers, because a real door's fwInfo object is all
             # integers (verified against firmware 1.7.18).
             hardware = (int(parts[0]), int(parts[1]))
         except ValueError:
-            parser.error("Hardware version must contain only numbers (e.g., '1.1')")
+            parser.error(
+                t(
+                    "simulator.cli.hardware_version_must_contain_only",
+                    "Hardware version must contain only numbers (e.g., '1.1')",
+                )
+            )
 
     try:
         result = asyncio.run(
@@ -1331,7 +1542,7 @@ def main():
         sys.exit(1)
 
     except KeyboardInterrupt:
-        print("\nSimulator stopped.")
+        print(t("simulator.cli.simulator_stopped", "\nSimulator stopped."))
         # Interrupted runs must not report success to CI (128 + SIGINT)
         sys.exit(130)
 
