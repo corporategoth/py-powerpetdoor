@@ -21,7 +21,7 @@ repos:
     # commit into a fight with the lint job.
     rev: v0.16.4
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
       - id: ruff-format
 

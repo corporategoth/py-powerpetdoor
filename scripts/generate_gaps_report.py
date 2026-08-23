@@ -432,7 +432,7 @@ def main() -> int:
         if stdout_mode:
             print(msg)
         else:
-            Path("tests/TESTING_GAPS.md").write_text(msg)
+            Path("tests/TESTING_GAPS.md").write_text(msg.rstrip("\n") + "\n")
         return 1
 
     with open(coverage_file) as f:
@@ -655,7 +655,7 @@ def main() -> int:
     if stdout_mode:
         print(output, end="")
     else:
-        Path("tests/TESTING_GAPS.md").write_text(output)
+        Path("tests/TESTING_GAPS.md").write_text(output.rstrip("\n") + "\n")
 
     return 0
 

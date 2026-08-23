@@ -2,7 +2,7 @@
 
 This file is **auto-generated** by CI after each test run. Do not edit manually.
 
-**Last updated:** 2026-08-23 10:12 UTC
+**Last updated:** 2026-08-23 10:21 UTC
 
 ## Summary
 
@@ -10,7 +10,7 @@ This file is **auto-generated** by CI after each test run. Do not edit manually.
 |--------|-------|
 | Line Coverage | 100.00% |
 | Branch Coverage | 100.00% |
-| Lines Covered | 6,455 / 6,455 |
+| Lines Covered | 6,499 / 6,499 |
 | Branches Covered | 2,276 / 2,276 |
 | Lines Missing | 0 |
 
@@ -72,4 +72,3 @@ None. Every `exclude_lines` and `partial_branches` pattern above matches only th
 | Lines | Type | Reason | Code |
 |-------|------|--------|------|
 | 657 | no cover | defensive: socket_reader swallows its own cancellation; only an outer cancel landing exactly on this await would raise | `except asyncio.CancelledError:` |
-
