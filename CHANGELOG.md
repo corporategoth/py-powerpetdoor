@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-23
+
 ### Fixed — proven against a real door (firmware 1.7.18)
 
 A physical Power Pet Door was probed for the first time. It disproved a
@@ -639,7 +641,8 @@ accepted, and the run still exited 0.
 - Async/await interface using asyncio
 - Support for Python 3.11, 3.12, 3.13, and 3.14
 
-[Unreleased]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/corporategoth/py-powerpetdoor/releases/tag/v0.1.0
