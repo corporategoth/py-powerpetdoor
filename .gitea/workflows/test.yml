@@ -1,8 +1,30 @@
-# NOTE: this file is a byte-identical copy of .github/workflows/test.yml.
-# Gitea Actions only reads .gitea/workflows/, and GitHub only reads
-# .github/workflows/, so the same pipeline has to exist in both places for
-# both runners to execute it. tests/test_ci_gates.py asserts the two files
-# are identical below this header, so they cannot drift.
+# GENERATED FILE - do not edit. Run scripts/sync_gitea_workflow.py.
+#
+# A copy of .github/workflows/test.yml, byte-identical below this header.
+# tests/test_ci_gates.py asserts that, so the two cannot drift.
+#
+# WHY THE DUPLICATION IS NECESSARY (not obvious, and not the case for every
+# repo in this family - ostinato needs no .gitea copy):
+#
+# Gitea does not read both workflow directories. It walks a candidate list
+# and stops at the FIRST that exists - `.gitea/workflows`, then
+# `.github/workflows` (go-gitea/gitea, modules/actions/workflows.go,
+# `listWorkflowsInDirs`: `if err == nil { break }`).
+#
+# `sync-wiki.yml` uses `on: wiki`, a Gitea-only trigger, so it HAS to live
+# in `.gitea/workflows/`. That single file makes the directory exist, which
+# switches Gitea to it exclusively - and without this copy beside it, Gitea
+# would run the wiki sync and no tests whatsoever.
+#
+# A symlink does NOT work here: Gitea filters by filename suffix with no
+# type check, so it reads the symlink's blob - which is the target path -
+# and parses it as the workflow. The result is a workflow with no jobs that
+# silently runs nothing.
+#
+# The same mechanism is why release.yml deliberately has no copy here:
+# Gitea therefore never attempts it, which is what we want. PyPI's trusted
+# publishing only federates with GitHub, so a release job on a Gitea runner
+# could not publish even if it ran.
 name: Tests
 
 on:

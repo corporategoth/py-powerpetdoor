@@ -99,6 +99,20 @@ repos:
         pass_filenames: false
         stages: [pre-commit]
 
+      # The Gitea copy of the test workflow is generated, never hand-edited.
+      # It has to exist (Gitea reads only .gitea/workflows once that
+      # directory exists, and sync-wiki.yml forces it to), and a symlink
+      # does not work - Gitea would read the link target as the workflow
+      # body and see a workflow with no jobs. Generating it removes the only
+      # reason the two copies could ever drift.
+      - id: gitea-workflow
+        name: Gitea workflow copy is current
+        entry: uv run python scripts/sync_gitea_workflow.py
+        language: system
+        files: ^\.(github|gitea)/workflows/test\.yml$
+        pass_filenames: false
+        stages: [pre-commit]
+
       - id: dependency-freshness
         name: Dependencies are current
         entry: uv run python scripts/check_dependencies.py
