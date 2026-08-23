@@ -262,7 +262,7 @@ class TestHoldtimeCommand:
         `broadcast all` failed forever after, and `GET_SETTINGS` /
         `GET_HOLD_TIME` answered every connected client
         `success:false / reason:"Command failed"` because
-        `int(hold_time * 100)` raises (round-7 frontend M1).
+        `int(hold_time * 100)` raises.
         """
         before = command_handler.simulator.state.hold_time
 
@@ -394,7 +394,7 @@ class TestAcCommand:
         assert state.ac_present is True
 
     async def test_bare_ac_reads_as_a_change_not_a_display(self, command_handler):
-        """`ac` mutates, so it must not be phrased like `battery`/`holdtime` (T5)."""
+        """`ac` mutates, so it must not be phrased like `battery`/`holdtime`."""
         state = command_handler.simulator.state
         state.ac_present = True
 

@@ -116,14 +116,8 @@ from .const import (
     PRIORITY_LOW,
     SUCCESS_TRUE,
 )
-from .framing import (
-    MAX_BUFFER_SIZE,
-    EventThrottle,
-    FrameDispatcher,
-    FrameScanner,
-    find_frame_end,
-)
-from .sanitize import MAX_LOGGED_LENGTH, sanitize_text
+from .framing import MAX_BUFFER_SIZE, FrameScanner, find_frame_end
+from .sanitize import MAX_LOGGED_LENGTH, sanitize_field, sanitize_text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -131,9 +125,10 @@ _LOGGER = logging.getLogger(__name__)
 MAX_FAILED_MSG = 2
 MAX_FAILED_PINGS = 3
 
-#: Cap on the exponential reconnect backoff delay, in seconds (L1)
+#: Cap on the exponential reconnect backoff delay, in seconds
 MAX_RECONNECT_DELAY = 300.0
-#: Maximum fraction of the backoff delay added as random jitter (L1)
+#: Maximum fraction of the backoff delay added as random jitter, so several
+#: clients do not retry in lockstep against the single-connection device.
 RECONNECT_JITTER = 0.25
 
 
@@ -196,7 +191,7 @@ class ResponseHandlerRegistry:
         matches no handler - including the JSON containers that are not
         usable dict keys at all, which would otherwise raise ``TypeError:
         unhashable type`` out of ``process_message`` and turn one ~40-byte
-        frame into a full traceback in the host application's log (D3).
+        frame into a full traceback in the host application's log.
         A missing CMD (None) is normal: response envelopes may omit it.
         """
         if not isinstance(cmd, str):
@@ -258,23 +253,6 @@ def make_bool(v: str | int | bool | None) -> bool | None:
         return v
 
 
-def _recorded_size(msg, frame_size: int | None) -> int:
-    """Magnitude for a per-frame throttle: real wire bytes when known.
-
-    The fallback exists only for a direct ``process_message`` caller (a
-    test, a third-party subclass) that has no frame. On the receive path
-    ``frame_size`` is always supplied, so the ``json.dumps`` here does not
-    run per frame - which was the other half of the defect: it was executed
-    on **every** occurrence purely to measure one, and discarded on ~99.9%
-    of them (32,768 serializations, ~35 ms, per 64 KiB read of ``{}``;
-    ~1.2 us/call in isolation). The byte-total accuracy is the reason for
-    the change, not the CPU (round-9 backend F2).
-    """
-    if frame_size is not None:
-        return frame_size
-    return len(json.dumps(msg))
-
-
 class PowerPetDoorClient(asyncio.Protocol):
     """Client for communicating with Power Pet Door devices.
 
@@ -320,17 +298,6 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._ownLoop = False
         self._eventLoop: asyncio.AbstractEventLoop | None = None
         self._transport = None
-        #: Transports connection_made() declined and aborted while this
-        #: object was wired into create_connection() directly (see
-        #: :meth:`connection_made`). asyncio still delivers their
-        #: connection_lost() here, and it must not tear anything down.
-        self._declined = 0
-        #: Transports adopted through the public :meth:`connection_made`
-        #: whose connection_lost() has not been delivered yet. More than
-        #: one outstanding means the loss now arriving belongs to a socket
-        #: that has already been superseded (L1) - asyncio passes no
-        #: transport identity, so this count is the only way to tell.
-        self._pending_direct_losses = 0
         self._keepalive: asyncio.Task | None = None
         self._check_receipt: asyncio.Task | None = None
         self._reconnect_task: asyncio.Task | None = None
@@ -345,76 +312,21 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._failed_pings = 0
         self._inflight_msg_id: int | None = None
         # One scanner per client, carried across data_received() calls: a
-        # peer that dribbles the bytes of a never-terminated object must not
-        # make us re-scan the retained buffer every time (S1).
+        # device that dribbles the bytes of a never-terminated object must
+        # not make us re-scan the retained buffer every time.
         self._scanner = FrameScanner()
-        # A peer that speaks non-ASCII gets one notice per connection plus
-        # doubling-schedule summaries, not one ERROR per data_received():
-        # one byte per TCP segment used to buy x247 write amplification in
-        # a third party's log (Security round-5 Finding 1).
-        self._non_ascii = EventThrottle(
-            _LOGGER,
-            logging.ERROR,
-            "Received non-ASCII bytes from device; escaped them (affected frames are "
-            "dropped) - %d chunks, %d bytes so far on this connection",
-        )
-        # The per-*frame* twins of the counter above. Round 5 throttled the
-        # per-chunk sites, which are limited by the peer's packet rate; these
-        # are limited by its byte rate, so a peer can pack 21,845 three-byte
-        # `{x}` frames into one 64 KiB write and buy x28 write amplification
-        # in a third party's log (round-6 security finding 2).
-        self._bad_frames = EventThrottle(
-            _LOGGER,
-            logging.ERROR,
-            "Failed to decode %d JSON frame(s) from device (%d bytes) on this connection",
-        )
-        self._bad_messages = EventThrottle(
-            _LOGGER,
-            logging.WARNING,
-            "Ignored %d malformed message(s) from device (%d bytes) on this connection",
-        )
-        # The device's own error envelope is a per-frame site too, and it
-        # is reachable without any malformed input: every frame whose
-        # `success` is not "true" logged an unthrottled, length-unbounded
-        # WARNING (round-7 security L3).
-        self._device_errors = EventThrottle(
-            _LOGGER,
-            logging.WARNING,
-            "Device reported %d error response(s) (%d bytes) on this connection",
-        )
-        # The two per-frame sites the round-6/7 sweeps missed. `msgID` is
-        # echoed on every response, so a peer answering `{"CMD":0,"msgID":[]}`
-        # in a tight loop bought one uncapped WARNING per frame - measured at
-        # 20,032 records for 20,000 frames, x5.27 the wire bytes, and a
-        # single 65,638-byte record from one frame just under the framing cap
-        # (round-9 security M1). The `fwInfo` site was already capped but
-        # never throttled, which is the same class one control short.
-        self._bad_msg_ids = EventThrottle(
-            _LOGGER,
-            logging.WARNING,
-            "Ignored %d unusable msgID(s) in device responses (%d bytes) on this connection",
-        )
-        self._bad_hw_payloads = EventThrottle(
-            _LOGGER,
-            logging.WARNING,
-            f"Device sent %d non-mapping {FIELD_FWINFO} payload(s) (%d bytes) on this connection",
-        )
-        # One task per framed message, created synchronously per read, was
-        # unbounded: one 256 KiB read of `{}` admitted 131,072 live tasks
-        # and ~135 MB of heap (round-6 security finding 1).
-        self._dispatcher = FrameDispatcher(self._dispatch_frame)
         # Fire-and-forget work is tracked so failures are logged
-        # immediately (L3). _tasks is connection-scoped work that
-        # disconnect() cancels; _handler_tasks holds async lifecycle
-        # handlers, which must survive the teardown that triggered them.
+        # immediately. _tasks is connection-scoped work that disconnect()
+        # cancels; _handler_tasks holds async lifecycle handlers, which
+        # must survive the teardown that triggered them.
         self._tasks: set[asyncio.Task] = set()
         self._handler_tasks: set[asyncio.Task] = set()
         # Keyed by the msgID echoed back by the device; the client always
-        # sends ints, but a response may echo a string (D3 tolerance).
+        # sends ints, but a response may echo a string.
         self._outstanding: dict[int | str, asyncio.Future] = {}
         # Plain heapq: the client is loop-thread-only (see class docstring),
         # so a lock-based queue.PriorityQueue would only imply a thread
-        # safety the rest of the class does not provide (L20).
+        # safety the rest of the class does not provide.
         self._queue: list[PrioritizedMessage] = []
         self._msg_sequence = 0  # Counter for FIFO ordering within same priority
 
@@ -483,7 +395,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         return asyncio.ensure_future(*args, loop=self._get_loop(), **kwargs)
 
     def _track_task(self, coro: Awaitable[Any], *, transient: bool = True) -> asyncio.Task:
-        """Schedule fire-and-forget work as a tracked task (L3).
+        """Schedule fire-and-forget work as a tracked task.
 
         Mirrors the simulator's pattern: the task is held in a set so an
         escaping exception is reported immediately by a done-callback,
@@ -540,7 +452,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         """Remove connection lifecycle callbacks by name.
 
         Safe for names that were never registered, or only partially
-        registered - it does not raise KeyError (M6).
+        registered - it does not raise KeyError.
         """
         self.on_connect.pop(name, None)
         self.on_disconnect.pop(name, None)
@@ -754,7 +666,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         """Invoke listener callbacks, isolating each in its own try/except.
 
         One misbehaving listener must never prevent the remaining
-        listeners from being notified (decision D3).
+        listeners from being notified.
         """
         for name, callback in list(listeners.items()):
             try:
@@ -776,8 +688,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         msg[key]`` raises ``TypeError`` for a scalar and ``msg[key]``
         raises ``KeyError`` when absent - both escape into
         ``_LOGGER.exception``, a full traceback per frame, where the
-        graceful "Response missing expected field" path already exists
-        (Security round-5 Finding 1).
+        graceful "Response missing expected field" path already exists.
         """
         value = msg.get(key)
         return value if isinstance(value, dict) else None
@@ -796,7 +707,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         below its handler call. Indexing directly instead raised a
         ``KeyError`` into ``_LOGGER.exception`` - a full traceback per
         39-byte frame, x12.7 write amplification, for a case the graceful
-        path already covered (Security round-5 Finding 1).
+        path already covered.
         """
         if FIELD_DOOR_STATUS not in msg:
             return
@@ -982,12 +893,6 @@ class PowerPetDoorClient(asyncio.Protocol):
     def _handle_hw_info(self, msg: dict, future) -> None:
         """Handle hardware info response.
 
-        ``fwInfo`` is the sixth response sub-object of the shape
-        :meth:`_payload_mapping` exists for, and the only one whose value
-        is *cached* rather than merely read - ``door._hw_info`` kept it and
-        three documented public properties then treated it as a dict
-        (round-6 backend M1).
-
         Deliberately liberal in what it accepts: whatever the device put
         there still resolves the future, so a caller using
         ``send_message(..., notify=True)`` sees exactly what the device
@@ -1002,16 +907,11 @@ class PowerPetDoorClient(asyncio.Protocol):
         if fw_info is not None:
             self._notify_listeners(self.hw_info_listeners, fw_info)
         else:
-            # Per-frame and peer-controlled: capped since round 6, throttled
-            # since round 9 (security M1) - a cap alone still buys one
-            # WARNING per frame.
-            rendered = sanitize_text(msg[FIELD_FWINFO], MAX_LOGGED_LENGTH)
-            if self._bad_hw_payloads.record(len(rendered)):
-                _LOGGER.warning(
-                    "Device sent a non-mapping %s payload; not notifying hw_info listeners: %s",
-                    FIELD_FWINFO,
-                    rendered,
-                )
+            _LOGGER.warning(
+                "Device sent a non-mapping %s payload; not notifying hw_info listeners: %s",
+                FIELD_FWINFO,
+                sanitize_field(msg[FIELD_FWINFO], MAX_LOGGED_LENGTH),
+            )
         self._resolve_future(future, msg[FIELD_FWINFO])
 
     @ResponseHandlerRegistry.handler(CMD_GET_DOOR_BATTERY)
@@ -1063,8 +963,8 @@ class PowerPetDoorClient(asyncio.Protocol):
     def _handle_schedule_list(self, msg: dict, future) -> None:
         """Handle schedule list response.
 
-        Same missing-field guard as :meth:`_handle_door_status` - the last
-        of the four handlers that indexed its payload field directly.
+        Same missing-field guard as :meth:`_handle_door_status`: a legal
+        envelope without the payload field returns without resolving.
         """
         if FIELD_SCHEDULES not in msg:
             return
@@ -1077,7 +977,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         Firmware that echoes the deleted index triggers the
         schedule_delete listeners; either way a successful envelope
         acknowledges the deletion, so the future resolves (with the index,
-        or None when it was not echoed) rather than timing out (D3).
+        or None when it was not echoed) rather than timing out.
         """
         index = msg.get(FIELD_INDEX)
         if index is not None:
@@ -1136,7 +1036,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         The documented device format is the bare envelope (see
         :meth:`_dispatch_notification_event`), but CMD-style variants
         (``{"CMD": "SENSOR_INDOOR", "success": "true", ...}``) are
-        tolerated and dispatched to the same listeners (decision D2).
+        tolerated and dispatched to the same listeners.
         """
         self._notify_listeners(
             self.notification_event_listeners, msg.get(FIELD_CMD), msg.get(FIELD_SENSOR_STATE)
@@ -1160,7 +1060,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         for event in (NOTIFY_SENSOR_INDOOR, NOTIFY_SENSOR_OUTDOOR, NOTIFY_LOW_BATTERY):
             if event in msg:
                 state = msg.get(FIELD_SENSOR_STATE)
-                _LOGGER.debug("Notification event: %s (state=%s)", event, sanitize_text(state))
+                _LOGGER.debug("Notification event: %s (state=%s)", event, sanitize_field(state))
                 self._notify_listeners(self.notification_event_listeners, event, state)
                 return True
         return False
@@ -1168,7 +1068,7 @@ class PowerPetDoorClient(asyncio.Protocol):
     def _dispatch_handler(self, name: str, callback: Callable) -> None:
         """Invoke a lifecycle handler, supporting sync and async callables.
 
-        Exceptions from the handler are logged, never propagated (D3).
+        Exceptions from the handler are logged, never propagated.
         """
         try:
             result = callback()
@@ -1194,7 +1094,7 @@ class PowerPetDoorClient(asyncio.Protocol):
                 self._eventLoop = asyncio.new_event_loop()
 
         # Tracked so a connect() that escapes with an unexpected exception is
-        # reported immediately rather than at GC time (L1).
+        # reported immediately rather than at GC time.
         self._track_task(self.connect())
 
         if self._ownLoop:
@@ -1231,7 +1131,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         self.disconnect()
 
     async def aclose(self, timeout: float | None = None) -> None:
-        """Shut down and await outstanding async lifecycle handlers (T2).
+        """Shut down and await outstanding async lifecycle handlers.
 
         :meth:`disconnect` deliberately leaves async ``on_connect``/
         ``on_disconnect`` handlers running - an ``on_disconnect`` coroutine
@@ -1242,7 +1142,7 @@ class PowerPetDoorClient(asyncio.Protocol):
 
         Cancelling ``aclose()`` itself does not weaken the guarantee: the
         cancel step runs from a ``finally``, so handlers are cancelled on
-        the way out rather than left running un-awaited (L2). That is the
+        the way out rather than left running un-awaited. That is the
         normal shutdown shape - an embedding application wrapping
         ``door.disconnect()`` in its own deadline, or being unloaded by a
         host framework that cancels the task.
@@ -1277,14 +1177,14 @@ class PowerPetDoorClient(asyncio.Protocol):
         Idempotent: a call made while already connected, or while another
         connect() is still in flight, is a no-op — the device accepts a
         single connection, so a second socket would orphan the first and
-        hog the device's only slot (M2).
+        hog the device's only slot.
 
         On failure the error is logged and a reconnect attempt is scheduled
         with backoff; this method only raises asyncio.CancelledError. That
         includes failures ``create_connection()`` reports as something other
         than OSError - an over-long IDNA label or a lone surrogate in the
         host raises UnicodeEncodeError, and a port outside 0-65535 raises
-        OverflowError (L1). No-op after shutdown()/stop().
+        OverflowError. No-op after shutdown()/stop().
         """
         if self._shutdown:
             _LOGGER.debug("Ignoring connect() while shut down")
@@ -1303,8 +1203,8 @@ class PowerPetDoorClient(asyncio.Protocol):
         try:
             async with asyncio.timeout(self.cfg_timeout):
                 # Each attempt gets its own protocol shim so a transport this
-                # client does not adopt cannot drive its connection state
-                # (M1/L2/T1) - see _ConnectionAttempt.
+                # client does not adopt cannot drive its connection state; see
+                # _ConnectionAttempt.
                 await loop.create_connection(
                     lambda: _ConnectionAttempt(self), self.cfg_host, self.cfg_port
                 )
@@ -1322,17 +1222,12 @@ class PowerPetDoorClient(asyncio.Protocol):
     def connection_made(self, transport) -> None:
         """asyncio callback for a successful connection.
 
-        ``PowerPetDoorClient`` is a public ``asyncio.Protocol``, so it may be
-        handed to ``create_connection()`` directly. asyncio attaches no
-        identity to the ``connection_lost()`` it later delivers *on this same
-        object*, so both kinds of event that must not tear down a healthy
-        connection are counted here: a transport this client declined and
-        aborted (L2), and one it adopted and has since replaced (L1).
+        ``PowerPetDoorClient`` is a public ``asyncio.Protocol``, so it may
+        be handed to ``create_connection()`` directly. :meth:`connect`
+        does not do that - it wires a :class:`_ConnectionAttempt` shim
+        instead, which knows its own transport.
         """
-        if self._adopt_transport(transport):
-            self._pending_direct_losses += 1
-        else:
-            self._declined += 1
+        self._adopt_transport(transport)
 
     def _adopt_transport(self, transport) -> bool:
         """Take ownership of ``transport``, or decline and abort it.
@@ -1344,13 +1239,13 @@ class PowerPetDoorClient(asyncio.Protocol):
             # shutdown()/stop() landed while create_connection() was still in
             # flight. disconnect() already ran, so nothing holds a reference
             # that would ever close this socket - abandon it here instead of
-            # leaving a "shut down" client keepalive-pinging the device (M1).
+            # leaving a "shut down" client keepalive-pinging the device.
             _LOGGER.info("Discarding a connection that completed after shutdown")
             transport.abort()
             return False
         if self._transport is not None:
             # Belt and braces behind connect()'s guard: never let a second
-            # transport orphan the live one (M2).
+            # transport orphan the live one.
             _LOGGER.warning("Rejecting a second connection; one is already established")
             transport.abort()
             return False
@@ -1362,8 +1257,8 @@ class PowerPetDoorClient(asyncio.Protocol):
         if self.cfg_keepalive:
             self._keepalive = self._track_task(self.keepalive())
 
-        # Flush anything that was enqueued while disconnected (L3),
-        # otherwise open the dequeue gate for the next enqueue.
+        # Flush anything that was enqueued while disconnected, otherwise
+        # open the dequeue gate for the next enqueue.
         if self._queue:
             self._can_dequeue = False
             self._track_task(self.dequeue_data())
@@ -1379,49 +1274,21 @@ class PowerPetDoorClient(asyncio.Protocol):
         """asyncio callback for connection lost (direct ``Protocol`` wiring).
 
         This is the entry point for a client handed to
-        ``create_connection()`` directly. asyncio does not say *which*
-        transport was lost, so the two classes of event that must not reach
-        the teardown path are counted off first - a declined transport (L2)
-        and a superseded one (L1). :class:`_ConnectionAttempt` never comes
-        through here: it knows its own transport and calls
-        :meth:`_on_transport_lost` after making the equivalent checks by
-        identity.
+        ``create_connection()`` directly. :class:`_ConnectionAttempt` never
+        comes through here: it knows its own transport and calls
+        :meth:`_on_transport_lost` after checking identity.
         """
-        if self._declined:
-            # A transport connection_made() refused and aborted. It never
-            # drove any state, so its lifecycle event must not close the
-            # connection that is actually live (L2).
-            self._declined -= 1
-            _LOGGER.debug("Ignoring connection_lost() from a declined transport")
-            return
-        superseded = self._pending_direct_losses > 1
-        if self._pending_direct_losses:
-            self._pending_direct_losses -= 1
-        if superseded:
-            # More than one adopted transport is still awaiting its loss, so
-            # this one is an older socket disconnect() already dropped and a
-            # newer connection has replaced. Forwarding it would close the
-            # healthy transport, fail its outstanding futures and burn a
-            # reconnect (L1) - the direct-wiring twin of the shim's
-            # identity check.
-            _LOGGER.debug("Ignoring connection_lost() from a superseded transport")
-            return
         self._on_transport_lost(exc)
 
     def _on_transport_lost(self, exc) -> None:
-        """Handle the loss of the transport that was actually driving state.
-
-        Callers must already have established that the event belongs to the
-        live connection (by identity for :class:`_ConnectionAttempt`, by
-        counting for the direct ``Protocol`` path).
-        """
+        """Handle the loss of the transport that was driving client state."""
         if not self._was_connected:
             # A local teardown already ran - an explicit disconnect(), a
             # keepalive give-up, a write failure or an overflow drop. The
             # cleanup is done and whatever reconnect those paths wanted is
             # already scheduled; asyncio simply delivers the socket's loss a
             # loop iteration later. Reporting a server-side close nobody saw
-            # and burning a second reconnect is wrong (T1).
+            # and burning a second reconnect would be wrong.
             _LOGGER.debug("Ignoring connection_lost() for an already-closed connection")
             return
         self.disconnect()
@@ -1436,14 +1303,14 @@ class PowerPetDoorClient(asyncio.Protocol):
         ``connection_lost()`` that ``disconnect()`` provokes. Scheduling it
         here makes the intent explicit, which is what lets
         :meth:`_on_transport_lost` ignore the trailing loss event instead of
-        treating it as a fresh server-side close (T1).
+        treating it as a fresh server-side close.
         """
         self.disconnect()
         if not self._shutdown:
             self._schedule_reconnect()
 
     def _next_reconnect_delay(self) -> float:
-        """Compute the next reconnect delay (L1).
+        """Compute the next reconnect delay.
 
         Exponential backoff starting at cfg_reconnect, doubling per
         consecutive failed attempt up to MAX_RECONNECT_DELAY, plus up to
@@ -1459,7 +1326,7 @@ class PowerPetDoorClient(asyncio.Protocol):
     def _schedule_reconnect(self) -> None:
         """Schedule a tracked reconnect attempt (cancelled by disconnect/stop)."""
         # Tracked in _tasks as well as _reconnect_task so an exception that
-        # escapes reconnect() is logged immediately (L1).
+        # escapes reconnect() is logged immediately.
         self._reconnect_task = self._track_task(self.reconnect(self._next_reconnect_delay()))
 
     async def reconnect(self, delay) -> None:
@@ -1477,7 +1344,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         cancelled, outstanding notify futures are failed with
         ConnectionError (never cancelled, so callers can distinguish
         disconnection from task cancellation), and on_disconnect handlers
-        fire only if a connection actually existed (L2).
+        fire only if a connection actually existed.
         """
         was_connected = self._was_connected
         self._was_connected = False
@@ -1491,20 +1358,6 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._failed_pings = 0
         self._inflight_msg_id = None
         self._scanner.reset()
-        # Same connection scope as the scanner: report the tail, then start
-        # the next connection's count clean.
-        for throttle in (
-            self._non_ascii,
-            self._bad_frames,
-            self._bad_messages,
-            self._device_errors,
-            self._bad_msg_ids,
-            self._bad_hw_payloads,
-        ):
-            throttle.flush()
-            throttle.reset()
-        # Undispatched frames belong to the connection that delivered them.
-        self._dispatcher.reset()
         self._queue.clear()
         self._msg_sequence = 0  # Reset sequence counter
 
@@ -1525,10 +1378,10 @@ class PowerPetDoorClient(asyncio.Protocol):
             if task is not current:
                 task.cancel()
 
-        # Cancel fire-and-forget work still in flight (L3). The caller's own
-        # task is skipped: disconnect() is reachable from inside one (a
-        # failed write), and self-cancelling it there would surface as a
-        # spurious CancelledError in unrelated code.
+        # Cancel fire-and-forget work still in flight. The caller's own task
+        # is skipped: disconnect() is reachable from inside one (a failed
+        # write), and self-cancelling it there would surface as a spurious
+        # CancelledError in unrelated code.
         for task in list(self._tasks):
             if task is not current:
                 task.cancel()
@@ -1575,13 +1428,13 @@ class PowerPetDoorClient(asyncio.Protocol):
 
             # The wire token stays wall-clock milliseconds (device
             # compatibility); latency is measured against the monotonic
-            # clock so NTP steps cannot skew it (L11).
+            # clock so NTP steps cannot skew it.
             self._last_ping = str(round(time.time() * 1000))
             self._last_ping_time = time.monotonic()
             self.send_message(PING, self._last_ping)
 
     def _fail_inflight_future(self, exc: Exception) -> None:
-        """Fail the future paired with the in-flight message, if any (H4)."""
+        """Fail the future paired with the in-flight message, if any."""
         if self._inflight_msg_id is None:
             return
         future = self._outstanding.get(self._inflight_msg_id)
@@ -1609,7 +1462,7 @@ class PowerPetDoorClient(asyncio.Protocol):
                 )
                 self._failed_msg = 0
                 # Fail fast: the documented `await future` pattern must not
-                # hang forever on a dropped message (H4).
+                # hang forever on a dropped message.
                 self._fail_inflight_future(
                     TimeoutError(
                         f"No response to {self._last_command} after {MAX_FAILED_MSG} attempts"
@@ -1650,7 +1503,7 @@ class PowerPetDoorClient(asyncio.Protocol):
             if diff < MINIMUM_TIME_BETWEEN_MSGS:
                 await asyncio.sleep(MINIMUM_TIME_BETWEEN_MSGS - diff)
             # Re-check after the sleep: disconnect() may have run in the
-            # meantime and cleared the transport (M7).
+            # meantime and cleared the transport.
             transport = self._transport
             if transport is None or transport.is_closing():
                 _LOGGER.warning("Connection closed while waiting to send; dropping message")
@@ -1698,7 +1551,7 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._last_command = None
 
         # Track the in-flight msgId so check_receipt can fail its future
-        # if the message is ultimately dropped (H4).
+        # if the message is ultimately dropped.
         self._inflight_msg_id = data.get(FIELD_MSG_ID)
         self._failed_msg = 0
         rawdata = json.dumps(data).encode("ascii")
@@ -1709,12 +1562,11 @@ class PowerPetDoorClient(asyncio.Protocol):
 
         All received bytes are untrusted. Non-ASCII bytes are escaped
         rather than dropped, so a single bad byte corrupts only the frame
-        that contains it instead of desynchronizing the stream (L2). The
-        stream is then framed by the shared scanner
-        (:mod:`powerpetdoor.framing`): garbage is discarded with a warning,
-        malformed JSON frames are logged and skipped, and exceeding the
-        un-parsed buffer cap drops the connection. This callback never
-        raises on arbitrary input.
+        that contains it instead of desynchronizing the stream. The stream
+        is then framed by the shared scanner (:mod:`powerpetdoor.framing`):
+        garbage is discarded with a warning, malformed JSON frames are
+        logged and skipped, and exceeding the un-parsed buffer cap drops
+        the connection. This callback never raises on arbitrary input.
         """
         if not data:
             return
@@ -1726,13 +1578,14 @@ class PowerPetDoorClient(asyncio.Protocol):
         # json.loads and is skipped on its own.
         decoded = data.decode("ascii", errors="backslashreplace")
         if len(decoded) != len(data):
-            self._non_ascii.record(len(data))
+            _LOGGER.error(
+                "Received non-ASCII bytes from device; escaped them (affected frames are dropped)"
+            )
 
         # Device bytes reach an operator's terminal through the host
         # application's log (`tail -f`, `journalctl`, `docker logs`), so ESC
-        # and friends must be escaped before they get there. Guarded like
-        # the simulator's identical line: sanitize_text is ~20x the cost of
-        # the suppressed logger.debug call it feeds (T2).
+        # and friends must be escaped before they get there. Guarded because
+        # sanitize_text is ~20x the cost of the suppressed debug call.
         if _LOGGER.isEnabledFor(logging.DEBUG):
             _LOGGER.debug("RX < %s", sanitize_text(decoded))
         frames, diag = self._scanner.feed(decoded)
@@ -1740,9 +1593,9 @@ class PowerPetDoorClient(asyncio.Protocol):
         if diag.overflow:
             # Checked before dispatch, not after: _drop_connection() ->
             # disconnect() cancels every task in `_tasks`, so frames
-            # dispatched first were created and then killed before they ran
-            # - a complete, legitimate frame vanishing with nothing in the
-            # log to say so (T5). Report the loss instead of hiding it.
+            # dispatched first would be created and then killed before they
+            # ran - a complete, legitimate frame vanishing with nothing in
+            # the log to say so. Report the loss instead of hiding it.
             _LOGGER.error(
                 "Receive buffer exceeded %d bytes without a complete message; disconnecting "
                 "(discarding %d complete frame(s) received in the same read)",
@@ -1752,50 +1605,30 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._drop_connection()
             return
 
-        # Bounded dispatch: one task per frame, created synchronously here,
-        # let one 256 KiB read of `{}` admit 131,072 live tasks and ~135 MB
-        # of heap before any of them ran (round-6 security finding 1).
-        self._dispatcher.submit(frames, self._transport)
-
-    def _dispatch_frame(self, frame: str) -> asyncio.Task | None:
-        """Decode one framed message and start its handler.
-
-        Returns:
-            The handler task, or None if the frame was not usable JSON.
-        """
-        try:
-            msg = json.loads(frame)
-        except (ValueError, RecursionError) as err:
-            # `json.JSONDecodeError` is a *subclass* of ValueError, not a
-            # superset of what json.loads raises. Two shapes well inside
-            # every declared bound escape it: an integer literal over
-            # `sys.get_int_max_str_digits()` (4300) digits raises a bare
-            # ValueError, and deep nesting raises RecursionError. Both are
-            # brace-balanced and under MAX_BUFFER_SIZE, so FrameScanner
-            # frames them and hands them straight here - and the escape
-            # killed the transport from `data_received` (a hot reconnect
-            # loop, because every attempt connects before dying and resets
-            # the backoff) or, from the `call_soon` re-arm, left the
-            # dispatcher permanently wedged (round-8 backend M1 /
-            # security M1). Widening the clause narrows nothing: a frame
-            # that fails to decode already took this exact path.
-            #
-            # Throttled: this fires once per *frame*, so it is limited by
-            # the peer's byte rate rather than its packet rate - `{x}` is
-            # three bytes and used to buy a 135-byte ERROR, x28 write
-            # amplification (round-6 security finding 2). The detail rides
-            # the same doubling schedule as the summary, bounded in length
-            # because the frame is peer-chosen.
-            if self._bad_frames.record(len(frame)):
+        for frame in frames:
+            try:
+                msg = json.loads(frame)
+            except (ValueError, RecursionError) as err:
+                # `json.JSONDecodeError` is a *subclass* of ValueError, not
+                # a superset of what json.loads raises. Two shapes well
+                # inside every declared bound escape it: an integer literal
+                # over `sys.get_int_max_str_digits()` (4300) digits raises a
+                # bare ValueError, and deep nesting raises RecursionError.
+                # Both are brace-balanced and under MAX_BUFFER_SIZE, so
+                # FrameScanner frames them and hands them straight here -
+                # and letting either escape kills the transport from
+                # `data_received`, which is a hot reconnect loop because
+                # every attempt connects before dying and resets the
+                # backoff.
                 _LOGGER.error(
                     "Failed to decode JSON frame (%s): %s",
                     err,
-                    sanitize_text(frame, MAX_LOGGED_LENGTH),
+                    sanitize_field(frame, MAX_LOGGED_LENGTH),
                 )
-            return None
-        return self._track_task(self.process_message(msg, frame_size=len(frame)))
+                continue
+            self._track_task(self.process_message(msg))
 
-    async def process_message(self, msg, *, frame_size: int | None = None) -> None:
+    async def process_message(self, msg) -> None:
         """Process an incoming message from the device.
 
         Uses the ResponseHandlerRegistry to dispatch to the appropriate
@@ -1807,19 +1640,6 @@ class PowerPetDoorClient(asyncio.Protocol):
 
         Args:
             msg: The decoded message.
-            frame_size: Bytes this message occupied on the wire, for the
-                two per-frame throttles below. Both used to hand
-                ``len(json.dumps(msg))`` to ``record()``, which is neither
-                the received size nor free: every sibling throttle on this
-                path records real received bytes
-                (``self._non_ascii.record(len(data))``,
-                ``self._bad_frames.record(len(frame))``), and a peer that
-                pads its frames controls the re-serialized size
-                independently of what it actually sent - 60,002 wire bytes
-                were reported as "2 bytes", a 30,001x under-report, in the
-                number an operator reads to decide whether a peer is worth
-                investigating (round-9 backend F2). Optional so that direct
-                callers - tests, third-party subclasses - keep working.
         """
         if not isinstance(msg, dict):
             _LOGGER.warning("Ignoring non-object message from device: %r", msg)
@@ -1834,14 +1654,10 @@ class PowerPetDoorClient(asyncio.Protocol):
 
         success = msg.get(FIELD_SUCCESS)
         if cmd is None and success is None:
-            # Per-frame and peer-controlled, exactly like the JSON decode
-            # failure above: `{}` is two bytes of legal JSON and bought a
-            # ~100-byte WARNING each (round-6 security finding 2).
-            if self._bad_messages.record(_recorded_size(msg, frame_size)):
-                _LOGGER.warning(
-                    "Ignoring malformed message from device: %s",
-                    sanitize_text(json.dumps(msg), MAX_LOGGED_LENGTH),
-                )
+            _LOGGER.warning(
+                "Ignoring malformed message from device: %s",
+                sanitize_text(json.dumps(msg), MAX_LOGGED_LENGTH),
+            )
             return
 
         future = None
@@ -1850,21 +1666,16 @@ class PowerPetDoorClient(asyncio.Protocol):
             self.replyMsgId = reply_msg_id
             # The device supplies this; anything that is not a usable dict
             # key (a list, a dict, ...) must not raise here - it simply
-            # matches no outstanding future (D3).
+            # matches no outstanding future.
             if isinstance(reply_msg_id, (int, str)):
                 outstanding = self._outstanding.get(reply_msg_id)
                 if outstanding is not None and not outstanding.done():
                     future = outstanding
             else:
-                # Every response echoes a msgID, so this is a per-frame site
-                # with a peer-chosen value: capped and throttled like its
-                # four siblings in this file (round-9 security M1).
-                rendered = sanitize_text(reply_msg_id, MAX_LOGGED_LENGTH)
-                if self._bad_msg_ids.record(len(rendered)):
-                    _LOGGER.warning(
-                        "Ignoring unusable msgID %s in device response; no future to resolve",
-                        rendered,
-                    )
+                _LOGGER.warning(
+                    "Ignoring unusable msgID %s in device response; no future to resolve",
+                    sanitize_field(reply_msg_id, MAX_LOGGED_LENGTH),
+                )
 
         # Acknowledge the in-flight command so the retry timer stops, but
         # defer dequeuing the next message until after the handler has run.
@@ -1888,13 +1699,6 @@ class PowerPetDoorClient(asyncio.Protocol):
                     try:
                         handler(self, msg, future)
                     except Exception:
-                        # Unreachable from any frame constructed in rounds
-                        # 7-9 (every registered handler's payload access is
-                        # guarded), so this is not throttled - but the frame
-                        # is still peer-chosen and can run to the 64 KiB
-                        # framing cap, so the *constant* is bounded like
-                        # every other per-frame line (round-9 security M1,
-                        # recommendation 3).
                         _LOGGER.exception(
                             "Error handling %s response: %s",
                             cmd,
@@ -1904,7 +1708,7 @@ class PowerPetDoorClient(asyncio.Protocol):
                             future.set_exception(CommandError(cmd, "Malformed response"))
                     # A handler that ran but could not resolve its future
                     # means the payload lacked the expected field. Fail it
-                    # typed - never cancel() an API caller's future (L9).
+                    # typed - never cancel() an API caller's future.
                     if future is not None and not future.done():
                         future.set_exception(CommandError(cmd, "Response missing expected field"))
                 elif future is not None and not future.done():
@@ -1913,21 +1717,10 @@ class PowerPetDoorClient(asyncio.Protocol):
                     future.set_result(msg)
             else:
                 reason = msg.get(FIELD_REASON)
-                # Fires for every frame carrying a CMD whose success is not
-                # "true" - the device's *ordinary* error envelope, not just
-                # malformed input - so a peer packing 11-byte {"CMD":"a"}
-                # envelopes bought one unthrottled WARNING per frame at
-                # x6.64 the wire bytes, in the host application's log
-                # (round-7 security L3). This is the shipped library; for
-                # the Home Assistant deployment target that is the whole
-                # instance's log. Throttled and length-capped like the
-                # three sibling sites; the first occurrence is still
-                # reported immediately and in full context.
-                if self._device_errors.record(_recorded_size(msg, frame_size)):
-                    _LOGGER.warning(
-                        "Error reported by device: %s",
-                        sanitize_text(json.dumps(msg), MAX_LOGGED_LENGTH),
-                    )
+                _LOGGER.warning(
+                    "Error reported by device: %s",
+                    sanitize_text(json.dumps(msg), MAX_LOGGED_LENGTH),
+                )
                 if future is not None and not future.done():
                     future.set_exception(CommandError(cmd, reason))
         finally:
@@ -2029,7 +1822,7 @@ class _ConnectionAttempt(asyncio.Protocol):
 
     Giving every attempt its own shim restores that identity. Only a
     transport the client adopted, and only while it is still the live one,
-    reaches the client's callbacks (M1/L2/T1).
+    reaches the client's callbacks.
     """
 
     __slots__ = ("_adopted", "_client", "_transport")
@@ -2048,12 +1841,12 @@ class _ConnectionAttempt(asyncio.Protocol):
         """Route the loss to the client only if this transport is still its own."""
         if not self._adopted:
             # Declined and aborted in connection_made(): it never drove any
-            # client state, so there is nothing to tear down (M1/L2).
+            # client state, so there is nothing to tear down.
             return
         current = self._client._transport
         if current is not None and current is not self._transport:
             # disconnect() dropped this socket and a newer connection has
-            # since been established; this event is stale (T1).
+            # since been established; this event is stale.
             _LOGGER.debug("Ignoring connection_lost() from a superseded transport")
             return
         # Goes straight to the client's teardown: the identity checks above

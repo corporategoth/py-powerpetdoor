@@ -7,7 +7,7 @@
 
 The built-in scripts synchronize on door state via ``wait_for`` conditions,
 so these tests run with fast door timing and assert exact outcomes - no
-wall-clock coupling (test-fanatic M5).
+wall-clock coupling.
 """
 
 from __future__ import annotations

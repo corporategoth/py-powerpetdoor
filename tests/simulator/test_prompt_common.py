@@ -58,7 +58,7 @@ class TestRenderResult:
     Its stated purpose is that network-poisoned state reaching a command's
     own output (a hostile ``SET_TIMEZONE`` echoed by the ``timezone``
     command) cannot inject terminal escapes. Deleting the ``sanitize_text``
-    call used to pass the whole suite (R4-M2).
+    call used to pass the whole suite.
     """
 
     def test_preserves_plain_text(self):
@@ -81,7 +81,7 @@ class TestRenderResult:
 
 
 class TestFormatRecallSanitizes:
-    """The recall echo must not be a second, unsanitized path (T2/T6)."""
+    """The recall echo must not be a second, unsanitized path."""
 
     def test_history_recall_prefix_is_sanitized(self):
         line = InputLine(original="!1", resolved="tz \x1b[2J", was_history_recall=True)
@@ -193,9 +193,9 @@ class TestInteractiveSessionNonTty:
             # The prompt is a task on the *same* asyncio loop as the door
             # protocol server, so an unwrapped completer runs its work in
             # the event loop: one Tab on a 200-script `--scripts-dir`
-            # stalled the emulated device for ~600 ms (round-8 frontend
-            # M1). Threading it makes that structurally impossible for any
-            # future completer, not just this one.
+            # stalled the emulated device for ~600 ms. Threading it makes
+            # that structurally impossible for any future completer, not
+            # just this one.
             from prompt_toolkit.completion import ThreadedCompleter
 
             from powerpetdoor.simulator.prompt_common import SimulatorCompleter
@@ -528,7 +528,7 @@ class TestCompleterInternals:
         assert self._completions("history ") == ["clear", "help"]
 
     def test_choice_completions_use_the_arg_description_as_meta(self):
-        """`stop ⇥⇥` showed "all    all" - the value as its own gloss (T3).
+        """`stop ⇥⇥` showed "all    all" - the value as its own gloss.
 
         ``bool_toggle`` shows "on -> Enable" and ``days`` shows
         "weekdays -> Monday-Friday"; the ArgSpec description was right

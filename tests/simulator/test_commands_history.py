@@ -120,8 +120,7 @@ class TestConstruction:
         prompt_toolkit raised inside the running application on every load
         and every store, dumping a traceback and a modal "Press ENTER to
         continue" the operator had to dismiss for the rest of the session.
-        `InMemoryHistory` was already the fallback two lines above
-        (round-9 frontend L2).
+        `InMemoryHistory` was already the fallback two lines above.
         """
         from prompt_toolkit.history import InMemoryHistory
 
@@ -183,7 +182,7 @@ class TestDisabledBehavior:
         assert disabled_history.resolve_recall("!!") is None
 
     def test_execute_command_unavailable_message(self, disabled_history):
-        """One message for both surfaces now (frontend T1)."""
+        """One message for both surfaces."""
         result = disabled_history.execute_command()
         assert result.success is False
         assert result.message == HISTORY_UNAVAILABLE_MESSAGE

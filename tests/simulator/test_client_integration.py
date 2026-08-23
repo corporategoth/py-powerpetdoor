@@ -278,7 +278,7 @@ class TestQueryCommands:
         """GET_HW_INFO returns all five hardware fields, like its sibling.
 
         `isinstance(result, dict)` accepted an empty dict; the battery test
-        two methods up pins its three fields (round-6 L5).
+        two methods up pins its three fields.
         """
         future = client.send_message(CONFIG, CMD_GET_HW_INFO, notify=True)
         result = await asyncio.wait_for(future, timeout=2.0)
@@ -310,7 +310,7 @@ class TestControlCommands:
         # The broadcast sequence is fully deterministic: the first one after
         # CMD_OPEN is always DOOR_RISING (engine._replace_sequence calls
         # _set_status(start_state) synchronously). Accepting any of three
-        # states made this test blind to a simulator that skips one (R3-L1).
+        # states made this test blind to a simulator that skips one.
         statuses = await tracker.wait_for_sequence("door_status", OPENING_SEQUENCE, timeout=3.0)
         assert statuses == OPENING_SEQUENCE
 
@@ -563,7 +563,7 @@ class TestSettingsRoundTrips:
 
 
 # ============================================================================
-# Notification Event Round-Trip Tests (D2: bare envelope)
+# Notification Event Round-Trip Tests (bare envelope)
 # ============================================================================
 
 
@@ -641,7 +641,7 @@ class TestDoorCycles:
 
         # Every broadcast of the cycle reached the client, in order: a
         # ">= 2 calls" assertion is satisfied by a simulator that skips
-        # states entirely (R3-L1).
+        # states entirely.
         statuses = await tracker.wait_for_sequence("door_status", FULL_CYCLE, timeout=5.0)
         assert statuses == FULL_CYCLE
 

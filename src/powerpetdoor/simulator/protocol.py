@@ -124,8 +124,8 @@ from ..const import (
     SUCCESS_FALSE,
     SUCCESS_TRUE,
 )
-from ..framing import EventThrottle, FrameDispatcher, FrameScanner
-from ..sanitize import MAX_LOGGED_LENGTH, sanitize_text
+from ..framing import FrameScanner
+from ..sanitize import MAX_LOGGED_LENGTH, sanitize_field, sanitize_text
 from ..schedule import MAX_SCHEDULE_INDEX
 from ..tz_utils import get_posix_tz_string, is_cache_initialized
 from .engine import DoorMotionEngine
@@ -133,17 +133,11 @@ from .state import DoorSimulatorState, Schedule
 
 logger = logging.getLogger(__name__)
 
-#: Per-connection write-buffer ceiling, in bytes, above which a door client
-#: that is not reading its own responses is dropped. Mirrors the control
-#: channel's ``_ControlLogHandler.MAX_CLIENT_BACKLOG`` (round-6 security
-#: finding 1, secondary instance).
-MAX_WRITE_BACKLOG = 1024 * 1024
-
 #: Network-derived strings are stripped of terminal control characters before
-#: they reach any log, so a hostile peer cannot inject escape sequences into
-#: operator consoles or forge extra log lines. The single implementation
-#: lives in the library package (:mod:`powerpetdoor.sanitize`) and is shared
-#: with the client library and the interactive front end.
+#: they reach any log, so escape sequences cannot reach operator consoles.
+#: The single implementation lives in the library package
+#: (:mod:`powerpetdoor.sanitize`) and is shared with the client library and
+#: the interactive front end.
 sanitize_log_text = sanitize_text
 
 #: Widest hold time (centiseconds) accepted from the wire; matches the
@@ -309,61 +303,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         self.on_disconnect = on_disconnect
         self.transport: asyncio.Transport | None = None
         # One scanner per connection, carried across data_received() calls
-        # so an unauthenticated peer dribbling a never-terminated object
-        # cannot make the daemon re-scan its retained buffer every time (S1).
+        # so a client dribbling a never-terminated object cannot make the
+        # daemon re-scan its retained buffer every time.
         self._scanner = FrameScanner()
-        # Twin of the client's counter: one notice per connection plus
-        # doubling-schedule summaries, so a peer sending one non-ASCII byte
-        # per TCP segment cannot buy one WARNING per byte - amplified again
-        # by the control channel's log fan-out (Security round-5 Finding 1).
-        self._non_ascii = EventThrottle(
-            logger,
-            logging.WARNING,
-            "Simulator: escaped non-ASCII bytes in %d received chunks (%d bytes total)",
-        )
-        # Twins of the client's per-frame throttles. These fire once per
-        # *frame*, so they are limited by the peer's byte rate rather than
-        # its packet rate: 21,845 three-byte `{x}` frames fit in one 64 KiB
-        # write and used to buy x46 write amplification, sustained for 17 s
-        # after the attacker disconnected (round-6 security finding 2).
-        self._bad_frames = EventThrottle(
-            logger,
-            logging.WARNING,
-            "Simulator: %d JSON parse error(s) (%d bytes) on this connection",
-        )
-        self._unknown_commands = EventThrottle(
-            logger,
-            logging.WARNING,
-            "Simulator: %d unknown command(s) (%d bytes) on this connection",
-        )
-        # Round 6 throttled the three sites above and left the *rejection*
-        # sites - one record per rejected SET_*, per bad schedule and per
-        # bad schedule list, with no length cap - at x1.9-2.6 write
-        # amplification and one WARNING per frame (round-7 security L3).
-        # One throttle for all three: they are the same event to an
-        # operator ("the peer keeps sending fields we refuse"), and the
-        # first occurrence is always reported in full.
-        self._rejections = EventThrottle(
-            logger,
-            logging.WARNING,
-            "Simulator: rejected %d malformed field(s)/payload(s) (%d bytes) on this connection",
-        )
-        # The write ceiling used to announce "dropping the connection"
-        # once per message and then not drop it (round-7 security L2).
-        self._connection_drops = EventThrottle(
-            logger,
-            logging.ERROR,
-            "Simulator: %d connection-drop event(s) (%d bytes) on this connection",
-        )
-        #: Latched once a protocol violation has cost this peer its
-        #: connection, so nothing re-checks and re-reports it.
-        self._dropped = False
         self._tasks: set[asyncio.Task] = set()
-        # One task per framed message, created synchronously per read, was
-        # unbounded: 256 KiB of `{}` admitted 131,072 live tasks / ~145 MB,
-        # linear in connections, with no connection cap (round-6 security
-        # finding 1).
-        self._dispatcher = FrameDispatcher(self._dispatch_frame)
         self._owns_engine = engine is None
         self.engine = engine or DoorMotionEngine(
             state,
@@ -383,15 +326,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc):
         logger.info("Simulator: Client disconnected")
-        # End of this connection's framing state: report the counters'
-        # suppressed tail rather than dropping it.
-        self._non_ascii.flush()
-        self._bad_frames.flush()
-        self._unknown_commands.flush()
-        self._rejections.flush()
-        self._connection_drops.flush()
         self._scanner.reset()
-        self._dispatcher.reset()
         for task in list(self._tasks):
             task.cancel()
         if self._owns_engine:
@@ -417,28 +352,21 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         Deterministic synchronization hook for tests: after feeding data via
         :meth:`data_received`, ``await protocol.drain()`` guarantees every
         received message has been fully handled (responses written).
-        Dispatch is bounded, so this also drains whatever the dispatcher is
-        still holding back.
         """
         while True:
             pending = [task for task in self._tasks if not task.done()]
             if not pending:
-                if not self._dispatcher.backlog:
-                    return
-                # Handlers finished but frames are still queued; the
-                # dispatcher starts them from a done-callback, so yield.
-                await asyncio.sleep(0)
-                continue
+                return
             await asyncio.gather(*pending, return_exceptions=True)
 
     def data_received(self, data: bytes):
         # Escape non-ASCII bytes instead of dropping the chunk: dropping it
         # would strand a half-buffered frame and wedge framing until the
         # 64 KiB overflow disconnect. The affected frame fails json.loads
-        # and is skipped on its own; later frames still arrive (L2).
+        # and is skipped on its own; later frames still arrive.
         text = data.decode("ascii", errors="backslashreplace")
         if len(text) != len(data):
-            self._non_ascii.record(len(data))
+            logger.warning("Simulator: escaped non-ASCII bytes in a received chunk")
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Simulator RX: %s", sanitize_log_text(text))
@@ -448,37 +376,23 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             self._drop_connection("receive buffer overflowed without a complete message")
             return
 
-        # Bounded dispatch, twin of the client's (round-6 security finding 1).
-        self._dispatcher.submit(frames, self.transport)
-
-    def _dispatch_frame(self, frame: str) -> asyncio.Task | None:
-        """Decode one framed message and start its handler.
-
-        Returns:
-            The handler task, or None if the frame was not usable JSON.
-        """
-        try:
-            msg = json.loads(frame)
-        except (ValueError, RecursionError) as err:
-            # Twin of the client's clause, widened for the same reason: a
-            # >4300-digit integer literal raises a bare ValueError and deep
-            # nesting raises RecursionError, neither of which is a
-            # JSONDecodeError, and both used to escape into the loop's
-            # exception handler - fatal-erroring the transport or wedging
-            # the dispatcher with reading paused forever, which held the
-            # fd and the `DoorSimulator.protocols` slot after the peer
-            # walked away (round-8 security M1).
-            #
-            # Throttled twin of the client's site: one unparseable frame is
-            # three bytes and used to buy a whole WARNING record.
-            if self._bad_frames.record(len(frame)):
+        for frame in frames:
+            try:
+                msg = json.loads(frame)
+            except (ValueError, RecursionError) as err:
+                # Twin of the client's clause, widened for the same reason:
+                # a >4300-digit integer literal raises a bare ValueError and
+                # deep nesting raises RecursionError, neither of which is a
+                # JSONDecodeError, and letting either escape fatal-errors
+                # the transport and holds the fd plus the
+                # `DoorSimulator.protocols` slot after the client walks away.
                 logger.warning(
                     "Simulator: JSON parse error: %s (frame: %s)",
                     err,
-                    sanitize_log_text(frame, MAX_LOGGED_LENGTH),
+                    sanitize_field(frame, MAX_LOGGED_LENGTH),
                 )
-            return None
-        return self._create_task(self._handle_message(msg))
+                continue
+            self._create_task(self._handle_message(msg))
 
     def _create_task(self, coro) -> asyncio.Task:
         """Create a tracked task so it can be drained/cancelled later."""
@@ -493,38 +407,15 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             logger.error("Simulator: message handler task failed", exc_info=task.exception())
 
     def _report_unknown_command(self, cmd: object) -> None:
-        """Log an unknown command, throttled (round-6 security finding 2)."""
-        rendered = sanitize_log_text(cmd, MAX_LOGGED_LENGTH)
-        if self._unknown_commands.record(len(rendered)):
-            logger.warning("Simulator: Unknown command: %s", rendered)
+        """Log an unknown command."""
+        logger.warning("Simulator: Unknown command: %s", sanitize_field(cmd, MAX_LOGGED_LENGTH))
 
     def _send(self, msg: dict):
-        """Send a message to the client.
-
-        A peer that issues valid commands and never reads the answers made
-        the daemon buffer them without bound - 1.5 MB of requests bought
-        36 MB of daemon heap, held for as long as the socket stayed open.
-        The control channel got a write-buffer ceiling in round 5; this is
-        the same ceiling on the door transport (round-6 security finding 1,
-        secondary instance). A door client that is not reading its own
-        responses is dropped, exactly like one that overflows the framing
-        cap.
-        """
-        # Latched: this peer has already cost itself its connection, so
-        # neither queued frames nor later broadcasts re-check the ceiling
-        # and re-announce the drop.
-        if self._dropped:
-            return
+        """Send a message to the client."""
         data = json.dumps(msg).encode("ascii")
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Simulator TX: %s", sanitize_log_text(str(msg)))
         if not self.transport:
-            return
-        buffered = self.transport.get_write_buffer_size()
-        if buffered > MAX_WRITE_BACKLOG:
-            self._drop_connection(
-                f"client is not reading its responses ({buffered} bytes buffered)"
-            )
             return
         self.transport.write(data)
 
@@ -533,21 +424,15 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
         ``transport.close()`` only sets ``_closing`` and removes the
         reader; ``connection_lost`` is deferred until the write buffer
-        drains, and a peer holding a zero TCP window never lets it. So the
-        protocol object, its ~1 MB buffer and its slot in
-        ``DoorSimulator.protocols`` were held for the life of the daemon,
-        ``ctl status`` kept reporting the client the daemon's own ERROR
-        said it had dropped, and every later broadcast logged again
-        (round-7 security L2).
+        drains, and a client holding a zero TCP window never lets it - so
+        the protocol object and its slot in ``DoorSimulator.protocols``
+        would be held for the life of the daemon, and ``ctl status`` would
+        keep reporting a client the daemon's own ERROR said it had dropped.
 
         ``abort()`` discards the unsent tail and delivers
-        ``connection_lost`` immediately. Discarding it is correct here:
-        the peer has already violated the protocol, and this is the only
-        thing that makes ``ctl status`` truthful.
+        ``connection_lost`` immediately.
         """
-        if self._connection_drops.record(len(reason)):
-            logger.error("Simulator: %s; dropping the connection", reason)
-        self._dropped = True
+        logger.error("Simulator: %s; dropping the connection", reason)
         if self.transport:
             self.transport.abort()
 
@@ -627,15 +512,14 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             # A deliberate rejection: the handler validated an untrusted
             # field and refused it before touching state. Report the actual
             # reason so a legitimate client can fix its payload.
-            if self._rejections.record(len(str(err))):
-                logger.warning(
-                    "Simulator: Rejected %s: %s",
-                    sanitize_log_text(cmd, MAX_LOGGED_LENGTH),
-                    sanitize_log_text(err, MAX_LOGGED_LENGTH),
-                )
+            logger.warning(
+                "Simulator: Rejected %s: %s",
+                sanitize_field(cmd, MAX_LOGGED_LENGTH),
+                sanitize_field(err, MAX_LOGGED_LENGTH),
+            )
             response = self._error_envelope(cmd, msg_id, str(err))
         except Exception:
-            logger.exception("Simulator: Error handling command %s", sanitize_log_text(cmd))
+            logger.exception("Simulator: Error handling command %s", sanitize_field(cmd))
             response = self._error_envelope(cmd, msg_id, "Command failed")
 
         self._send(response)
@@ -758,9 +642,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
         Used as a dict key, so a JSON container raises ``TypeError:
         unhashable type`` and one packet becomes a full traceback at ERROR
-        plus a useless "Command failed" reason. The sibling ``msgID`` field
-        has been guarded since round 2 and every ``SET_*`` field since round
-        3; these two were the last unguarded wire values (L3/S2).
+        plus a useless "Command failed" reason.
 
         Returns:
             The index, or None when the field is absent.
@@ -793,11 +675,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         except ValueError as err:
             # Untrusted wire data: reject malformed schedules rather than
             # storing something that raises later during evaluation.
-            if self._rejections.record(len(str(err))):
-                logger.warning(
-                    "Simulator: Rejected schedule: %s",
-                    sanitize_log_text(err, MAX_LOGGED_LENGTH),
-                )
+            logger.warning(
+                "Simulator: Rejected schedule: %s",
+                sanitize_field(err, MAX_LOGGED_LENGTH),
+            )
             response[FIELD_SUCCESS] = SUCCESS_FALSE
             response[FIELD_REASON] = str(err)
             return
@@ -825,7 +706,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         ``schedules`` to ``[]`` made a one-word packet wipe every stored
         schedule and answer ``success: "true"``, and a wrong-typed field
         fell straight through to the same success response having done
-        nothing (L2). "Clear everything" now has to be spelled out as an
+        nothing. "Clear everything" now has to be spelled out as an
         explicit ``"schedules": []``, and every other shape is rejected
         with a reason the way docs/protocol.md says every ``SET_*`` is.
         """
@@ -839,11 +720,10 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         except ValueError as err:
             # Reject the whole list atomically: a partial load would
             # leave the simulator in a state no client asked for.
-            if self._rejections.record(len(str(err))):
-                logger.warning(
-                    "Simulator: Rejected schedule list: %s",
-                    sanitize_log_text(err, MAX_LOGGED_LENGTH),
-                )
+            logger.warning(
+                "Simulator: Rejected schedule list: %s",
+                sanitize_field(err, MAX_LOGGED_LENGTH),
+            )
             response[FIELD_SUCCESS] = SUCCESS_FALSE
             response[FIELD_REASON] = str(err)
             return

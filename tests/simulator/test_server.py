@@ -224,7 +224,7 @@ class TestDoorSimulator:
         await sim.stop()
 
         # `assert sim.server is not None` alone was pure redundancy with
-        # test_listens_on_port (round-6 L5); the shutdown half was untested.
+        # test_listens_on_port; the shutdown half was untested.
         assert sim.server.is_serving() is False
         with pytest.raises(OSError):
             _, writer = await asyncio.wait_for(
@@ -319,9 +319,8 @@ class TestDoorSimulator:
 
         The constant's *value* was pinned; the crossing was not, so both
         `old_percent > THRESHOLD` -> `>=` and `percent <= THRESHOLD` -> `<`
-        survived the whole suite (round-7 test-fanatic M5). The rule is
-        edge-triggered: it fires only on the transition *onto* the
-        threshold, exactly once.
+        survived the whole suite. The rule is edge-triggered: it fires only
+        on the transition *onto* the threshold, exactly once.
         """
         sent: list[int] = []
         monkeypatch.setattr(simulator, "_send_low_battery_notification", lambda: sent.append(end))
@@ -433,7 +432,7 @@ class TestDoorOperationSequences:
 
 
 # ============================================================================
-# Engine Path Parity Tests (M12: one engine, identical behavior)
+# Engine Path Parity Tests (one engine, identical behavior)
 # ============================================================================
 
 
@@ -1140,7 +1139,7 @@ class TestBroadcastPayloads:
 
 
 # ============================================================================
-# Notification Event Tests (D2: bare envelope)
+# Notification Event Tests (bare envelope)
 # ============================================================================
 
 
@@ -1181,7 +1180,7 @@ class TestLowBatteryNotification:
 
 
 # ============================================================================
-# Shutdown Cleanliness Tests (L14: no leaked tasks)
+# Shutdown Cleanliness Tests (no leaked tasks)
 # ============================================================================
 
 

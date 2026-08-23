@@ -204,7 +204,7 @@ class TestScheduleAdd:
         assert sorted(command_handler.simulator.state.schedules) == [0, 1]
 
     async def test_add_refuses_to_allocate_past_the_wire_bound(self, command_handler):
-        """The index search is capped at MAX_SCHEDULE_INDEX (security #4).
+        """The index search is capped at MAX_SCHEDULE_INDEX.
 
         A wire peer can legitimately fill every legal slot (0-255); the
         operator's next `schedule add` then silently created index 256,

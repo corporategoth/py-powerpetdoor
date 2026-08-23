@@ -11,10 +11,12 @@ and land verbatim in whatever consumes them. A log record read with
 ``tail -f``/``journalctl``/``docker logs``, or a value echoed by the
 interactive CLI, is therefore an ANSI-injection sink.
 
-:func:`sanitize_text` is the single implementation used by every such sink.
-It lives in the library package - not in the simulator's front-end stack -
-so ``client.py``, ``schedule.py`` and ``tz_utils.py`` can use it without
-importing simulator or ``prompt_toolkit`` code.
+:func:`sanitize_text` is the implementation used by every such sink, and
+:func:`sanitize_field` is its stricter sibling for a sink that renders one
+device-supplied *field value*. They live in the library package - not in the
+simulator's front-end stack - so ``client.py``, ``schedule.py`` and
+``tz_utils.py`` can use them without importing simulator or
+``prompt_toolkit`` code.
 """
 
 import re
@@ -28,11 +30,16 @@ import re
 #: ``decode("ascii", errors="backslashreplace")`` unchanged, and becomes an
 #: unpaired surrogate at ``json.loads``. An unpaired surrogate cannot be
 #: encoded to UTF-8, so a "sanitized" string containing one is exactly what a
-#: ``logging.FileHandler(encoding="utf-8")`` cannot write: measured, 200
-#: hostile frames produced 0 log lines and 359 KB of logging-internal
-#: tracebacks on stderr, from a code path outside every ``EventThrottle``
-#: this project has (round-9 security M2). Escaping them keeps the record.
+#: ``logging.FileHandler(encoding="utf-8")`` cannot write: 200 such frames
+#: produced 0 log lines and 359 KB of logging-internal tracebacks on stderr.
+#: Escaping them keeps the record.
+#:
+#: LF is deliberately **not** here: this is also applied to whole formatted
+#: log records, and a multi-line traceback is legitimate there.
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\ud800-\udfff]")
+
+#: :data:`_CONTROL_CHAR_RE` plus LF, for :func:`sanitize_field`.
+_FIELD_CHAR_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f\ud800-\udfff]")
 
 #: Appended by :func:`sanitize_text` when ``limit`` cut the value short.
 _TRUNCATION_MARKER = "...(truncated)"
@@ -40,8 +47,7 @@ _TRUNCATION_MARKER = "...(truncated)"
 #: Default cap for echoing a whole peer-chosen frame into a log record.
 #: The frame is attacker-chosen and may be anything up to the 64 KiB
 #: framing cap, so the constant of any per-frame log line has to be
-#: bounded independently of how often the line fires (round-6 security
-#: finding 2).
+#: bounded independently of how often the line fires.
 MAX_LOGGED_LENGTH = 200
 
 
@@ -78,7 +84,35 @@ def sanitize_text(text: object, limit: int | None = None) -> str:
         The value with every control character and surrogate replaced by its
         escape.
     """
+    return _sanitize(_CONTROL_CHAR_RE, text, limit)
+
+
+def sanitize_field(text: object, limit: int | None = None) -> str:
+    """:func:`sanitize_text`, and LF as well, for one field value.
+
+    Use this wherever a *single* device-supplied value is interpolated into
+    a log record. A field value is single-valued by definition, so a newline
+    in one is never legitimate: it ends the physical line, and a log reader
+    takes everything after it as a fresh record - with a timestamp, a
+    severity and a message the device chose. ``sanitize_text`` cannot do
+    this itself, because it is also applied to whole formatted records,
+    where a multi-line traceback is exactly what should be written.
+
+    Args:
+        text: The untrusted value; stringified if it is not already a string.
+        limit: Maximum number of characters to keep, as for
+            :func:`sanitize_text`.
+
+    Returns:
+        The value with every control character (including LF), DEL, C1
+        control and surrogate replaced by its escape.
+    """
+    return _sanitize(_FIELD_CHAR_RE, text, limit)
+
+
+def _sanitize(pattern: "re.Pattern[str]", text: object, limit: int | None) -> str:
+    """Truncate then escape, shared by the two public entry points."""
     value = str(text)
     if limit is not None and len(value) > limit:
         value = value[:limit] + _TRUNCATION_MARKER
-    return _CONTROL_CHAR_RE.sub(_escape, value)
+    return pattern.sub(_escape, value)

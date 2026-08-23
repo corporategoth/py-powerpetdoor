@@ -449,7 +449,7 @@ class TestShutdownCommand:
         command_handler.stop_callback.assert_called_once_with()
 
     async def test_stop_is_not_an_alias_for_shutdown(self, command_handler):
-        """`stop` stops the running script, never the whole simulator (M5)."""
+        """`stop` stops the running script, never the whole simulator."""
         result = await command_handler.execute("stop")
         assert result.success is False
         assert result.message == "No script is running (use 'shutdown' to stop the simulator)"

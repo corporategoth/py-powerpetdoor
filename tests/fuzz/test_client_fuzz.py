@@ -3,7 +3,7 @@
 # This software is released under the MIT License.
 # https://opensource.org/licenses/MIT
 
-"""Hypothesis property tests for client value coercion (H6).
+"""Hypothesis property tests for client value coercion.
 
 make_bool coerces untrusted wire values; it must be total (never raise)
 and deterministic across the documented input domains.
@@ -26,8 +26,7 @@ class TestMakeBoolProperties:
         """Any string maps to exactly True, False or None - never raises.
 
         Asserted by identity: `1 in (True, False, None)` is True in Python,
-        so membership does not pin the type the docstring promises
-        (round-6 test-fanatic L2).
+        so membership would not pin the type this promises.
         """
         result = make_bool(text)
         assert result is True or result is False or result is None

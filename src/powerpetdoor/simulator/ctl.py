@@ -214,7 +214,7 @@ class LocalCommandHandler(InfoCommandsMixin, ControlCommandsMixin):
                 result = handler()
         except Exception as e:
             # The transport already labels failures ("ERROR: ..."), so an
-            # inner "Error: " prefix only doubles it up (T2).
+            # inner "Error: " prefix only doubles it up.
             return LocalCommandResult(False, str(e))
 
         # Check for exit marker
@@ -242,8 +242,8 @@ def send_command(
     duration is unbounded and arbitrarily quiet, and the live connection is
     the liveness signal. A wait-run also streams the daemon's ``LOG:`` lines
     to **stderr** as they arrive, so a CI job sees progress while the script
-    runs and the assertion that failed when it does (M3); stdout stays
-    clean for the single result line.
+    runs and the assertion that failed when it does; stdout stays clean for
+    the single result line.
 
     Args:
         host: Simulator host address
@@ -347,6 +347,7 @@ def _basic_readline(prompt_text: str) -> "asyncio.Future[str | None]":
 
     Uses add_reader (not a thread) so a daemon shutdown can end the
     session immediately instead of waiting for the user to press Enter.
+    Resolves with None at EOF.
     """
     loop = asyncio.get_running_loop()
     fut: asyncio.Future[str | None] = loop.create_future()
@@ -363,24 +364,23 @@ def _basic_readline(prompt_text: str) -> "asyncio.Future[str | None]":
         try:
             loop.remove_reader(fd)
         except Exception:
-            # Defensive. Linux selectors swallow errors for dead fds, so no
-            # *real* selector can drive this clause - that part of the
-            # exclusion rationale this line used to carry was true. What
-            # was wrong was concluding it could not be tested:
-            # `loop.remove_reader` is a stdlib API a test can replace, and
-            # the contract this clause exists for (the error must not reach
-            # the loop's exception handler) is now pinned by a seam test
-            # rather than hidden from the gate (round-7 test-fanatic M4).
-            #
-            # Do not write the exclusion phrase itself in prose here: it is
-            # matched by `re.search` against the whole source line, so a
-            # comment mentioning it silently excludes that line - the same
-            # shape as the bare `...` pattern round 6 removed.
+            # Defensive: the error must not reach the loop's exception
+            # handler. Linux selectors swallow errors for dead fds, so no
+            # real selector drives this clause.
             pass
 
     sys.stdout.write(prompt_text)
     sys.stdout.flush()
-    loop.add_reader(fd, on_readable)
+    try:
+        loop.add_reader(fd, on_readable)
+    except OSError:
+        # Not every stdin is pollable: epoll rejects /dev/null, a regular
+        # file and the temp file bash uses for a heredoc with
+        # PermissionError. Read those directly - they never wait long -
+        # rather than dying with a traceback.
+        line = sys.stdin.readline()
+        fut.set_result(line if line else None)
+        return fut
     fut.add_done_callback(cleanup)
     return fut
 
@@ -393,8 +393,8 @@ async def interactive_mode_async(
     # session.log`, `| tee`, `| grep`, a container capturing stdout or a
     # supervisor saw nothing at all while a command was in flight - the
     # streamed LOG: lines all landed at once at the next prompt, making
-    # "still running" and "hung" indistinguishable (M3). prompt_toolkit is
-    # not driving that case anyway.
+    # "still running" and "hung" indistinguishable. prompt_toolkit is not
+    # driving that case anyway.
     _enable_line_buffering(sys.stdout)
 
     # Initialize timezone cache for completion
@@ -737,10 +737,9 @@ command to see available simulator commands.
     # `--timeout 0` reads to a user as "no timeout"; it actually put the
     # socket in non-blocking mode and yielded `Error: [Errno 115] Operation
     # now in progress`, and `-t -1` leaked `settimeout`'s own ValueError
-    # text - an errno no operator should have to decode from a CLI flag
-    # (round-9 frontend T1). `run <script> wait` is the documented spelling
-    # for "wait as long as it takes", so a sentinel here would be a second
-    # one.
+    # text - an errno no operator should have to decode from a CLI flag.
+    # `run <script> wait` is the documented spelling for "wait as long as it
+    # takes", so a sentinel here would be a second one.
     if args.timeout <= 0:
         parser.error(
             f"--timeout {args.timeout:g}: must be greater than 0 "
@@ -750,7 +749,7 @@ command to see available simulator commands.
     # The daemon refuses script paths over the control channel, so this
     # process must not complete them: offering `my_custom.yaml` steers the
     # user to a command that always fails, while the name that works
-    # (`my_custom`) is one completion cannot offer (M1).
+    # (`my_custom`) is one completion cannot offer.
     set_script_paths_allowed(False)
 
     # Determine door port for prompt display
@@ -770,8 +769,7 @@ command to see available simulator commands.
                 # --timeout and then advised raising it, which is wrong in
                 # both halves - the command was never a command, and raising
                 # the timeout only makes the hang longer. A shell wrapper
-                # expanding an unset variable lands here immediately
-                # (round-9 frontend L4).
+                # expanding an unset variable lands here immediately.
                 parser.error("empty command")
             success, response = send_command(args.host, args.port, command, args.timeout)
             print(response)

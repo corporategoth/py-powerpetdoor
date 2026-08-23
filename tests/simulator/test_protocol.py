@@ -569,7 +569,7 @@ class TestFraming:
         # abort(), not close(): close() only sets _closing and waits for the
         # write buffer to drain, which a peer that will not read never lets
         # happen - so connection_lost never arrived and the protocol stayed
-        # live and registered (round-7 security L2).
+        # live and registered.
         mock_transport.abort.assert_called_once()
         mock_transport.close.assert_not_called()
         assert mock_transport.write.call_count == 0
@@ -586,7 +586,7 @@ class TestFraming:
     async def test_dribbled_frame_is_scanned_once_per_byte(self, protocol, monkeypatch):
         """A byte-at-a-time unauthenticated peer costs O(N) CPU, not O(N^2).
 
-        Same defect as the client side (S1); the simulator's door port is
+        Same defect as the client side; the simulator's door port is
         the unauthenticated half of it.
         """
         from powerpetdoor import framing
@@ -609,25 +609,23 @@ class TestFraming:
         assert protocol.buffer == payload
         assert examined[0] == len(payload)
 
-    async def test_overflow_resets_the_scanner_and_serves_nothing_further(
+    async def test_overflow_resets_the_scanner_and_aborts_the_connection(
         self, protocol, mock_transport
     ):
         """An overflow clears the buffer and really ends the connection.
 
-        The drop is latched, so neither frames already queued behind the
-        overflow nor a later broadcast are answered on a connection the
-        daemon has just told the operator it dropped (round-7 security L2).
+        `close()` would defer `connection_lost` until the write buffer
+        drains, holding the protocol object and its `DoorSimulator.protocols`
+        slot; `abort()` delivers it at once.
         """
         protocol.data_received(b'{"a": "' + b"x" * (MAX_BUFFER_SIZE + 1024))
         await protocol.drain()
+
         assert protocol.buffer == ""
         mock_transport.abort.assert_called_once()
 
-        await dispatch(protocol, {PING: "after-overflow"})
-        assert mock_transport.write.call_count == 0
-
     async def test_non_ascii_byte_mid_frame_does_not_desync(self, protocol, mock_transport):
-        """One bad byte kills only its own frame, never the framing (L2)."""
+        """One bad byte kills only its own frame, never the framing."""
         # Half a PING arrives, then its tail carrying a stray byte.
         protocol.data_received(
             b'{"PING": "bad',
@@ -733,7 +731,7 @@ class TestProtocolViolations:
         """A non-numeric hour is refused with the standard error envelope.
 
         The operator-facing warning is asserted too: deleting it left the
-        control flow intact and survived the whole suite (R5-L4).
+        control flow intact and survived the whole suite.
         """
         caplog.set_level(logging.WARNING, logger="powerpetdoor.simulator.protocol")
         await dispatch(
@@ -819,13 +817,13 @@ class TestProtocolViolations:
     async def test_index_addressed_commands_reject_bad_indices(
         self, protocol, mock_transport, caplog, cmd, index, reason
     ):
-        """The last two unguarded wire values used as dict keys (L3/S2).
+        """The last two unguarded wire values used as dict keys.
 
         A JSON container is unhashable, so ``index in schedules`` raised
         ``TypeError`` - one packet per full Python traceback at ERROR from an
         unauthenticated port, and a useless "Command failed" reason for a
-        legitimate client. The sibling msgID field has been guarded since
-        round 2 and every SET_* field since round 3.
+        legitimate client. The sibling msgID field and every SET_* field are
+        already guarded.
         """
         with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
             await dispatch(protocol, {CONFIG: cmd, FIELD_INDEX: index, "msgId": 7})
@@ -834,13 +832,8 @@ class TestProtocolViolations:
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
         assert response[FIELD_REASON] == reason
         assert "Traceback" not in caplog.text
-        # The rejection detail rides an EventThrottle now, so the throttle's
-        # own first-occurrence summary accompanies it (round-7 security L3);
-        # what this test pins is that nothing here is worse than a WARNING.
-        assert [record.levelno for record in caplog.records] == [
-            logging.WARNING,
-            logging.WARNING,
-        ]
+        # Nothing here is worse than a WARNING.
+        assert [record.levelno for record in caplog.records] == [logging.WARNING]
         assert any(
             record.getMessage().startswith(f"Simulator: Rejected {cmd}:")
             for record in caplog.records
@@ -907,7 +900,7 @@ class TestLogSanitization:
 
 
 # ============================================================================
-# Sensor Notification Envelope Tests (D2: bare envelope)
+# Sensor Notification Envelope Tests (bare envelope)
 # ============================================================================
 
 
@@ -1439,7 +1432,7 @@ class TestSetHandlers:
     async def test_set_schedule_list_rejects_a_non_list_payload(
         self, protocol, mock_transport, state, schedules
     ):
-        """A wrong-typed payload is rejected with a reason, not ignored (L2).
+        """A wrong-typed payload is rejected with a reason, not ignored.
 
         It used to skip the load branch and fall straight through to the
         success response, reporting success for a message that did nothing
@@ -1458,7 +1451,7 @@ class TestSetHandlers:
         assert list(state.schedules.keys()) == [9]
 
     async def test_set_schedule_list_requires_the_field(self, protocol, mock_transport, state):
-        """An absent ``schedules`` must not wipe the store (L2).
+        """An absent ``schedules`` must not wipe the store.
 
         ``msg.get(FIELD_SCHEDULES, [])`` defaulted to the empty list, which
         took the "load new schedules" branch: a one-word packet cleared
@@ -1666,7 +1659,7 @@ class TestProtocolLifecycle:
 
 
 # ============================================================================
-# Untrusted SET_* wire values (security finding 1)
+# Untrusted SET_* wire values
 # ============================================================================
 
 
@@ -1717,7 +1710,7 @@ class TestWireValueValidation:
     async def test_infinite_hold_time_does_not_break_later_commands(
         self, protocol, mock_transport, state
     ):
-        """The exact `1e400` reproduction from the security report.
+        """The exact `1e400` overflow reproduction.
 
         Before the fix this stored `inf`, and every later GET_SETTINGS /
         GET_HOLD_TIME answered "Command failed" for the life of the process.
@@ -1755,7 +1748,7 @@ class TestWireValueValidation:
     async def test_set_timezone_rejects_non_strings(
         self, protocol, mock_transport, state, timezone, reason
     ):
-        """The exact list/dict reproductions from the security report."""
+        """The exact list/dict reproductions that used to wedge schedule evaluation."""
         state.timezone = "America/New_York"
         await self._assert_rejected(
             protocol, mock_transport, {CONFIG: CMD_SET_TIMEZONE, FIELD_TZ: timezone}, reason
@@ -1769,7 +1762,7 @@ class TestWireValueValidation:
 
         Only the reject side (129) was ever sent, so `len(value) >
         max_length` -> `>=` - which rejects the longest legal timezone as
-        "too long" - survived the whole suite (round-7 test-fanatic M5).
+        "too long" - survived the whole suite.
         """
         longest = "x" * protocol_module.MAX_TIMEZONE_LENGTH
 
@@ -1869,7 +1862,7 @@ class TestWireValueValidation:
     async def test_set_notifications_reads_flags_not_truthiness(
         self, protocol, mock_transport, state, wire_value, expected
     ):
-        """bool("0") is True; make_bool is what the client uses (L4)."""
+        """bool("0") is True; make_bool is what the client uses."""
         state.low_battery = not expected
         await dispatch(
             protocol,
@@ -1886,7 +1879,7 @@ class TestWireValueValidation:
     async def test_set_schedule_reads_string_day_flags_as_flags(
         self, protocol, mock_transport, state
     ):
-        """`"0"` must not enable the day - the bool("0") trap (L4)."""
+        """`"0"` must not enable the day - the bool("0") trap."""
         await dispatch(
             protocol,
             {
@@ -1909,7 +1902,7 @@ class TestWireValueValidation:
     async def test_set_schedule_rejects_a_missing_time_window(
         self, protocol, mock_transport, state
     ):
-        """An inside entry with no window must fail, not become 06:00-22:00 (L5)."""
+        """An inside entry with no window must fail, not become 06:00-22:00."""
         await self._assert_rejected(
             protocol,
             mock_transport,
@@ -1925,7 +1918,7 @@ class TestWireValueValidation:
         self, protocol, mock_transport, state
     ):
         """int(inf) raises OverflowError; it must not fall through to the
-        generic "Command failed" with a stack trace (informational #5)."""
+        generic "Command failed" with a stack trace."""
         protocol.data_received(b'{"cmd":"SET_SCHEDULE","schedule":{"index":1e400,"inside":true}}')
         await protocol.drain()
         response = last_response(mock_transport)
@@ -1947,16 +1940,13 @@ class TestWireValueValidation:
 class TestTheWireNumericBoundsAreInclusive:
     """`_coerce_wire_number`'s upper bound is `<=`, and nothing pinned it.
 
-    Round 7's boundary sweep pinned the *string* sibling
-    (`_coerce_wire_string`'s `len(value) > max_length`) and the CLI's float
-    `max_value`, and missed this one adjacent site. Turning `<=` into `<`
-    rejects exactly the documented maximum on every field that uses it -
-    with a message that contradicts itself ("must be between 0 and 90000,
-    got 90000") - and left the whole suite green (round-8 test-fanatic M3).
+    Turning `<=` into `<` rejects exactly the documented maximum on every
+    field that uses it - with a message that contradicts itself ("must be
+    between 0 and 90000, got 90000") - and leaves the whole suite green.
 
     This pins what the simulator accepts **today**; it changes and narrows
-    nothing on the wire. Three shipped constants, four wire call sites,
-    each at `limit - 1`, `limit` and `limit + 1` (CLAUDE.md rule 8).
+    nothing on the wire. Three shipped constants, four wire call sites, each
+    at `limit - 1`, `limit` and `limit + 1` (CLAUDE.md rule 8).
     """
 
     async def _round_trip(self, protocol, mock_transport, msg):
@@ -2109,160 +2099,45 @@ class TestTheWireNumericBoundsAreInclusive:
         assert response[FIELD_SCHEDULE]["index"] == MAX_SCHEDULE_INDEX
 
 
-class TestBoundedDispatchAndBackpressure:
-    """The simulator's twin of the client's bounded frame dispatch.
-
-    256 KiB of packed `{}` admitted 131,072 live tasks / 145 MB, linear in
-    connections, with no connection cap anywhere (round-6 security 1).
-    """
-
-    async def test_a_packed_read_creates_a_bounded_number_of_tasks(self, protocol):
-        protocol.data_received(b"{}" * 5000)
-
-        assert protocol._dispatcher.inflight == framing.MAX_INFLIGHT_FRAMES
-        assert protocol._dispatcher.backlog == 5000 - framing.MAX_INFLIGHT_FRAMES
-        assert len(protocol._tasks) == framing.MAX_INFLIGHT_FRAMES
-
-    async def test_reading_is_paused_while_the_backlog_is_deep(self, protocol, mock_transport):
-        protocol.data_received(b"{}" * 5000)
-
-        mock_transport.pause_reading.assert_called_once_with()
-        assert protocol._dispatcher.paused is True
-
-    async def test_every_frame_is_still_handled_and_reading_resumes(self, protocol, mock_transport):
-        protocol.data_received(b'{"config":"GET_DOOR_STATUS"}' * 400)
-        await protocol.drain()
-
-        assert len(all_responses(mock_transport)) == 400
-        assert protocol._dispatcher.backlog == 0
-        mock_transport.resume_reading.assert_called_once_with()
-
-    async def test_normal_traffic_never_pauses(self, protocol, mock_transport):
-        protocol.data_received(b'{"config":"GET_DOOR_STATUS"}{"config":"GET_POWER"}')
-        await protocol.drain()
-
-        assert mock_transport.pause_reading.call_count == 0
-        assert len(all_responses(mock_transport)) == 2
-
-    async def test_connection_lost_drops_the_backlog(self, protocol):
-        protocol.data_received(b"{}" * 5000)
-        assert protocol._dispatcher.backlog > 0
-
-        protocol.connection_lost(None)
-
-        assert protocol._dispatcher.backlog == 0
-
-
-class TestPerFrameLogThrottling:
-    """Per-frame log sites are limited by the peer's byte rate, not packets."""
-
-    async def test_parse_errors_are_summarized(self, protocol, caplog):
-        """`{x}` is three bytes; 21,845 of them fit in one 64 KiB write."""
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
-            protocol.data_received(b"{x}" * 1000)
-            await protocol.drain()
-
-        tallies = [
-            record.getMessage()
-            for record in caplog.records
-            if "JSON parse error(s)" in record.getMessage()
-        ]
-        assert len(tallies) == 10  # 1, 2, 4, ... 512
-        assert tallies[-1] == ("Simulator: 512 JSON parse error(s) (1536 bytes) on this connection")
-        assert protocol._bad_frames.count == 1000
-
-    async def test_the_parse_error_detail_is_bounded(self, protocol, caplog):
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
-            protocol.data_received(b"{" + b"z" * 5000 + b"}")
-            await protocol.drain()
-
-        detail = next(
-            record.getMessage()
-            for record in caplog.records
-            if record.getMessage().startswith("Simulator: JSON parse error:")
-        )
-        assert "...(truncated))" in detail
-        assert len(detail) < 400
-
-    async def test_unknown_commands_are_summarized(self, protocol, mock_transport, caplog):
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
-            protocol.data_received(b'{"cmd":"a"}' * 100)
-            await protocol.drain()
-
-        tallies = [
-            record.getMessage()
-            for record in caplog.records
-            if record.getMessage().startswith("Simulator: Unknown command:")
-        ]
-        assert len(tallies) == 7  # 1, 2, 4, ... 64
-        assert protocol._unknown_commands.count == 100
-        # Every one of them is still answered with the error envelope.
-        assert len(all_responses(mock_transport)) == 100
-
-    async def test_connection_lost_flushes_the_per_frame_tails(self, protocol, caplog):
-        protocol.data_received(b"{x}" * 3)
-        await protocol.drain()
-
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
-            caplog.clear()
-            protocol.connection_lost(None)
-
-        assert [record.getMessage() for record in caplog.records] == [
-            "Simulator: 3 JSON parse error(s) (9 bytes) on this connection"
-        ]
-
-
 class TestDecodeFailuresThatAreNotJSONDecodeError:
     """Twin of `tests/test_client.py::TestDecodeFailuresThatAreNotJSONDecodeError`.
 
     `json.JSONDecodeError` is a ValueError *subclass*, so catching it is
     not the same as catching what `json.loads` raises. A >4300-digit
     integer literal raises a bare ValueError and deep nesting raises
-    RecursionError. Escaping `_dispatch_frame` fatal-errored the transport
-    or - from the `call_soon` re-arm - wedged the dispatcher with reading
-    paused forever, which held the fd and the `DoorSimulator.protocols`
-    slot after the peer closed its socket (round-8 security M1).
+    RecursionError, and letting either escape fatal-errors the transport,
+    holding the fd and the `DoorSimulator.protocols` slot after the client
+    closes its socket.
 
     Both frames are brace-balanced and under `MAX_BUFFER_SIZE`, so the
     framing cap is provably not what stops them.
     """
 
     @pytest.mark.parametrize("frame", [bigint_frame(), nested_frame()], ids=["bigint", "nested"])
-    async def test_a_poisoned_frame_alone_does_not_escape_data_received(self, frame, protocol):
+    async def test_a_poisoned_frame_alone_does_not_escape_data_received(
+        self, frame, protocol, mock_transport, caplog
+    ):
         assert len(frame) < framing.MAX_BUFFER_SIZE
 
-        protocol.data_received(frame)
-        await protocol.drain()
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
+            protocol.data_received(frame)
+            await protocol.drain()
 
-        assert protocol._dispatcher.backlog == 0
-        assert protocol._bad_frames.count == 1
+        mock_transport.abort.assert_not_called()
+        assert "Simulator: JSON parse error" in caplog.text
 
-    @pytest.mark.parametrize("frame", [bigint_frame(), nested_frame()], ids=["bigint", "nested"])
-    async def test_a_poisoned_frame_in_the_re_arm_does_not_wedge_the_dispatcher(
-        self, frame, protocol
+    async def test_deep_nesting_split_across_reads_is_not_caught_by_the_framing_cap(
+        self, protocol, caplog
     ):
-        """Budget burned by unparseable frames, then the frame, then a paused backlog."""
-        filler = framing.MAX_INFLIGHT_FRAMES
-        trailing = framing.MAX_FRAME_BACKLOG + 44
-
-        protocol.data_received(b"{x}" * filler + frame + b"{x}" * trailing)
-        assert protocol._dispatcher.paused is True
-        await protocol.drain()
-
-        assert protocol._dispatcher.backlog == 0
-        assert protocol._dispatcher.paused is False
-        assert protocol._bad_frames.count == filler + trailing + 1
-
-    async def test_deep_nesting_split_across_reads_is_not_caught_by_the_framing_cap(self, protocol):
         """Delivered in network-sized pieces, so only the decoder can stop it."""
         frame = nested_frame()
 
-        for start in range(0, len(frame), 1400):
-            protocol.data_received(frame[start : start + 1400])
-        await protocol.drain()
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
+            for start in range(0, len(frame), 1400):
+                protocol.data_received(frame[start : start + 1400])
+            await protocol.drain()
 
-        assert protocol._bad_frames.count == 1
-        assert protocol._dispatcher.backlog == 0
+        assert "Simulator: JSON parse error" in caplog.text
 
     @pytest.mark.parametrize(
         ("frame", "detail"),
@@ -2272,10 +2147,10 @@ class TestDecodeFailuresThatAreNotJSONDecodeError:
         ],
         ids=["bigint", "nested"],
     )
-    async def test_a_poisoned_frame_lands_on_the_existing_throttled_path(
+    async def test_a_poisoned_frame_lands_on_the_existing_decode_path(
         self, frame, detail, protocol, caplog
     ):
-        """Byte-identical treatment to `{x}`: same records, same schedule."""
+        """Byte-identical treatment to `{x}`: the same log call site."""
         with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
             protocol.data_received(b"{x}")
             await protocol.drain()
@@ -2283,13 +2158,12 @@ class TestDecodeFailuresThatAreNotJSONDecodeError:
             # across the differing detail text.
             control_shape = [record.msg for record in caplog.records]
             caplog.clear()
-            protocol._bad_frames.reset()
 
             protocol.data_received(frame)
             await protocol.drain()
 
         assert [record.msg for record in caplog.records] == control_shape
-        assert detail in caplog.records[1].getMessage()
+        assert detail in caplog.records[0].getMessage()
 
     async def test_a_legitimate_command_after_a_poisoned_frame_is_still_answered(
         self, protocol, mock_transport
@@ -2302,225 +2176,3 @@ class TestDecodeFailuresThatAreNotJSONDecodeError:
         await protocol.drain()
 
         assert [reply["CMD"] for reply in all_responses(mock_transport)] == [CMD_GET_DOOR_STATUS]
-
-
-class TestShippedBoundsHaveTheirValuesPinned:
-    """`MAX_WRITE_BACKLOG` is a per-connection memory cap, and relaxing it
-    16x left the whole suite green (round-7 test-fanatic L1)."""
-
-    def test_the_write_backlog_ceiling_is_1_mib(self):
-        """Above this a peer that will not read its answers is dropped."""
-        assert protocol_module.MAX_WRITE_BACKLOG == 1024 * 1024
-
-    def test_the_wire_string_bounds_are_the_documented_ones(self):
-        assert protocol_module.MAX_TIMEZONE_LENGTH == 128
-        assert protocol_module.MAX_HOLD_TIME_CENTISECONDS == 90000
-        assert protocol_module.MAX_TRIGGER_VOLTAGE == 65535
-
-
-class TestWriteBacklogCeiling:
-    """A peer that never reads its answers made the daemon buffer them.
-
-    1.50 MB of valid `{"config":"GET_SETTINGS"}` bought +36 MB of daemon
-    heap, held for as long as the socket stayed open. The control channel
-    got this ceiling in round 5; the door transport did not (round-6
-    security 1, secondary instance).
-    """
-
-    async def test_a_client_that_is_not_reading_is_dropped(self, protocol, mock_transport, caplog):
-        mock_transport.get_write_buffer_size.return_value = protocol_module.MAX_WRITE_BACKLOG + 1
-
-        with caplog.at_level(logging.ERROR, logger="powerpetdoor.simulator.protocol"):
-            protocol.data_received(b'{"config":"GET_DOOR_STATUS"}')
-            await protocol.drain()
-
-        mock_transport.abort.assert_called_once_with()
-        mock_transport.close.assert_not_called()
-        mock_transport.write.assert_not_called()
-        assert any(
-            record.getMessage().startswith("Simulator: client is not reading its responses")
-            for record in caplog.records
-        )
-
-    async def test_a_client_at_the_ceiling_is_still_served(self, protocol, mock_transport):
-        """The bound is a ceiling, not a hair trigger."""
-        mock_transport.get_write_buffer_size.return_value = protocol_module.MAX_WRITE_BACKLOG
-
-        protocol.data_received(b'{"config":"GET_DOOR_STATUS"}')
-        await protocol.drain()
-
-        mock_transport.close.assert_not_called()
-        assert len(all_responses(mock_transport)) == 1
-
-    async def test_send_without_a_transport_is_a_noop(self, state):
-        """connection_lost() clears nothing, but a protocol may never connect."""
-        proto = DoorSimulatorProtocol(state)
-
-        proto._send({"CMD": "PONG"})  # must not raise
-
-        assert proto.transport is None
-
-    async def test_the_ceiling_is_a_boundary_not_a_hair_trigger(self, protocol, mock_transport):
-        """Assert *at* the limit: exactly MAX_WRITE_BACKLOG is still served."""
-        mock_transport.get_write_buffer_size.return_value = protocol_module.MAX_WRITE_BACKLOG
-
-        protocol.data_received(b'{"config":"GET_DOOR_STATUS"}')
-        await protocol.drain()
-
-        mock_transport.abort.assert_not_called()
-        assert len(all_responses(mock_transport)) == 1
-
-    async def test_the_drop_is_latched_so_nothing_re_reports_it(
-        self, protocol, mock_transport, caplog
-    ):
-        """The ceiling announced "dropping the connection" once per message.
-
-        `_send()` re-evaluated the condition for every subsequent message
-        and re-emitted a byte-identical ERROR, unthrottled - the exact
-        pattern round 6 removed from the three sibling sites in this class.
-        Measured before the fix: 300 further messages bought 300 further
-        records, 1 distinct message out of 1048 (round-7 security L2).
-        """
-        mock_transport.get_write_buffer_size.return_value = protocol_module.MAX_WRITE_BACKLOG + 1
-
-        with caplog.at_level(logging.ERROR, logger="powerpetdoor.simulator.protocol"):
-            protocol.data_received(b'{"config":"GET_DOOR_STATUS"}')
-            await protocol.drain()
-            first = len(caplog.records)
-
-            for _ in range(300):
-                protocol._send({"CMD": "PONG"})
-
-        assert first > 0
-        assert len(caplog.records) == first
-        assert mock_transport.abort.call_count == 1
-        assert mock_transport.write.call_count == 0
-
-    async def test_a_later_broadcast_is_not_answered_on_a_dropped_connection(
-        self, protocol, mock_transport
-    ):
-        """`ctl status` kept reporting a client the daemon said it dropped."""
-        mock_transport.get_write_buffer_size.return_value = protocol_module.MAX_WRITE_BACKLOG + 1
-        protocol.data_received(b'{"config":"GET_DOOR_STATUS"}')
-        await protocol.drain()
-
-        mock_transport.get_write_buffer_size.return_value = 0
-        protocol._send({"CMD": "SET_HOLD_TIME", "holdTime": 200})
-
-        assert mock_transport.write.call_count == 0
-
-    async def test_repeated_drops_are_throttled(self, protocol, mock_transport, caplog):
-        """The latch is the fix; the throttle is the invariant behind it."""
-        with caplog.at_level(logging.ERROR, logger="powerpetdoor.simulator.protocol"):
-            for _ in range(200):
-                protocol._drop_connection("synthetic protocol violation")
-
-        details = [
-            record.getMessage()
-            for record in caplog.records
-            if record.getMessage().startswith("Simulator: synthetic")
-        ]
-        # 1, 2, 4, ... 128 - logarithmic, not one per call.
-        assert len(details) == 8
-
-    async def test_connection_lost_flushes_the_drop_and_rejection_tails(
-        self, protocol, mock_transport, caplog
-    ):
-        """Totals are batched, never lost - same contract as the siblings."""
-        await dispatch(protocol, {CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: []})
-        await dispatch(protocol, {CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: []})
-        await dispatch(protocol, {CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: []})
-
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
-            caplog.clear()
-            protocol.connection_lost(None)
-
-        assert any(
-            "rejected 3 malformed field(s)/payload(s)" in record.getMessage()
-            for record in caplog.records
-        )
-
-
-class TestRejectionSitesAreThrottledAndBounded:
-    """Round 6 throttled three per-frame sites and left the rejection sites.
-
-    All of them fire once per *frame*, so they are limited by the peer's
-    byte rate rather than its packet rate - the exact criterion round 6
-    used. Measured before the fix, one 256 KiB-scale burst through a real
-    protocol object: `SET_HOLD_TIME holdTime:[]` x2.58 write amplification
-    and 8,000 records, `SET_SCHEDULE {"index":[]}` x2.12 / 8,000,
-    `SET_SCHEDULE_LIST` x1.91 / 8,000. After: x0.01 and 26 records each
-    (round-7 security L3).
-    """
-
-    async def test_rejected_commands_are_summarized(self, protocol, caplog):
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
-            for _ in range(100):
-                await dispatch(protocol, {CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: []})
-
-        details = [
-            record.getMessage()
-            for record in caplog.records
-            if record.getMessage().startswith("Simulator: Rejected SET_HOLD_TIME:")
-        ]
-        # 1, 2, 4, ... 64 - logarithmic in 100 frames, not linear.
-        assert len(details) == 7
-        assert protocol._rejections.count == 100
-
-    async def test_every_rejection_is_still_answered_on_the_wire(self, protocol, mock_transport):
-        """Throttling the *log* must not hide anything from the client."""
-        for _ in range(50):
-            await dispatch(protocol, {CONFIG: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: []})
-
-        responses = all_responses(mock_transport)
-        assert len(responses) == 50
-        assert all(response[FIELD_SUCCESS] == SUCCESS_FALSE for response in responses)
-
-    async def test_the_rejection_detail_is_length_bounded(self, protocol, caplog):
-        """The reason echoes the peer's value, so it is peer-sized.
-
-        A single frame could otherwise produce a record as large as the
-        64 KiB framing cap allows.
-        """
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
-            await dispatch(
-                protocol,
-                {CONFIG: CMD_SET_SCHEDULE, FIELD_SCHEDULE: {FIELD_INDEX: "z" * 5000}},
-            )
-
-        detail = next(
-            record.getMessage()
-            for record in caplog.records
-            if record.getMessage().startswith("Simulator: Rejected schedule:")
-        )
-        assert "...(truncated)" in detail
-        assert len(detail) < 500
-
-    async def test_bad_schedules_share_the_same_throttle(self, protocol, caplog):
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
-            for _ in range(100):
-                await dispatch(protocol, {CONFIG: CMD_SET_SCHEDULE, FIELD_SCHEDULE: {"index": []}})
-
-        details = [
-            record.getMessage()
-            for record in caplog.records
-            if record.getMessage().startswith("Simulator: Rejected schedule:")
-        ]
-        assert len(details) == 7
-        assert protocol._rejections.count == 100
-
-    async def test_bad_schedule_lists_share_the_same_throttle(self, protocol, caplog):
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
-            for _ in range(100):
-                await dispatch(
-                    protocol,
-                    {CONFIG: CMD_SET_SCHEDULE_LIST, FIELD_SCHEDULES: [{"index": []}]},
-                )
-
-        details = [
-            record.getMessage()
-            for record in caplog.records
-            if record.getMessage().startswith("Simulator: Rejected schedule list:")
-        ]
-        assert len(details) == 7
-        assert protocol._rejections.count == 100

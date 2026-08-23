@@ -58,10 +58,10 @@ logger = logging.getLogger(__name__)
 #: is neither matched none of them and fell through to the open: a
 #: one-character typo in a script synthesised a third sensor that ignored
 #: the enable flags, the safety lock *and* the schedule, and the run still
-#: reported PASSED (round-7 frontend M2). Callers that want a hard failure
-#: (the script DSL) check against this first; the engine itself refuses the
-#: name the same way it refuses a disabled sensor, so the documented
-#: programmatic API keeps its "returns None" contract.
+#: reported PASSED. Callers that want a hard failure (the script DSL) check
+#: against this first; the engine itself refuses the name the same way it
+#: refuses a disabled sensor, so the documented programmatic API keeps its
+#: "returns None" contract.
 SENSOR_NAMES = ("inside", "outside")
 
 #: Floor (seconds) on the blocked-sensor re-check wait. While a sensor
@@ -297,7 +297,7 @@ class DoorMotionEngine:
         ``_set_status`` calls (``_hold_open`` returns without awaiting when
         ``hold_time`` is ~0), so a state resolved at request time can be
         stale by the time it is applied, and replaying it re-broadcasts a
-        status the door has already moved past (L3).
+        status the door has already moved past.
 
         Returns:
             True if the request was deferred (the caller must not act now).
@@ -366,26 +366,24 @@ class DoorMotionEngine:
     def sensor_open_block_reason(self, sensor: str) -> str | None:
         """Why ``sensor`` may not open the door right now, or ``None``.
 
-        **One** predicate for both sensor entry points. There used to be
-        two: :meth:`trigger_sensor` checked power, command lockout,
-        per-sensor enable, safety lock and the schedule; while
-        :meth:`activate_sensor` re-implemented a weaker subset inline with
-        no command-lockout check and no schedule check. Nothing asserted
-        either, so every operand of both compound guards could be deleted
-        with the whole suite green (round-9 test-fanatic M2).
+        **One** predicate for both sensor entry points: power, command
+        lockout, per-sensor enable, safety lock and the schedule. Do not
+        re-implement it inline in :meth:`trigger_sensor` or
+        :meth:`activate_sensor`: a weaker copy is reachable from both
+        shipped front ends - the ``inside``/``outside`` CLI commands
+        (``commands/door.py``) and the ``inside``/``outside``/``pet_presence``
+        script actions (``scripting.py``) - so a script step
+        ``- action: inside`` opens the door while every schedule window is
+        closed.
 
-        The divergence was reachable from both shipped front ends - the
-        ``inside``/``outside`` CLI commands (``commands/door.py``) and the
-        ``inside``/``outside``/``pet_presence`` script actions
-        (``scripting.py``) - so a CI script step ``- action: inside`` opened
-        the door while every schedule window was closed. ``docs/operation.md``
-        ("Schedule and Sensor Interaction") settles that half outright:
-        *"Outside scheduled windows, sensor triggers are ignored"*. The
-        command-lockout half is not settled by ``docs/operation.md``, which
-        describes command lockout only in terms of blocking the door from
-        *closing*; the two are made consistent on ``trigger_sensor``'s
-        answer, which is the behaviour ``scripts/power_lockout_test.yaml``
-        and ``test_cmd_lockout_ignores_trigger`` have asserted since round 1.
+        ``docs/operation.md`` ("Schedule and Sensor Interaction") settles the
+        schedule half outright: *"Outside scheduled windows, sensor triggers
+        are ignored"*. The command-lockout half is not settled by
+        ``docs/operation.md``, which describes command lockout only in terms
+        of blocking the door from *closing*; the two are made consistent on
+        ``trigger_sensor``'s answer, which is the behaviour
+        ``scripts/power_lockout_test.yaml`` and
+        ``test_cmd_lockout_ignores_trigger`` assert.
 
         Note the scope: this gates *opening the door*, not the sensor-active
         flag. A pet standing in the doorway is a physical fact, so
@@ -528,9 +526,8 @@ class DoorMotionEngine:
         active = state.inside_sensor_active if sensor == "inside" else state.outside_sensor_active
         if state.door_status == DOOR_STATE_CLOSED and active:
             # The same gate `trigger_sensor` applies - one predicate, so the
-            # two entry points cannot disagree again (round-9 test-fanatic
-            # M2). This is where command lockout and the schedule window used
-            # to be missing.
+            # two entry points cannot disagree about power, command lockout,
+            # the sensor enables or the schedule window.
             blocked = self.sensor_open_block_reason(sensor)
             if blocked is None:
                 logger.info("Simulator: %s sensor triggering door cycle", sensor.capitalize())

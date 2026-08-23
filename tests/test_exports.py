@@ -104,9 +104,8 @@ class TestAllExports:
     def test_notification_and_error_exports(self):
         """CommandError and the notification-event constants are exported.
 
-        Wave 1a handoff: the notification listener API and typed command
-        errors are public API, so their names must be importable from the
-        package root.
+        The notification listener API and typed command errors are public
+        API, so their names must be importable from the package root.
         """
         required = [
             "CommandError",
@@ -135,8 +134,8 @@ class TestAllExports:
 class TestEveryExportIsDocumented:
     """A name in ``__all__`` is public API, so the prose must mention it.
 
-    49 of 121 exports appeared in no doc at all (frontend L3) - including
-    the seven timezone helpers that bridge IANA names to the POSIX strings
+    49 of 121 exports once appeared in no doc at all - including the seven
+    timezone helpers that bridge IANA names to the POSIX strings
     ``door.set_timezone`` documents as its only accepted form, and the
     ``PRIORITY_*`` constants the ``PrioritizedMessage`` example replaced
     with a magic number. Pinned here so the next export cannot slip in
@@ -160,10 +159,9 @@ class TestEveryExportIsDocumented:
         (``CMD_OPEN`` < ``CMD_OPEN_AND_HOLD``, ``Schedule`` <
         ``ScheduleTime``, ``DOOR_STATUS`` < ``FIELD_DOOR_STATUS``, ...), so
         a plain ``in`` check could be satisfied by a longer name and report
-        a genuinely undocumented export as documented. Demonstrated on a
-        throwaway copy of the corpus in round 6 (test-fanatic L1); latent
-        rather than active, because every name does appear standalone
-        today - which is exactly what this now pins.
+        a genuinely undocumented export as documented. Latent rather than
+        active, because every name does appear standalone today - which is
+        exactly what this pins.
         """
         text = self._all_doc_text()
 
@@ -210,10 +208,10 @@ class TestThePep561Marker:
     """121 exported, annotated, CI-gated names were inert downstream.
 
     PEP 561 says an installed package's annotations are ignored unless it
-    ships a `py.typed` marker. Measured on an installed copy with a control
-    (round-9 frontend M1): without the marker, mypy reports *"Skipping
-    analyzing powerpetdoor: module is installed, but missing library stubs
-    or py.typed marker"* and sees the whole API as `Any`; with it, the same
+    ships a `py.typed` marker. Measured on an installed copy with a
+    control: without the marker, mypy reports *"Skipping analyzing
+    powerpetdoor: module is installed, but missing library stubs or
+    py.typed marker"* and sees the whole API as `Any`; with it, the same
     consumer's `await door.set_hold_time("banana")` is an `arg-type` error.
 
     The marker is included in the wheel by setuptools automatically -
@@ -231,8 +229,8 @@ class TestThePep561Marker:
         assert marker.read_bytes() == b""
 
     def test_the_marker_is_not_listed_as_package_data(self):
-        """Its rationale was false and must not be repeated: setuptools ships
-        it without being told to."""
+        """Listing it would be redundant: setuptools ships it without being
+        told to."""
         import tomllib
 
         pyproject = tomllib.loads(

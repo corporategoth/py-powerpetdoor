@@ -117,10 +117,10 @@ class ArgSpec:
         """Resolve this argument's help text.
 
         A description can depend on runtime policy the way ``completer``
-        already does: ``run``'s ``script`` argument accepts names *and*
-        file paths on the interactive CLI, but only bare names over the
-        control channel - and the in-client help was advertising the form
-        that channel refuses outright (L2).
+        already does: ``run``'s ``script`` argument accepts names *and* file
+        paths on the interactive CLI, but only bare names over the control
+        channel, so a fixed string would advertise a form that channel
+        refuses outright.
         """
         return self.description() if callable(self.description) else self.description
 
@@ -173,15 +173,15 @@ def parse_arg(value: str, spec: ArgSpec) -> tuple[Any, str | None]:
         try:
             parsed_float = float(value)
             # `nan`/`inf`/`Infinity`/`1e400` are legal float() parses, and
-            # every bound check below is False for nan, so the bounds the
-            # command's own help advertises silently did not hold. One
-            # `holdtime nan` then wedged the door and made GET_SETTINGS and
-            # GET_HOLD_TIME answer every connected client
-            # `success:false` for the life of the daemon (round-7 frontend
-            # M1). The wire path (protocol._require_finite) and the script
-            # DSL (ScriptRunner._script_number) already refuse these; this
-            # is the third front end onto the same state, and it now uses
-            # the same wording they do.
+            # every bound check below is False for nan, so without this guard
+            # the bounds the command's own help advertises silently do not
+            # hold. One `holdtime nan` then wedges the door and makes
+            # GET_SETTINGS and GET_HOLD_TIME answer every connected client
+            # `success:false` for the life of the daemon. The wire path
+            # (protocol._require_finite) and the script DSL
+            # (ScriptRunner._script_number) already refuse these; this is the
+            # third front end onto the same state, and it uses the same
+            # wording they do.
             #
             # The "int" branch needs no such guard: int("nan") and
             # int("1e400") both raise ValueError and are caught below.

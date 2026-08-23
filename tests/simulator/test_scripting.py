@@ -535,7 +535,7 @@ class TestScriptRunner:
         the whole suite: the branch never firing, and its message replaced by
         the timeout message. An operator who typed `stop` was then told
         "Timeout waiting for condition: door_open" - a misleading diagnosis
-        with a generous timeout still running (round-6 test-fanatic L3).
+        with a generous timeout still running.
         """
         task = asyncio.create_task(runner._wait_for_condition("door_keepup", 30))
         await asyncio.sleep(0)
@@ -565,7 +565,7 @@ class TestScriptRunner:
         assert "  [SCRIPT] after-stop" not in messages
 
     async def test_stop_during_the_last_step_fails_the_run(self, runner, simulator, caplog):
-        """A stop landing during the FINAL step must still report FAILED (H1).
+        """A stop landing during the FINAL step must still report FAILED.
 
         The stop check only ran at the top of each iteration, so a stop
         during the last step was silently discarded: the loop ended, the
@@ -590,7 +590,7 @@ class TestScriptRunner:
     async def test_stop_during_the_last_step_of_a_longer_script_fails_the_run(
         self, runner, simulator
     ):
-        """Same defect with steps before the last one (the two-step case, H1)."""
+        """Same defect with steps before the last one (the two-step case)."""
 
         async def stopping_close():
             runner.stop()
@@ -601,7 +601,7 @@ class TestScriptRunner:
         assert await runner.run(script, verbose=False) is False
 
     async def test_stop_interrupts_a_plain_wait(self, runner, simulator):
-        """`wait N` is raced against the stop event, not slept through (H1).
+        """`wait N` is raced against the stop event, not slept through.
 
         An uninterruptible wait made the "stop lands during the final step"
         window as long as the final wait.
@@ -636,7 +636,7 @@ class TestScriptRunner:
         assert loop.time() - started < 1.0
 
     async def test_stop_requested_is_observable_while_running(self, runner, simulator):
-        """`stop` takes effect at a step boundary, so the pending state shows (L3)."""
+        """`stop` takes effect at a step boundary, so the pending state shows."""
         entered = asyncio.Event()
         release = asyncio.Event()
 
@@ -664,7 +664,7 @@ class TestScriptRunner:
         assert runner.stop_requested is False
 
     async def test_on_start_fires_once_the_run_lock_is_held(self, runner, simulator):
-        """The queue consumer stops counting a run as pending when it starts (M2)."""
+        """The queue consumer stops counting a run as pending when it starts."""
         seen: list[bool] = []
         script = Script.from_simple_commands(["log hello"])
 
@@ -678,7 +678,7 @@ class TestScriptRunner:
         assert seen == [True]
 
     async def test_on_start_returning_false_abandons_the_run(self, runner, simulator):
-        """A claim dropped while parked on the lock must not run (M1).
+        """A claim dropped while parked on the lock must not run.
 
         `stop all` cancels the claimed entry while the consumer waits for
         the run lock; starting the script afterwards would run exactly what
@@ -720,6 +720,75 @@ class TestScriptRunner:
             result = await runner.run(script, verbose=False)
         assert result is False
         assert "Unexpected error at step 1" in caplog.text
+
+
+class TestAssertConditionsSurviveTheYamlLoader:
+    """`equals:` arrives from PyYAML already resolved.
+
+    PyYAML turns `on`/`off` (and `yes`/`no`/`true`/`false`) into booleans
+    and bare digits into ints, and the comparison then called `.lower()`
+    on them - so 9 of the 12 documented `assert` conditions failed a
+    **true** assertion with `AttributeError: 'bool' object has no attribute
+    'lower'`. Quoting does not rescue `hold_time`, which is stored as a
+    float: `equals: "2"` still lost to `str(2.0)`.
+    """
+
+    @pytest.mark.parametrize(
+        ("condition", "literal", "setup"),
+        [
+            ("power", "off", lambda state: setattr(state, "power", False)),
+            ("power", "on", lambda state: setattr(state, "power", True)),
+            ("auto", "off", lambda state: setattr(state, "auto", False)),
+            ("autoretract", "on", lambda state: setattr(state, "autoretract", True)),
+            ("safety_lock", "off", lambda state: setattr(state, "safety_lock", False)),
+            ("cmd_lockout", "on", lambda state: setattr(state, "cmd_lockout", True)),
+            ("battery", "75", lambda state: setattr(state, "battery_percent", 75)),
+            ("hold_time", "2", lambda state: setattr(state, "hold_time", 2.0)),
+            ("hold_time", '"2"', lambda state: setattr(state, "hold_time", 2.0)),
+            ("hold_time", "2.5", lambda state: setattr(state, "hold_time", 2.5)),
+            ("total_open_cycles", "4", lambda state: setattr(state, "total_open_cycles", 4)),
+            ("total_auto_retracts", "1", lambda state: setattr(state, "total_auto_retracts", 1)),
+            ("inside", "enabled", lambda state: setattr(state, "inside", True)),
+            ("outside", "disabled", lambda state: setattr(state, "outside", False)),
+            ("door_status", "DOOR_CLOSED", lambda state: None),
+        ],
+    )
+    async def test_a_true_assertion_written_in_yaml_passes(
+        self, runner, simulator, condition, literal, setup
+    ):
+        setup(simulator.state)
+        script = Script.from_yaml(
+            f"name: A\nsteps:\n  - action: assert\n    condition: {condition}\n"
+            f"    equals: {literal}\n"
+        )
+
+        assert await runner.run(script, verbose=False) is True
+
+    async def test_a_false_assertion_written_in_yaml_still_fails(self, runner, simulator, caplog):
+        """The guard must not turn every assertion into a pass."""
+        simulator.state.power = True
+        script = Script.from_yaml(
+            "name: A\nsteps:\n  - action: assert\n    condition: power\n    equals: off\n"
+        )
+
+        with caplog.at_level(logging.ERROR, logger=SCRIPT_LOGGER):
+            assert await runner.run(script, verbose=False) is False
+
+        assert "power: expected 'off', got 'on'" in caplog.text
+
+    async def test_the_failure_message_reports_the_normalized_values(
+        self, runner, simulator, caplog
+    ):
+        """`got '2.0'` for a hold time of 2 s reads like a different number."""
+        simulator.state.hold_time = 2.0
+        script = Script.from_yaml(
+            "name: A\nsteps:\n  - action: assert\n    condition: hold_time\n    equals: 3\n"
+        )
+
+        with caplog.at_level(logging.ERROR, logger=SCRIPT_LOGGER):
+            assert await runner.run(script, verbose=False) is False
+
+        assert "hold_time: expected '3', got '2'" in caplog.text
 
 
 class TestScriptActions:
@@ -824,7 +893,18 @@ class TestScriptActions:
         assert schedule.inside is True
         assert schedule.outside is True
         assert (schedule.start_hour, schedule.start_min) == (0, 0)
-        assert (schedule.end_hour, schedule.end_min) == (23, 59)
+        # Midnight to midnight. The end is exclusive, so 00:00-23:59 covers
+        # 1439 minutes and blocked the sensors for exactly the minute 23:59
+        # - which failed this file's schedule-script tests once a day.
+        assert (schedule.end_hour, schedule.end_min) == (0, 0)
+        assert (
+            sum(
+                schedule.is_sensor_allowed("inside", minute // 60, minute % 60, weekday)
+                for weekday in range(7)
+                for minute in range(1440)
+            )
+            == 7 * 1440
+        )
 
         result = await runner.run(Script.from_simple_commands(["remove_schedule 3"]), verbose=False)
         assert result is True
@@ -944,7 +1024,7 @@ class TestSetValueMatrix:
         assert getattr(runner.simulator.state, attr) == expected
 
     def test_set_hold_time_accepts_fractional_seconds(self):
-        """hold_time is a float everywhere else, so 1.5 must work (L6)."""
+        """hold_time is a float everywhere else, so 1.5 must work."""
         runner = make_runner()
         runner._set_value("hold_time", "1.5")
         assert runner.simulator.state.hold_time == 1.5
@@ -957,13 +1037,13 @@ class TestSetValueMatrix:
 
 
 class TestScriptWriterIsBoundedLikeTheWire:
-    """The YAML script channel is the third writer of these fields (S3).
+    """The YAML script channel is the third writer of these fields.
 
-    Round 3 bounded the wire path and the CLI path was already bounded; the
-    script path was not, so `set hold_time inf` re-opened exactly the
-    Medium round 3 closed - GET_SETTINGS (issued by the shipped client on
-    every connect and refresh) then fails for every client for the life of
-    the process, and the door parks in DOOR_HOLDING.
+    The wire path and the CLI path are both bounded; the script path was
+    not, so `set hold_time inf` re-opened the same hole - GET_SETTINGS
+    (issued by the shipped client on every connect and refresh) then fails
+    for every client for the life of the process, and the door parks in
+    DOOR_HOLDING.
     """
 
     @pytest.mark.parametrize(
@@ -1030,13 +1110,13 @@ class TestScriptWriterIsBoundedLikeTheWire:
 
 
 class TestScriptDelaysAreBounded:
-    """The last unbounded script numerics (Security round-5 Informational 2).
+    """The last unbounded script numerics.
 
     ``duration: .nan`` reached ``asyncio.sleep`` and raised
     ``ValueError("Invalid delay: NaN")`` inside a fire-and-forget task: the
     step silently did not happen, the sensor stayed active forever, the
     operator got an unhandled-task traceback - and the run still reported
-    PASSED, which is the false-green CI signal round 4's H1 was about.
+    PASSED, a false-green CI signal.
     """
 
     @pytest.mark.parametrize(
@@ -1100,7 +1180,7 @@ class TestScriptDelaysAreBounded:
 
 
 class TestScriptPathsAllowedFlag:
-    """One policy flag, read by the completer and the in-client help (L2)."""
+    """One policy flag, read by the completer and the in-client help."""
 
     def test_default_allows_paths(self):
         assert scripting.script_paths_allowed() is True
@@ -1212,8 +1292,7 @@ class TestBuiltinScriptInfrastructure:
 
         `script.name is not None` and `len(steps) > 0` claim "parses
         without errors" while pinning almost nothing, and the loop had no
-        non-emptiness guard so it would pass vacuously if discovery broke
-        (round-6 test-fanatic L5).
+        non-emptiness guard so it would pass vacuously if discovery broke.
         """
         listed = list_builtin_scripts()
 
@@ -1267,8 +1346,8 @@ class TestDescriptionsAreCachedPerFileVersion:
     `list`, `--list-scripts` and every Tab keystroke share one renderer,
     and it fully YAML-parsed every candidate every time: ~600 ms for a
     200-script `--scripts-dir`, held on the event loop that serves the
-    door protocol (round-8 frontend M1). Descriptions are what the parse
-    is *for*, and they change only when the file does.
+    door protocol. Descriptions are what the parse is *for*, and they
+    change only when the file does.
     """
 
     @pytest.fixture(autouse=True)
@@ -1322,8 +1401,8 @@ class TestDescriptionsAreCachedPerFileVersion:
         The key's `st_size` component is what covers a filesystem with
         coarse `mtime` granularity, and `os.utime`-preserving tooling -
         exactly the cases it exists for. Dropping it survived the whole
-        suite (round-9 test-fanatic L3), and `os.utime(path, ns=...)` makes
-        the collision deterministic rather than a race.
+        suite, and `os.utime(path, ns=...)` makes the collision
+        deterministic rather than a race.
         """
         script = tmp_path / "one.yaml"
         script.write_text("name: One\ndescription: FIRST\nsteps:\n  - close\n")
@@ -1434,7 +1513,7 @@ class TestScriptCompleter:
         much as completing nothing, because every candidate was fully
         YAML-parsed and the whole set handed to prompt_toolkit to filter.
         For a 200-script `--scripts-dir` that is ~600 ms on the door
-        server's own event loop, from one keystroke (round-8 frontend M1).
+        server's own event loop, from one keystroke.
         """
         narrowed = script_completer("bas")
 
@@ -1511,7 +1590,7 @@ class TestScriptCompleter:
 
 
 class TestScriptChannelIsSanitized:
-    """A YAML script is a named untrusted input in this threat model (S3).
+    """A YAML script is a named untrusted input in this threat model.
 
     PyYAML rejects raw C0 bytes in scalars but its ``\\e`` escape produces a
     real ESC, so "the file looks clean" is not a defence. Every script
@@ -1577,7 +1656,7 @@ class TestScriptChannelIsSanitized:
 
 
 class TestScriptCompleterWithoutPaths:
-    """ctl's daemon refuses script paths, so ctl must not complete them (M1).
+    """ctl's daemon refuses script paths, so ctl must not complete them.
 
     Completion used to offer ``my_custom.yaml`` - guaranteed to fail with
     "Unknown script" - while the name that works (``my_custom``) was the
@@ -1621,7 +1700,7 @@ class TestScriptCompleterWithoutPaths:
 
 
 # ============================================================================
-# Concurrent Script Execution (frontend round-2 M3)
+# Concurrent Script Execution
 # ============================================================================
 
 
@@ -1662,7 +1741,7 @@ class TestScriptSerialization:
 
         # Bounded: without the fast-fail guard this await parks on the run
         # lock that only `release` (the line below) frees, and a regression
-        # would hang the suite forever instead of failing (R3-M4).
+        # would hang the suite forever instead of failing.
         with pytest.raises(ScriptError, match="Another script is already running: First"):
             async with asyncio.timeout(2.0):
                 await runner.run(self._script("Second"), queue_if_busy=False)
@@ -1703,7 +1782,7 @@ class TestScriptSerialization:
 
 
 class TestScriptBooleanCoercion:
-    """Script booleans go through one coercer, and fail closed (T1)."""
+    """Script booleans go through one coercer, and fail closed."""
 
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -1734,9 +1813,8 @@ class TestScriptBooleanCoercion:
         """`enabled: "0"` produced an *enabled* schedule.
 
         Unquoted YAML `false` parses to a real bool, so this only bit a
-        quoted or templated value - but the same argument applied to the
-        numeric parameters and round 5 bounded all of them (round-6
-        backend T1).
+        quoted or templated value - but the same argument applies to the
+        numeric parameters, which are all bounded.
         """
         await runner._execute_step(
             ScriptStep(action="add_schedule", params={"index": 3, "enabled": "0"})
@@ -1779,10 +1857,10 @@ class TestUnknownNameErrorsNameTheAlternatives:
     The script DSL is the *CI* front end - these messages are read in a
     build log with no terminal to experiment in, which is exactly where
     naming the alternatives is worth the most - and every one of them had
-    the accepted set as a literal in the same function (round-8 frontend
-    L4). The sharpest was `Unknown assertion condition: door_closed`: the
-    single most natural assertion in a door simulator, and a name the
-    runner recognises *for the other action*.
+    the accepted set as a literal in the same function. The sharpest was
+    `Unknown assertion condition: door_closed`: the single most natural
+    assertion in a door simulator, and a name the runner recognises *for
+    the other action*.
 
     Each published tuple is pinned against the chain it describes, so the
     message cannot drift from the implementation.
@@ -1893,7 +1971,7 @@ class TestUnknownNameErrorsNameTheAlternatives:
         ],
     )
     async def test_a_name_valid_for_the_other_action_says_so(self, runner, simulator, step, hint):
-        """The trap round-7 frontend L1 described and fixed docs-only."""
+        """The trap that used to be addressed in the documentation only."""
         with pytest.raises(ScriptError) as error:
             await runner._execute_step(step)
 
@@ -1942,10 +2020,9 @@ class TestUnknownNamesInStepsFailLoudly:
     "outside"`, so an unrecognised name matched none of them and fell
     through to the door open. One character opened the door with both
     sensors disabled and the safety lock on, and still reported PASSED -
-    which over `ctl run <name> wait` is a green CI exit code (round-7
-    frontend M2). A misspelled *parameter* was ignored just as silently,
-    and the progress log echoed it back as if accepted (round-7 frontend
-    L3).
+    which over `ctl run <name> wait` is a green CI exit code. A misspelled
+    *parameter* was ignored just as silently, and the progress log echoed
+    it back as if accepted.
     """
 
     async def test_an_unknown_sensor_fails_the_script(self, runner, simulator, caplog):
@@ -1961,7 +2038,7 @@ class TestUnknownNamesInStepsFailLoudly:
         assert "Script error at step 1: Unknown sensor: insde. Use: inside, outside" in caplog.text
 
     async def test_an_unknown_sensor_cannot_bypass_the_gates(self, runner, simulator):
-        """The control the report used: identical state, one character apart.
+        """The control: identical state, one character apart.
 
         With both sensors disabled and the safety lock on, the real sensor
         name is gated and the typo used to open the door anyway.
@@ -2005,7 +2082,7 @@ class TestUnknownNamesInStepsFailLoudly:
                 "(plus the annotations comment, description, note)",
             ),
             # "Use: none" read as an instruction to pass the literal token
-            # `none` (round-8 frontend L4).
+            # `none`.
             (
                 "close",
                 {"hold": True},
@@ -2041,9 +2118,9 @@ class TestUnknownNamesInStepsFailLoudly:
         """Making unknown parameters an error broke annotated user scripts.
 
         `- action: wait / seconds: 1 / note: let the door settle` is an
-        ordinary thing for a YAML author to write, and it exited 0 before
-        round 7 and 1 after (round-8 frontend L3). A closed, documented set
-        of annotation keys keeps the strictness where it matters.
+        ordinary thing for a YAML author to write, and the strict check
+        turned its exit code from 0 into 1. A closed, documented set of
+        annotation keys keeps the strictness where it matters.
         """
         script = Script(
             name="Annotated",
@@ -2136,12 +2213,12 @@ class TestUnknownNamesInStepsFailLoudly:
         `duration`, `index`, `name`, `sensor`, `value`), so 11 of the 19
         actions could gain a fictional parameter and the union check could
         not notice - not merely "was not tested against one mutation", but
-        structurally incapable (round-8 test-fanatic M4).
+        structurally incapable.
 
-        The failure mode that protects against is round-7 frontend L3
-        restored: the progress log echoes the typo back as accepted, the
-        parameter does nothing, and `ctl run <name> wait` exits 0 - a green
-        CI result for a script that tested nothing.
+        The failure mode that protects against: the progress log echoes the
+        typo back as accepted, the parameter does nothing, and `ctl run
+        <name> wait` exits 0 - a green CI result for a script that tested
+        nothing.
         """
         per_action = _parameters_read_per_action()
 
@@ -2206,8 +2283,8 @@ class TestSimpleCommandShorthandDefaults:
 
     `from_simple_commands` reads `parts[2]` only when `len(parts) > 2`, so
     `> 2` -> `>= 2` would raise IndexError on the documented 2-word form -
-    and survived the whole suite, because every test supplied three words
-    (round-7 test-fanatic M5). These pin the documented defaults.
+    and survived the whole suite, because every test supplied three words.
+    These pin the documented defaults.
     """
 
     def test_wait_for_defaults_to_a_thirty_second_timeout(self):
@@ -2254,14 +2331,14 @@ class TestTheAnnotationKeysAreDocumented:
 
 
 class TestUnknownTopLevelKeysAreRefused:
-    """The last silent misspelling class in this DSL (round-9 frontend M3).
+    """The last silent misspelling class in this DSL.
 
     `Script.from_yaml` read exactly three keys with `data.get(...)` defaults
     and never looked at what else was in the mapping, so `stpes:` produced a
     zero-step script that printed `>>> Script PASSED` and exited **0** - the
     whole file silently became a no-op that still reported success. Every
     other misspelling class (action, sensor, condition, setting, step
-    parameter) fails loudly by deliberate decision across rounds 7 and 8.
+    parameter) fails loudly by deliberate decision.
     """
 
     @pytest.mark.parametrize(

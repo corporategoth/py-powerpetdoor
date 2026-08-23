@@ -6,8 +6,8 @@
 """Shared wire-message capture for simulator integration tests.
 
 There used to be two ``MessageCapture`` classes, and one of them hand-rolled
-a brace-depth scanner that was not string-aware - precisely the defect round
-1 removed from ``client.find_end`` and replaced with
+a brace-depth scanner that was not string-aware - precisely the defect
+removed from ``client.find_end`` and replaced with
 :func:`powerpetdoor.framing.extract_frames`. Any simulator payload carrying
 a brace inside a JSON string value would have been mis-framed, and the
 helper swallowed the resulting JSONDecodeError silently, so the message

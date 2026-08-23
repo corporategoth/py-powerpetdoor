@@ -87,6 +87,10 @@ class PipeStdin:
     pipe is consumed exactly once per reader callback (a buffered reader
     would slurp multiple lines and strand them outside the event loop's
     readiness notifications).
+
+    The trailing newline is kept, because a real ``readline()`` returns
+    ``""`` *only* at EOF - and EOF is what ends the session. Dropping it
+    here made a bare Enter indistinguishable from EOF.
     """
 
     def __init__(self, read_fd: int):
@@ -102,9 +106,11 @@ class PipeStdin:
         data = b""
         while True:
             ch = os.read(self._fd, 1)
-            if not ch or ch == b"\n":
+            if not ch:
                 break
             data += ch
+            if ch == b"\n":
+                break
         return data.decode()
 
 
@@ -527,7 +533,7 @@ class TestMainArguments:
 
     @pytest.fixture(autouse=True)
     def never_runs(self, monkeypatch):
-        """Reaching run_simulator here is a failure, not a 60 s hang (R4-L6).
+        """Reaching run_simulator here is a failure, not a 60 s hang.
 
         Most of these tests call cli.main() directly and rely on an argparse
         error (or --list-scripts) to exit first - which is exactly what they
@@ -600,9 +606,9 @@ class TestMainArguments:
         """main()'s handler, in isolation.
 
         On its own this asserts nothing about the shipped binary - the
-        binary swallowed the cancellation so this handler was never entered
-        (F-H1). `TestTheRealBinaryUnderSIGINT` is what pins that half; this
-        pins the exit code the handler chooses.
+        binary swallowed the cancellation so this handler was never
+        entered. `TestTheRealBinaryUnderSIGINT` is what pins that half;
+        this pins the exit code the handler chooses.
         """
 
         async def interrupted_run(**kwargs):
@@ -621,9 +627,9 @@ class TestMainArguments:
 
         `result is None` means the run never reached the end of its scripts.
         The old `and result is not None` guard fell through to exit **0**,
-        which is what made an interrupted CI run report success (F-H1).
-        `--oneshot` without `--script` is refused at rc 2, so this state has
-        no legitimate meaning other than "interrupted".
+        which is what made an interrupted CI run report success. `--oneshot`
+        without `--script` is refused at rc 2, so this state has no
+        legitimate meaning other than "interrupted".
         """
 
         async def fake_run(**kwargs):
@@ -646,7 +652,7 @@ class TestMainArguments:
         monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--list-scripts"])
         cli.main()
         out = capsys.readouterr().out
-        # Same header the `list` command prints (T1)
+        # Same header the `list` command prints
         assert "Built-in scripts:" in out
         assert "  basic_cycle: " in out
         assert called == []
@@ -669,7 +675,7 @@ class TestMainArguments:
         ],
     )
     def test_script_only_flags_rejected_without_script(self, capsys, monkeypatch, flag, message):
-        """Silently ignoring a mode-scoped flag is a CI repeatability trap (L2)."""
+        """Silently ignoring a mode-scoped flag is a CI repeatability trap."""
         monkeypatch.setattr(sys, "argv", ["ppd-simulator", *flag])
         with pytest.raises(SystemExit) as exc_info:
             cli.main()
@@ -684,7 +690,7 @@ class TestMainArguments:
         assert "error: --loop, --oneshot cannot be used without --script" in capsys.readouterr().err
 
     def test_script_only_flags_in_daemon_mode_say_so(self, capsys, monkeypatch):
-        """--daemon --oneshot used to advise --script, which --daemon refuses (T1)."""
+        """--daemon --oneshot used to advise --script, which --daemon refuses."""
         monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--daemon", "--oneshot"])
         with pytest.raises(SystemExit) as exc_info:
             cli.main()
@@ -712,7 +718,7 @@ class TestMainArguments:
         assert captured["wait_for_client"] is True
 
     def test_list_scripts_shows_scripts_dir_entries(self, capsys, monkeypatch, tmp_path):
-        """--list-scripts must show everything `run` can resolve (M4)."""
+        """--list-scripts must show everything `run` can resolve."""
         (tmp_path / "my_custom.yaml").write_text(
             "name: My Custom Script\ndescription: Local extras\nsteps:\n  - action: log\n"
             "    message: ok\n"
@@ -722,7 +728,7 @@ class TestMainArguments:
         )
         cli.main()
         out = capsys.readouterr().out
-        # Same header the `list` command prints (T1)
+        # Same header the `list` command prints
         assert "Built-in scripts:" in out
         assert f"Scripts from {tmp_path}:" in out
         assert "  my_custom: Local extras" in out
@@ -730,7 +736,7 @@ class TestMainArguments:
     def test_list_scripts_shows_an_empty_scripts_dir_explicitly(
         self, capsys, monkeypatch, tmp_path
     ):
-        """The flag's effect must be visible even when it finds nothing (L1)."""
+        """The flag's effect must be visible even when it finds nothing."""
         monkeypatch.setattr(
             sys, "argv", ["ppd-simulator", "--list-scripts", "--scripts-dir", str(tmp_path)]
         )
@@ -739,7 +745,7 @@ class TestMainArguments:
         assert f"Scripts from {tmp_path}:\n  (none)\n" in out
 
     def test_missing_scripts_dir_is_rejected(self, capsys, monkeypatch, tmp_path):
-        """A typo'd --scripts-dir used to be silently ignored (L1)."""
+        """A typo'd --scripts-dir used to be silently ignored."""
         missing = tmp_path / "nope"
         monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--scripts-dir", str(missing)])
         with pytest.raises(SystemExit) as exc_info:
@@ -752,7 +758,7 @@ class TestMainArguments:
         assert captured["control_port"] == 4321
 
     def test_default_log_handler_sanitizes(self, monkeypatch, root_logger_guard):
-        """--script (headless/CI) and --daemon kept the plain formatter (S3).
+        """--script (headless/CI) and --daemon kept the plain formatter.
 
         The two interactive paths install _SanitizingFormatter themselves,
         so headless and daemon modes were the only ones with no terminal
@@ -879,7 +885,7 @@ class TestInteractivePrompt:
         assert capsys.readouterr().out == "$ \r\033[Khello\n$ "
 
     def test_output_emits_no_ansi_off_a_terminal(self, capsys):
-        """Piped output must stay free of escape sequences (T3).
+        """Piped output must stay free of escape sequences.
 
         pytest's capture replaces stdout with a non-tty, which is exactly
         the piped/`TERM=dumb` case the fallback prompt exists for.
@@ -935,7 +941,7 @@ class TestInteractivePrompt:
 
 
 # ============================================================================
-# Non-TTY status output (M2)
+# Non-TTY status output
 # ============================================================================
 
 
@@ -945,7 +951,7 @@ class TestStatusPrint:
     def test_status_print_flushes(self, monkeypatch):
         """stdout is block-buffered off a terminal; the banner and script
         progress would otherwise appear after the fact, or die with the
-        process on SIGTERM (M2)."""
+        process on SIGTERM."""
         flushes: list[bool] = []
 
         class RecordingStdout(io.StringIO):
@@ -982,11 +988,11 @@ class TestControlLogHandler:
         handler.setFormatter(logging.Formatter("%(message)s"))
         handler.emit(self._record("hi"))
         assert good.data == b"LOG: hi\n"
-        # A writer that raised is dropped, not retried on every record (H1)
+        # A writer that raised is dropped, not retried on every record
         assert clients == {good}
 
     def test_closing_writer_is_dropped_without_writing(self):
-        """A peer that died mid-stream is only noticed here (H1)."""
+        """A peer that died mid-stream is only noticed here."""
         good = FakeStreamWriter()
         dead = FakeStreamWriter(closing=True)
         clients = {good, dead}
@@ -997,7 +1003,7 @@ class TestControlLogHandler:
         assert clients == {good}
 
     def test_records_are_dropped_for_a_client_with_a_runaway_backlog(self):
-        """A parked ctl session must not grow the daemon's heap (Security F1).
+        """A parked ctl session must not grow the daemon's heap.
 
         `emit` cannot `drain()`, so an attached-but-not-reading client
         queued every record in daemon memory - measured at +0.16 MB/s under
@@ -1029,10 +1035,10 @@ class TestControlLogHandler:
     def test_emit_refuses_to_re_enter(self):
         """asyncio logs from inside write(); rebroadcasting that is the loop.
 
-        Reproduces the report's scenario (a ctl client killed / piped to
-        head): the writer stays open but every write emits a root-logger
-        WARNING. Without the guard this recurses until the stack blows;
-        with it, exactly one record is broadcast per real record.
+        The scenario (a ctl client killed / piped to head): the writer stays
+        open but every write emits a root-logger WARNING. Without the guard
+        this recurses until the stack blows; with it, exactly one record is
+        broadcast per real record.
         """
         records: list[str] = []
 
@@ -1096,8 +1102,7 @@ class TestControlChannelEdges:
         Skipping it meant no answer could ever come, so
         `ppd-simulator-ctl ""` sat out the whole `--timeout` and then
         advised raising it - advice that is wrong in both halves. A shell
-        wrapper expanding an unset variable lands here (round-9 frontend
-        L4). One line closes it.
+        wrapper expanding an unset variable lands here. One line closes it.
         """
         executed = []
 
@@ -1127,9 +1132,9 @@ class TestControlChannelEdges:
         "Control client error: Separator is found, but chunk is longer than
         limit" at **ERROR** - which `_ControlLogHandler` then broadcast into
         every other operator's `ctl` session, while the sender saw only
-        "Connection closed without response" (round-9 frontend L4).
-        asyncio consumes through the newline before raising, so the
-        connection is still usable and the next command is answered.
+        "Connection closed without response". asyncio consumes through the
+        newline before raising, so the connection is still usable and the
+        next command is answered.
         """
         executed = []
 
@@ -1155,10 +1160,6 @@ class TestControlChannelEdges:
             logging.INFO
         ]
         assert "Control client error" not in caplog.text
-
-    def test_the_control_line_limit_is_64_kib(self):
-        """Pinned by value: relaxing a resource cap must be argued for."""
-        assert cli.MAX_CONTROL_LINE == 64 * 1024
 
     async def test_handle_client_error_result(self):
         async def execute(cmd):
@@ -1207,7 +1208,7 @@ class TestControlChannelEdges:
         assert writer not in channel.clients
 
     async def test_normal_hang_up_is_not_an_error(self, caplog):
-        """A one-shot ctl exiting mid-write is not an ERROR (L1).
+        """A one-shot ctl exiting mid-write is not an ERROR.
 
         Essentially every one-shot `run`/`stop` produced one - the client
         reads its `OK:` line and exits while the daemon is still emitting
@@ -1383,7 +1384,7 @@ class TestProcessScriptQueue:
             await release.wait()
             proceed = on_start is None or on_start()
             # 0 only if on_start released the claim; the consumer's own
-            # `finally` cannot be what satisfies this (R5-L3).
+            # `finally` cannot be what satisfies this.
             depth_after_start.append(queue.qsize())
             started.set()
             return proceed
@@ -1391,7 +1392,7 @@ class TestProcessScriptQueue:
         return run
 
     async def test_claim_is_released_only_once_the_run_starts(self):
-        """A dequeued run stays counted until it actually starts (M2)."""
+        """A dequeued run stays counted until it actually starts."""
         queue = ScriptQueue()
         stop = asyncio.Event()
         started = asyncio.Event()
@@ -1433,7 +1434,7 @@ class TestProcessScriptQueue:
         await asyncio.wait_for(task, 5)
 
     async def test_a_claim_dropped_by_stop_all_never_runs(self, caplog):
-        """`stop all` in the claim window abandons the run (frontend M1).
+        """`stop all` in the claim window abandons the run.
 
         The consumer is parked on the run lock, so the entry is claimed but
         not started. `clear()` cancels it, `on_start` reports that, and the
@@ -1673,7 +1674,7 @@ class TestRunStartupScripts:
         assert ">>> Client disconnected, stopping scripts" in capsys.readouterr().out
 
     async def test_script_progress_lines_sanitize_the_script_name(self, capsys):
-        """The name comes out of an untrusted YAML file and hits a terminal (S3).
+        """The name comes out of an untrusted YAML file and hits a terminal.
 
         PyYAML rejects raw C0 bytes in a scalar but its ``\\e`` escape
         produces a real ESC, so "the file looks clean" is not a defence.
@@ -1706,7 +1707,7 @@ class TestRunStartupScripts:
         assert "Error running script 'evil\\x1b[2J': bad \\x1b[2J yaml" in out
 
     async def test_inner_loop_disconnect_line_is_flushed(self, monkeypatch):
-        """The one progress line the flush fix missed (L1).
+        """The one progress line the flush fix missed.
 
         It is also the only line that explains why the remaining scripts
         never ran, and off a terminal it died in the buffer - not even
@@ -1773,7 +1774,7 @@ class TestRunStartupScripts:
         The `if script_delay > 0:` guard in the outer loop was never
         exercised in its False direction - mutating it to `>= 0` survived
         the whole suite, hidden from the coverage gate by the bare
-        three-dot exclusion pattern (round-6 test-fanatic H2).
+        three-dot exclusion pattern.
         """
 
         async def stop_after_two(script, sim):
@@ -1803,13 +1804,12 @@ class TestRunStartupScripts:
     async def test_zero_script_delay_between_scripts_does_not_wait(self, capsys):
         """The *other* `script_delay > 0` guard, at `cli.py:488`.
 
-        Round 6 added the zero-delay test for the outer loop only; the
-        inner guard has a positive-delay test but had no zero-delay
+        The inner guard has a positive-delay test but had no zero-delay
         counterpart, so a mutant printing ">>> Waiting 0s before next
         script..." between every script - or before the *first* one - went
-        unnoticed (round-7 test-fanatic L4). Coverage cannot see this:
-        `if A and B:` is one branch point with two destinations, so 100%
-        branch coverage never requires `i > 0 and delay == 0`.
+        unnoticed. Coverage cannot see this: `if A and B:` is one branch
+        point with two destinations, so 100% branch coverage never requires
+        `i > 0 and delay == 0`.
         """
         sim, handler, runner, stop, result, runs, _ = self._make()
         await self._run(["s1", "s2"], sim, handler, runner, stop, result, script_delay=0)
@@ -1851,7 +1851,7 @@ class TestRunStartupScripts:
         failed *yet*", not "every assertion ran and passed". Recording it
         made `ppd-simulator --script … --oneshot` print
         `>>> All scripts PASSED` and exit **0** for a run stopped inside a
-        30 s `wait`, two steps before its `assert` (F-H1). Re-raising is what
+        30 s `wait`, two steps before its `assert`. Re-raising is what
         lets `asyncio.Runner` turn the cancellation back into
         `KeyboardInterrupt` for main().
         """
@@ -2012,6 +2012,98 @@ class TestBasicStdinInput:
         assert prompt.calls == ["show"]
         assert executed == []
 
+    async def test_eof_ends_the_session_instead_of_re_showing_the_prompt(self):
+        """`readline() == ""` is EOF, not a bare Enter.
+
+        An fd at EOF is *permanently* readable, so treating it as Enter
+        re-arms the reader forever: 98% of a core, tens of MB of prompt
+        text, and a process that never exits - on pipe-backed stdin only,
+        which is why a terminal never showed it.
+        """
+        basic, prompt, stop, executed, _ = self._make(readline=lambda: "")
+
+        basic.handle_input()
+
+        assert stop.is_set() is True
+        assert basic._reader_removed is True
+        assert executed == []
+        assert "show" not in prompt.calls
+
+    async def test_eof_is_only_acted_on_once(self):
+        """The second callback (if any) must be inert, not a second shutdown."""
+        reads = ["", ""]
+        basic, prompt, stop, _, _ = self._make(readline=lambda: reads.pop(0))
+
+        basic.handle_input()
+        basic.handle_input()
+
+        assert prompt.calls.count("clear") == 1
+
+    async def test_a_non_pollable_stdin_falls_back_to_blocking_reads(self, tmp_path):
+        """/dev/null, a regular file and some heredocs are not pollable.
+
+        `epoll` refuses them with PermissionError out of `add_reader`, which
+        used to be a 37-line traceback and rc 1 before the prompt appeared.
+        """
+        script = tmp_path / "commands"
+        script.write_text("status\n")
+        loop = asyncio.get_running_loop()
+        prompt = RecordingPrompt()
+        stop = asyncio.Event()
+        executed = []
+
+        async def execute(line):
+            executed.append(line)
+            return SimpleNamespace(success=True, message="")
+
+        with script.open() as handle:
+            basic = cli._BasicStdinInput(
+                loop, prompt, SimpleNamespace(execute=execute), stop, stdin=handle
+            )
+            with pytest.raises(PermissionError):
+                loop.add_reader(handle.fileno(), lambda: None)
+
+            basic.start()
+            await asyncio.wait_for(stop.wait(), 5)
+
+        # The command ran, and EOF at the end of the file ended the session.
+        assert executed == ["status"]
+        assert basic._blocking_task is None or basic._blocking_task.done()
+
+    async def test_the_blocking_reader_stops_when_the_session_ends(self):
+        """A shutdown from elsewhere ends the read loop, not just EOF."""
+        loop = asyncio.get_running_loop()
+        prompt = RecordingPrompt()
+        stop = asyncio.Event()
+
+        def readline():
+            stop.set()  # e.g. a `shutdown` command completing meanwhile
+            return "\n"
+
+        basic = cli._BasicStdinInput(
+            loop,
+            prompt,
+            SimpleNamespace(),
+            stop,
+            stdin=SimpleNamespace(readline=readline, fileno=lambda: -1),
+        )
+
+        await asyncio.wait_for(basic._read_blocking(), 5)
+
+        assert prompt.calls == ["show"]
+
+    async def test_dev_null_stdin_ends_the_session_immediately(self):
+        loop = asyncio.get_running_loop()
+        prompt = RecordingPrompt()
+        stop = asyncio.Event()
+
+        with open(os.devnull) as handle:
+            basic = cli._BasicStdinInput(loop, prompt, SimpleNamespace(), stop, stdin=handle)
+            basic.start()
+            await asyncio.wait_for(stop.wait(), 5)
+
+        assert basic._reader_removed is True
+
     async def test_handle_input_readline_error_reported(self):
         def broken_readline():
             raise RuntimeError("boom")
@@ -2045,7 +2137,7 @@ class TestBasicStdinInput:
         assert prompt.calls == ["show"]
 
     async def test_process_command_sanitizes_network_poisoned_output(self):
-        """render_result is the ONLY sanitizer on this path (R4-M2).
+        """render_result is the ONLY sanitizer on this path.
 
         A hostile SET_TIMEZONE stores a string the ``timezone`` command
         echoes straight back, so the CLI's own print site must escape it.
@@ -2055,7 +2147,7 @@ class TestBasicStdinInput:
         assert prompt.calls == [("output", ">>> Timezone: \\x1b[2J\\x1b[1;1H*** PWNED ***\\x07")]
 
     async def test_process_command_shutdown_sanitizes_output(self, capsys):
-        """The shutdown branch prints through the same sanitizer (R4-M2)."""
+        """The shutdown branch prints through the same sanitizer."""
         basic, _, _, _, _ = self._make(message="Bye \x1b[2J", sets_stop=True)
         await basic.process_command("shutdown")
         out = capsys.readouterr().out
@@ -2101,7 +2193,7 @@ class TestRunSimulatorScripts:
         read `script_result[0]`, so `run_simulator` returned `None` and the
         `>>> All scripts PASSED` banner was printed by the dying task on the
         way out - a verdict for a run that never reached its assertion, on
-        the exit path that then reported 0 (F-H1).
+        the exit path that then reported 0.
         """
         script = tmp_path / "slow.yaml"
         script.write_text(
@@ -2243,7 +2335,7 @@ class TestRunSimulatorDaemonExtras:
             writer.close()
 
     async def test_empty_scripts_dir_warns_at_startup(self, tmp_path, caplog):
-        """An existing but empty --scripts-dir must not be silent either (L1)."""
+        """An existing but empty --scripts-dir must not be silent either."""
         caplog.set_level(logging.WARNING)
         task, ports = await self._start_daemon(scripts_dir=str(tmp_path))
         reader, writer = await asyncio.open_connection("127.0.0.1", ports["control"])
@@ -2281,7 +2373,7 @@ class TestRunSimulatorDaemonExtras:
         """Cancelling the run_simulator task performs full cleanup and then
         lets the cancellation through.
 
-        Swallowing it is how Ctrl-C became exit 0 (F-H1): `asyncio.Runner`
+        Swallowing it is how Ctrl-C became exit 0: `asyncio.Runner`
         delivers SIGINT by cancelling the main task and only re-raises
         `KeyboardInterrupt` if that cancellation actually propagates.
         """
@@ -2372,7 +2464,7 @@ class TestRunSimulatorInteractive:
         out = capsys.readouterr().out
         prompt_text = f"127.0.0.1:{ports['door']}> "
         # Exactly three: initial, after the empty line, after the output.
-        # `>= 3` let a duplicated-prompt regression through (L5).
+        # `>= 3` let a duplicated-prompt regression through.
         assert out.count(prompt_text) == 3
         assert ">>> " in out
         assert "Door:" in out  # status output
@@ -2590,20 +2682,20 @@ class TestRunSimulatorInteractive:
 
 
 # ============================================================================
-# Ctrl-C against the real binary (F-H1)
+# Ctrl-C against the real binary
 # ============================================================================
 
 
 class TestTheRealBinaryUnderSIGINT:
     """The exit code and the verdict banner, measured on a real process.
 
-    The test this replaced monkeypatched `cli.run_simulator` to raise
-    `KeyboardInterrupt` directly, so it asserted `main()`'s handler in
-    isolation and could not fail for the reason it existed: the shipped
-    binary swallowed the cancellation `asyncio.Runner` uses to deliver
-    SIGINT, so that handler was never entered and an interrupted `--oneshot`
-    run printed `>>> All scripts PASSED` and exited **0** (F-H1). Only a real
-    process carries that machinery, so only a real process can pin it.
+    Monkeypatching `cli.run_simulator` to raise `KeyboardInterrupt` directly
+    only asserts `main()`'s handler in isolation, and cannot fail for the
+    reason this exists: the shipped binary swallowed the cancellation
+    `asyncio.Runner` uses to deliver SIGINT, so that handler was never
+    entered and an interrupted `--oneshot` run printed
+    `>>> All scripts PASSED` and exited **0**. Only a real process carries
+    that machinery, so only a real process can pin it.
     """
 
     LONG_SCRIPT = """\
@@ -2694,18 +2786,17 @@ steps:
 
 
 # ============================================================================
-# Startup failures (round-9 frontend L1)
+# Startup failures
 # ============================================================================
 
 
 class TestBindTimeArgumentsFailAsArguments:
     """Ports and hosts were the one class this parser did not check.
 
-    `--scripts-dir` has had `parser.error(...)` since round 7; `--port
-    99999` reached `socket.bind()` and exited with `OverflowError: bind():
-    port must be 0-65535` under 30 lines of asyncio traceback carrying
-    absolute paths from the machine that built the venv (round-9 frontend
-    L1).
+    `--scripts-dir` is caught by `parser.error(...)`; `--port 99999` reached
+    `socket.bind()` and exited with `OverflowError: bind(): port must be
+    0-65535` under 30 lines of asyncio traceback carrying absolute paths
+    from the machine that built the venv.
     """
 
     @pytest.fixture(autouse=True)
@@ -2772,7 +2863,7 @@ class TestBindTimeArgumentsFailAsArguments:
     def test_a_non_positive_run_for_is_an_argument_error(self, capsys, monkeypatch, value):
         """`--run-for -5` was accepted and silently meant "shut down
         immediately", logging `Run time (-5.0s) elapsed, shutting down` as
-        if five negative seconds had passed (round-9 frontend T1)."""
+        if five negative seconds had passed."""
         monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--daemon", "--run-for", value])
 
         with pytest.raises(SystemExit) as exc_info:

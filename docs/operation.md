@@ -255,6 +255,13 @@ When schedules are disabled (`timersEnabled = false`):
 
 **Example**: A schedule for inside sensor from 6:00 to 22:00 means pets can only exit during those hours (assuming inside sensor opens door for exit).
 
+**Window boundaries**: the start minute is included and the end minute is
+excluded, so `6:00`–`22:00` covers 6:00 through 21:59. An end earlier than
+the start wraps past midnight (`22:00`–`6:00`). A window whose start and end
+*coincide* is the whole day — with an exclusive end that is the only way to
+express 24/7, since `00:00`–`23:59` would leave the minute 23:59 uncovered.
+An entry that should gate nothing is spelled `enabled: false`.
+
 ---
 
 ## Power and Battery

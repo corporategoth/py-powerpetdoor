@@ -190,7 +190,7 @@ class Schedule:
         if prefix:
             # A sensor is selected, so the window that gates it is required:
             # defaulting an absent one to 06:00-22:00 would grant 16 hours of
-            # access nobody asked for (L5).
+            # access nobody asked for.
             start_hour, start_min = coerce_schedule_time(
                 require_schedule_field(data, f"{prefix}{FIELD_START_TIME_SUFFIX}"), "start time"
             )
@@ -207,7 +207,7 @@ class Schedule:
             index=index,
             # Read like every other wire flag rather than with a bespoke
             # `== "1"`: `true`/`yes`/`on` are as valid a spelling here as
-            # they are for daysOfWeek right next to it (T3).
+            # they are for daysOfWeek right next to it.
             enabled=coerce_schedule_flag(data.get(FIELD_ENABLED, True), FIELD_ENABLED),
             days_of_week=days_of_week,
             inside=inside,
@@ -258,11 +258,17 @@ class Schedule:
         start = self.start_hour * 60 + self.start_min
         end = self.end_hour * 60 + self.end_min
 
-        # Handle schedules that cross midnight
-        if start <= end:
+        if start == end:
+            # The whole day. The end is exclusive, so [start, end) can cover
+            # at most 1439 of the day's 1440 minutes - coinciding ends are
+            # the only spelling a true 24h entry has. (00:00-23:59 looks
+            # like one and blocks the sensor for exactly the minute 23:59.)
+            # An entry that should gate nothing is spelled `enabled: false`.
+            return True
+        if start < end:
             return start <= current_minutes < end
-        else:
-            return current_minutes >= start or current_minutes < end
+        # Crosses midnight.
+        return current_minutes >= start or current_minutes < end
 
 
 @dataclass
@@ -399,7 +405,7 @@ class DoorSimulatorState:
 
         Sorted by slot: the store is a dict, so a client that created slot
         5 before slot 1 got ``[5, 1]`` back - insertion order, not slot
-        order, which no array-of-slots firmware would produce (T3).
+        order, which no array-of-slots firmware would produce.
         """
         return sorted(self.schedules.keys())
 

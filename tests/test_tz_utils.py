@@ -86,7 +86,7 @@ class TestCacheInitialization:
         assert tz_utils.is_cache_initialized() is True
 
     async def test_concurrent_async_init_builds_cache_once(self, reset_cache, monkeypatch):
-        """Two concurrent initializers must run the tzdata scan once (L12)."""
+        """Two concurrent initializers must run the tzdata scan once."""
         calls = []
         real_build = tz_utils._build_timezone_caches
 
@@ -155,8 +155,7 @@ class TestGetAvailableTimezones:
         """Should return empty list when cache not initialized.
 
         The warning is the caller's only clue that the empty list means
-        "not initialized" rather than "no zones", so it is asserted
-        (R5-L4): deleting the log call survived the whole suite.
+        "not initialized" rather than "no zones", so it is asserted here.
         """
         with caplog.at_level(logging.WARNING, logger="powerpetdoor.tz_utils"):
             result = tz_utils.get_available_timezones()
@@ -165,7 +164,7 @@ class TestGetAvailableTimezones:
         assert "Timezone cache not initialized" in caplog.text
 
     def test_returns_copy_not_internal_cache(self):
-        """Mutating the returned list must not affect the cache (L12)."""
+        """Mutating the returned list must not affect the cache."""
         result = tz_utils.get_available_timezones()
         original_len = len(result)
 
@@ -250,10 +249,10 @@ class TestFindIanaForPosix:
         ["America/New_York", "America/Los_Angeles", "Europe/Berlin", "Australia/Sydney"],
     )
     def test_reverse_lookup_round_trips_exactly(self, iana):
-        """The reverse map's contract, asserted exactly (R5-L5).
+        """The reverse map's contract, asserted exactly.
 
-        ``startswith("America/")`` accepted ~150 zones - and not the one
-        the test name implied: this tzdata answers ``America/Detroit`` for
+        ``startswith("America/")`` would accept ~150 zones - and not the
+        one the name implies: this tzdata answers ``America/Detroit`` for
         New York's POSIX string and ``Africa/Ceuta`` for Berlin's, because
         the map is keyed by POSIX rule, not by name. The *round trip* is
         the invariant the reverse map exists to provide, and unlike a name
@@ -274,8 +273,7 @@ class TestFindIanaForPosix:
         _posix_to_iana`, so the *alphabetically first* IANA name wins.
         Dropping that guard makes the map last-match-wins - for this tzdata
         `America/New_York`'s POSIX string resolves to `US/Michigan` instead
-        of `America/Detroit`, out of 27 candidates - and nothing failed
-        (round-7 test-fanatic L3).
+        of `America/Detroit`, out of 27 candidates.
 
         Asserting `min(candidates)` rather than a zone name keeps this
         stable across tzdata builds, which is the reason the sibling test
@@ -400,7 +398,7 @@ class TestParsePosixTzString:
         assert result["dst_abbrev"] == "BST"
 
     def test_parse_angle_bracket_negative(self):
-        """<-03>3 (e.g. Buenos_Aires) parses with brackets stripped (L18)."""
+        """<-03>3 (e.g. Buenos_Aires) parses with brackets stripped."""
         result = tz_utils.parse_posix_tz_string("<-03>3")
         assert result is not None
         assert result["std_abbrev"] == "-03"
@@ -408,14 +406,14 @@ class TestParsePosixTzString:
         assert result["dst_abbrev"] is None
 
     def test_parse_angle_bracket_positive(self):
-        """<+05>-5 (e.g. Asia/Yekaterinburg style) parses correctly (L18)."""
+        """<+05>-5 (e.g. Asia/Yekaterinburg style) parses correctly."""
         result = tz_utils.parse_posix_tz_string("<+05>-5")
         assert result is not None
         assert result["std_abbrev"] == "+05"
         assert result["std_offset"] == "-5"
 
     def test_parse_angle_bracket_with_dst(self):
-        """Angle-bracket abbreviations with DST rules parse fully (L18)."""
+        """Angle-bracket abbreviations with DST rules parse fully."""
         result = tz_utils.parse_posix_tz_string("<-04>4<-03>,M9.1.6/24,M4.1.6/24")
         assert result is not None
         assert result["std_abbrev"] == "-04"
@@ -425,7 +423,7 @@ class TestParsePosixTzString:
         assert result["dst_end"] == "M4.1.6/24"
 
     def test_parse_real_tzdata_angle_bracket_zone(self):
-        """A real tzdata zone with a numeric abbreviation parses (L18/M2)."""
+        """A real tzdata zone with a numeric abbreviation parses."""
         posix = tz_utils.get_posix_tz_string("America/Argentina/Buenos_Aires")
         assert posix == "<-03>3"
         result = tz_utils.parse_posix_tz_string(posix)
@@ -434,7 +432,7 @@ class TestParsePosixTzString:
         assert result["std_offset"] == "3"
 
     def test_parse_no_match_returns_none(self):
-        """Input with no parseable abbreviation returns None (M2 contract)."""
+        """Input with no parseable abbreviation returns None."""
         assert tz_utils.parse_posix_tz_string("123") is None
         assert tz_utils.parse_posix_tz_string("!!!") is None
 
@@ -501,7 +499,7 @@ class TestIntegration:
     """Integration tests for timezone utilities."""
 
     def test_every_timezone_has_parseable_posix(self):
-        """Exhaustive: every tzdata zone has a POSIX string and it parses (M2).
+        """Exhaustive: every tzdata zone has a POSIX string and it parses.
 
         No sampling, no ratios, no skips - the pinned tzdata dependency
         ships a TZif footer for every zone, and the parser must handle
@@ -522,7 +520,7 @@ class TestIntegration:
         assert unparseable == []
 
     def test_new_york_posix_matches_zoneinfo_transitions(self):
-        """The parsed DST rule matches real zoneinfo behavior (M2).
+        """The parsed DST rule matches real zoneinfo behavior.
 
         M3.2.0 means DST starts the 2nd Sunday of March: 2026-03-08.
         The UTC offset must differ across that transition.
@@ -556,9 +554,8 @@ class TestIntegration:
     def test_european_timezones(self):
         """Berlin uses CET/CEST - so assert that, like the US sibling does.
 
-        ``std_abbrev is not None`` accepted any abbreviation at all while
-        the docstring claimed a specific pair (R5-L5). These have been
-        stable for decades.
+        ``std_abbrev is not None`` would accept any abbreviation at all;
+        this pair has been stable for decades, so assert it.
         """
         result = tz_utils.get_posix_tz_string("Europe/Berlin")
         assert result is not None

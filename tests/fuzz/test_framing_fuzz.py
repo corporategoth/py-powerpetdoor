@@ -5,8 +5,8 @@
 
 """Hypothesis property tests for wire framing.
 
-These pin the framing contract (decision D1): any list of JSON objects,
-delivered with any chunking and any non-JSON garbage between them, must
+These pin the framing contract: any list of JSON objects, delivered
+with any chunking and any non-JSON garbage between them, must
 come back out as exactly the same objects; the un-parsed buffer must stay
 bounded; and the scanner must never raise on arbitrary input.
 
@@ -90,7 +90,7 @@ def _capture_client() -> tuple[PowerPetDoorClient, list[dict]]:
         pass
 
     def _record(msg, **_kwargs):
-        # `**_kwargs` absorbs `frame_size=` (round-9 backend F2).
+        # `**_kwargs` absorbs `frame_size=`.
         received.append(msg)
         return _noop()
 
@@ -100,23 +100,10 @@ def _capture_client() -> tuple[PowerPetDoorClient, list[dict]]:
 
 
 class _FlowTransport(asyncio.Transport):
-    """A transport that records the dispatcher's flow-control decisions."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.paused = False
-
-    def pause_reading(self) -> None:
-        self.paused = True
-
-    def resume_reading(self) -> None:
-        self.paused = False
+    """A transport standing in for the connection under test."""
 
     def write(self, data: bytes) -> None:
         """Answers are irrelevant here; the receive path is under test."""
-
-    def get_write_buffer_size(self) -> int:
-        return 0
 
     def close(self) -> None:
         """The properties never close a connection."""
@@ -158,19 +145,13 @@ def _fuzz_event_loop():
 _LOOP: asyncio.AbstractEventLoop | None = None
 
 
-def _drain(feed, dispatcher) -> None:
-    """Run ``feed()`` on the module loop and let the dispatcher finish.
-
-    "Never wedges" is precisely "a backlog that survives every turn the
-    loop can give it", so the drain runs until the dispatcher is idle
-    rather than for a fixed number of turns - a wedge then shows up as the
-    bound being exhausted, which the caller's assertions catch.
-    """
+def _drain(feed, tasks) -> None:
+    """Run ``feed()`` on the module loop and let its handler tasks finish."""
 
     async def _run() -> None:
         feed()
         for _ in range(20000):
-            if not dispatcher.backlog and not dispatcher.inflight:
+            if not tasks:
                 return
             await asyncio.sleep(0)
 
@@ -241,7 +222,7 @@ class TestScannerLinearityProperties:
     ``MAX_BUFFER_SIZE`` bounds the *memory* a dribbling peer can cost; it
     does not bound the CPU spent reaching that bound. Re-scanning the
     retained buffer on every ``data_received`` made that quadratic, and the
-    attacker picks the chunk size, so the attacker picks the exponent (S1).
+    attacker picks the chunk size, so the attacker picks the exponent.
     """
 
     @staticmethod
@@ -327,7 +308,7 @@ class TestClientFramingProperties:
         data=st.data(),
     )
     def test_non_ascii_bytes_between_frames_lose_nothing(self, objs, bad, data):
-        """Non-ASCII bytes between frames must not desync the stream (L2).
+        """Non-ASCII bytes between frames must not desync the stream.
 
         Dropping the whole chunk on UnicodeDecodeError stranded whatever
         was already buffered, so every later message went unprocessed until
@@ -350,7 +331,7 @@ class TestClientFramingProperties:
 
 
 # ============================================================================
-# Arbitrary raw bytes into data_received (round-8 backend M1 / security M1)
+# Arbitrary raw bytes into data_received
 # ============================================================================
 #
 # The properties above feed *well-formed* JSON: `_json_objects` are dicts
@@ -477,58 +458,41 @@ def _classify(payload: bytes) -> str:
     return "decode: ok"
 
 
-class TestArbitraryBytesNeverRaiseAndNeverWedge:
+class TestArbitraryBytesNeverRaise:
     """`data_received` "never raises on arbitrary input", on both sides.
 
     Two documented contracts (`framing.py`'s module docstring and
-    `client.data_received`'s) said so and were false. The consequences
-    differed by where in the pump the poisoned frame landed - a hot
-    reconnect loop from inside `data_received`, a permanently wedged
-    dispatcher from inside the `call_soon` re-arm - so both the "never
-    raises" and the "never wedges" halves are asserted here.
+    `client.data_received`'s) said so and were false: a >4300-digit integer
+    literal and deep nesting escape `json.JSONDecodeError`, and letting
+    either out of `data_received` fatal-errors the transport - which for
+    the client is a hot reconnect loop, because every attempt connects
+    before dying and resets the backoff.
     """
-
-    @staticmethod
-    def _assert_drained(dispatcher, transport) -> None:
-        """No backlog, no phantom inflight, reading not left paused."""
-        assert dispatcher.backlog == 0
-        assert dispatcher.inflight == 0
-        assert dispatcher.paused is False
-        assert transport.paused is False
 
     @settings(max_examples=300, deadline=None)
     @given(recipes=st.lists(_hostile_recipes, min_size=1, max_size=6))
-    def test_the_client_never_raises_and_never_wedges(self, recipes):
+    def test_the_client_never_raises(self, recipes):
         payloads = [_materialise(recipe) for recipe in recipes]
         for payload in payloads:
             event(_classify(payload))
         client, _ = _capture_client()
-        transport = _FlowTransport()
-        client._transport = transport
-        client._dispatcher._transport = transport
+        client._transport = _FlowTransport()
 
-        _drain(
-            lambda: [client.data_received(payload) for payload in payloads],
-            client._dispatcher,
-        )
+        _drain(lambda: [client.data_received(payload) for payload in payloads], client._tasks)
 
-        self._assert_drained(client._dispatcher, transport)
+        assert client._tasks == set()
 
     @settings(max_examples=300, deadline=None)
     @given(recipes=st.lists(_hostile_recipes, min_size=1, max_size=6))
-    def test_the_simulator_never_raises_and_never_wedges(self, recipes):
+    def test_the_simulator_never_raises(self, recipes):
         payloads = [_materialise(recipe) for recipe in recipes]
         for payload in payloads:
             event(_classify(payload))
         protocol = _capture_simulator_protocol()
-        transport = protocol.transport
 
-        _drain(
-            lambda: [protocol.data_received(payload) for payload in payloads],
-            protocol._dispatcher,
-        )
+        _drain(lambda: [protocol.data_received(payload) for payload in payloads], protocol._tasks)
 
-        self._assert_drained(protocol._dispatcher, transport)
+        assert protocol._tasks == set()
 
     @settings(max_examples=100, deadline=None)
     @given(recipe=_pathological_recipes, chunk_size=st.integers(min_value=1, max_value=4096))
@@ -540,17 +504,14 @@ class TestArbitraryBytesNeverRaiseAndNeverWedge:
         assume(len(payload) < MAX_BUFFER_SIZE)
         event(_classify(payload))
         client, received = _capture_client()
-        transport = _FlowTransport()
-        client._transport = transport
-        client._dispatcher._transport = transport
+        client._transport = _FlowTransport()
 
         _drain(
             lambda: [
                 client.data_received(payload[i : i + chunk_size])
                 for i in range(0, len(payload), chunk_size)
             ],
-            client._dispatcher,
+            client._tasks,
         )
 
-        self._assert_drained(client._dispatcher, transport)
         assert len(received) == (1 if _classify(payload) == "decode: ok" else 0)

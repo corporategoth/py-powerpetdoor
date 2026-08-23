@@ -97,7 +97,7 @@ class ControlCommandsMixin:
         """Clear the terminal screen.
 
         A no-op off a terminal: writing the escape sequence to a pipe or a
-        dumb terminal only injects literal garbage into the output (T3).
+        dumb terminal only injects literal garbage into the output.
         """
         # Use __stdout__ to bypass prompt_toolkit's patch_stdout
         out = sys.__stdout__ if sys.__stdout__ else sys.stdout

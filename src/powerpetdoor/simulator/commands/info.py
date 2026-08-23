@@ -133,7 +133,7 @@ class InfoCommandsMixin:
         bc = s.battery_config
         num_clients = len(self.simulator.protocols)
         # Serialized script runs made "busy" a real state; without this the
-        # operator watches the door move with no explanation (M5).
+        # operator watches the door move with no explanation.
         script = self.script_status()
         running_script, queued_scripts = script.running, script.queued
         data = {
@@ -348,11 +348,8 @@ class InfoCommandsMixin:
             history clear   - Clear command history
 
         Delegates to :meth:`History.execute_command`, which is the single
-        implementation. This method used to re-implement clear + formatting
-        inline against the raw prompt_toolkit object, and the two copies
-        had already drifted on user-facing text - with the well-documented
-        one being the dead copy a maintainer would edit (round-6 frontend
-        T1).
+        implementation. Do not re-implement clear + formatting inline against
+        the raw prompt_toolkit object: two copies drift on user-facing text.
 
         Note: Requires prompt_toolkit (install with pip install pypowerpetdoor[interactive])
         """

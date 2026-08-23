@@ -18,7 +18,7 @@ import logging
 
 import pytest
 
-from powerpetdoor.sanitize import sanitize_text
+from powerpetdoor.sanitize import sanitize_field, sanitize_text
 
 
 class TestSanitizeText:
@@ -85,10 +85,10 @@ class TestSurrogatesAreEscaped:
 
     ``"\\ud800"`` is legal JSON, arrives on the wire as six ASCII characters,
     and becomes an unpaired surrogate at ``json.loads``. It cannot be encoded
-    to UTF-8, so before round-9 security M2 the "sanitized" value was exactly
-    what a ``logging.FileHandler(encoding="utf-8")`` could not write: the
-    record was dropped from the operator's log file entirely and the payload
-    went to stderr instead, from a code path outside every ``EventThrottle``.
+    to UTF-8, so leaving it unescaped produces exactly what a
+    ``logging.FileHandler(encoding="utf-8")`` cannot write: the record is
+    dropped from the operator's log file entirely and the payload goes to
+    stderr instead.
     """
 
     @pytest.mark.parametrize(
@@ -102,7 +102,7 @@ class TestSurrogatesAreEscaped:
         ids=["U+D7FF", "U+D800", "U+DFFF", "U+E000"],
     )
     def test_the_surrogate_block_boundary_is_exact(self, codepoint, expected):
-        """Rule 8 at both edges: escape the block, and only the block.
+        """Both edges of the surrogate block: escape the block, and only the block.
 
         Compared through `ascii()` on purpose: a *failing* assertion would
         otherwise put a raw unpaired surrogate into pytest's report, and
@@ -124,11 +124,10 @@ class TestSurrogatesAreEscaped:
     def test_a_surrogate_from_the_wire_produces_a_writable_log_record(self, tmp_path):
         """End to end: pure-ASCII wire bytes, a real UTF-8 file handler.
 
-        This is the shipped `door.py:1494` sink the security harness measured
-        at 200 hostile frames -> **0** log lines and 359 KB of stderr. The
-        assertion is that the record the handler produces can actually be
-        written; `caplog` cannot see this failure mode, because it never
-        encodes anything.
+        This is the shipped `door.py:1494` sink, measured at 200 hostile
+        frames -> **0** log lines and 359 KB of stderr. The assertion is that
+        the record the handler produces can actually be written; `caplog`
+        cannot see this failure mode, because it never encodes anything.
         """
         from powerpetdoor.door import PowerPetDoor
 
@@ -162,26 +161,57 @@ class TestSurrogatesAreEscaped:
         assert "Ignoring non-mapping hardware info: \\ud800SECRETPROBE" in written
 
 
+class TestSanitizeFieldEscapesLineFeeds:
+    """A newline in a *field value* forges log records.
+
+    `_CONTROL_CHAR_RE` escapes CR but not LF, so a device-supplied field
+    interpolated into a log line ends the physical line and everything
+    after it is read as a fresh record - with a timestamp, a severity and
+    a message the device chose. LF cannot go into `sanitize_text` itself:
+    that is also applied to whole formatted records, where a multi-line
+    traceback is exactly what should be written.
+    """
+
+    FORGERY = "ok\n2025-01-01 00:00:00 [CRITICAL] the door is on fire"
+
+    def test_a_field_value_cannot_start_a_new_line(self):
+        result = sanitize_field(self.FORGERY)
+
+        assert "\n" not in result
+        assert "\\x0a" in result
+        assert result.count("CRITICAL") == 1  # the text survives, inert
+
+    def test_sanitize_text_still_passes_line_feeds_through(self):
+        """The formatter legitimately emits multi-line tracebacks."""
+        assert "\n" in sanitize_text(self.FORGERY)
+
+    def test_it_is_additive_over_sanitize_text(self):
+        """Everything sanitize_text escapes, sanitize_field escapes too."""
+        raw = "".join(chr(code) for code in range(0x00, 0xA0)) + "\ud800"
+
+        assert sanitize_field(raw) == sanitize_text(raw).replace("\n", "\\x0a")
+
+    def test_it_keeps_tab_like_sanitize_text_does(self):
+        assert sanitize_field("a\tb") == "a\tb"
+
+    def test_it_truncates_before_escaping_like_sanitize_text(self):
+        result = sanitize_field("\n" * 100, limit=4)
+
+        assert result == "\\x0a" * 4 + "...(truncated)"
+
+
 class TestLibraryLogSinks:
     """The shipped library must not put raw device bytes into a log record."""
 
     def test_decode_failure_log_is_sanitized(self, mock_client, caplog):
-        """A brace-balanced but invalid frame is logged escaped, at ERROR.
-
-        Two ERROR records: the throttle's running tally and, on the
-        occurrences the throttle reports, the sanitized detail.
-        """
+        """A brace-balanced but invalid frame is logged escaped, at ERROR."""
         client, _, _ = mock_client
         with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
             client.data_received(b"{\x1b[2J\x1b[1;1H*** PWNED ***\x07}")
 
         records = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert len(records) == 2
-        assert (
-            records[0].getMessage()
-            == "Failed to decode 1 JSON frame(s) from device (26 bytes) on this connection"
-        )
-        message = records[1].getMessage()
+        assert len(records) == 1
+        message = records[0].getMessage()
         assert "\x1b" not in message
         assert "\x07" not in message
         assert "\\x1b[2J\\x1b[1;1H*** PWNED ***\\x07" in message
@@ -268,25 +298,10 @@ class TestTruncation:
     def test_no_limit_keeps_the_previous_behaviour(self):
         assert sanitize_text("x" * 5000) == "x" * 5000
 
-    def test_the_default_frame_limit_is_exported(self):
-        from powerpetdoor.sanitize import MAX_LOGGED_LENGTH
-
-        assert MAX_LOGGED_LENGTH == 200
-
-
-class TestTheLoggedLengthCapIsPinned:
-    """A per-frame log record's *constant* has to be bounded independently
-    of how often the line fires (round-6 security 2 / round-7 L1)."""
-
-    def test_the_logged_length_cap_is_200(self):
-        from powerpetdoor import sanitize
-
-        assert sanitize.MAX_LOGGED_LENGTH == 200
-
     def test_the_truncation_boundary_is_exact(self):
-        """Assert *at* the limit: `len(value) > limit` -> `>=` marked a
-        value of exactly `limit` as truncated though nothing was cut
-        (round-7 test-fanatic M5)."""
+        """Assert *at* the limit: `len(value) > limit` must not become `>=`,
+        which would mark a value of exactly `limit` as truncated though
+        nothing was cut."""
         from powerpetdoor.sanitize import sanitize_text
 
         assert sanitize_text("x" * 10, 10) == "x" * 10

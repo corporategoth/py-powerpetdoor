@@ -40,11 +40,9 @@ class ScheduleCommandsMixin:
     def _format_sensor_scope(inside: bool, outside: bool) -> str:
         """Render which sensors a schedule covers.
 
-        One helper for every surface that says it. The same concept was
-        spelled three ways in one command family - ``add`` echoed the raw
-        ``both sensor`` choice (not even grammatical), ``list`` rendered
-        ``inside+outside sensor``, and the implicit-schedule line said
-        ``both sensors`` (round-7 frontend T2). Plural throughout.
+        One helper for every surface that says it, so ``add``, ``list`` and
+        the implicit-schedule line cannot drift into three spellings of the
+        same concept. Plural throughout.
         """
         if inside and outside:
             return "inside and outside sensors"

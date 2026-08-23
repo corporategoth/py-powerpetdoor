@@ -167,7 +167,7 @@ class TestParseArgFloat:
         the door, and made GET_SETTINGS and GET_HOLD_TIME answer every
         connected client `success:false` for the life of the daemon. The
         wire path and the script DSL both refuse these already; this is the
-        third front end onto the same state (round-7 frontend M1).
+        third front end onto the same state.
         """
         value, error = parse_arg(raw, ArgSpec("n", "float", min_value=0.1, max_value=900))
 
@@ -183,7 +183,7 @@ class TestParseArgFloat:
         )
 
     def test_boundary_values_accepted(self):
-        """Assert *at* the limit, not merely inside it (round-7 test-fanatic M5).
+        """Assert *at* the limit, not merely inside it.
 
         `max_value >` -> `>=` on this branch survived the whole suite while
         the same flip on the int sibling was caught.

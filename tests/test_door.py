@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import sys
 
@@ -137,13 +138,13 @@ class TestDoorStatus:
         assert DoorStatus.from_string(DOOR_STATE_KEEPUP) == DoorStatus.KEEPUP
 
     def test_from_string_invalid(self, caplog):
-        """from_string maps unknown strings to UNKNOWN with a warning (L16)."""
+        """from_string maps unknown strings to UNKNOWN with a warning."""
         assert DoorStatus.from_string("INVALID") == DoorStatus.UNKNOWN
         assert DoorStatus.from_string("") == DoorStatus.UNKNOWN
         assert "Unknown door status" in caplog.text
 
     def test_unknown_status_is_neither_open_nor_closed(self):
-        """An UNKNOWN status must not claim the door is closed (L16)."""
+        """An UNKNOWN status must not claim the door is closed."""
         door = PowerPetDoor("127.0.0.1")
         door._status = DoorStatus.UNKNOWN
 
@@ -237,8 +238,8 @@ def _inside_payload(**overrides):
     """A minimal well-formed inside-sensor schedule payload.
 
     ``inside``/``outside`` entries must carry their own time window - the
-    parser refuses to invent one (L5) - so hostile-input tests that are
-    about some *other* field start from a complete payload.
+    parser refuses to invent one - so hostile-input tests that are about
+    some *other* field start from a complete payload.
     """
     payload = {
         "index": 0,
@@ -259,7 +260,7 @@ class TestSchedule:
         schedule = Schedule()
         assert schedule.index == 0
         assert schedule.enabled is True
-        # All days, as real booleans - True == 1 would mask an int regression (L2)
+        # All days, as real booleans - True == 1 would mask an int regression
         assert schedule.days_of_week == [True, True, True, True, True, True, True]
         assert all(isinstance(day, bool) for day in schedule.days_of_week)
         assert schedule.inside is False
@@ -297,9 +298,9 @@ class TestSchedule:
         in any field - except ``enabled``, which differs on purpose: this
         emitter is client->device and has sent a JSON boolean to real
         firmware since v0.1.0, while the simulator plays the device side
-        and replies ``"1"``. Round 5 unified them on the authority of the
-        reverse-engineered docs/protocol.md; that was reverted, and this
-        test is what stops it happening again.
+        and replies ``"1"``. The two must not be unified on the authority
+        of the reverse-engineered docs/protocol.md; this test is what stops
+        that.
         """
         schedule = Schedule(
             index=3,
@@ -327,7 +328,7 @@ class TestSchedule:
         assert payload["enabled"] is False
 
     def test_to_dict_days_are_wire_ints(self):
-        """The wire protocol carries literal 1/0 ints, never bools (L2)."""
+        """The wire protocol carries literal 1/0 ints, never bools."""
         schedule = Schedule(days_of_week=[True, False, True, False, True, False, True], inside=True)
 
         d = schedule.to_dict()
@@ -354,7 +355,7 @@ class TestSchedule:
         assert d["in_end_time"] == {"hour": 0, "min": 0}
 
     def test_from_dict_days_are_bools(self):
-        """Wire 1/0 lists are converted to real booleans (L2)."""
+        """Wire 1/0 lists are converted to real booleans."""
         restored = Schedule.from_dict(
             _inside_payload(daysOfWeek=[1, 0, 1, 0, 1, 0, 1]),
         )
@@ -381,7 +382,7 @@ class TestSchedule:
 
     @pytest.mark.parametrize("flag", ["0", 0, False, "false", "off", "no"], ids=repr)
     def test_from_dict_disabled_day_flags_are_read_as_disabled(self, flag):
-        """bool("0") is True, so day flags go through make_bool (L4/R4-M3).
+        """bool("0") is True, so day flags go through make_bool.
 
         This is the library-side twin of the simulator's
         ``_coerce_schedule_day`` test: a firmware variant that sends
@@ -394,20 +395,20 @@ class TestSchedule:
 
     @pytest.mark.parametrize("flag", ["0", 0, False, "false"], ids=repr)
     def test_from_dict_disabled_enabled_flag_is_read_as_disabled(self, flag):
-        """``enabled`` is read the same way its daysOfWeek sibling is (T3)."""
+        """``enabled`` is read the same way its daysOfWeek sibling is."""
         restored = Schedule.from_dict(_inside_payload(enabled=flag))
 
         assert restored.enabled is False
 
     @pytest.mark.parametrize("flag", ["1", 1, True, "true", "yes", "on"], ids=repr)
     def test_from_dict_enabled_accepts_every_flag_spelling(self, flag):
-        """A bespoke ``== "1"`` read "true"/"yes"/"on" as disabled (T3)."""
+        """A bespoke ``== "1"`` read "true"/"yes"/"on" as disabled."""
         restored = Schedule.from_dict(_inside_payload(enabled=flag))
 
         assert restored.enabled is True
 
     def test_from_dict_enabled_is_always_a_real_bool(self):
-        """A field declared ``enabled: bool`` must never hold 1/0 (T3)."""
+        """A field declared ``enabled: bool`` must never hold 1/0."""
         restored = Schedule.from_dict(_inside_payload(enabled=1))
 
         assert restored.enabled is True
@@ -417,7 +418,7 @@ class TestSchedule:
         assert restored.to_dict()["enabled"] is True
 
     def test_from_dict_no_days_defaults_to_every_day(self):
-        """An absent daysOfWeek means "every day", and that is pinned (R5-L1).
+        """An absent daysOfWeek means "every day", and that is pinned.
 
         The default direction matters and was unobserved on both sides: two
         tests parsed a payload without the field, neither looked at the
@@ -440,7 +441,7 @@ class TestSchedule:
         ids=repr,
     )
     def test_from_dict_bitmask_boundaries(self, mask, expected):
-        """The legacy bitmask branch, pinned across its whole range (R5-L1).
+        """The legacy bitmask branch, pinned across its whole range.
 
         ``True``/``False`` are ints on this wire like everywhere else, so
         they are masks too - one bit and no bits respectively.
@@ -449,7 +450,7 @@ class TestSchedule:
 
     @pytest.mark.parametrize("mask", [-1, -128, 128, 2**64], ids=repr)
     def test_from_dict_out_of_range_bitmask_is_rejected(self, mask):
-        """An out-of-range mask is rejected, not read modulo 7 bits (R5-L1).
+        """An out-of-range mask is rejected, not read modulo 7 bits.
 
         ``-1 >> i & 1`` is 1 forever, so the old unbounded branch turned
         every negative integer into "every day on" - the exact opposite of
@@ -461,7 +462,7 @@ class TestSchedule:
             Schedule.from_dict(_inside_payload(daysOfWeek=mask))
 
     def test_from_dict_inside_wins_when_both_sensors_are_flagged(self):
-        """Statement order is the rule, so pin it on both parsers (R5-T4).
+        """Statement order is the rule, so pin it on both parsers.
 
         ``schedule add both`` produces both-flag entries in-project, so the
         branch is live even though docs/protocol.md calls it out of spec.
@@ -490,13 +491,13 @@ class TestSchedule:
 
 
 class TestDoorScheduleFromDictRejectsHostileInput:
-    """The library's schedule parser reads bytes off the wire (R4-M1).
+    """The library's schedule parser reads bytes off the wire.
 
     Every payload here used to raise TypeError/AttributeError out of a
     documented public coroutine, or be swallowed by listener isolation and
     silently freeze the cached schedule list. The contract is a
     ``ValueError`` naming the offending field - the same contract the
-    simulator's twin parser has had since round 3.
+    simulator's twin parser has.
     """
 
     @pytest.mark.parametrize(
@@ -587,7 +588,7 @@ class TestDoorScheduleFromDictRejectsHostileInput:
         ids=["no-inside-start", "no-inside-end", "no-outside-start"],
     )
     def test_missing_time_window_is_rejected_not_invented(self, payload, message):
-        """A selected sensor with no window must fail, not get a free one (L5)."""
+        """A selected sensor with no window must fail, not get a free one."""
         with pytest.raises(ValueError, match=message):
             Schedule.from_dict(payload)
 
@@ -660,7 +661,7 @@ class TestPowerPetDoorConnection:
         assert door.port == port
 
     async def test_second_connect_does_not_open_a_second_connection(self, door, simulator, caplog):
-        """connect() while connected is a no-op, not a leaked socket (M2)."""
+        """connect() while connected is a no-op, not a leaked socket."""
         transport = door._client._transport
 
         with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
@@ -1011,7 +1012,7 @@ class TestPowerPetDoorRefresh:
 
 
 # ============================================================================
-# Settings Coercion Tests (test-fanatic H1)
+# Settings Coercion Tests
 # ============================================================================
 
 
@@ -1084,7 +1085,7 @@ class TestSettingsCoercion:
 
 
 # ============================================================================
-# Connect Lifecycle Tests (D5/C1, M10, M6)
+# Connect Lifecycle Tests
 # ============================================================================
 
 
@@ -1092,7 +1093,7 @@ class TestConnectLifecycle:
     """The documented no-loop connect pattern and failure semantics."""
 
     async def test_connect_without_explicit_loop(self, simulator):
-        """PowerPetDoor(host); await door.connect() works with loop=None (C1)."""
+        """PowerPetDoor(host); await door.connect() works with loop=None."""
         port = simulator.server.sockets[0].getsockname()[1]
         door = PowerPetDoor("127.0.0.1", port=port, keepalive=0, timeout=5.0, reconnect=0.5)
 
@@ -1103,7 +1104,7 @@ class TestConnectLifecycle:
             await door.disconnect()
 
     async def test_connect_failure_raises_connection_error(self, refused_port):
-        """connect() to a dead port raises ConnectionError, not silence (M10)."""
+        """connect() to a dead port raises ConnectionError, not silence."""
         door = PowerPetDoor("127.0.0.1", port=refused_port, keepalive=0, timeout=0.2, reconnect=0.1)
 
         with pytest.raises(ConnectionError):
@@ -1122,12 +1123,12 @@ class TestConnectLifecycle:
         assert door._client._reconnect_task is None
 
     async def test_disconnect_before_connect_is_safe(self):
-        """disconnect() before connect() must not raise (M6)."""
+        """disconnect() before connect() must not raise."""
         door = PowerPetDoor("127.0.0.1")
         await door.disconnect()
 
     async def test_double_disconnect_is_safe(self, simulator):
-        """Two disconnect() calls in a row must not raise (M6)."""
+        """Two disconnect() calls in a row must not raise."""
         port = simulator.server.sockets[0].getsockname()[1]
         door = PowerPetDoor("127.0.0.1", port=port, keepalive=0, timeout=5.0)
 
@@ -1142,7 +1143,7 @@ class TestConnectLifecycle:
 
         Its docstring promises "nothing outlives this call": the
         on_disconnect coroutine the call itself triggers is awaited. Every
-        test passed with the aclose() call reverted to shutdown() (R4-M4).
+        test passed with the aclose() call reverted to shutdown().
         """
         port = simulator.server.sockets[0].getsockname()[1]
         door = PowerPetDoor("127.0.0.1", port=port, keepalive=0, timeout=5.0)
@@ -1191,7 +1192,7 @@ class TestConnectLifecycle:
         assert door._client._handler_tasks == set()
 
     async def test_reconnect_after_disconnect(self, simulator):
-        """connect() after disconnect() re-arms the client (M6)."""
+        """connect() after disconnect() re-arms the client."""
         port = simulator.server.sockets[0].getsockname()[1]
         door = PowerPetDoor("127.0.0.1", port=port, keepalive=0, timeout=5.0)
 
@@ -1206,7 +1207,7 @@ class TestConnectLifecycle:
             await door.disconnect()
 
     async def test_refresh_scheduled_after_auto_reconnect(self, simulator):
-        """After a client-level auto-reconnect, the cache resynchronizes (M10)."""
+        """After a client-level auto-reconnect, the cache resynchronizes."""
         port = simulator.server.sockets[0].getsockname()[1]
         door = PowerPetDoor("127.0.0.1", port=port, keepalive=0, timeout=5.0, reconnect=0.05)
         await door.connect()
@@ -1229,7 +1230,7 @@ class TestConnectLifecycle:
 
 
 # ============================================================================
-# Schedule API Tests (H10)
+# Schedule API Tests
 # ============================================================================
 
 
@@ -1250,7 +1251,7 @@ def _sim_schedule(index, days, start=(7, 30), end=(21, 15), inside=True, outside
 
 
 class TestDoorSchedules:
-    """door.py schedule methods against the simulator (H10)."""
+    """door.py schedule methods against the simulator."""
 
     async def test_refresh_schedules_two_step_fetch(self, door, simulator):
         """refresh_schedules fetches the list then each schedule."""
@@ -1348,12 +1349,12 @@ class TestDoorSchedules:
 
 
 # ============================================================================
-# Notifications API Tests (H10)
+# Notifications API Tests
 # ============================================================================
 
 
 class TestSetNotifications:
-    """set_notifications merge semantics and wire format (H10)."""
+    """set_notifications merge semantics and wire format."""
 
     async def test_partial_update_preserves_others(self, door):
         """Unspecified settings are sent with their cached values."""
@@ -1427,12 +1428,12 @@ class TestSetNotifications:
 
 
 # ============================================================================
-# Latency / Version / Position Tests (H10)
+# Latency / Version / Position Tests
 # ============================================================================
 
 
 class TestDoorLatency:
-    """Latency tracking from ping/pong (H10)."""
+    """Latency tracking from ping/pong."""
 
     async def test_latency_set_by_ping(self):
         """_on_ping converts milliseconds to seconds."""
@@ -1454,7 +1455,7 @@ class TestDoorLatency:
 
 
 class TestVersionFormatting:
-    """firmware_version / hardware_version string formatting (H10)."""
+    """firmware_version / hardware_version string formatting."""
 
     async def test_firmware_version_populated(self):
         door = PowerPetDoor("127.0.0.1")
@@ -1486,7 +1487,7 @@ class TestVersionFormatting:
 
 
 class TestToggleWhileClosing:
-    """toggle() is a no-op while the door is closing (H10)."""
+    """toggle() is a no-op while the door is closing."""
 
     async def test_toggle_noop_while_closing(self):
         from unittest.mock import AsyncMock, patch
@@ -1505,7 +1506,7 @@ class TestToggleWhileClosing:
 
 
 class TestStatusCallbackIsolation:
-    """A raising status callback must not break the others (H10)."""
+    """A raising status callback must not break the others."""
 
     async def test_status_callback_exception_does_not_break_others(self):
         door = PowerPetDoor("127.0.0.1")
@@ -1524,7 +1525,7 @@ class TestStatusCallbackIsolation:
 
 
 class TestPositionMap:
-    """position maps every status to an exact percentage (H10)."""
+    """position maps every status to an exact percentage."""
 
     @pytest.mark.parametrize(
         ("status", "expected"),
@@ -1547,7 +1548,7 @@ class TestPositionMap:
 
 
 # ============================================================================
-# Device-Backed Property Tests (H10)
+# Device-Backed Property Tests
 # ============================================================================
 
 
@@ -1660,7 +1661,7 @@ class TestDoorUnitEdges:
         assert door.schedules == []
 
     async def test_refresh_schedules_sorts_by_index(self):
-        """`door.schedules` order must not depend on the last code path (T3).
+        """`door.schedules` order must not depend on the last code path.
 
         `GET_SCHEDULE_LIST` returns slots, and a device (or a simulator)
         whose slots were filled out of order can answer them out of order.
@@ -1694,7 +1695,7 @@ class TestDoorUnitEdges:
         assert [s.index for s in door.schedules] == [1, 3, 5]
 
     async def test_refresh_names_each_failed_step_in_the_log(self, caplog):
-        """A dead refresh step is reported at the door layer, not swallowed (L5)."""
+        """A dead refresh step is reported at the door layer, not swallowed."""
         door = PowerPetDoor("127.0.0.1")
 
         def fake_send(msg_type, cmd, notify=False, **kwargs):
@@ -1714,7 +1715,7 @@ class TestDoorUnitEdges:
         assert "Refresh step settings failed" not in caplog.text
 
     async def test_refresh_settings_names_each_failed_step_in_the_log(self, caplog):
-        """Both settings sub-steps are named when they fail (L5)."""
+        """Both settings sub-steps are named when they fail."""
         door = PowerPetDoor("127.0.0.1")
 
         def fake_send(msg_type, cmd, notify=False, **kwargs):
@@ -1749,7 +1750,7 @@ class TestDoorUnitEdges:
 
 
 # ============================================================================
-# Callback Registration and Isolation Tests (H10)
+# Callback Registration and Isolation Tests
 # ============================================================================
 
 
@@ -1826,7 +1827,7 @@ class TestDoorCallbackRegistration:
 
 
 # ============================================================================
-# Listener None-Value Guard Tests (D4)
+# Listener None-Value Guard Tests
 # ============================================================================
 
 
@@ -1874,8 +1875,83 @@ class TestListenerNoneGuards:
         assert getattr(door._notifications, attr) is True
 
 
+class TestFalsyNonBoolFlagsDoNotReadAsOff:
+    """`make_bool` passes a value it does not recognize straight through.
+
+    Its final `else: return v` returns the argument for anything that is
+    neither a string nor an int, so `[]`, `{}` and `0.0` arrive at these
+    listeners as themselves, not as None - and `if value is not None` let
+    them into a strictly typed cache. A known-ON `safety_lock` receiving
+    `[]` then read False: a safety flag failing in the permissive
+    direction. (It is not permanent - any `refresh_settings()` or reconnect
+    heals it - but it is wrong until then.)
+
+    Widening `make_bool` is not the fix: `compress_schedule` calls it
+    unguarded on day flags, where "unrecognized" has to stay fail-closed.
+    """
+
+    FALSY_NON_BOOLS = [[], {}, 0.0, (), set()]
+
+    @pytest.mark.parametrize("value", FALSY_NON_BOOLS)
+    async def test_a_known_on_safety_lock_is_not_turned_off(self, value, caplog):
+        door = PowerPetDoor("127.0.0.1")
+        door._safety_lock = True
+
+        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.door"):
+            door._on_safety_lock_update(FIELD_OUTSIDE_SENSOR_SAFETY_LOCK, value)
+
+        assert door.safety_lock is True
+        assert "keeping the cached value" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("method", "attr"),
+        [
+            ("_on_power_update", "_power"),
+            ("_on_inside_update", "_inside_sensor"),
+            ("_on_outside_update", "_outside_sensor"),
+            ("_on_auto_update", "_auto"),
+            ("_on_safety_lock_update", "_safety_lock"),
+            ("_on_autoretract_update", "_autoretract"),
+            ("_on_cmd_lockout_update", "_pet_proximity_keep_open"),
+            ("_on_notify_inside_on", "_notifications"),
+            ("_on_notify_inside_off", "_notifications"),
+            ("_on_notify_outside_on", "_notifications"),
+            ("_on_notify_outside_off", "_notifications"),
+            ("_on_notify_low_battery", "_notifications"),
+        ],
+    )
+    async def test_every_facade_flag_listener_keeps_its_cache(self, method, attr):
+        """All twelve, because they all cached whatever `make_bool` returned."""
+        door = PowerPetDoor("127.0.0.1")
+        before = copy.copy(getattr(door, attr))
+
+        getattr(door, method)("field", [])
+
+        assert getattr(door, attr) == before
+
+    async def test_the_settings_sweep_keeps_its_cache_too(self):
+        """`_on_settings` reads the same values through the same coercion."""
+        door = PowerPetDoor("127.0.0.1")
+        door._safety_lock = True
+        door._pet_proximity_keep_open = True
+
+        door._on_settings({FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: [], FIELD_CMD_LOCKOUT: []})
+
+        assert door.safety_lock is True
+        assert door._pet_proximity_keep_open is True
+
+    async def test_a_real_bool_still_lands(self):
+        """The guard must not make the listeners inert."""
+        door = PowerPetDoor("127.0.0.1")
+        door._safety_lock = True
+
+        door._on_safety_lock_update(FIELD_OUTSIDE_SENSOR_SAFETY_LOCK, False)
+
+        assert door.safety_lock is False
+
+
 # ============================================================================
-# Schedule Cache Maintenance Tests (H10)
+# Schedule Cache Maintenance Tests
 # ============================================================================
 
 
@@ -1909,7 +1985,7 @@ class TestScheduleCacheMaintenance:
         ids=["null-days", "int-time", "null-time", "bad-index", "not-an-object"],
     )
     async def test_malformed_schedule_update_is_logged_and_dropped(self, payload, caplog):
-        """A bad device payload must not silently freeze the cache (R4-M1).
+        """A bad device payload must not silently freeze the cache.
 
         The client isolates listener exceptions, so the TypeError/
         AttributeError this used to raise was swallowed: the cached
@@ -1945,7 +2021,7 @@ class TestScheduleCacheMaintenance:
 
 
 # ============================================================================
-# Untrusted device payloads reaching the facade (round-6 backend M1/L2)
+# Untrusted device payloads reaching the facade
 # ============================================================================
 
 
@@ -1971,7 +2047,7 @@ class TestFacadeRejectsMalformedDevicePayloads:
         """`_hw_info` is the only retained payload, and three public
         properties treat it as a dict - `hardware_info` raised
         `AttributeError: 'str' object has no attribute 'copy'` with nothing
-        in the log naming the frame that caused it (round-6 backend M1)."""
+        in the log naming the frame that caused it."""
         door = PowerPetDoor("127.0.0.1")
         door._hw_info = {"ver": "1"}
 
@@ -1982,8 +2058,6 @@ class TestFacadeRejectsMalformedDevicePayloads:
         assert door.hardware_info == {"ver": "1"}
         assert door.firmware_version == "0.0.0"
         assert [record.getMessage() for record in caplog.records] == [
-            "Ignored 1 non-mapping hardware info payload(s) from device (5 bytes) "
-            "on this connection",
             "Ignoring non-mapping hardware info: 1.2.3",
         ]
 
@@ -2019,7 +2093,7 @@ class TestFacadeRejectsMalformedDevicePayloads:
         """Iterating the raw value raised TypeError out of a documented
         coroutine for a scalar, and issued one GET_SCHEDULE *per character*
         for a string - 200 sequential round trips against a device that
-        rate-limits between messages (round-6 backend L2)."""
+        rate-limits between messages."""
         client, transport, device = mock_client
         door = PowerPetDoor("127.0.0.1")
         door._client = client
@@ -2042,7 +2116,7 @@ class TestFacadeRejectsMalformedDevicePayloads:
 
     async def test_refresh_schedules_timeout_log_survives_a_string_index(self, mock_client, caplog):
         """`%d` on a device-supplied index turned the timeout warning into
-        a logging-internal formatting error on stderr (backend L2)."""
+        a logging-internal formatting error on stderr."""
         client, transport, device = mock_client
         door = PowerPetDoor("127.0.0.1")
         door._client = client
@@ -2061,7 +2135,7 @@ class TestFacadeRejectsMalformedDevicePayloads:
 
 
 # ============================================================================
-# Facade cache type guards (round-7 backend M1 / L1)
+# Facade cache type guards
 # ============================================================================
 
 
@@ -2075,11 +2149,11 @@ class TestFacadeCacheIsTypeGuarded:
     strictly typed attributes:
 
     - ``batteryPercent: "55"`` made the documented ``battery.charging``
-      property raise ``TypeError`` with **nothing logged** (backend M1);
-    - stats and timezone silently held the wrong Python type (backend L1);
+      property raise ``TypeError`` with **nothing logged**;
+    - stats and timezone silently held the wrong Python type;
     - ``holdOpenTime: "200"`` raised out of the listener - a full traceback
       per frame - and ``NaN`` was cached into a property documented
-      ``-> float`` (found by this round's sibling sweep).
+      ``-> float``.
 
     And the ``dict.get(key, cached)`` "keep the last good value" defaults
     could never fire, because ``_handle_battery`` always builds every key:
@@ -2146,9 +2220,8 @@ class TestFacadeCacheIsTypeGuarded:
         The cached value has to be *decisive*. Seeding ``present=True``
         made "kept the cache" and "coerced the int" give the same answer
         for the ``1`` parameter (``bool(1)`` is ``True``), so a `_keep_bool`
-        that coerced ints passed this test and the whole suite (round-8
-        test-fanatic L3, CLAUDE.md rules 8/9). Every parameter here is
-        truthy, and the cache is False.
+        that coerced ints passed this test and the whole suite (CLAUDE.md
+        rules 8/9). Every parameter here is truthy, and the cache is False.
         """
         door._battery = BatteryInfo(percent=42, present=False, ac_present=False)
 
@@ -2222,17 +2295,16 @@ class TestFacadeCacheIsTypeGuarded:
         values a device can send (5.1%) ``int(x * 100) != round(x * 100)`` -
         but ``4.0`` is one of the values where they agree, so replacing the
         fallback's ``round()`` with ``int()`` silently rewrote the cache and
-        passed this test (round-8 test-fanatic L4). ``0.29`` is decisive:
-        ``0.29 * 100`` is ``28.999999999999996``.
+        passed this test. ``0.29`` is decisive: ``0.29 * 100`` is
+        ``28.999999999999996``.
 
-        ``10**400`` is the round-8 backend L1 / security L2 case: legal
-        JSON, an ``int``, and ``value / 100.0`` raises ``OverflowError``.
-        ``-(10**400)`` is the same case on the other side of zero, and it is
-        the half the magnitude guard's ``-maximum <=`` operand is the only
-        thing stopping - a device sending a negative arbitrary-precision
-        integer is no less plausible than a positive one, and
-        ``docs/protocol.md`` is reverse-engineered and constrains neither
-        (round-9 test-fanatic M3).
+        ``10**400`` is legal JSON, an ``int``, and ``value / 100.0`` raises
+        ``OverflowError``. ``-(10**400)`` is the same case on the other side
+        of zero, and it is the half the magnitude guard's ``-maximum <=``
+        operand is the only thing stopping - a device sending a negative
+        arbitrary-precision integer is no less plausible than a positive
+        one, and ``docs/protocol.md`` is reverse-engineered and constrains
+        neither.
         """
         door._hold_time = cached
 
@@ -2265,9 +2337,7 @@ class TestFacadeCacheIsTypeGuarded:
         two. Only the two positive ones were pinned, and dropping the
         ``-maximum <=`` half survived the whole suite: shipped,
         ``-(10**400)`` is rejected and the cache kept; without that operand
-        it reaches ``centiseconds / 100.0`` and raises ``OverflowError``,
-        which is the exact failure round 8 was raised for (round-9
-        test-fanatic M3).
+        it reaches ``centiseconds / 100.0`` and raises ``OverflowError``.
         """
         door._hold_time = 4.0
         limit = int(sys.float_info.max)
@@ -2302,128 +2372,6 @@ class TestFacadeCacheIsTypeGuarded:
         assert door.total_auto_retracts == huge
 
 
-# ============================================================================
-# The facade's per-frame log sites (round-9 security M1)
-# ============================================================================
-
-
-class TestTheFacadePerFrameLogSitesAreThrottledAndCapped:
-    """Three facade sites fired once per device frame with neither an
-    ``EventThrottle`` nor ``MAX_LOGGED_LENGTH``.
-
-    Measured on the shipped facade before the fix: 20,000 frames produced
-    **20,000** records at each of them, against 10 for the client's
-    round-7-fixed sibling, and one frame just under the 64 KiB framing cap
-    produced a single **65,086-byte** record. ``door.py:264`` is the worst
-    of the three because it needs no attack at all - a firmware revision
-    reporting a status string this library does not know produces one
-    uncapped WARNING per status update on a correctly-functioning
-    installation (round-9 security M1).
-    """
-
-    def test_unknown_statuses_are_summarized(self, caplog):
-        door = PowerPetDoor("127.0.0.1")
-
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
-            for _ in range(200):
-                door._on_door_status("SOME_NEWER_FIRMWARE_STATE")
-
-        details = [
-            record.getMessage()
-            for record in caplog.records
-            if record.getMessage().startswith("Unknown door status")
-        ]
-        # 1, 2, 4, ... 128 - logarithmic in 200 frames, not linear.
-        assert len(details) == 8
-        assert door._unknown_statuses.count == 200
-        assert details[0] == "Unknown door status from device: SOME_NEWER_FIRMWARE_STATE"
-
-    def test_a_direct_call_without_a_throttle_always_warns(self, caplog):
-        """`DoorStatus.from_string` is public and its contract is "never
-        silently claim a possibly-open door is closed" (L16). The throttle
-        is the facade's, not the classmethod's."""
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
-            for _ in range(5):
-                assert DoorStatus.from_string("INVALID") is DoorStatus.UNKNOWN
-
-        assert len(caplog.records) == 5
-
-    def test_the_echoed_status_is_bounded(self, caplog):
-        """One frame with a 65,000-character `door_status` produced one
-        65,086-byte record."""
-        door = PowerPetDoor("127.0.0.1")
-
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
-            door._on_door_status("A" * 5000)
-
-        detail = next(
-            record.getMessage()
-            for record in caplog.records
-            if record.getMessage().startswith("Unknown door status")
-        )
-        assert detail.endswith("...(truncated)")
-        assert len(detail) < 400
-
-    def test_malformed_schedule_updates_are_summarized_and_bounded(self, caplog):
-        """`err` embeds `{value!r}` of the untrusted payload."""
-        door = PowerPetDoor("127.0.0.1")
-
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
-            for _ in range(200):
-                door._on_schedule_update({"index": "B" * 5000})
-
-        details = [
-            record.getMessage()
-            for record in caplog.records
-            if record.getMessage().startswith("Ignoring malformed schedule update")
-        ]
-        assert len(details) == 8
-        assert door._bad_schedule_updates.count == 200
-        assert details[0].endswith("...(truncated)")
-        assert len(details[0]) < 400
-
-    def test_non_mapping_hardware_info_is_summarized(self, caplog):
-        """Capped since round 6, throttled only now."""
-        door = PowerPetDoor("127.0.0.1")
-
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
-            for _ in range(200):
-                door._on_hw_info_update("1.2.3")
-
-        details = [
-            record.getMessage()
-            for record in caplog.records
-            if record.getMessage().startswith("Ignoring non-mapping hardware info")
-        ]
-        assert len(details) == 8
-        assert door._bad_hw_info.count == 200
-
-    async def test_the_facade_throttles_are_connection_scoped(self, caplog):
-        """Like the client's six: report the tail at teardown, then start the
-        next connection's count clean."""
-        door = PowerPetDoor("127.0.0.1")
-        for _ in range(3):
-            door._on_door_status("NOPE")
-            door._on_hw_info_update("scalar")
-            door._on_schedule_update({"index": "x"})
-
-        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
-            await door._on_disconnect()
-
-        tallies = [record.getMessage() for record in caplog.records]
-        assert any(t.startswith("Received 3 unknown door status(es) from device") for t in tallies)
-        assert any(
-            t.startswith("Ignored 3 non-mapping hardware info payload(s) from device")
-            for t in tallies
-        )
-        assert any(
-            t.startswith("Ignored 3 malformed schedule update(s) from device") for t in tallies
-        )
-        assert door._unknown_statuses.count == 0
-        assert door._bad_hw_info.count == 0
-        assert door._bad_schedule_updates.count == 0
-
-
 class TestTheRejectionLogSaysWhatWasExpected:
     """`_log_rejected`'s third argument was asserted nowhere, for any field.
 
@@ -2432,9 +2380,9 @@ class TestTheRejectionLogSaysWhatWasExpected:
     reason - so dropping the `"int" if maximum is None else f"int of
     magnitude <= {maximum:g}"` ternary survived the whole suite, and a
     `-10**400` rejected for *magnitude* logged `expected int` for a value
-    that **is** an `int` (round-9 test-fanatic L2). That is the one
-    diagnostic an operator reaches for when a firmware variant is
-    misbehaving, and error text is part of the contract.
+    that **is** an `int`. That is the one diagnostic an operator reaches
+    for when a firmware variant is misbehaving, and error text is part of
+    the contract.
     """
 
     @pytest.mark.parametrize(
@@ -2505,9 +2453,9 @@ class TestTheFacadeTimeoutSaysWhatTimedOut:
     Its `repr()` is literally `TimeoutError()`, so a developer saw an empty
     exception after a 20-second stall with no way to tell "the door is
     wedged" from "you never called connect()" - the least actionable
-    exception this API can produce (round-9 frontend M2). The queue-on-
-    reconnect behaviour it hides is deliberate and documented, so the fix
-    is the message, not the behaviour.
+    exception this API can produce. The queue-on-reconnect behaviour it
+    hides is deliberate and documented, so the fix is the message, not the
+    behaviour.
     """
 
     async def test_a_disconnected_setter_names_the_command_and_the_queue(self):

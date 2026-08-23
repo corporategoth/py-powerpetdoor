@@ -142,14 +142,13 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
         """Set or show hold time.
 
         Validates *before* writing. The broadcast that follows converts to
-        centiseconds (``int(hold_time * 100)``), so an unrepresentable
-        value raised out of the handler *after* the assignment: the command
-        printed ERROR having already corrupted the state it reported
-        failing on, and every later ``GET_SETTINGS`` / ``GET_HOLD_TIME``
-        answered ``success:false`` (round-7 frontend M1). ``parse_arg``
-        refuses non-finite input on the operator path now, so this is the
-        second layer - it also covers direct programmatic callers of the
-        command mixin.
+        centiseconds (``int(hold_time * 100)``), so an unrepresentable value
+        raised out of the handler *after* the assignment: the command printed
+        ERROR having already corrupted the state it reported failing on, and
+        every later ``GET_SETTINGS`` / ``GET_HOLD_TIME`` answered
+        ``success:false``. ``parse_arg`` refuses non-finite input on the
+        operator path, so this is the second layer - it also covers direct
+        programmatic callers of the command mixin.
         """
         if seconds is None:
             return CommandResult(True, f"Hold time: {self.simulator.state.hold_time}s")
@@ -208,7 +207,8 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
 
         Phrased as "AC set to ..." rather than "AC: ...": the latter is how
         the read-only displays (`battery`, `holdtime`) phrase themselves, so
-        a bare `ac` looked like it was showing rather than changing (T5).
+        a bare `ac` would otherwise look like it was showing rather than
+        changing.
         """
         present = not self.simulator.state.ac_present
         self.simulator.set_ac_present(present)

@@ -49,7 +49,7 @@ class TestWireCaptureFraming:
         assert parsed == [{"CMD": "DOOR_STATUS", "door_status": "DOOR_RISING"}]
 
     def test_feed_is_string_aware_about_braces(self, capture):
-        """A brace inside a JSON string does not end the frame (the C5 defect)."""
+        """A brace inside a JSON string does not end the frame."""
         assert capture.feed(b'{"CMD": "a}b"}') == [{"CMD": "a}b"}]
 
     def test_feed_splits_multiple_frames_in_one_read(self, capture):

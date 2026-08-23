@@ -106,10 +106,10 @@ class CommandHandler(
         # Publish the extra scripts dir so `list`, the unknown-script hint,
         # and tab completion all see the same runnable set.
         set_extra_scripts_dir(scripts_dir)
-        # Same for the path policy: it was a handler attribute *and* a
-        # module flag ctl set for its completer, and the daemon set only
-        # the attribute - so the daemon's own `run help` still advertised
-        # file paths on the channel that refuses them (L2).
+        # Same for the path policy: it is a handler attribute *and* a module
+        # flag ctl sets for its completer. Setting only the attribute leaves
+        # the daemon's own `run help` advertising file paths on the channel
+        # that refuses them.
         set_script_paths_allowed(allow_script_paths)
 
         self._Script = Script
@@ -359,7 +359,7 @@ class CommandHandler(
                     result = await result
             except Exception as e:
                 # The transport already labels failures ("ERROR: ..."), so an
-                # inner "Error: " prefix only doubles it up (T2).
+                # inner "Error: " prefix only doubles it up.
                 return CommandResult(False, str(e))
         else:
             # No args defined - reject leftovers instead of silently ignoring them
@@ -381,7 +381,7 @@ class CommandHandler(
                     result = await result
             except Exception as e:
                 # The transport already labels failures ("ERROR: ..."), so an
-                # inner "Error: " prefix only doubles it up (T2).
+                # inner "Error: " prefix only doubles it up.
                 return CommandResult(False, str(e))
 
         # Handlers are looked up dynamically (getattr), so the type checker

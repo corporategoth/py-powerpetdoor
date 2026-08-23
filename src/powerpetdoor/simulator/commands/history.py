@@ -18,10 +18,8 @@ from .base import CommandResult
 
 logger = logging.getLogger(__name__)
 
-#: The one message shown when history is unavailable. There used to be two
-#: (this class said "History not available (install prompt_toolkit)", the
-#: live command spelled out the pip install), which is exactly the drift a
-#: dead duplicate produces (round-6 frontend T1).
+#: The one message shown when history is unavailable. Do not duplicate it:
+#: separate copies of the wording drift out of sync with each other.
 HISTORY_UNAVAILABLE_MESSAGE = (
     "History not available. Install prompt_toolkit for history support:\n"
     "  pip install pypowerpetdoor[interactive]"
@@ -79,11 +77,10 @@ class History:
             history_file: Path to history file, "none" to disable file storage,
                          or None for in-memory only.
             backend: An already-built prompt_toolkit history object to wrap
-                instead of creating one. This is how the ``history``
-                command reaches these operations: the command handler is
-                handed the raw backend, and wrapping it here is what let
-                the inline re-implementation of clear + formatting go away
-                (round-6 frontend T1).
+                instead of creating one. This is how the ``history`` command
+                reaches these operations: the command handler is handed the
+                raw backend, and wrapping it here keeps clear + formatting
+                from being re-implemented inline.
         """
         self._history: Any = backend
         self._prompt_toolkit_available = backend is not None
@@ -109,7 +106,7 @@ class History:
                     # every load and every store, so a one-character typo in
                     # `--history` bought a traceback and a modal "Press ENTER
                     # to continue" the operator had to dismiss, repeatedly,
-                    # for the life of the session (round-9 frontend L2).
+                    # for the life of the session.
                     logger.warning(
                         f"Could not use history file {history_file}: {e}; "
                         "history is in-memory for this session"

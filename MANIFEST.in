@@ -1,27 +1,22 @@
 # Source-distribution contents.
 #
-# The published sdist used to carry 9 of the repo's test modules and none of
-# the machinery that runs them - no conftest.py, no tests/__init__.py, no
-# tests/fuzz/, no tests/simulator/ - because setuptools' default sdist
-# heuristic picks up top-level *.py files and stops. `pytest` in the unpacked
-# artifact therefore collected nothing and errored on
+# setuptools' default sdist heuristic picks up top-level *.py files and
+# stops, so the published sdist used to carry 9 of the repo's test modules
+# and none of the machinery that runs them - no conftest.py, no
+# tests/__init__.py, no tests/fuzz/, no tests/simulator/. `pytest` in the
+# unpacked artifact therefore collected nothing and errored on
 # `from tests.conftest import ...`.
 #
-# Every security fix in rounds 1-9 is asserted by a test, and the fuzz suite
-# that reaches the round-8 decode shapes lives in tests/fuzz/. A downstream
-# packager, an auditor, or a distribution's build system takes the *sdist* -
-# so advertising a suite it cannot execute is worse than shipping none
-# (round-9 security informational 1). This ships the whole thing: with the
-# `dev` extra installed (which is what the shipped `addopts = "-n auto"`
-# needs), `pytest` in the unpacked sdist runs the same suite CI does.
+# A downstream packager, an auditor, or a distribution's build system takes
+# the *sdist*, so advertising a suite it cannot execute is worse than
+# shipping none. This ships the whole thing: with the `dev` extra installed
+# (which is what the shipped `addopts = "-n auto"` needs), `pytest` in the
+# unpacked sdist runs the same suite CI does.
 #
 # `.github/workflows/test.yml`'s `packaging` job unpacks the built sdist and
 # asserts this choice, so it cannot drift back silently.
 graft tests
 graft docs
-# `tests/test_gaps_report.py` imports it by path, and it is inside the
-# coverage gate, so the sdist is only self-consistent with it.
-graft scripts
 include CHANGELOG.md
 include uv.lock
 

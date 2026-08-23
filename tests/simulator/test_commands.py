@@ -473,8 +473,7 @@ class TestInteractiveOnlyCommands:
 
         The assertion is against the buffer this test installs. `capsys`
         patches sys.stdout, not sys.__stdout__, so a capsys-based assertion
-        here is vacuous - it holds whether or not the sequence was written
-        (R3-M1).
+        here is vacuous - it holds whether or not the sequence was written.
         """
         command_handler.set_interactive_mode(True)
         tty = _TtyStdout()
@@ -487,7 +486,7 @@ class TestInteractiveOnlyCommands:
         assert tty.getvalue() == "\033[2J\033[H"
 
     async def test_clear_writes_nothing_off_a_terminal(self, command_handler, monkeypatch):
-        """Piped/dumb sessions must not receive ANSI garbage (T3)."""
+        """Piped/dumb sessions must not receive ANSI garbage."""
         command_handler.set_interactive_mode(True)
         pipe = io.StringIO()  # isatty() -> False
         monkeypatch.setattr(sys, "__stdout__", pipe)
@@ -751,7 +750,7 @@ class TestCliModeRestore:
         Without this, a failing assertion between set_cli_mode(True) and
         set_cli_mode(False) leaves every later test in this xdist worker
         looking at a corrupted registry - a cascade of misleading failures
-        around the one real one (R3-T2).
+        around the one real one.
         """
         try:
             yield
@@ -937,7 +936,7 @@ class TestRunWaitMode:
 
         # Bounded: without the fast-fail guard this call waits on the run
         # lock that only `release` frees, and the test would hang forever
-        # instead of failing (R3-M4).
+        # instead of failing.
         async with asyncio.timeout(2.0):
             result = await queued_handler.execute(f"run {script} wait")
 
@@ -977,7 +976,7 @@ class TestRunWaitMode:
 
 
 class TestScriptQueue:
-    """The queue counts the run already taken off it (M2), and can drop it."""
+    """The queue counts the run already taken off it, and can drop it."""
 
     async def test_put_then_get_preserves_order(self):
         queue = ScriptQueue()
@@ -988,7 +987,7 @@ class TestScriptQueue:
         assert (await queue.get()).ref == "b"
 
     async def test_entries_carry_the_display_name(self):
-        """`list` reports names, not raw references (T2)."""
+        """`list` reports names, not raw references."""
         queue = ScriptQueue()
         await queue.put("./scripts/long2.yaml", "Long Script B")
 
@@ -1041,7 +1040,7 @@ class TestScriptQueue:
         assert queue.pending() == ["Script A", "Script B"]
 
     async def test_clear_drops_claimed_runs_too(self):
-        """`stop all` must leave nothing pending, claim included (M1).
+        """`stop all` must leave nothing pending, claim included.
 
         clear() used to empty `_waiting` only, so the one entry claim
         tracking exists for survived the drop, the reported count
@@ -1063,7 +1062,7 @@ class TestScriptQueue:
         assert queue.qsize() == 0
 
     async def test_a_cleared_claim_reports_it_must_not_start(self):
-        """start() is how the consumer learns its run was dropped (M1)."""
+        """start() is how the consumer learns its run was dropped."""
         queue = ScriptQueue()
         await queue.put("a", "Script A")
         claimed = await queue.get()
@@ -1103,7 +1102,7 @@ class TestScriptQueue:
 
 
 class TestScriptBusyVisibility:
-    """Serialized runs made "busy" a real state; it must be observable (M5)."""
+    """Serialized runs made "busy" a real state; it must be observable."""
 
     @pytest.fixture
     def queued_handler(self, simulator):
@@ -1177,7 +1176,7 @@ class TestScriptBusyVisibility:
             await asyncio.wait_for(task, 2.0)
 
     async def test_stop_ends_the_running_script(self, queued_handler):
-        """`stop` stops the script, and the run reports FAILED (M5)."""
+        """`stop` stops the script, and the run reports FAILED."""
         runner = queued_handler.script_runner
         task, release = await self._start_blocking_script(runner)
         try:
@@ -1193,11 +1192,11 @@ class TestScriptBusyVisibility:
         result = await queued_handler.execute("stop")
         assert result.success is False
         # `stop` was an alias for `shutdown` until this release, so muscle
-        # memory is the likeliest reason it lands on an idle simulator (T4).
+        # memory is the likeliest reason it lands on an idle simulator.
         assert result.message == "No script is running (use 'shutdown' to stop the simulator)"
 
     async def test_stop_does_not_shut_the_simulator_down(self, queued_handler):
-        """The whole point of dropping the shutdown alias (M5)."""
+        """The whole point of dropping the shutdown alias."""
         await queued_handler.execute("stop")
         queued_handler.stop_callback.assert_not_called()
 
@@ -1208,7 +1207,7 @@ class TestScriptBusyVisibility:
         queued_handler.stop_callback.assert_called_once_with()
 
     async def test_status_shows_a_pending_stop(self, queued_handler):
-        """A requested-but-not-yet-effective stop is visible (L3).
+        """A requested-but-not-yet-effective stop is visible.
 
         `stop` takes effect at a step boundary, so an operator watching
         `status` could not tell a registered stop from one that never
@@ -1224,7 +1223,7 @@ class TestScriptBusyVisibility:
             await asyncio.wait_for(task, 2.0)
 
     async def test_repeat_stop_says_the_first_one_registered(self, queued_handler):
-        """A second `stop` used to answer with a fresh success (L3)."""
+        """A second `stop` used to answer with a fresh success."""
         task, release = await self._start_blocking_script(queued_handler.script_runner)
         try:
             assert (await queued_handler.execute("stop")).message == "Stopping script: Slow Script"
@@ -1236,7 +1235,7 @@ class TestScriptBusyVisibility:
             await asyncio.wait_for(task, 2.0)
 
     async def test_status_counts_a_dequeued_but_unstarted_run(self, queued_handler):
-        """The `(N queued)` indicator used to under-report by one (M2).
+        """The `(N queued)` indicator used to under-report by one.
 
         The queue consumer takes an entry off as soon as one exists and
         only then waits for the run lock, so the commonest case - one
@@ -1256,7 +1255,7 @@ class TestScriptBusyVisibility:
             assert result.data["queued_scripts"] == 1
 
             listed = await queued_handler.execute("list")
-            # The name, not the reference: every other line prints names (T2).
+            # The name, not the reference: every other line prints names.
             assert "Queued: My Custom Script" in listed.message
             assert listed.data["pending"] == ["My Custom Script"]
         finally:
@@ -1264,7 +1263,7 @@ class TestScriptBusyVisibility:
             await asyncio.wait_for(task, 2.0)
 
     async def test_stop_all_drains_the_queue_in_one_command(self, queued_handler):
-        """Queued runs had to be cancelled one `stop` at a time (L2)."""
+        """Queued runs had to be cancelled one `stop` at a time."""
         task, release = await self._start_blocking_script(queued_handler.script_runner)
         try:
             for _ in range(3):
@@ -1280,14 +1279,14 @@ class TestScriptBusyVisibility:
             await asyncio.wait_for(task, 2.0)
 
     async def test_stop_all_drop_count_matches_the_depth_list_just_printed(self, queued_handler):
-        """Running + N queued + a claimed one: all gone, one command (M1).
+        """Running + N queued + a claimed one: all gone, one command.
 
-        The claim-tracking fix (M2) and the `stop all` fix (L2) did not
-        know about each other: `clear()` emptied `_waiting` only while
-        `qsize()` counted the claim, so `stop all` reported one fewer than
-        `list` had shown a breath earlier and left the claimed run to start
-        as soon as the running script stopped. Two `stop all` commands were
-        needed to clear one running plus two queued.
+        The claim-tracking fix and the `stop all` fix did not know about
+        each other: `clear()` emptied `_waiting` only while `qsize()`
+        counted the claim, so `stop all` reported one fewer than `list` had
+        shown a breath earlier and left the claimed run to start as soon as
+        the running script stopped. Two `stop all` commands were needed to
+        clear one running plus two queued.
         """
         task, release = await self._start_blocking_script(queued_handler.script_runner)
         try:
@@ -1306,7 +1305,7 @@ class TestScriptBusyVisibility:
             assert result.message == "Stopping script: Slow Script (dropped 2 queued)"
             assert queued_handler.script_queue.qsize() == 0
             assert queued_handler.script_queue.pending() == []
-            # And the claimed entry knows it must not start (frontend M1).
+            # And the claimed entry knows it must not start.
             assert claimed.cancelled is True
             assert queued_handler.script_queue.start(claimed) is False
 
@@ -1321,7 +1320,7 @@ class TestScriptBusyVisibility:
 
         Deleting `scope == STOP_ALL_KEYWORD and` from the guard survived
         every test in the suite: no test issued a bare `stop` with runs
-        queued (R5-L2).
+        queued.
         """
         task, release = await self._start_blocking_script(queued_handler.script_runner)
         try:
@@ -1331,10 +1330,9 @@ class TestScriptBusyVisibility:
             result = await queued_handler.execute("stop")
 
             assert result.success is True
-            # The queue is left alone, and - unlike before round 6 - the
-            # answer says so, because the observable consequence of `stop`
-            # here is that a *different* script starts driving the door
-            # (frontend L2).
+            # The queue is left alone, and the answer says so, because the
+            # observable consequence of `stop` here is that a *different*
+            # script starts driving the door.
             assert result.message == (
                 "Stopping script: Slow Script (2 still queued; use 'stop all' to discard them)"
             )
@@ -1354,7 +1352,7 @@ class TestScriptBusyVisibility:
         assert queued_handler.script_queue.qsize() == 0
 
     async def test_stop_all_with_nothing_at_all_reports_idle(self, queued_handler):
-        """`stop all` is idempotent: the requested state already holds (T1).
+        """`stop all` is idempotent: the requested state already holds.
 
         A CI wrapper doing `ctl stop all || fail` used to get a false
         failure for having nothing to do.
@@ -1365,7 +1363,7 @@ class TestScriptBusyVisibility:
         assert result.message == "Nothing running or queued"
 
     async def test_bare_stop_with_a_pending_run_says_so(self, queued_handler):
-        """ "No script is running" was wrong in the claim window (M1).
+        """ "No script is running" was wrong in the claim window.
 
         Nothing is running, but a claimed run *is* pending, so the flat
         answer left the operator polling `list` and retrying.
@@ -1443,7 +1441,7 @@ class TestScriptPathRestrictions:
     async def test_restricted_refuses_a_symlink_out_of_the_scripts_dir(
         self, restricted_handler, tmp_path, suffix
     ):
-        """A bare name must not follow a symlink out of the base dir (R5-M2).
+        """A bare name must not follow a symlink out of the base dir.
 
         The lexical rejections above are all stopped earlier, by
         `_load_script_restricted`. Nothing tested the check that actually
@@ -1463,7 +1461,7 @@ class TestScriptPathRestrictions:
 
         # Refused, and the refusal explains itself: `Unknown script: evil.
         # Available: ..., evil, ...` contradicted itself inside one line,
-        # because `list`/completion advertised the symlink (frontend L1).
+        # because `list`/completion advertised the symlink.
         with pytest.raises(ValueError, match="resolves outside"):
             restricted_handler.load_script("evil")
 
@@ -1486,9 +1484,8 @@ class TestScriptPathRestrictions:
 
         In the unrestricted front end it is reached whenever
         `Path(script_ref).exists()` is False, so the containment check is
-        the only thing between it and an arbitrary file (R5-M2). Since
-        round 6 the refusal names the reason instead of claiming the file
-        does not exist (frontend L1); it still refuses.
+        the only thing between it and an arbitrary file. The refusal names
+        the reason instead of claiming the file does not exist.
         """
         outside = tmp_path.parent / "outside"
         outside.mkdir(exist_ok=True)
@@ -1498,13 +1495,13 @@ class TestScriptPathRestrictions:
             restricted_handler._load_script_by_name("../outside/secret")
 
     async def test_a_genuinely_unknown_name_still_says_unknown(self, restricted_handler):
-        """The L1 fix must not turn every miss into a path-policy message."""
+        """The clearer refusal must not turn every miss into a path-policy message."""
         with pytest.raises(ScriptError, match="Unknown script: nope"):
             restricted_handler._load_script_by_name("nope")
 
 
 class TestScriptsDirVisibility:
-    """--scripts-dir scripts must be discoverable, not just runnable (M4)."""
+    """--scripts-dir scripts must be discoverable, not just runnable."""
 
     @pytest.fixture
     def scripts_dir_handler(self, simulator, tmp_path):
@@ -1549,7 +1546,7 @@ class TestScriptsDirVisibility:
     async def test_list_shows_an_empty_scripts_dir_as_configured_but_empty(
         self, simulator, tmp_path
     ):
-        """`--list-scripts` prints the header for an empty dir; `list` must too (T5).
+        """`--list-scripts` prints the header for an empty dir; `list` must too.
 
         A ctl user cannot see the daemon's command line, so without the
         header they cannot tell "no --scripts-dir configured" from
@@ -1571,7 +1568,7 @@ class TestScriptsDirVisibility:
     async def test_run_help_does_not_advertise_paths_over_the_control_channel(
         self, scripts_dir_handler
     ):
-        """The in-client help pointed at the form the channel refuses (L2)."""
+        """The in-client help pointed at the form the channel refuses."""
         result = await scripts_dir_handler.execute("run help")
 
         assert "paths are not accepted over the control channel" in result.message
@@ -1602,10 +1599,10 @@ class TestScriptsDirVisibility:
 
         "...move it into the directory or run it by path" was answered by
         the very next line of code with "Script paths are not allowed over
-        the control channel; use a bare script name" (round-7 frontend L6).
-        Locally, running it by path really *is* the remedy, so that half of
-        the advice has to survive - which is why the string is policy-aware
-        rather than simply shortened.
+        the control channel; use a bare script name". Locally, running it
+        by path really *is* the remedy, so that half of the advice has to
+        survive - which is why the string is policy-aware rather than
+        simply shortened.
         """
         outside = tmp_path.parent / f"outside_{allow_paths}"
         outside.mkdir(exist_ok=True)
@@ -1629,8 +1626,7 @@ class TestScriptsDirVisibility:
         """The marker names the real file, suffix included.
 
         It used to reconstruct `<dir>/<name>`, which read like a path but
-        `ls` on it failed, and could not express a shadowing `.yml`
-        (round-7 frontend L5).
+        `ls` on it failed, and could not express a shadowing `.yml`.
         """
         shadowing = tmp_path / "basic_cycle.yml"
         shadowing.write_text(
@@ -1656,7 +1652,7 @@ class TestScriptsDirVisibility:
 
 
 # ============================================================================
-# is_wait_run (R3-M3)
+# is_wait_run
 # ============================================================================
 
 

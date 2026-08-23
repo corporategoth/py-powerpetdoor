@@ -226,7 +226,7 @@ class TestSchedule:
         schedule = Schedule.from_dict(data)
         # Bitmask 0b0011111 = 31 -> Sun..Thu on, Fri/Sat off, as real bools.
         # `True == 1`, so the isinstance check is what actually pins the
-        # normalization R4-M3/T3 were about (R5-T5).
+        # normalization.
         assert schedule.days_of_week == [True, True, True, True, True, False, False]
         assert all(isinstance(day, bool) for day in schedule.days_of_week)
 
@@ -245,7 +245,7 @@ class TestSchedule:
         assert all(isinstance(day, bool) for day in schedule.days_of_week)
 
     def test_from_dict_reads_string_day_flags_as_flags_not_truthiness(self):
-        """`"0"` disables the day - bool("0") is True, which would enable it (L4)."""
+        """`"0"` disables the day - bool("0") is True, which would enable it."""
         schedule = Schedule.from_dict(
             {
                 "index": 0,
@@ -276,7 +276,7 @@ class TestSchedule:
         ids=repr,
     )
     def test_from_dict_reads_enabled_like_every_other_wire_flag(self, flag, expected):
-        """`enabled` is read the way its daysOfWeek sibling is (T3).
+        """`enabled` is read the way its daysOfWeek sibling is.
 
         A bespoke `== "1"` read "true"/"yes"/"on" as *disabled*, and left an
         integer 1/0 in a field declared `enabled: bool`.
@@ -381,6 +381,50 @@ class TestSchedule:
         assert schedule.is_day_active(0) is False
         assert schedule.is_day_active(6) is False
 
+    def test_coinciding_ends_are_a_full_twenty_four_hour_window(self):
+        """All 1440 minutes, not 1439 and not 0.
+
+        The window end is exclusive, so `[start, end)` covers at most 1439
+        of the day's minutes: `00:00-23:59` looks like a 24/7 entry and
+        blocks the sensor for exactly the minute 23:59. Two schedule-script
+        tests failed for that one minute a day. Coinciding ends are
+        therefore the only spelling a true 24h window has.
+        """
+        schedule = Schedule(
+            index=0,
+            enabled=True,
+            days_of_week=[True] * 7,
+            inside=True,
+            start_hour=0,
+            start_min=0,
+            end_hour=0,
+            end_min=0,
+        )
+
+        allowed = [
+            minute
+            for minute in range(1440)
+            if schedule.is_sensor_allowed("inside", minute // 60, minute % 60, 0)
+        ]
+
+        assert len(allowed) == 1440
+
+    def test_an_exclusive_end_window_covers_every_minute_but_the_last(self):
+        """The shape that made 00:00-23:59 wrong, stated directly."""
+        schedule = Schedule(
+            index=0,
+            enabled=True,
+            days_of_week=[True] * 7,
+            inside=True,
+            start_hour=0,
+            start_min=0,
+            end_hour=23,
+            end_min=59,
+        )
+
+        assert schedule.is_sensor_allowed("inside", 23, 58, 0) is True
+        assert schedule.is_sensor_allowed("inside", 23, 59, 0) is False
+
     def test_is_sensor_allowed_inside_normal_hours(self):
         """Inside sensor should be allowed during scheduled hours."""
         schedule = Schedule(
@@ -462,9 +506,9 @@ class TestSchedule:
         This test's older half asserts 23:00, 02:00 and 12:00 - the
         interior of the window and one point far outside it - so both
         comparisons that define the window were unpinned: `>= start` -> `>`
-        and `< end` -> `<=` each survived the whole suite (round-7
-        test-fanatic M5). The window is inclusive at the start and
-        exclusive at the end, and those are the two minutes that say so.
+        and `< end` -> `<=` each survived the whole suite. The window is
+        inclusive at the start and exclusive at the end, and those are the
+        two minutes that say so.
         """
         schedule = Schedule(
             index=0,
@@ -503,7 +547,7 @@ class TestScheduleFromDictRejectsHostileInput:
 
     A stored malformed schedule used to raise IndexError/TypeError later,
     during sensor evaluation - a quiet, persistent denial of the
-    sensor-trigger feature (security round-2 finding 1).
+    sensor-trigger feature.
     """
 
     def test_non_mapping_payload_rejected(self):
@@ -591,7 +635,7 @@ class TestScheduleFromDictRejectsHostileInput:
         ],
     )
     def test_missing_time_window_is_rejected_not_invented(self, payload, message):
-        """A selected sensor with no window must fail, not get 06:00-22:00 (L5)."""
+        """A selected sensor with no window must fail, not get 06:00-22:00."""
         with pytest.raises(ValueError, match=message):
             Schedule.from_dict(payload)
 
@@ -601,11 +645,11 @@ class TestScheduleFromDictRejectsHostileInput:
         assert (schedule.inside, schedule.outside) == (False, False)
         assert (schedule.start_hour, schedule.start_min) == (6, 0)
         assert (schedule.end_hour, schedule.end_min) == (22, 0)
-        # The absent-daysOfWeek default was unobserved on both sides (R5-L1).
+        # The absent-daysOfWeek default was unobserved on both sides.
         assert schedule.days_of_week == [True] * 7
 
     def test_from_dict_no_days_defaults_to_every_day(self):
-        """An absent daysOfWeek means "every day" here too (R5-L1)."""
+        """An absent daysOfWeek means "every day" here too."""
         assert Schedule.from_dict({}).days_of_week == [True] * 7
 
     @pytest.mark.parametrize(
@@ -621,17 +665,17 @@ class TestScheduleFromDictRejectsHostileInput:
         ids=repr,
     )
     def test_from_dict_bitmask_boundaries(self, mask, expected):
-        """The legacy bitmask branch, pinned across its range (R5-L1)."""
+        """The legacy bitmask branch, pinned across its range."""
         assert Schedule.from_dict({"index": 0, "daysOfWeek": mask}).days_of_week == expected
 
     @pytest.mark.parametrize("mask", [-1, -128, 128, 2**64], ids=repr)
     def test_from_dict_out_of_range_bitmask_is_rejected(self, mask):
-        """A negative mask must not fail open to all seven days (R5-L1)."""
+        """A negative mask must not fail open to all seven days."""
         with pytest.raises(ValueError, match="daysOfWeek"):
             Schedule.from_dict({"index": 0, "daysOfWeek": mask})
 
     def test_from_dict_inside_wins_when_both_sensors_are_flagged(self):
-        """Statement order is the rule, so pin it on both parsers (R5-T4)."""
+        """Statement order is the rule, so pin it on both parsers."""
         schedule = Schedule.from_dict(
             {
                 "index": 0,
@@ -756,7 +800,7 @@ class TestDoorSimulatorState:
         assert result[1] == 1
 
     def test_get_schedule_list_is_sorted_by_slot(self):
-        """Slots created out of order still come back in slot order (T3).
+        """Slots created out of order still come back in slot order.
 
         The store is a dict, so insertion order leaked into the reply and
         `door.refresh_schedules` inherited it - leaving the public
@@ -911,7 +955,7 @@ class TestIsSensorBlockingClose:
 
 
 # ============================================================================
-# Timezone Resolution Tests (M9: POSIX wire values)
+# Timezone Resolution Tests (POSIX wire values)
 # ============================================================================
 
 
@@ -1013,16 +1057,16 @@ class TestGetTzinfo:
             inside=True,
             start_hour=0,
             start_min=0,
-            end_hour=23,
-            end_min=59,
+            end_hour=0,
+            end_min=0,
         )
         assert state.is_sensor_allowed_by_schedule("inside") is True
 
-        # A zero-length window never allows it
+        # No scheduled day never allows it
         state.schedules[0] = Schedule(
             index=0,
             enabled=True,
-            days_of_week=[1, 1, 1, 1, 1, 1, 1],
+            days_of_week=[0, 0, 0, 0, 0, 0, 0],
             inside=True,
             start_hour=0,
             start_min=0,
@@ -1032,7 +1076,7 @@ class TestGetTzinfo:
         assert state.is_sensor_allowed_by_schedule("inside") is False
 
     def test_hold_time_accepts_float(self):
-        """hold_time is a float field (T2)."""
+        """hold_time is a float field."""
         state = DoorSimulatorState(hold_time=2.5)
         assert state.hold_time == 2.5
         assert DoorSimulatorState.__dataclass_fields__["hold_time"].type is float

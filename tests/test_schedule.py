@@ -236,7 +236,7 @@ class TestCompressSchedule:
     """Tests for schedule compression algorithm."""
 
     def test_compressed_entries_carry_documented_wire_types(self):
-        """compress_schedule() output goes straight onto the wire (M1).
+        """compress_schedule() output goes straight onto the wire.
 
         Every entry is a deep copy of ``schedule_template``, so a wrong
         wire type there ships in every incremental sync. Checked with the
@@ -429,19 +429,19 @@ class TestCompressSchedule:
 
 
 class TestCompressScheduleEdgeCases:
-    """Boundary and negative cases for compress_schedule (H11/T7)."""
+    """Boundary and negative cases for compress_schedule."""
 
     create_schedule_entry = TestCompressSchedule.create_schedule_entry
 
     def test_sparse_entry_raises_value_error(self):
-        """An entry missing its time fields raises a clear ValueError (T7)."""
+        """An entry missing its time fields raises a clear ValueError."""
         sparse = {FIELD_DAYSOFWEEK: [1, 1, 1, 1, 1, 1, 1], FIELD_INSIDE: True}
 
         with pytest.raises(ValueError, match="missing"):
             compress_schedule([sparse])
 
     def test_missing_daysofweek_raises_value_error(self):
-        """An entry without daysOfWeek raises a clear ValueError (T7)."""
+        """An entry without daysOfWeek raises a clear ValueError."""
         entry = self.create_schedule_entry(0, [1] * 7, inside=True, in_start=(6, 0), in_end=(10, 0))
         del entry[FIELD_DAYSOFWEEK]
 
@@ -449,12 +449,12 @@ class TestCompressScheduleEdgeCases:
             compress_schedule([entry])
 
     def test_non_dict_entry_raises_value_error(self):
-        """A non-dict entry raises a clear ValueError (T7)."""
+        """A non-dict entry raises a clear ValueError."""
         with pytest.raises(ValueError, match="not a dict"):
             compress_schedule(["not-a-schedule"])
 
     def test_entry_with_flags_but_no_time_dicts_raises(self):
-        """Both flags present but no time sub-dicts names the missing key (T7)."""
+        """Both flags present but no time sub-dicts names the missing key."""
         entry = {
             FIELD_DAYSOFWEEK: [1, 1, 1, 1, 1, 1, 1],
             FIELD_INSIDE: True,
@@ -465,7 +465,7 @@ class TestCompressScheduleEdgeCases:
             compress_schedule([entry])
 
     def test_error_identifies_entry_position(self):
-        """The ValueError names the offending entry's position (T7)."""
+        """The ValueError names the offending entry's position."""
         good = self.create_schedule_entry(0, [1] * 7, inside=True, in_start=(6, 0), in_end=(10, 0))
         with pytest.raises(ValueError, match="entry 1"):
             compress_schedule([good, {}])
@@ -544,9 +544,9 @@ class TestCompressScheduleEdgeCases:
 
     @pytest.mark.parametrize("flag", ["0", 0, False, "false", "off", "no"], ids=repr)
     def test_compress_reads_disabled_day_flags_with_make_bool(self, flag):
-        """bool("0") is True, so the expand step must use make_bool (L4/R4-M3).
+        """bool("0") is True, so the expand step must use make_bool.
 
-        This is the third site of the same fix (the other two are
+        This is the third site of the same coercion (the other two are
         ``door.Schedule.from_dict`` and the simulator's
         ``coerce_schedule_day``): a firmware variant sending ``"0"`` day
         flags would otherwise expand to every day of the week.
@@ -696,7 +696,7 @@ class TestScheduleEntryContentKey:
         """Missing optional fields fall back to the documented defaults.
 
         The key for a fixed literal entry is exactly knowable, so pin it
-        rather than asserting it is merely not None (round-6 L5).
+        rather than asserting it is merely not None.
         """
         entry = {
             FIELD_DAYSOFWEEK: [1, 0, 0, 0, 0, 0, 0],
@@ -743,14 +743,14 @@ class TestScheduleEntryContentKey:
 
     @pytest.mark.parametrize("flag", ["1", 1, True], ids=repr)
     def test_day_flag_spellings_all_produce_one_key(self, flag):
-        """String day flags must not make every entry look changed (L1).
+        """String day flags must not make every entry look changed.
 
-        This is the third reader of ``daysOfWeek`` and the only one that
-        was still comparing the field raw. Against the firmware variant
-        ``compress_schedule`` and ``coerce_schedule_day`` were both
-        hardened for, ``("1", ...)`` and ``(1, ...)`` were different keys,
-        so ``compute_schedule_diff`` reported every entry as changed and
-        the incremental sync issued a full SET_SCHEDULE sweep.
+        This is the third reader of ``daysOfWeek``. Comparing the field raw
+        makes ``("1", ...)`` and ``(1, ...)`` different keys against the
+        firmware variant ``compress_schedule`` and ``coerce_schedule_day``
+        are both hardened for, so ``compute_schedule_diff`` reports every
+        entry as changed and the incremental sync issues a full
+        SET_SCHEDULE rewrite.
         """
         canonical = {FIELD_DAYSOFWEEK: [1] * 7, FIELD_INSIDE: True}
         variant = {FIELD_DAYSOFWEEK: [flag] * 7, FIELD_INSIDE: True}
@@ -759,7 +759,7 @@ class TestScheduleEntryContentKey:
 
     @pytest.mark.parametrize("flag", ["0", 0, False], ids=repr)
     def test_disabled_day_flag_spellings_all_produce_one_key(self, flag):
-        """bool("0") is True, so the off spellings must collapse too (L1)."""
+        """bool("0") is True, so the off spellings must collapse too."""
         canonical = {FIELD_DAYSOFWEEK: [0] * 7, FIELD_INSIDE: True}
         variant = {FIELD_DAYSOFWEEK: [flag] * 7, FIELD_INSIDE: True}
 
@@ -769,13 +769,13 @@ class TestScheduleEntryContentKey:
         )
 
     def test_integer_enabled_flag_matches_the_boolean(self):
-        """``enabled`` got half the treatment: str was read, int was not (L1)."""
+        """``enabled`` reads string spellings, so it must read int ones too."""
         assert schedule_entry_content_key(
             {FIELD_DAYSOFWEEK: [1] * 7, FIELD_ENABLED: 0}
         ) == schedule_entry_content_key({FIELD_DAYSOFWEEK: [1] * 7, FIELD_ENABLED: False})
 
     def test_device_string_days_are_a_no_op_diff_against_local_ints(self):
-        """The measured symptom of L1: a full rewrite where nothing changed."""
+        """The measured symptom: a full rewrite where nothing changed."""
         local = {
             FIELD_INDEX: 0,
             FIELD_DAYSOFWEEK: [1, 1, 1, 1, 1, 1, 1],
@@ -795,14 +795,14 @@ class TestScheduleEntryContentKey:
         assert (to_delete, to_set) == ([], [])
 
     def test_the_new_wire_types_diff_to_a_no_op_against_the_device(self):
-        """M1 and L1 compose: a device echo of what we sent is not a change.
+        """A device echo of what we sent is not a change.
 
-        The emitter fix put ``enabled: "1"`` on the wire and the key fix
-        made ``daysOfWeek`` spelling-insensitive. Together they have to
+        The emitter puts ``enabled: "1"`` on the wire and the content key
+        is ``daysOfWeek`` spelling-insensitive. Together they have to
         produce *no* diff for a device that stores exactly what
         ``compress_schedule`` sent and answers ``GET_SCHEDULE`` with the
         simulator's own emitter - otherwise the incremental sync path
-        rewrites every entry on every sync, which is what L1 measured.
+        rewrites every entry on every sync.
         """
         from powerpetdoor.simulator import Schedule as SimulatorSchedule
 
@@ -980,13 +980,11 @@ class TestComputeScheduleDiff:
     def test_two_brand_new_entries_get_distinct_indices(self):
         """The second new entry must not reuse the first's fresh index.
 
-        Only the fuzz suite caught this: deleting the
-        ``{e[FIELD_INDEX] for e in entries_to_set[:i]}`` term from
-        ``used_indices`` survived ``pytest --ignore=tests/fuzz``, which is
-        exactly what CI's unit matrix runs and what CLAUDE.md's checklist
-        requires to stand alone. The existing coverage had only *one*
-        brand-new entry, so the rule was never exercised deterministically
-        (round-6 test-fanatic M1).
+        Dropping the ``{e[FIELD_INDEX] for e in entries_to_set[:i]}`` term
+        from ``used_indices`` is otherwise invisible to
+        ``pytest --ignore=tests/fuzz``, which is exactly what CI's unit
+        matrix runs. The rest of the coverage uses only *one* brand-new
+        entry, so the rule is never exercised deterministically there.
         """
         current = [self.create_entry(0, [1, 0, 0, 0, 0, 0, 0])]  # Sunday, kept
         new = [
@@ -1019,7 +1017,7 @@ class TestComputeScheduleDiff:
         assert [entry[FIELD_INDEX] for entry in to_set] == [0, 1, 2]
 
     def test_diff_does_not_mutate_inputs(self):
-        """compute_schedule_diff must not modify either input list (L13)."""
+        """compute_schedule_diff must not modify either input list."""
         current = [self.create_entry(0, [1, 0, 0, 0, 0, 0, 0], start_hour=8)]
         new = [self.create_entry(9, [1, 0, 0, 0, 0, 0, 0], start_hour=10)]
         current_snapshot = deepcopy(current)
@@ -1078,7 +1076,7 @@ class TestScheduleTemplate:
 
 
 # ============================================================================
-# Untrusted indices in compute_schedule_diff (round-6 backend L3)
+# Untrusted indices in compute_schedule_diff
 # ============================================================================
 
 

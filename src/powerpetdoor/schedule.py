@@ -50,7 +50,7 @@ from .const import (
     FIELD_OUTSIDE_PREFIX,
     FIELD_START_TIME_SUFFIX,
 )
-from .sanitize import sanitize_text
+from .sanitize import sanitize_field, sanitize_text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -113,8 +113,7 @@ def coerce_schedule_days(value: object) -> list[bool]:
     The bitmask is range-checked like every other numeric wire field:
     ``(-1 >> i) & 1`` is 1 forever, so an unbounded mask turned *every*
     negative integer into "active all seven days" - failing open, which is
-    the exact opposite of the doctrine :func:`coerce_schedule_flag`
-    documents (R5-L1).
+    the exact opposite of the doctrine :func:`coerce_schedule_flag` documents.
 
     Raises:
         ValueError: If the value is neither of those shapes, an element is
@@ -155,7 +154,7 @@ def coerce_schedule_flag(value: object, name: str) -> bool:
         _LOGGER.debug(
             "Schedule %s is not a recognizable flag (%s); treating it as off",
             name,
-            sanitize_text(value),
+            sanitize_field(value),
         )
         return False
     return flag
@@ -177,8 +176,8 @@ def coerce_schedule_time(value: object, name: str) -> tuple[int, int]:
 
     The hour is required: this entry's whole purpose is to gate sensor
     access, so materializing a permissive window out of an absent field is
-    the wrong way to fail (L5). The minute defaults to 0, matching the
-    protocol's own ``{hour: H, min: 0}`` shape.
+    the wrong way to fail. The minute defaults to 0, matching the protocol's
+    own ``{hour: H, min: 0}`` shape.
 
     Raises:
         ValueError: If the value is not a mapping, carries no hour, or the
@@ -300,9 +299,9 @@ def validate_schedule_entry(sched: dict) -> bool:
 # wire. Do not "tidy" it to match the Python types, to match the other
 # direction, or to match docs/protocol.md - that document is
 # reverse-engineered and is not authority over what the firmware accepts.
-# Round 5 changed the client->device `enabled` spelling to "1"/"0" on the
-# doc's say-so and it had to be reverted: the JSON boolean is what has
-# actually run against real Power Pet Doors since v0.1.0.
+# The client->device `enabled` field is a JSON boolean, not the "1"/"0" the
+# doc describes: the boolean is what has actually run against real Power Pet
+# Doors since v0.1.0.
 #
 # Each field is one line in one of the two format constants, so when a real
 # device settles a question, flipping that field's spelling is a one-line
@@ -440,7 +439,7 @@ schedule_template = build_schedule_payload(
 
 
 def _require_complete_entry(sched: dict, position: int) -> None:
-    """Validate that a schedule entry is fully populated for compression (T7).
+    """Validate that a schedule entry is fully populated for compression.
 
     compress_schedule() reads every field of every entry, so each entry
     must carry a 7-element daysOfWeek list, the inside/outside flags, and
@@ -501,7 +500,7 @@ def compress_schedule(schedule: list[dict]) -> list[dict]:
         Compressed list of schedule entries with sequential indices
 
     Raises:
-        ValueError: If an entry is missing required fields (T7).
+        ValueError: If an entry is missing required fields.
     """
     for position, sched in enumerate(schedule):
         _require_complete_entry(sched, position)
@@ -537,7 +536,7 @@ def compress_schedule(schedule: list[dict]) -> list[dict]:
         for day in range(len(sched[FIELD_DAYSOFWEEK])):
             # make_bool, not truthiness: bool("0") is True, and a firmware
             # variant that sends "0"/"1" day flags (as it already does for
-            # `enabled`) would otherwise expand to every day of the week (L4).
+            # `enabled`) would otherwise expand to every day of the week.
             if make_bool(sched[FIELD_DAYSOFWEEK][day]) is True:
                 if sched[FIELD_INSIDE]:
                     daysched = expanded_sched[FIELD_INSIDE].setdefault(day, [])
@@ -654,7 +653,7 @@ def schedule_entry_content_key(entry: dict) -> tuple:
     ``compress_schedule`` and ``coerce_schedule_day`` were both hardened
     for - every entry looked changed, so the incremental-sync path this
     function exists to enable issued a full ``SET_SCHEDULE`` sweep at every
-    sync against a single-connection, rate-limited device (L1).
+    sync against a single-connection, rate-limited device.
 
     Args:
         entry: Schedule entry dictionary
@@ -720,8 +719,7 @@ def compute_schedule_diff(
     3. Only deleting entries when there are more current entries than new entries
 
     Neither input list is modified: the returned ``entries_to_set`` are
-    deep copies of the new entries with their ``index`` field reassigned
-    (L13).
+    deep copies of the new entries with their ``index`` field reassigned.
 
     ``current_schedule`` may be raw device dicts (the docstring below
     invites exactly that, and this helper is a public export), so every
@@ -729,8 +727,8 @@ def compute_schedule_diff(
     than being trusted. A current entry whose index is not a usable slot
     number cannot be addressed by ``SET_SCHEDULE``/``DELETE_SCHEDULE`` at
     all, so it is skipped with a warning - instead of raising ``TypeError``
-    out of a public helper on a mixed list, or silently handing the caller
-    a payload with ``"index": null`` (round-6 backend L3).
+    out of a public helper on a mixed list, or silently handing the caller a
+    payload with ``"index": null``.
 
     Args:
         current_schedule: List of current schedule entries on device
@@ -768,8 +766,7 @@ def compute_schedule_diff(
             matched_indices.add(current_by_content[key])
         else:
             # This is a new/changed entry that needs to be SET. Copy it so
-            # the index reassignment below never mutates the caller's
-            # input (L13).
+            # the index reassignment below never mutates the caller's input.
             entries_to_set.append(deepcopy(entry))
 
     # Indices that can be reused (current indices that weren't matched)
@@ -782,11 +779,11 @@ def compute_schedule_diff(
             entry[FIELD_INDEX] = reusable_indices[i]
         else:
             # Need a new index - the lowest slot nothing else is using.
-            # `matched | reusable` is exactly `current_indices`, so the
-            # only thing that has to be added is the slots already handed
-            # to *earlier* brand-new entries in this same loop - without
-            # that, two new entries share one index and one silently
-            # overwrites the other (round-6 test-fanatic M1).
+            # `matched | reusable` is exactly `current_indices`, so the only
+            # thing that has to be added is the slots already handed to
+            # *earlier* brand-new entries in this same loop - without that,
+            # two new entries share one index and one silently overwrites
+            # the other.
             used_indices = (
                 matched_indices
                 | set(reusable_indices)

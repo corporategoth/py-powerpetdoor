@@ -73,34 +73,15 @@ def _reset_extra_scripts_dir():
 class MockTransport:
     """Mock asyncio transport for network simulation."""
 
-    def __init__(self, write_buffer_size: int = 0):
+    def __init__(self):
         self.written_data: list[bytes] = []
         self.aborted = False
         self._closing = False
         self._closed = False
-        #: Flow-control calls the bounded frame dispatcher makes.
-        self.reading_paused = False
-        self.pause_calls = 0
-        self.resume_calls = 0
-        self._write_buffer_size = write_buffer_size
 
     def write(self, data: bytes) -> None:
         """Record written data."""
         self.written_data.append(data)
-
-    def pause_reading(self) -> None:
-        """Record backpressure applied by :class:`FrameDispatcher`."""
-        self.reading_paused = True
-        self.pause_calls += 1
-
-    def resume_reading(self) -> None:
-        """Record backpressure released by :class:`FrameDispatcher`."""
-        self.reading_paused = False
-        self.resume_calls += 1
-
-    def get_write_buffer_size(self) -> int:
-        """Bytes queued for the peer but not yet sent."""
-        return self._write_buffer_size
 
     def is_closing(self) -> bool:
         """Return whether transport is closing."""
@@ -314,9 +295,9 @@ def make_async_callback(callback_tracker):
 #
 # `json.JSONDecodeError` is a *subclass* of ValueError, so catching it is
 # not the same as catching what `json.loads` raises. Two shapes escaped
-# both `_dispatch_frame` implementations (round-8 backend M1 / security
-# M1). Both are brace-balanced and under `MAX_BUFFER_SIZE`, so the framing
-# cap is provably not what stops them - the decoder is.
+# both `_dispatch_frame` implementations. Both are brace-balanced and under
+# `MAX_BUFFER_SIZE`, so the framing cap is provably not what stops them -
+# the decoder is.
 #
 # They live here rather than in one test module because the client and the
 # simulator protocol are twins on this path and must be pinned together.
@@ -337,7 +318,7 @@ def nested_frame(depth: int = 9999) -> bytes:
 
 
 # ============================================================================
-# Golden wire payloads (backend M1)
+# Golden wire payloads
 # ============================================================================
 
 #: The schedule numbered 3 that gates the inside sensor 06:30-22:15 on
@@ -352,10 +333,10 @@ def nested_frame(depth: int = 9999) -> bytes:
 #: accepted a JSON boolean since v0.1.0) and the simulator's is
 #: device->client (what a door replies, where ``"1"`` is what was
 #: observed). ``docs/protocol.md`` is reverse-engineered and is not
-#: authority over what the firmware accepts, so a future round must not
-#: "unify" these two payloads. Every field except ``enabled`` is identical
-#: and pinned on both sides, so a divergence in any other field still
-#: fails immediately.
+#: authority over what the firmware accepts, so these two payloads must
+#: not be "unified". Every field except ``enabled`` is identical and
+#: pinned on both sides, so a divergence in any other field still fails
+#: immediately.
 GOLDEN_SCHEDULE_WIRE_TO_DEVICE = {
     "index": 3,
     "enabled": True,

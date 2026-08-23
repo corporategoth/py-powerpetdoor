@@ -319,14 +319,13 @@ class TestFallbackSession:
 
         `new_status = count > 0` -> `>= 0` makes a zero-client status flip
         the prompt's connected indicator **on** and trigger a redraw, and
-        the session still produced the same transcript, so the test passed
-        (round-7 test-fanatic L6). The `clients=0` row is the one that
-        distinguishes the two: the mutant redraws once where the correct
-        code redraws not at all.
+        the session still produced the same transcript, so the test passed.
+        The `clients=0` row is the one that distinguishes the two: the
+        mutant redraws once where the correct code redraws not at all.
 
-        This is the machinery round 6 added in e92a82a ("Refresh prompt
-        colour immediately on client connect/disconnect"), so its
-        zero-client edge is exactly the case worth pinning.
+        This is the machinery added in e92a82a ("Refresh prompt colour
+        immediately on client connect/disconnect"), so its zero-client edge
+        is exactly the case worth pinning.
         """
         from powerpetdoor.simulator.prompt_common import InteractiveSession
 
@@ -382,7 +381,7 @@ class TestFallbackSession:
     async def test_wait_run_has_no_response_deadline(
         self, daemon, piped_stdin, recorded_stdout, start_session
     ):
-        """`run <script> wait` waits as long as the script takes (M2).
+        """`run <script> wait` waits as long as the script takes.
 
         The daemon stays silent for far longer than --timeout, exactly like
         a long script that logs nothing.
@@ -429,7 +428,7 @@ class TestFallbackSession:
         # close. The margin is 10x on purpose: under `-n auto` on a loaded
         # runner the loop can be delayed >100 ms between a sleep expiring and
         # the write landing, and this is one of the few tests where a slow
-        # machine could produce a *false failure* (R3-L5).
+        # machine could produce a *false failure*.
         task = start_session(daemon, timeout=1.0)
         await recorder.wait_for(prompt, count=1)
         os.write(stdin_fd, b"status\n")
@@ -723,7 +722,7 @@ class TestInterruptsAndCancellation:
         The clause carried a `# pragma: no cover` claiming it could not be
         triggered deterministically, while the structurally identical
         `except EOFError` in prompt_common.py has no pragma and is covered
-        by exactly this technique (round-6 test-fanatic T3).
+        by exactly this technique.
         """
         await daemon.start()
 

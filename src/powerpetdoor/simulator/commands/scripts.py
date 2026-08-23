@@ -41,7 +41,7 @@ class QueuedScript:
     must compare by identity. The display name is carried alongside the
     reference because ``run`` has already loaded the script and knows it -
     ``list`` used to print a raw ``./scripts/long2.yaml`` on its ``Queued:``
-    line while every other line printed ``Long Script B`` (T2).
+    line while every other line printed ``Long Script B``.
 
     Attributes:
         ref: The reference passed to ``run``, used to load the script.
@@ -65,16 +65,16 @@ class ScriptQueue:
     *then* waits for the run lock, so a bare ``asyncio.Queue.qsize()``
     under-reported by one for the commonest case - a single script waiting
     behind a ``run ... wait`` - which displayed as "nothing pending" when
-    something was (M2). A claimed entry stays counted, and named, until its
-    run actually starts.
+    something was. A claimed entry stays counted, and named, until its run
+    actually starts.
 
     A claim is *cancellable*, not merely visible. ``stop all`` used to
     empty ``_waiting`` only, so the one entry claim-tracking exists for
     survived the drop and started running seconds later - the drop count
-    contradicted the queue depth ``list`` had just printed, and clearing
-    one running plus N queued runs took two ``stop all`` commands
-    (frontend M1). :meth:`clear` now marks claimed entries cancelled and
-    :meth:`start` reports that to the consumer, which abandons the run.
+    contradicted the queue depth ``list`` had just printed, and clearing one
+    running plus N queued runs took two ``stop all`` commands. :meth:`clear`
+    now marks claimed entries cancelled and :meth:`start` reports that to
+    the consumer, which abandons the run.
     """
 
     def __init__(self) -> None:
@@ -143,7 +143,7 @@ class ScriptQueue:
         return dropped
 
     def qsize(self) -> int:
-        """Pending runs, counting one claimed but not yet started (M2)."""
+        """Pending runs, counting one claimed but not yet started."""
         return len(self._waiting) + len(self._claimed)
 
     def pending(self) -> list[str]:
@@ -172,7 +172,7 @@ def format_script_status(status: ScriptStatus) -> str:
 
     A requested-but-not-yet-effective stop gets its own word: ``stop`` takes
     effect at a step boundary, and without this the operator cannot tell a
-    registered stop from one that never arrived (L3).
+    registered stop from one that never arrived.
     """
     if status.running is None:
         state = "Script: none running"
@@ -242,9 +242,9 @@ class ScriptsCommandsMixin:
                 that resolves outside it. Falling through to
                 ``Unknown script: <name>. Available: ..., <name>, ...``
                 told the operator the script both did and did not exist,
-                with no hint that a path policy was involved (round-6
-                frontend L1). ``list``/``--list-scripts``/completion no
-                longer advertise such files either.
+                with no hint that a path policy was involved.
+                ``list``/``--list-scripts``/completion no longer advertise
+                such files either.
         """
         if self._scripts_dir:
             base = Path(self._scripts_dir).resolve()
@@ -265,7 +265,7 @@ class ScriptsCommandsMixin:
         """The runner's state: what is running, what is pending, and why.
 
         Serialized runs made "busy" a real state; this is the single place
-        that reports it, shared by ``status``, ``list`` and ``stop`` (M5).
+        that reports it, shared by ``status``, ``list`` and ``stop``.
         """
         running = self.script_runner.current_script if self.script_runner.busy else None
         queue = self.script_queue
@@ -284,18 +284,17 @@ class ScriptsCommandsMixin:
         (docs/simulator.md records that precedence). The listing says so
         rather than printing the same name twice with two descriptions and
         no marker of which one ``run`` picks - over ctl the built-in is
-        genuinely unreachable, since paths are refused (round-6 frontend
-        L3).
+        genuinely unreachable, since paths are refused.
         """
-        # One renderer for both surfaces (round-7 frontend L5).
+        # One renderer for both surfaces.
         listing = render_script_listing(self._scripts_dir, builtin=self._list_builtin_scripts())
         lines = list(listing.lines)
         scripts, extra = listing.builtin, listing.extra
         status = self.script_status()
         lines.append(format_script_status(status))
         if status.pending:
-            # A bare count cannot answer "is the thing I queued five
-            # minutes ago still waiting?" (M2).
+            # A bare count cannot answer "is the thing I queued five minutes
+            # ago still waiting?"
             lines.append(f"Queued: {', '.join(status.pending)}")
         return CommandResult(
             True,
@@ -335,8 +334,8 @@ class ScriptsCommandsMixin:
         ``stop all`` also empties the pending queue - including a run the
         consumer has already claimed but not started - so an operator does
         not have to issue one ``stop`` per queued entry and guess how many
-        are left (L2, frontend M1). Its drop count therefore always matches
-        the ``queued`` count ``status``/``list`` reported a moment earlier.
+        are left. Its drop count therefore always matches the ``queued``
+        count ``status``/``list`` reported a moment earlier.
         """
         status = self.script_status()
         dropped: list[QueuedScript] = []
@@ -348,7 +347,7 @@ class ScriptsCommandsMixin:
             if scope == STOP_ALL_KEYWORD:
                 # "leave nothing running or queued" is already true, so a
                 # CI wrapper doing `ctl stop all || fail` must not see a
-                # failure for having nothing to do (T1).
+                # failure for having nothing to do.
                 return CommandResult(True, "Nothing running or queued")
             if status.queued:
                 # A claimed-but-not-started run: something *is* pending
@@ -360,7 +359,7 @@ class ScriptsCommandsMixin:
                     f"(use 'stop all' to discard them)",
                 )
             # `stop` used to be an alias for `shutdown`, so muscle memory is
-            # the likeliest reason it lands on an idle simulator (T4).
+            # the likeliest reason it lands on an idle simulator.
             return CommandResult(
                 False, "No script is running (use 'shutdown' to stop the simulator)"
             )
@@ -371,13 +370,13 @@ class ScriptsCommandsMixin:
             # run - so "the door is now idle" is exactly the wrong mental
             # model, and a repeated `stop` (the commonest way to check
             # whether the first one landed) kills the *next* script rather
-            # than being idempotent (round-6 frontend L2).
+            # than being idempotent.
             suffix = f" ({status.queued} still queued; use 'stop all' to discard them)"
         else:
             suffix = ""
         if status.stopping:
             # Repeating `stop` used to answer with a fresh success, which
-            # reads as if the first one had not registered (L3).
+            # reads as if the first one had not registered.
             return CommandResult(True, f"Stop already requested for: {status.running}{suffix}")
         self.script_runner.stop()
         return CommandResult(True, f"Stopping script: {status.running}{suffix}")
@@ -420,7 +419,7 @@ class ScriptsCommandsMixin:
             script = self.load_script(script_ref)
             if self.script_queue and mode != RUN_WAIT_KEYWORD:
                 # The name goes onto the queue with the reference: `list`
-                # reports names, and the loader has already resolved it (T2).
+                # reports names, and the loader has already resolved it.
                 await self.script_queue.put(script_ref, script.name)
                 return CommandResult(True, f"Queued script: {script.name}")
             else:
@@ -430,5 +429,5 @@ class ScriptsCommandsMixin:
                 return CommandResult(success, f"Script {status}: {script.name}")
         except Exception as e:
             # The transport already labels failures ("ERROR: ..."), so an
-            # inner "Error: " prefix only doubles it up (T2).
+            # inner "Error: " prefix only doubles it up.
             return CommandResult(False, str(e))

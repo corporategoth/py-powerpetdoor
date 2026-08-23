@@ -794,7 +794,8 @@ Toggle a boolean setting.
 #### Schedules
 
 **add_schedule**
-Add a schedule entry.
+Add a schedule entry covering both sensors, every day, 24 hours (midnight to
+midnight), so a script behaves the same at every time of day.
 ```yaml
 - action: add_schedule
   index: 1

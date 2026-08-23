@@ -276,3 +276,6 @@ data/
 # direnv
 .envrc
 .idea/
+
+# AI review process residue - not product
+.claude/analysis/

@@ -63,11 +63,11 @@ class SimulatorStartupError(OSError):
 
     The mirror-image failure on the client half of this product answers
     ``Connection refused to 127.0.0.1:39999``; the server half answered a
-    30-line traceback through asyncio internals in which the one useful
-    line was last, printed absolute paths from the machine that built the
-    venv, and - when only the derived ``--daemon`` control port collided -
-    left stdout completely empty, so nothing said which of the two ports
-    was the problem (round-9 frontend L1).
+    30-line traceback through asyncio internals in which the one useful line
+    was last, printed absolute paths from the machine that built the venv,
+    and - when only the derived ``--daemon`` control port collided - left
+    stdout completely empty, so nothing said which of the two ports was the
+    problem.
 
     Carrying the *role* is the whole point: `('0.0.0.0', 3861) in use` does
     not tell an operator which flag to change.
@@ -142,9 +142,9 @@ class InteractivePrompt:
     def clear_line(self):
         """Clear the current line (prompt and any partial input).
 
-        Only emits the ANSI erase sequence on a real terminal: on a pipe or
-        a dumb terminal it would render as literal garbage in the output
-        (T3), and there is no cursor to rewind anyway.
+        Only emits the ANSI erase sequence on a real terminal: on a pipe or a
+        dumb terminal it would render as literal garbage in the output, and
+        there is no cursor to rewind anyway.
         """
         if self._enabled and sys.stdout.isatty():
             # Move to start of line and clear to end
@@ -181,7 +181,7 @@ def status_print(message: str = "") -> None:
     stdout is block-buffered whenever it is not a terminal, while logging
     goes to stderr unbuffered. Without an explicit flush the startup banner
     and script progress appear after the fact in a redirected log - or not
-    at all, since the buffer dies with the process on SIGTERM (M2).
+    at all, since the buffer dies with the process on SIGTERM.
     """
     print(message, flush=True)
 
@@ -194,13 +194,12 @@ CONTROL_PORT_OFFSET = 1
 DAEMON_DEFAULT_CONTROL_PORT = -1
 
 #: Longest control-channel command line accepted, in bytes. Explicit rather
-#: than asyncio's implicit default so the refusal can name it (round-9
-#: frontend L4).
+#: than asyncio's implicit default so the refusal can name it.
 MAX_CONTROL_LINE = 64 * 1024
 
 #: Inclusive TCP port range. Checked in the parser rather than at bind time,
 #: where it surfaced as `OverflowError: bind(): port must be 0-65535` under
-#: 30 lines of asyncio traceback (round-9 frontend L1).
+#: 30 lines of asyncio traceback.
 MIN_PORT = 0
 MAX_PORT = 65535
 
@@ -239,7 +238,7 @@ class _ControlLogHandler(logging.Handler):
     WARNING - synchronously, inside this handler. Without a guard that
     record is broadcast to the same dead writer, producing another record,
     and one closed ``ctl`` session floods every other session with hundreds
-    of lines (H1). Three things break the loop: dead writers are dropped,
+    of lines. Three things break the loop: dead writers are dropped,
     failing writers are dropped, and ``emit`` refuses to re-enter.
 
     Records are also dropped for a client whose write buffer has run away.
@@ -247,7 +246,7 @@ class _ControlLogHandler(logging.Handler):
     logging call sites), so a ``ctl -i`` session parked in a terminal and
     not reading grows an unbounded queue in the daemon's memory - measured
     at +0.16 MB/s under a hostile dribble, tracking the log rate with no
-    bound in sight (Security round-5 Finding 1).
+    bound in sight.
     """
 
     #: Per-client write-buffer ceiling, in bytes, above which log records
@@ -401,8 +400,7 @@ class ControlChannel:
                     # the generic handler below and logged an asyncio
                     # internal ("Separator is found, but chunk is longer
                     # than limit") at ERROR - which _ControlLogHandler then
-                    # broadcast into every other operator's ctl session
-                    # (round-9 frontend L4).
+                    # broadcast into every other operator's ctl session.
                     logger.info("Control client %s sent an over-long command line", addr)
                     writer.write(
                         f"ERROR: Command line too long (max {MAX_CONTROL_LINE} bytes)\n".encode()
@@ -416,7 +414,7 @@ class ControlChannel:
                     # Answering costs one line and removes an unanswerable
                     # request from the protocol: silently skipping it meant
                     # `ppd-simulator-ctl ""` waited out the full --timeout
-                    # and then blamed the daemon (round-9 frontend L4).
+                    # and then blamed the daemon.
                     writer.write(b"ERROR: Empty command\n")
                     await writer.drain()
                     continue
@@ -440,7 +438,7 @@ class ControlChannel:
             # every one-shot `run`/`stop` hung up mid-write. Reporting a
             # normal hang-up at ERROR - and broadcasting it to every other
             # ctl session via _ControlLogHandler - trains operators to
-            # ignore the one severity that should never be ignorable (L1).
+            # ignore the one severity that should never be ignorable.
             logger.debug(f"Control client {addr} hung up: {e}")
         except Exception as e:
             logger.error(f"Control client error: {e}")
@@ -500,9 +498,9 @@ async def _process_script_queue(
                     """Release the claim, and veto a run that was dropped."""
                     # The claim is dropped when the run actually starts, not
                     # when it was dequeued: until then it is still pending
-                    # and `status`/`list` must say so (M2). A `stop all` in
-                    # that window cancels it, and the run is abandoned
-                    # rather than started seconds later (frontend M1).
+                    # and `status`/`list` must say so. A `stop all` in that
+                    # window cancels it, and the run is abandoned rather
+                    # than started seconds later.
                     if not script_queue.start(entry):
                         logger.info(f"Dropped queued script: {sanitize_text(name)}")
                         return False
@@ -545,7 +543,7 @@ async def _run_startup_scripts(
     moment of a cancellation means "nothing has failed *yet*", which is not the
     same thing as "every assertion ran and passed" - printing
     ``>>> All scripts PASSED`` for a run cut off before its ``assert`` step is
-    a false green on the documented CI command (F-H1).
+    a false green on the documented CI command.
     """
     all_success = True
     run_count = 0
@@ -577,7 +575,7 @@ async def _run_startup_scripts(
                 if wait_for_client and not simulator.protocols:
                     # Flushed like every other progress line: this is the
                     # one that explains why the remaining scripts never
-                    # ran, and it died in the buffer (L1).
+                    # ran, and it died in the buffer.
                     status_print(">>> Client disconnected, stopping scripts")
                     break
 
@@ -591,7 +589,7 @@ async def _run_startup_scripts(
                     # The name comes out of a YAML file, which this project's
                     # threat model treats as untrusted; PyYAML's "\e" escape
                     # puts a real ESC in a file that looks clean, and this
-                    # goes straight to the operator's terminal (S3).
+                    # goes straight to the operator's terminal.
                     name = sanitize_text(script.name)
                     status_print(f"\n>>> Running script: {name}")
                     success = await script_runner.run(script)
@@ -626,7 +624,7 @@ async def _run_startup_scripts(
     finally:
         if interrupted:
             # No verdict: leave script_result[0] at None so main() exits
-            # non-zero, and report what actually happened instead (F-H1).
+            # non-zero, and report what actually happened instead.
             if oneshot:
                 status_print(f"\n>>> Interrupted after {completed} of {len(scripts)} script(s)")
         else:
@@ -657,19 +655,30 @@ class _BasicStdinInput:
         self._stop_event = stop_event
         self._stdin = stdin if stdin is not None else sys.stdin
         self._reader_removed = False
+        self._blocking_task: asyncio.Task | None = None
 
     def start(self) -> None:
         """Enable the prompt and start reading stdin."""
         self._prompt.enable()
-        self._loop.add_reader(self._stdin.fileno(), self.handle_input)
+        try:
+            self._loop.add_reader(self._stdin.fileno(), self.handle_input)
+        except OSError:
+            # Not every stdin is pollable: epoll rejects /dev/null, a
+            # regular file and the temp file bash uses for a heredoc with
+            # PermissionError. Read those with plain blocking reads (they
+            # never wait long) instead of dying with a traceback.
+            self._blocking_task = asyncio.ensure_future(self._read_blocking())
 
     def stop(self) -> None:
-        """Remove the stdin reader (idempotent; safe if never added)."""
+        """Stop reading stdin (idempotent; safe if never started)."""
         self._reader_removed = True
+        task, self._blocking_task = self._blocking_task, None
+        if task is not None:
+            task.cancel()
         try:
             self._loop.remove_reader(self._stdin.fileno())
         except Exception:
-            pass  # Already removed
+            pass  # Already removed, or never added
 
     def handle_input(self) -> None:
         """Reader callback: consume one line and schedule its execution."""
@@ -677,14 +686,40 @@ class _BasicStdinInput:
         if self._stop_event.is_set() or self._reader_removed:
             return
         try:
-            line = self._stdin.readline().strip()
-            if line:
-                asyncio.create_task(self.process_command(line))
-            else:
-                # Empty line (just Enter), re-show prompt
-                self._prompt.show()
+            line = self._stdin.readline()
         except Exception as e:
             self._prompt.output(f"Error: {e}")
+            return
+        self._handle_line(line)
+
+    def _handle_line(self, line: str) -> bool:
+        """Act on one raw line; False once the session is over.
+
+        An empty string is EOF, not a bare Enter. That distinction is the
+        whole point: an fd at EOF is permanently readable, so treating it
+        as Enter re-arms this callback forever - a busy loop that prints a
+        prompt per turn and never exits. EOF ends the session, exactly like
+        Ctrl-D on a terminal.
+        """
+        if line == "":
+            self.stop()
+            self._prompt.clear_line()
+            self._stop_event.set()
+            return False
+        line = line.strip()
+        if line:
+            asyncio.create_task(self.process_command(line))
+        else:
+            # Empty line (just Enter), re-show prompt
+            self._prompt.show()
+        return True
+
+    async def _read_blocking(self) -> None:
+        """Drive :meth:`_handle_line` from blocking reads (non-pollable stdin)."""
+        while not self._stop_event.is_set() and not self._reader_removed:
+            line = await self._loop.run_in_executor(None, self._stdin.readline)
+            if not self._handle_line(line):
+                return
 
     async def process_command(self, line: str) -> None:
         """Execute one command line and print its result."""
@@ -818,7 +853,7 @@ async def run_simulator(
     )
 
     # The handler publishes scripts_dir on construction; say so out loud when
-    # the directory turns out to hold nothing runnable (L1).
+    # the directory turns out to hold nothing runnable.
     if scripts_dir:
         from .scripting import list_extra_scripts
 
@@ -873,8 +908,8 @@ async def run_simulator(
     # task cancelled in the cleanup below) so that `_run_startup_scripts`'
     # `finally` always runs *before* `script_result[0]` is read. As a bare
     # `create_task` it was instead reaped by `asyncio.run`'s shutdown, i.e.
-    # after main() had already read `None` and fallen through to exit 0
-    # (F-H1) - and an un-referenced task is eligible for garbage collection.
+    # after main() had already read `None` and fallen through to exit 0 - and
+    # an un-referenced task is eligible for garbage collection.
     startup_task: asyncio.Task | None = None
     if scripts:
         startup_task = asyncio.create_task(
@@ -976,7 +1011,7 @@ async def run_simulator(
                 basic_input.start()
         else:
             # Not daemon mode as the docs define it (no control channel is
-            # started on this path) - just headless (T5).
+            # started on this path) - just headless.
             logger.warning("stdin not available, running without interactive input")
 
     # Handle run_for timeout
@@ -995,8 +1030,8 @@ async def run_simulator(
     # the main task and only turns that back into `KeyboardInterrupt` if the
     # cancellation actually propagates. Swallowing it made `asyncio.run()`
     # return normally, so main()'s `except KeyboardInterrupt` never fired and
-    # an interrupted `--oneshot` run exited 0 (F-H1). Clean up in the
-    # `finally` and let the cancellation through.
+    # an interrupted `--oneshot` run exited 0. Clean up in the `finally` and
+    # let the cancellation through.
     try:
         await stop_event.wait()
     finally:
@@ -1144,16 +1179,15 @@ def main():
 
     # A typo'd --scripts-dir used to be silently ignored: the daemon started
     # happily and the first sign of trouble was an "Unknown script" error
-    # from a ctl user much later (L1).
+    # from a ctl user much later.
     if args.scripts_dir is not None and not Path(args.scripts_dir).is_dir():
         parser.error(f"--scripts-dir {args.scripts_dir}: not a directory")
 
     # Bind-time values were the one class of bad argument this parser did
     # not check, so `--port 99999` reached socket.bind() and exited with a
     # 30-line `OverflowError: bind(): port must be 0-65535` through asyncio
-    # internals, and `--host 300.1.1.1` with a `socket.gaierror` (round-9
-    # frontend L1). Everything else here already answers with a usage line
-    # at rc 2; these now do too.
+    # internals, and `--host 300.1.1.1` with a `socket.gaierror`. Everything
+    # else here already answers with a usage line at rc 2; these now do too.
     _validate_port(parser, "--port", args.port)
     if args.daemon is not None and args.daemon != DAEMON_DEFAULT_CONTROL_PORT:
         _validate_port(parser, "--daemon", args.daemon)
@@ -1162,7 +1196,7 @@ def main():
 
     # `--run-for -5` was accepted and silently meant "shut down
     # immediately", logging `Run time (-5.0s) elapsed, shutting down` as if
-    # five negative seconds had passed (round-9 frontend T1).
+    # five negative seconds had passed.
     if args.run_for is not None and args.run_for <= 0:
         parser.error(f"--run-for {args.run_for:g}: must be greater than 0")
 
@@ -1173,7 +1207,7 @@ def main():
     # Defence in depth for anything not sanitized at its source: the
     # interactive paths install this formatter themselves, but --script
     # (headless/CI) and --daemon kept the plain one, so they had no
-    # terminal-escape protection at all (S3).
+    # terminal-escape protection at all.
     for handler in logging.getLogger().handlers:
         handler.setFormatter(_SanitizingFormatter("%(asctime)s [%(levelname)s] %(message)s"))
 
@@ -1182,13 +1216,13 @@ def main():
         from .scripting import render_script_listing, set_extra_scripts_dir
 
         # The very same renderer the `list` command uses. These two
-        # surfaces were always *intended* to agree, but the round-6 shadow
-        # marker landed only in `list`, so the pre-flight surface printed a
-        # shadowed name twice with no marker (round-7 frontend L5). Sharing
-        # the renderer is the only way that stays true.
+        # surfaces were always *intended* to agree, but the shadow marker
+        # once landed only in `list`, so the pre-flight surface printed a
+        # shadowed name twice with no marker. Sharing the renderer is the
+        # only way that stays true.
         set_extra_scripts_dir(args.scripts_dir)
         for line in render_script_listing(args.scripts_dir).lines:
-            # Names and descriptions come out of YAML files (S3).
+            # Names and descriptions come out of YAML files.
             print(sanitize_text(line))
         return
 
@@ -1212,7 +1246,7 @@ def main():
         unusable = [name for name, given in script_only_flags if given]
         if unusable:
             # In daemon mode --script is itself refused, so "use --script"
-            # would just send the operator round a second time (T1).
+            # would just send the operator round a second time.
             if daemon:
                 parser.error(f"{', '.join(unusable)} is not available in daemon mode")
             parser.error(f"{', '.join(unusable)} cannot be used without --script")
@@ -1223,7 +1257,7 @@ def main():
         # -1 means use default (port + CONTROL_PORT_OFFSET), otherwise the
         # port given. The offset was a named constant *and* inlined here,
         # so nothing read the constant and the documented default had no
-        # executable pin (round-7 test-fanatic L2).
+        # executable pin.
         control_port = (
             args.port + CONTROL_PORT_OFFSET
             if args.daemon == DAEMON_DEFAULT_CONTROL_PORT
@@ -1276,14 +1310,14 @@ def main():
         # never established a verdict - it was interrupted before the scripts
         # finished - which can never legitimately mean success. `--oneshot`
         # without `--script` is already refused above at rc 2, so there is no
-        # other way to reach this with no result (F-H1).
+        # other way to reach this with no result.
         if args.oneshot:
             sys.exit(0 if result else 1)
 
     except SimulatorStartupError as err:
         # One operator sentence naming the role of the port that failed,
         # not 30 lines of asyncio internals with build-machine paths in
-        # them. The traceback stays available behind --debug (L1).
+        # them. The traceback stays available behind --debug.
         print(err, file=sys.stderr)
         if args.debug:
             import traceback

@@ -3,7 +3,7 @@
 # This software is released under the MIT License.
 # https://opensource.org/licenses/MIT
 
-"""Hypothesis property tests for schedule compression and diffing (H6).
+"""Hypothesis property tests for schedule compression and diffing.
 
 The invariants pinned here are derived from the implementation contract:
 
@@ -220,7 +220,7 @@ class TestDiffProperties:
     @settings(max_examples=75, deadline=None)
     @given(current=_indexed_unique_schedules(), new=_indexed_unique_schedules())
     def test_diff_does_not_mutate_inputs(self, current, new):
-        """Neither input list is modified (L13)."""
+        """Neither input list is modified."""
         current_snapshot = deepcopy(current)
         new_snapshot = deepcopy(new)
 
@@ -258,8 +258,7 @@ class TestValidateProperties:
     def test_validate_never_raises_and_returns_bool(self, entry):
         """`x in (True, False)` is satisfied by `1`, so it pins nothing.
 
-        Identity is what the name promises (round-6 test-fanatic L2, the
-        pattern round 5 removed from the sibling fuzz module).
+        Identity is what the name promises, so assert identity.
         """
         result = validate_schedule_entry(entry)
         assert result is True or result is False

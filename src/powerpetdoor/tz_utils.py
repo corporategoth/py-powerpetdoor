@@ -20,7 +20,7 @@ import logging
 import re
 import threading
 
-from .sanitize import sanitize_text
+from .sanitize import sanitize_field
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,11 +30,11 @@ _iana_to_posix: dict[str, str] = {}
 _posix_to_iana: dict[str, str] = {}
 _cache_initialized: bool = False
 # Serializes cache initialization so concurrent initializers cannot run
-# the (expensive) tzdata scan twice (L12).
+# the (expensive) tzdata scan twice.
 _cache_lock = threading.Lock()
 
 # POSIX TZ abbreviations are either alphabetic (EST) or, in modern tzdata,
-# angle-bracket-quoted alphanumeric/sign forms such as <+05> or <-03> (L18).
+# angle-bracket-quoted alphanumeric/sign forms such as <+05> or <-03>.
 _POSIX_ABBREV = r"[A-Za-z]+|<[A-Za-z0-9+\-]+>"
 _POSIX_TZ_RE = re.compile(
     rf"^({_POSIX_ABBREV})"
@@ -116,7 +116,7 @@ async def async_init_timezone_cache() -> None:
 
     Uses asyncio.to_thread to run blocking I/O in a thread pool.
     Must be called once before using other functions. Safe to call
-    concurrently: the tzdata scan runs at most once (L12).
+    concurrently: the tzdata scan runs at most once.
     """
     if _cache_initialized:
         return
@@ -128,7 +128,7 @@ def init_timezone_cache_sync() -> None:
     """Initialize timezone caches synchronously (blocking).
 
     Use async_init_timezone_cache() for non-blocking initialization.
-    Safe to call concurrently: the tzdata scan runs at most once (L12).
+    Safe to call concurrently: the tzdata scan runs at most once.
     """
     if _cache_initialized:
         return
@@ -148,7 +148,7 @@ def get_available_timezones() -> list[str]:
     """Get sorted list of available IANA timezone names.
 
     Returns a copy - mutating the returned list does not affect the
-    internal cache (L12). Returns empty list if cache not initialized.
+    internal cache. Returns empty list if cache not initialized.
     """
     if _iana_timezones is None:
         _LOGGER.warning("Timezone cache not initialized, returning empty list")
@@ -178,7 +178,7 @@ def parse_posix_tz_string(posix_tz: str) -> dict | None:
     Handles both alphabetic abbreviations (``EST5EDT,M3.2.0,M11.1.0``)
     and the angle-bracket forms modern tzdata emits for numeric zone
     names (``<+05>-5``, ``<-03>3``); the brackets are stripped from the
-    returned abbreviations (L18).
+    returned abbreviations.
 
     Args:
         posix_tz: POSIX TZ string (e.g., 'EST5EDT,M3.2.0,M11.1.0')
@@ -212,7 +212,7 @@ def parse_posix_tz_string(posix_tz: str) -> dict | None:
     match = _POSIX_TZ_RE.match(tz_part)
     if not match:
         # Device-supplied: never log it raw (ANSI injection into host logs).
-        _LOGGER.debug("Could not parse POSIX TZ string: %s", sanitize_text(posix_tz))
+        _LOGGER.debug("Could not parse POSIX TZ string: %s", sanitize_field(posix_tz))
         return None
 
     result["std_abbrev"] = match.group(1).strip("<>")

@@ -15,9 +15,8 @@ if TYPE_CHECKING:
 #: ``(subcommand, state attribute, description, aliases)`` - the single
 #: source of truth for the ``notify`` subcommands. The decorators, the
 #: setter and ``notify``'s display all read it, so adding a notification is
-#: one row. It used to exist and be referenced by nothing, with the same
-#: five definitions spelled out a second time in the decorators and a third
-#: time in the display block (round-6 frontend T2).
+#: one row. Do not respell these definitions in the decorators or the
+#: display block - keep both reading this table.
 _NOTIFY_DEFS: tuple[tuple[str, str, str, list[str]], ...] = (
     ("inside_on", "sensor_on_indoor", "Notify when inside sensor triggers", []),
     ("inside_off", "sensor_off_indoor", "Notify when inside sensor stops", []),

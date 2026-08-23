@@ -53,17 +53,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
       - name: Check linting
-        run: ruff check src tests scripts
+        run: ruff check src tests
       - name: Check formatting
-        run: ruff format --check src tests scripts
+        run: ruff format --check src tests
       - name: Check types
         run: mypy src
 
-  # Round 7 shipped two breaking script-DSL changes and left CHANGELOG.md
-  # untouched - the first fix commit in the series not to update it, after
-  # four rounds of doing it correctly, so a user whose script suite started
-  # exiting 1 had nothing to tell them it was coming (round-8 frontend L3).
-  # Nothing in tests/ or .github/ checked, which is why it slipped silently.
+  # A breaking change with no CHANGELOG entry leaves a user whose scripts
+  # started exiting 1 with nothing to tell them it was coming.
   changelog:
     name: Changelog
     runs-on: ubuntu-latest
@@ -119,16 +116,12 @@ jobs:
           fi
           echo "OK: $(echo "$changed" | grep -c '^src/' || true) file(s) under src/ changed"
 
-  # The published artifacts, asserted rather than assumed.
-  #
-  # The sdist used to carry 9 test modules and none of the machinery that
-  # runs them, so `pytest` in the unpacked artifact collected nothing and
-  # errored - it advertised a suite it could not execute, which is worse
-  # than shipping none (round-9 security informational 1). And the wheel
-  # shipped 121 annotated, CI-gated names with no PEP 561 marker, so every
-  # downstream consumer type-checked the whole library as `Any` (round-9
-  # frontend M1). Both are invisible to every other job here, because both
-  # are properties of the *built* artifact.
+  # The published artifacts, asserted rather than assumed. The sdist used to
+  # carry 9 test modules and none of the machinery that runs them, and the
+  # wheel shipped 121 annotated names with no PEP 561 marker (so every
+  # downstream consumer type-checked the library as `Any`). Both are
+  # invisible to every other job here: they are properties of the *built*
+  # artifact.
   packaging:
     name: Packaging
     needs: [cache-actions]
@@ -159,8 +152,7 @@ jobs:
           root="$(echo /tmp/sdist/*/)"
           for required in \
             tests/conftest.py tests/__init__.py tests/fuzz/__init__.py \
-            tests/simulator/__init__.py tests/TESTING_GAPS.md \
-            scripts/generate_gaps_report.py docs/protocol.md
+            tests/simulator/__init__.py docs/protocol.md
           do
             if [ ! -e "$root$required" ]; then
               echo "::error::$required is missing from the sdist."
@@ -283,19 +275,6 @@ jobs:
           coverage html
           coverage json
           coverage report --show-missing --fail-under=0
-      - name: Generate gaps report
-        run: python scripts/generate_gaps_report.py
-      - name: Commit updated TESTING_GAPS.md
-        if: github.event_name == 'push'
-        run: |
-          git config user.name "CI Bot"
-          git config user.email "ci@neuromancy.net"
-          git add tests/TESTING_GAPS.md
-          if ! git diff --cached --quiet; then
-            git commit -m "[skip ci] Update TESTING_GAPS.md from coverage report"
-            git push
-          fi
-        continue-on-error: true
       - name: Upload coverage to Codecov
         if: ${{ env.CODECOV_TOKEN != '' }}
         uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4

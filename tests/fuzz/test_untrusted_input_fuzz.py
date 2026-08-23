@@ -5,25 +5,24 @@
 
 """Hypothesis property tests for the untrusted-input validation layer.
 
-Round 3 added an entire validation layer for hostile wire input - the
-``_coerce_wire_*`` family, ``WireValueError``, and two rewritten schedule
-parsers - and the property suite did not grow with it (R4-L5). These are
-the totality properties that layer is *for*: every entry point must be
-total over arbitrary JSON-shaped input, raising only its own declared
-exception type.
+The layer under test is the validation layer for hostile wire input: the
+``_coerce_wire_*`` family, ``WireValueError``, and the two schedule
+parsers. These are the totality properties that layer is *for*: every
+entry point must be total over arbitrary JSON-shaped input, raising only
+its own declared exception type.
 
-That is not theoretical. The round-3 wave itself fixed a totality bug of
-exactly this class (``int(float("inf"))`` raising ``OverflowError`` out of
-a validator), and the library-side ``Schedule.from_dict`` had eight
-distinct crash shapes that a totality property found in under a minute.
+That is not theoretical. A totality bug of exactly this class has shipped
+here (``int(float("inf"))`` raising ``OverflowError`` out of a validator),
+and the library-side ``Schedule.from_dict`` had eight distinct crash
+shapes that a totality property found in under a minute.
 
 **A property is only worth its runtime if it draws the values it exists
-for** (R5-M3). ``st.recursive`` with ``max_leaves=8`` spends its budget on
+for.** ``st.recursive`` with ``max_leaves=8`` spends its budget on
 containers, so the measured draw rate for a top-level non-finite float was
 0/600 and for a parseable 7-element ``daysOfWeek`` 18/600 - i.e. removing
-``OverflowError`` from ``coerce_schedule_int``'s except clause survived the
-whole fuzz suite, and ``coerce_schedule_day`` returning ``int(flag)``
-survived too. Two strategies fix that:
+``OverflowError`` from ``coerce_schedule_int``'s except clause would slip
+through the whole fuzz suite, and so would ``coerce_schedule_day``
+returning ``int(flag)``. Two strategies fix that:
 
 - ``_pathological`` is mixed into every scalar coercer's input, so the
   non-finite/overflowing values these validators were written for are
@@ -81,7 +80,7 @@ _json_values = st.recursive(
 # The values these validators exist to reject, drawn deliberately rather
 # than hoped for. `1e400` is what `json.loads("1e400")` produces (inf);
 # `int()` of any of the three floats raises OverflowError or ValueError,
-# which is the totality hole R4 fixed and R5 found untested.
+# which is the totality hole these validators exist to close.
 _pathological = st.sampled_from(
     [
         float("inf"),
@@ -108,8 +107,7 @@ _well_shaped_bitmask = st.integers(min_value=0, max_value=MAX_DAYS_BITMASK)
 #: In-range values for the numeric wire coercers, plus the string
 #: spellings a device might send them as. `_scalar_values` alone reached
 #: the success-path post-conditions in 6-11 of 600 draws, so the "and the
-#: result is in range" half of those properties barely ran (round-6
-#: test-fanatic L4).
+#: result is in range" half of those properties barely ran.
 _well_shaped_wire_number = st.one_of(
     st.integers(min_value=0, max_value=90000),
     st.floats(min_value=0, max_value=90000, allow_nan=False, allow_infinity=False),
@@ -159,9 +157,9 @@ _schedule_payloads = st.one_of(
 
 #: Every codepoint :func:`sanitize_text` promises to neutralize, spelled
 #: out independently of the module's own regex. Asserting the output
-#: against ``_CONTROL_CHAR_RE`` made the property unable to fail: narrowing
-#: the production regex to ``[\x00]`` narrows the *check* in lockstep
-#: (R5-M3(b)).
+#: against ``_CONTROL_CHAR_RE`` would make the property unable to fail:
+#: narrowing the production regex to ``[\x00]`` narrows the *check* in
+#: lockstep.
 _CONTROL_CODEPOINTS = frozenset([*range(0x00, 0x09), 0x0B, *range(0x0C, 0x20), *range(0x7F, 0xA0)])
 
 
@@ -215,10 +213,10 @@ class TestScheduleCoercerTotality:
     def test_non_finite_floats_are_rejected_cleanly(self, value):
         """``int(float("inf"))`` raises OverflowError, not ValueError.
 
-        The totality hole the file's docstring cites: removing
-        ``OverflowError`` from the except tuple survived the whole fuzz
-        suite because the strategy drew a top-level non-finite float 0
-        times in 600 examples (R5-M3(a)).
+        The totality hole the module docstring describes: removing
+        ``OverflowError`` from the except tuple slips through a strategy
+        that draws a top-level non-finite float 0 times in 600 examples,
+        so the value is sampled explicitly here.
         """
         try:
             coerce_schedule_int(value, "index", MAX_SCHEDULE_INDEX)
@@ -247,9 +245,9 @@ class TestScheduleCoercerTotality:
         """The protocol's actual shape must reach the success path.
 
         ``x in (True, False)`` does not pin the bool contract - ``1 in
-        (True, False)`` is True in Python - and the one assertion that did
-        use ``isinstance`` was only reached on 18/600 draws, all through
-        the integer-bitmask branch (R5-M3(c)).
+        (True, False)`` is True in Python - and the sibling ``isinstance``
+        assertion is only reached on 18/600 draws, all through the
+        integer-bitmask branch.
         """
         days = coerce_schedule_days(value)
 
@@ -292,9 +290,9 @@ class TestScheduleParserTotality:
     """Both schedule parsers raise ValueError or nothing at all.
 
     The library's parser is the one that reads real device bytes, and it
-    used to escape with TypeError/AttributeError in eight distinct shapes
-    (R4-M1). Testing both sides here is the point: the twin that was not
-    changed is exactly where the last three rounds' fixes went missing.
+    used to escape with TypeError/AttributeError in eight distinct shapes.
+    Testing both sides here is the point: the twin that is not being
+    changed is exactly where a fix goes missing.
     """
 
     @settings(max_examples=300, deadline=None)
@@ -368,9 +366,9 @@ class TestSanitizeProperties:
         """Checked against an independent definition of "control character".
 
         Validating the output with ``sanitize_text``'s own
-        ``_CONTROL_CHAR_RE`` made this property unable to fail: narrowing
-        the production regex to ``[\\x00]`` narrows the check with it, so
-        ESC/CSI/DEL pass through and the property still passes (R5-M3(b)).
+        ``_CONTROL_CHAR_RE`` would make this property unable to fail:
+        narrowing the production regex to ``[\\x00]`` narrows the check
+        with it, so ESC/CSI/DEL pass through and the property still passes.
         """
         out = sanitize_text(text)
 

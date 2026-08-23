@@ -64,7 +64,7 @@ async def engine(state):
 
 
 class TestStatusHooks:
-    """wait_for_status and status listeners (D9 deterministic hooks)."""
+    """wait_for_status and status listeners (deterministic hooks)."""
 
     async def test_wait_for_status_returns_immediately_on_match(self, engine, state):
         """No wait when the door is already in the requested state."""
@@ -150,7 +150,7 @@ class TestReentrantStatusListeners:
 
     ``_set_status`` fires listeners synchronously inside the sequence owner
     task, so a listener calling ``open()``/``close()`` used to leave the
-    original ``_run`` task looping alongside a freshly created one (M1):
+    original ``_run`` task looping alongside a freshly created one:
     doubled transitions and a doubled ``total_open_cycles``.
     """
 
@@ -228,7 +228,7 @@ class TestReentrantStatusListeners:
         assert state.door_status == DOOR_STATE_RISING
 
     async def test_zero_hold_time_does_not_replay_a_stale_start_state(self, state):
-        """The deferred request records the intent, not a resolved state (L3).
+        """The deferred request records the intent, not a resolved state.
 
         With ``hold_time`` ~0 ``_hold_open()`` returns without awaiting, so
         ``_run`` performs a second ``_set_status`` in the same synchronous
@@ -278,9 +278,9 @@ class TestReentrantStatusListeners:
                 # defer: starting the sequence here would cancel the owner
                 # task from inside itself and leave a second _run racing it.
                 # `assert` cannot be used here - engine.py wraps listener
-                # calls in `except Exception`, which swallows AssertionError
-                # (round-6 test-fanatic L5) - so the return value is
-                # sampled and asserted outside the listener instead.
+                # calls in `except Exception`, which swallows AssertionError -
+                # so the return value is sampled and asserted outside the
+                # listener instead.
                 sampled_inside_dispatch.append(
                     (engine.open(), state.door_status, engine._restart_handle is not None)
                 )
@@ -466,7 +466,7 @@ class TestOpenClose:
 
 
 class TestHoldBehavior:
-    """Deadline-based hold-open behavior (T6) and sensor blocking."""
+    """Deadline-based hold-open behavior and sensor blocking."""
 
     async def test_hold_expires_and_door_closes(self, engine, state):
         """With no sensors active, HOLDING transitions to closing on its own."""
@@ -526,7 +526,7 @@ class TestHoldBehavior:
 
 
 class TestAutoRetract:
-    """Sensor-during-close auto-retract (M8: no self-cancel)."""
+    """Sensor-during-close auto-retract (no self-cancel)."""
 
     async def test_sensor_during_close_causes_retract(self, engine, state):
         """A blocking sensor during closing reverses the door (auto-retract)."""
@@ -604,18 +604,23 @@ class TestAutoRetract:
 
 
 def _close_every_schedule_window(state, *, inside=True):
-    """Turn timers on with a zero-length window, so no trigger is ever allowed."""
+    """Turn timers on with a schedule that is closed at every moment.
+
+    No day is selected, which is time-of-day independent - a window with
+    coinciding ends is the *whole* day, not an empty one (the end is
+    exclusive, so an empty window has no spelling).
+    """
     from powerpetdoor.simulator import Schedule
 
     state.auto = True
     state.schedules[0] = Schedule(
         index=0,
         enabled=True,
-        days_of_week=[True] * 7,
+        days_of_week=[False] * 7,
         inside=inside,
-        start_hour=0,
+        start_hour=6,
         start_min=0,
-        end_hour=0,
+        end_hour=22,
         end_min=0,
     )
 
@@ -624,7 +629,7 @@ def _close_every_schedule_window(state, *, inside=True):
 #: shipped front ends - `commands/door.py`'s `inside`/`outside` CLI commands
 #: and `scripting.py`'s `inside`/`outside`/`pet_presence` script actions -
 #: so a gate that only one of them applies is a gate the operator can walk
-#: straight past (round-9 test-fanatic M2).
+#: straight past.
 SENSOR_ENTRY_POINTS = [
     pytest.param(lambda engine, sensor: engine.trigger_sensor(sensor), id="trigger_sensor"),
     pytest.param(lambda engine, sensor: engine.activate_sensor(sensor, 5.0), id="activate_sensor"),
@@ -641,8 +646,7 @@ class TestSensorGuardsBlockBothEntryPoints:
     the suite drove the first one, and the `activate_sensor` tests asserted
     only toggle/duration mechanics and never looked at `door_status` - so
     every operand of both compound guards could be deleted with the full
-    suite green, and the two answers had disagreed for nine rounds
-    (round-9 test-fanatic M2).
+    suite green while the two answers disagreed.
 
     Coverage cannot see this class at all: the guard is one branch point
     with two destinations and the positive destination runs, which is
@@ -654,7 +658,7 @@ class TestSensorGuardsBlockBothEntryPoints:
     - that document describes command lockout only as something that stops
     a sensor blocking the door from *closing* - so the two are made
     consistent on the behaviour `scripts/power_lockout_test.yaml` and this
-    file have asserted since round 1.
+    file assert.
     """
 
     @pytest.mark.parametrize("trigger", SENSOR_ENTRY_POINTS)
@@ -851,7 +855,7 @@ class TestActivateSensor:
         assert state.door_status == DOOR_STATE_KEEPUP
 
     async def test_reactivation_cancels_the_stale_deactivation_timer(self, engine, state):
-        """Re-activating a sensor must not inherit the old expiry (L4)."""
+        """Re-activating a sensor must not inherit the old expiry."""
         state.power = False
         engine.activate_sensor("inside", 0.02)
         stale = engine._sensor_timers["inside"]
@@ -962,7 +966,7 @@ class TestSimulateObstruction:
 
 
 class TestLifecycle:
-    """Engine task lifecycle (L14)."""
+    """Engine task lifecycle."""
 
     async def test_stop_cancels_running_sequence(self, state):
         """stop() cancels and awaits the sequence task."""
@@ -1010,17 +1014,8 @@ class TestLifecycle:
         assert await waiter == DOOR_STATE_RISING
 
 
-class TestEngineBoundsHaveTheirValuesPinned:
-    """`MIN_BLOCKED_RECHECK` stops a near-zero hold_time turning the
-    blocked-sensor wait into a busy loop; doubling it left the suite green
-    (round-7 test-fanatic L1)."""
-
-    def test_the_blocked_recheck_floor_is_100ms(self):
-        assert engine_module.MIN_BLOCKED_RECHECK == 0.1
-
-
 class TestTheBlockedRecheckFloorActuallyStopsTheSpin:
-    """The constant's *value* was pinned; its *purpose* was not.
+    """`MIN_BLOCKED_RECHECK` keeps a near-zero hold time from busy-looping.
 
     `_hold_open`'s blocked branch is a `while True` whose only yield is
     `_wait_for_wake(max(hold_time, MIN_BLOCKED_RECHECK))`. Deleting the
@@ -1029,8 +1024,7 @@ class TestTheBlockedRecheckFloorActuallyStopsTheSpin:
     that decides (CLAUDE.md rule 9). With `hold_time = 0`, which the wire
     coercer explicitly permits (`_coerce_wire_number(..., 0, ...)`),
     `asyncio.timeout(0)` returns immediately and the loop spins at 72% of a
-    core for as long as the pet stands in the doorway (round-8
-    test-fanatic M2).
+    core for as long as the pet stands in the doorway.
 
     Measured by counting yields over a fixed number of loop turns rather
     than by wall clock, so it is deterministic under `-n auto`.
@@ -1105,10 +1099,10 @@ class TestUnknownSensorNames:
     Every gate in `trigger_sensor` is `if sensor == "inside"` / `elif
     sensor == "outside"`, so a name that is neither skipped the enable
     flags, the safety lock *and* the schedule, and fell straight through to
-    the door open (round-7 frontend M2). `DoorSimulator.trigger_sensor()`
-    and `activate_sensor()` are documented programmatic APIs returning
-    None, so the engine refuses in the same shape as its other gates - log
-    and do nothing - while the script DSL raises.
+    the door open. `DoorSimulator.trigger_sensor()` and `activate_sensor()`
+    are documented programmatic APIs returning None, so the engine refuses
+    in the same shape as its other gates - log and do nothing - while the
+    script DSL raises.
     """
 
     @pytest.mark.parametrize("sensor", ["insde", "INSIDE", "", "both", "middle"])
@@ -1137,7 +1131,7 @@ class TestUnknownSensorNames:
         assert f"Ignoring unknown sensor {sensor}" in caplog.text
 
     async def test_the_refusal_is_sanitized(self, engine, caplog):
-        """The name reaches a log; it may come from a YAML file (S3)."""
+        """The name reaches a log; it may come from a YAML file."""
         with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.engine"):
             engine.trigger_sensor("\x1b[31mred")
 

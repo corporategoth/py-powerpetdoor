@@ -86,9 +86,8 @@ MAX_SCRIPT_HOLD_TIME = 900.0
 #: numerics: ``duration: .nan`` reached ``asyncio.sleep`` and raised
 #: ``ValueError("Invalid delay: NaN")`` inside a fire-and-forget task, so the
 #: step silently did not happen, the sensor stayed active forever, the
-#: operator got a stack trace - and the run still reported PASSED
-#: (Security round-5 Informational 2). One day is far beyond any real
-#: simulation and still rejects ``inf``/``nan`` outright.
+#: operator got a stack trace - and the run still reported PASSED. One day is
+#: far beyond any real simulation and still rejects ``inf``/``nan`` outright.
 MAX_SCRIPT_DELAY = 86400.0
 
 #: Script-file spellings of the boolean values that the shared wire
@@ -129,11 +128,10 @@ _STATUS_WAIT_CONDITIONS: dict[str, tuple[str, ...]] = {
 #
 # Five of the DSL's seven "unknown name" errors named no alternatives at
 # all, and the sharpest of them - `Unknown assertion condition:
-# door_closed` - is a name the runner recognises *for the other action*
-# (round-8 frontend L4). The script DSL is the **CI** front end: these
-# messages are read in a build log, with no terminal to experiment in,
-# which is exactly the context where naming the alternatives is worth the
-# most.
+# door_closed` - is a name the runner recognises *for the other action*.
+# The script DSL is the **CI** front end: these messages are read in a
+# build log, with no terminal to experiment in, which is exactly the
+# context where naming the alternatives is worth the most.
 #
 # Each tuple is pinned against the `== "..."` chain it describes by
 # `tests/simulator/test_scripting.py::TestUnknownNameErrorsNameTheAlternatives`,
@@ -207,9 +205,8 @@ def _other_table_hint(name: str, other: tuple[str, ...], other_action: str) -> s
     ``assert door_closed`` is the single most natural assertion in a door
     simulator, and it is a ``wait_for`` condition - so the runner
     recognises the name, for the other action, and said only "Unknown
-    assertion condition". Round 7 fixed the docs; this fixes the message,
-    which is what the author who mistyped is actually looking at (round-8
-    frontend L4).
+    assertion condition". The error message is what the author who
+    mistyped is actually looking at, so it names the other action.
     """
     return f" (that name belongs to the '{other_action}' action)" if name in other else ""
 
@@ -222,9 +219,9 @@ def _other_table_hint(name: str, other: tuple[str, ...], other_action: str) -> s
 #: ``Step 1: wait(duration=8)``, waited the 1.0 s default instead of 8, and
 #: reported PASSED. The one piece of output an author inspects actively
 #: confirmed the typo had been accepted, and a script written to wait out a
-#: door cycle silently became a no-op that still exits 0 (round-7 frontend
-#: L3). Every other misspelling class in this DSL - action, setting,
-#: condition, and now sensor - fails loudly; parameters now do too.
+#: door cycle silently became a no-op that still exits 0. Every other
+#: misspelling class in this DSL - action, setting, condition, and sensor -
+#: fails loudly; parameters do too.
 #:
 #: Keys must stay in step with the ``action == "..."`` chain in
 #: :meth:`ScriptRunner._execute_step`; that is pinned by
@@ -253,10 +250,9 @@ _ACTION_PARAMS: dict[str, frozenset[str]] = {
 
 #: Documentation-only keys accepted on **any** step and read by nothing.
 #:
-#: Making unknown parameters an error (round-7 frontend L3) is right - a
-#: typo'd real parameter must fail loudly - but it also broke existing user
-#: scripts that annotate their steps, which is an ordinary thing for a YAML
-#: author to do:
+#: Making unknown parameters an error is right - a typo'd real parameter
+#: must fail loudly - but it also broke existing user scripts that annotate
+#: their steps, which is an ordinary thing for a YAML author to do:
 #:
 #: .. code-block:: yaml
 #:
@@ -273,7 +269,7 @@ STEP_ANNOTATION_KEYS = frozenset({"comment", "description", "note"})
 
 #: The complete set of keys :meth:`Script.from_yaml` reads. Anything else at
 #: the top level of a script file is a misspelling and is refused, in the
-#: same shape as every other unknown name in this DSL (round-9 frontend M3).
+#: same shape as every other unknown name in this DSL.
 SCRIPT_TOP_LEVEL_KEYS = frozenset({"description", "name", "steps"})
 
 
@@ -314,14 +310,13 @@ class Script:
         if not isinstance(data, dict):
             raise ScriptError("Script must be a YAML dictionary")
 
-        # Top-level keys were the last silent misspelling class in this DSL,
-        # and they have the worst blast radius: a step-parameter typo loses
-        # one step, `stpes:` loses the entire file while still printing
-        # `>>> Script PASSED` and exiting 0 (round-9 frontend M3). Every
-        # other class - action, sensor, condition, setting, step parameter -
-        # already fails loudly in this `Unknown X: y. Use: ...` shape.
-        # `steps: []` legitimately means "no steps", so the check is on
-        # unknown keys and not on emptiness.
+        # Top-level keys have the worst blast radius of any misspelling
+        # class in this DSL: a step-parameter typo loses one step, `stpes:`
+        # loses the entire file while still printing `>>> Script PASSED` and
+        # exiting 0. Every other class - action, sensor, condition, setting,
+        # step parameter - already fails loudly in this
+        # `Unknown X: y. Use: ...` shape. `steps: []` legitimately means
+        # "no steps", so the check is on unknown keys and not on emptiness.
         unknown = sorted(set(data) - SCRIPT_TOP_LEVEL_KEYS)
         if unknown:
             raise ScriptError(
@@ -448,7 +443,7 @@ class ScriptRunner:
         """Whether a stop has been requested for the running script.
 
         ``stop`` takes effect at a step boundary, so the operator needs a
-        way to tell a registered stop from one that never arrived (L3).
+        way to tell a registered stop from one that never arrived.
         """
         return self._stop_requested
 
@@ -471,11 +466,11 @@ class ScriptRunner:
                 a synchronous pass/fail must not silently block.
             on_start: Called once the run lock is held and this script is
                 about to become the running one. The queue consumer uses
-                it to stop counting the run as pending (M2). Returning
-                False abandons the run without executing a step: waiting
-                for the lock is the window in which ``stop all`` can drop
-                the entry, and starting it afterwards would run exactly
-                what the operator just discarded (frontend M1).
+                it to stop counting the run as pending. Returning False
+                abandons the run without executing a step: waiting for the
+                lock is the window in which ``stop all`` can drop the
+                entry, and starting it afterwards would run exactly what
+                the operator just discarded.
 
         Returns:
             True if all steps (including assertions) passed. False for an
@@ -507,7 +502,7 @@ class ScriptRunner:
             # model ("here is a repro script for the bug I filed"), and
             # PyYAML's "\e" escape puts a real ESC in a file that looks
             # clean. Sanitize at the source, exactly as the protocol
-            # channel does (S3).
+            # channel does.
             logger.info(f"Running script: {sanitize_text(script.name)}")
             if script.description:
                 logger.info(f"  {sanitize_text(script.description)}")
@@ -527,7 +522,7 @@ class ScriptRunner:
                 # A stop that landed during the *last* step used to be
                 # discarded: the loop simply ended and the run reported
                 # PASSED with exit code 0, the opposite of what `stop`
-                # documents and the one signal a CI abort relies on (H1).
+                # documents and the one signal a CI abort relies on.
                 logger.info("Script stopped by request")
                 return False
 
@@ -565,8 +560,7 @@ class ScriptRunner:
             unexpected = sorted(set(params) - known_params - STEP_ANNOTATION_KEYS)
             if unexpected:
                 # "Use: none" for a no-parameter action read as an
-                # instruction to pass the literal token `none` (round-8
-                # frontend L4).
+                # instruction to pass the literal token `none`.
                 accepted = (
                     f"Use: {', '.join(sorted(known_params))}"
                     if known_params
@@ -585,10 +579,10 @@ class ScriptRunner:
             # was not validated, and it failed in the worst direction: an
             # unrecognised name matched none of the engine's gates, so a
             # one-character typo opened the door with both sensors disabled
-            # and the safety lock on - and still reported PASSED, which
-            # over `ctl run <name> wait` is a green CI exit code
-            # (round-7 frontend M2). Every other misspelling class here
-            # (action, setting, condition) already fails loudly.
+            # and the safety lock on - and still reported PASSED, which over
+            # `ctl run <name> wait` is a green CI exit code. Every other
+            # misspelling class here (action, setting, condition) already
+            # fails loudly.
             sensor = params.get("sensor", "inside")
             if sensor not in SENSOR_NAMES:
                 raise ScriptError(f"Unknown sensor: {sensor}. Use: {', '.join(SENSOR_NAMES)}")
@@ -633,8 +627,8 @@ class ScriptRunner:
             )
             # Raced against the stop event, so `stop` during a long wait
             # takes effect straight away instead of at the end of the
-            # sleep. This is also what shrinks the "stop lands during the
-            # final step" window that H1 is about.
+            # sleep. This also shrinks the window in which a stop lands
+            # during the final step and would otherwise be discarded.
             await self._sleep_or_stop(seconds)
 
         elif action == "wait_for":
@@ -661,7 +655,7 @@ class ScriptRunner:
         elif action == "log":
             message = params.get("message", "")
             # Script-supplied text reaching an operator's terminal: same
-            # rule as the wire channel (S3).
+            # rule as the wire channel.
             logger.info(f"  [SCRIPT] {sanitize_text(message)}")
 
         elif action == "add_schedule":
@@ -669,9 +663,11 @@ class ScriptRunner:
             # could otherwise allocate a slot the wire path itself rejects.
             index = int(self._script_number(params.get("index", 1), "index", 0, MAX_SCHEDULE_INDEX))
             enabled = self._script_bool(params.get("enabled", True))
-            # Create a schedule that allows BOTH sensors 24/7 (midnight to midnight)
-            # This ensures tests pass regardless of the time of day.
-            # Note: Each schedule entry controls specific sensors via inside/outside flags.
+            # A schedule that allows BOTH sensors 24/7, so a script that
+            # adds one behaves the same at every time of day. Midnight to
+            # midnight: the window end is exclusive, so 00:00-23:59 is 1439
+            # minutes and blocks the sensors for exactly the minute 23:59
+            # (see Schedule.is_sensor_allowed).
             schedule = Schedule(
                 index=index,
                 enabled=enabled,
@@ -680,8 +676,8 @@ class ScriptRunner:
                 outside=True,  # Allow outside sensor
                 start_hour=0,
                 start_min=0,
-                end_hour=23,
-                end_min=59,
+                end_hour=0,
+                end_min=0,
             )
             self.simulator.add_schedule(schedule)
 
@@ -704,7 +700,7 @@ class ScriptRunner:
         A plain ``asyncio.sleep`` made ``wait`` uninterruptible, so the
         window in which a ``stop`` request sits unobserved was as long as
         the wait itself - and if that was the final step, the request was
-        discarded entirely (H1).
+        discarded entirely.
         """
         if self._stop_requested:
             return
@@ -830,7 +826,7 @@ class ScriptRunner:
         the only one that was unbounded: ``set hold_time inf`` stored a
         value that broke ``GET_SETTINGS`` for every client for the life of
         the process and parked the door in DOOR_HOLDING - the same damage
-        the wire path was hardened against in round 3 (S3).
+        the wire path is hardened against.
 
         Raises:
             ScriptError: If the value is not a finite number in range.
@@ -853,12 +849,12 @@ class ScriptRunner:
         with plain truthiness: unquoted YAML ``false`` parses to a real
         bool, but a quoted or templated ``"false"``/``"0"``/``"off"`` is a
         non-empty string, so ``enabled: "0"`` produced an **enabled**
-        schedule (round-6 backend T1). Routed through the library's
-        ``coerce_schedule_flag`` (``make_bool`` underneath) so this file
-        stops being a third implementation of one concept, with the
-        script-only ``enabled``/``disabled`` spellings layered on top -
-        script vocabulary is a front-end concern and must not widen what
-        the *protocol* parsers accept.
+        schedule. Routed through the library's ``coerce_schedule_flag``
+        (``make_bool`` underneath) so this file stops being a third
+        implementation of one concept, with the script-only
+        ``enabled``/``disabled`` spellings layered on top - script
+        vocabulary is a front-end concern and must not widen what the
+        *protocol* parsers accept.
         """
         if isinstance(value, str):
             alias = _SCRIPT_BOOL_ALIASES.get(value.strip().lower())
@@ -872,7 +868,7 @@ class ScriptRunner:
         name = name.lower().replace("-", "_")
 
         # One coercer for the whole file (and shared with the library),
-        # rather than a third hand-rolled truthiness rule (T1).
+        # rather than a third hand-rolled truthiness rule.
         bool_value = self._script_bool(value)
 
         if name == "power":
@@ -927,12 +923,31 @@ class ScriptRunner:
                 f"Use: {', '.join(TOGGLE_SETTINGS)}"
             )
 
-    def _assert_condition(self, condition: str, expected: str):
+    @staticmethod
+    def _assert_text(value: object) -> str:
+        """Render one side of an ``assert`` comparison as text.
+
+        ``equals:`` arrives straight from PyYAML, which resolves ``on`` /
+        ``off`` (and ``yes`` / ``no`` / ``true`` / ``false``) to booleans and
+        bare digits to ints. Calling ``.lower()`` on those raises
+        ``AttributeError``, so most of the documented conditions failed a
+        *true* assertion with a Python internals message. Both sides go
+        through here, so the two spellings always agree.
+        """
+        if isinstance(value, bool):
+            return "on" if value else "off"
+        if isinstance(value, float) and value.is_integer():
+            # hold_time is stored as a float, so `equals: 2` (and the quoted
+            # `equals: "2"`) both have to match a stored 2.0.
+            return str(int(value))
+        return str(value)
+
+    def _assert_condition(self, condition: str, expected: object):
         """Assert a condition equals an expected value."""
         state = self.simulator.state
         condition = condition.lower().replace("-", "_")
 
-        actual = None
+        actual: object = None
 
         if condition == "door_status":
             actual = state.door_status
@@ -943,7 +958,7 @@ class ScriptRunner:
         elif condition == "battery":
             actual = str(state.battery_percent)
         elif condition == "hold_time":
-            actual = str(state.hold_time)
+            actual = state.hold_time
         elif condition == "inside":
             actual = "enabled" if state.inside else "disabled"
         elif condition == "outside":
@@ -965,12 +980,14 @@ class ScriptRunner:
                 f"Use: {', '.join(ASSERT_CONDITIONS)}"
             )
 
-        # Normalize expected value
-        expected_normalized = expected.upper() if condition == "door_status" else expected.lower()
-        actual_normalized = actual.upper() if condition == "door_status" else actual.lower()
+        # Normalize both sides to text, then compare case-insensitively.
+        expected_text = self._assert_text(expected)
+        actual_text = self._assert_text(actual)
 
-        if actual_normalized != expected_normalized:
-            raise ScriptAssertionError(f"{condition}: expected '{expected}', got '{actual}'")
+        if actual_text.casefold() != expected_text.casefold():
+            raise ScriptAssertionError(
+                f"{condition}: expected '{expected_text}', got '{actual_text}'"
+            )
 
 
 # Directory containing built-in script files
@@ -986,9 +1003,9 @@ _extra_scripts_dir: Path | None = None
 #: Whether this process may run a script by file path. ctl talks to a
 #: daemon that refuses paths outright (`_load_script_restricted`), so
 #: completing local YAML files there steers the user to a form guaranteed
-#: to fail - and cannot offer the bare name that works (M1). Module-level
-#: for the same reason as _extra_scripts_dir: the completer is referenced
-#: from an ArgSpec and has no handler context of its own.
+#: to fail - and cannot offer the bare name that works. Module-level for the
+#: same reason as _extra_scripts_dir: the completer is referenced from an
+#: ArgSpec and has no handler context of its own.
 _script_paths_allowed = True
 
 
@@ -1014,8 +1031,7 @@ def describe_script_argument() -> str:
 
     ``run help`` over ctl answered "Script name or file path" while the
     very next command answered "Script paths are not allowed over the
-    control channel" - the in-client help pointing at the broken form
-    (L2).
+    control channel" - the in-client help pointing at the broken form.
     """
     if _script_paths_allowed:
         return "Script name or file path"
@@ -1028,8 +1044,8 @@ def describe_out_of_directory_remedy() -> str:
     Policy-aware for the same reason :func:`describe_script_argument` is:
     over the control channel "or run it by path" pointed the operator at a
     form the very next line of code refuses, so the two refusals pointed at
-    each other (round-7 frontend L6). Locally, running it by path really is
-    the remedy, so the advice stays.
+    each other. Locally, running it by path really is the remedy, so the
+    advice stays.
     """
     if _script_paths_allowed:
         return "move it into the directory or run it by path"
@@ -1044,7 +1060,7 @@ def script_escapes_directory(path: Path, base: Path) -> bool:
     symlink pointing out of ``--scripts-dir`` was listed by ``list``,
     ``--list-scripts`` and tab completion - and then refused by ``run``
     with ``Unknown script: linked. Available: ..., linked, ...``, a message
-    that contradicted itself inside one line (round-6 frontend L1).
+    that contradicted itself inside one line.
 
     Args:
         path: Candidate script file.
@@ -1105,11 +1121,10 @@ def _describe_script(path: Path) -> tuple[str, str | None]:
 
     Every listing and every Tab keystroke used to fully YAML-parse every
     candidate file - 200 scripts cost ~600 ms, on the same event loop that
-    serves the door protocol, so one keystroke stalled the emulated device
-    (round-8 frontend M1). Descriptions are what the parse is *for* and
-    they change only when the file does, so the stat tuple is the key: new
-    and edited files are still picked up immediately, which is the
-    behaviour ``list`` relies on.
+    serves the door protocol, so one keystroke stalled the emulated device.
+    Descriptions are what the parse is *for* and they change only when the
+    file does, so the stat tuple is the key: new and edited files are still
+    picked up immediately, which is the behaviour ``list`` relies on.
     """
     try:
         stat = path.stat()
@@ -1142,7 +1157,7 @@ def _describe_scripts(script_files: dict[str, Path]) -> list[tuple[str, str]]:
     for name, path in sorted(script_files.items()):
         description, error = _describe_script(path)
         if error is not None:
-            # Both the name and the error text are file-derived (S3).
+            # Both the name and the error text are file-derived.
             # Reported on every listing, not only the first: the cache is
             # a parse cache, not a report cache.
             logger.warning(f"Failed to load script {sanitize_text(name)}: {error}")
@@ -1161,7 +1176,7 @@ def get_builtin_script(name: str) -> Script:
     if name not in script_files:
         available = ", ".join(sorted({*script_files, *get_extra_script_files()}))
         # "built-in" would read as if the --scripts-dir names in that same
-        # Available: list were built-ins too (T3).
+        # Available: list were built-ins too.
         raise ScriptError(f"Unknown script: {name}. Available: {available}")
     return Script.from_file(script_files[name])
 
@@ -1202,11 +1217,11 @@ def render_script_listing(
 
     The ``list`` command and ``ppd-simulator --list-scripts`` print the
     same list, and ``cli.py`` even carries a comment saying they are meant
-    to agree - but the round-6 shadow marker landed in ``list`` and in tab
+    to agree - but the shadow marker used to land in ``list`` and in tab
     completion only. ``--list-scripts`` is the pre-flight surface (it needs
     no daemon), so it is the one most likely to be consulted first, and it
     showed the shadowed name twice with two contradicting descriptions and
-    nothing saying which one ``run`` picks (round-7 frontend L5).
+    nothing saying which one ``run`` picks.
 
     The marker also prints the *real* file, from
     :func:`get_extra_script_files`, rather than reconstructing
@@ -1231,7 +1246,7 @@ def render_script_listing(
         lines.append(f"  {name}: {desc}{marker}")
     if scripts_dir is not None:
         # Header even when the directory is empty, so the flag's effect is
-        # visible rather than silently absent (round-5 L1 / T5).
+        # visible rather than silently absent.
         lines.append(f"Scripts from {scripts_dir}:")
         for name, desc in extra:
             lines.append(f"  {name}: {desc}")
@@ -1265,23 +1280,23 @@ def script_completer(prefix: str = "") -> list[tuple[str, str]]:
     Gracefully handles missing PyYAML by returning just script names.
     When this front end may not run scripts by path (ctl, whose daemon
     refuses them), only script *names* are offered - suggesting a local
-    file there is suggesting a command that always fails (M1).
+    file there is suggesting a command that always fails.
 
     In the name branch the prefix filters *before* the parse. It used to
     filter nowhere: every candidate was fully YAML-parsed and the whole
     set handed to prompt_toolkit, so completing four characters that
     already identify one file cost exactly as much as completing nothing -
     ~600 ms for a 200-script directory, on the door server's own event
-    loop (round-8 frontend M1). The test is case-insensitive to match the
-    downstream filter in ``prompt_common``, which is
-    ``name.lower().startswith(word_before.lower())``; a case-sensitive
-    one here would silently change completion for uppercase input.
+    loop. The test is case-insensitive to match the downstream filter in
+    ``prompt_common``, which is
+    ``name.lower().startswith(word_before.lower())``; a case-sensitive one
+    here would silently change completion for uppercase input.
     """
     result: list[tuple[str, str]] = []
 
     if not _script_paths_allowed and ("/" in prefix or "\\" in prefix):
         # A path-shaped prefix can only ever complete to a command this
-        # front end's daemon refuses outright, so offer nothing (M1).
+        # front end's daemon refuses outright, so offer nothing.
         return result
 
     # Determine the directory to search based on prefix
@@ -1332,7 +1347,7 @@ def script_completer(prefix: str = "") -> list[tuple[str, str]]:
         # Add builtin scripts, then any registered --scripts-dir scripts.
         # A shadowed built-in is skipped rather than offered a second time:
         # the completer cannot disambiguate two identical strings, and the
-        # scripts-dir copy is the one `run` would pick (L3).
+        # scripts-dir copy is the one `run` would pick.
         extra_files = get_extra_script_files()
         for script_files, label in (
             ({k: v for k, v in _get_script_files().items() if k not in extra_files}, "(builtin)"),

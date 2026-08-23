@@ -155,15 +155,14 @@ class TestSendCommand:
         assert "Response timeout after 0.3s" in msg
 
     async def test_wait_run_ignores_the_response_timeout(self):
-        """`run <script> wait` has no deadline while the daemon is alive (M2).
+        """`run <script> wait` has no deadline while the daemon is alive.
 
         The daemon here stays silent for far longer than --timeout, exactly
         like a long script with no logging; the answer must still arrive.
         """
         released = asyncio.Event()
         # Recorded, not asserted: an AssertionError inside a connected
-        # callback goes to the loop exception handler, not to the test
-        # (round-6 test-fanatic L5).
+        # callback goes to the loop exception handler, not to the test.
         received: list[bytes] = []
 
         async def slow_wait_run(reader, writer):
@@ -214,7 +213,7 @@ class TestSendCommand:
         under `-n auto` on a loaded runner the loop can be delayed >100 ms
         between a sleep expiring and the write landing, and this is one of
         the few tests where a slow machine could produce a *false failure*
-        rather than a false pass (R3-L5). Total runtime is unchanged.
+        rather than a false pass. Total runtime is unchanged.
         """
 
         async def chatty_handler(reader, writer):
@@ -241,7 +240,7 @@ class TestSendCommand:
         assert msg == "OK: done"
 
     async def test_wait_run_streams_log_lines_to_stderr(self, capfd):
-        """A one-shot wait-run must show why a script failed (M3).
+        """A one-shot wait-run must show why a script failed.
 
         The assertion text lives only in the LOG: stream; ctl used to parse
         and discard it, so the documented CI recipe printed one bare
@@ -597,7 +596,7 @@ class TestLocalCommandDispatch:
         assert "Arguments:" in result.message
 
     def test_history_without_a_terminal_session_is_unknown(self):
-        """ctl answers exactly as the CLI does, not "install prompt_toolkit" (T4).
+        """ctl answers exactly as the CLI does, not "install prompt_toolkit".
 
         Under pytest stdin is not a tty, so no history object is registered
         and history is genuinely unavailable for this session.
@@ -742,17 +741,17 @@ class TestCtlMain:
         assert "Control a running Power Pet Door simulator" in out
         # The epilog is what a bare invocation shows, so it must name the
         # only exit-code-bearing form and the command whose meaning just
-        # changed (T3).
+        # changed.
         assert "run SCRIPT wait" in out
         assert "exit code reflects PASSED/FAILED" in out
         assert "Stop the running script (not the daemon)" in out
         # "always exits 0" was not literally true - a script that fails to
-        # load exits 1, because the load happens before the enqueue (T4).
+        # load exits 1, because the load happens before the enqueue.
         assert "Plain 'run SCRIPT' exits 0 as soon as it is queued" in out
         assert "script that fails to load is still an error, and exits 1." in out
 
     def test_main_forbids_script_path_completion(self, monkeypatch):
-        """ctl's daemon refuses script paths, so ctl must not complete them (M1)."""
+        """ctl's daemon refuses script paths, so ctl must not complete them."""
         from powerpetdoor.simulator import scripting
 
         monkeypatch.setattr(scripting, "_script_paths_allowed", True)
@@ -882,6 +881,28 @@ class TestBasicReadline:
         line = await asyncio.wait_for(fut, 5)
         assert line is None
 
+    async def test_a_non_pollable_stdin_is_read_directly(self, monkeypatch, tmp_path, capsys):
+        """/dev/null, a regular file and some heredocs are not pollable.
+
+        `epoll` refuses them with PermissionError out of `add_reader`,
+        which used to be a 37-line traceback and rc 1 instead of a prompt.
+        """
+        script = tmp_path / "commands"
+        script.write_text("status\n")
+
+        with script.open() as handle:
+            monkeypatch.setattr(sys, "stdin", handle)
+            loop = asyncio.get_running_loop()
+            with pytest.raises(PermissionError):
+                loop.add_reader(handle.fileno(), lambda: None)
+
+            line = await asyncio.wait_for(ctl._basic_readline("> "), 5)
+            at_eof = await asyncio.wait_for(ctl._basic_readline("> "), 5)
+
+        assert line == "status\n"
+        assert at_eof is None  # EOF still ends the session
+        assert capsys.readouterr().out.count("> ") == 2
+
     async def test_cancel_does_not_consume_pending_input(self, pipe_stdin):
         """A cancelled prompt must leave buffered stdin data untouched and
         must not try to resolve the cancelled future."""
@@ -915,7 +936,7 @@ class TestBasicReadline:
         but `loop.remove_reader` is a stdlib API a test can replace, and
         the contract the clause exists for is precisely testable: the error
         must not reach the loop's exception handler. Pinned by this seam
-        test instead of hidden by a pragma (round-7 test-fanatic M4).
+        test instead of hidden by a pragma.
         """
         loop = asyncio.get_running_loop()
         callback_errors: list[dict] = []
@@ -942,7 +963,7 @@ class TestBasicReadline:
 
 
 class TestEnableLineBuffering:
-    """ctl -i off a terminal was block-buffered: 12 s of live log, 0 bytes (M3)."""
+    """ctl -i off a terminal was block-buffered: 12 s of live log, 0 bytes."""
 
     def test_reconfigures_a_non_tty_stream(self):
         calls = []
@@ -1043,8 +1064,8 @@ class TestUnanswerableAndOutOfRangeArguments:
     raising it - the daemon skips blank lines by design, so no answer could
     ever come and the advice was wrong in both halves. `-t 0` put the
     socket in *non-blocking* mode and surfaced `Error: [Errno 115]
-    Operation now in progress`; `-t -1` leaked `settimeout`'s own ValueError
-    text (round-9 frontend L4/T1).
+    Operation now in progress`; `-t -1` leaked `settimeout`'s own
+    ValueError text.
     """
 
     @pytest.fixture(autouse=True)

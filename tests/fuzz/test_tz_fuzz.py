@@ -3,7 +3,7 @@
 # This software is released under the MIT License.
 # https://opensource.org/licenses/MIT
 
-"""Hypothesis property tests for POSIX TZ string parsing (H6).
+"""Hypothesis property tests for POSIX TZ string parsing.
 
 parse_posix_tz_string handles wire values from real devices, so it must
 be total over arbitrary text (never raise, never return a half-parsed
@@ -35,7 +35,7 @@ def _mutate_posix(posix: str, cut: int, char: str) -> str:
 
 #: Real tzdata footers with a single character replaced. Unlike raw text
 #: these land on both sides of the parse boundary, so the "never
-#: half-parses" invariant is actually exercised (round-6 test-fanatic L4).
+#: half-parses" invariant is actually exercised.
 _MUTATED_POSIX_STRINGS = st.builds(
     _mutate_posix,
     st.sampled_from(_REAL_POSIX_STRINGS),
@@ -53,8 +53,8 @@ class TestParsePosixTzProperties:
             st.text(max_size=40),
             # `st.text()` essentially never parses as a POSIX TZ string, so
             # on its own the "never half-parses" half of this property ran
-            # 3 times in 600 draws (round-6 test-fanatic L4). Mutating real
-            # footers is what actually reaches the success path.
+            # 3 times in 600 draws. Mutating real footers is what actually
+            # reaches the success path.
             _MUTATED_POSIX_STRINGS,
         )
     )
@@ -70,10 +70,9 @@ class TestParsePosixTzProperties:
     def test_the_mutation_strategy_reaches_both_sides_of_the_parse(self):
         """A property is only worth its runtime if it draws the right values.
 
-        `st.text(max_size=40)` reached the success-path assertions in
-        3 of 600 draws (0.5%), so "never half-parses" was effectively
-        untested. Measured deterministically here rather than trusted
-        (round-6 test-fanatic L4).
+        `st.text(max_size=40)` reaches the success-path assertions in
+        3 of 600 draws (0.5%), leaving "never half-parses" effectively
+        untested. Measured deterministically here rather than trusted.
         """
         rng = random.Random(0)
         parsed = 0

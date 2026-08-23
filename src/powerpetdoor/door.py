@@ -114,8 +114,7 @@ from .const import (
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
 )
-from .framing import EventThrottle
-from .sanitize import MAX_LOGGED_LENGTH, sanitize_text
+from .sanitize import MAX_LOGGED_LENGTH, sanitize_field, sanitize_text
 from .schedule import (
     MAX_SCHEDULE_INDEX,
     SCHEDULE_WIRE_TO_DEVICE,
@@ -142,23 +141,15 @@ logger = logging.getLogger(__name__)
 # does not recognize - so the coercion has to happen here, on the way into the
 # cache.
 #
-# It did not. Five listeners assigned device values straight into strictly
-# typed attributes, so `batteryPercent: "55"` made the documented
-# `door.battery.charging` property raise TypeError with nothing logged
-# (round-7 backend M1), and stats/timezone silently held the wrong type
-# (round-7 backend L1). Worse, the `data.get(key, cached)` "keep the last
-# good value" defaults could never fire, because the client always builds
-# every key - so a bad frame *overwrote* a good cached value with None.
-#
-# The rule these three helpers enforce, and the one to apply to any listener
-# added later: **nothing enters the facade cache without a type check, and a
-# value that fails it leaves the cache untouched.**
+# The rule these helpers enforce, and the one to apply to any listener added
+# later: **nothing enters the facade cache without a type check, and a value
+# that fails it leaves the cache untouched.** (`batteryPercent: "55"` used to
+# make the documented `door.battery.charging` property raise TypeError with
+# nothing logged.)
 #
 # Rejections log at DEBUG, not WARNING: these listeners fire once per device
-# frame, and an unthrottled per-frame WARNING is precisely the log
-# amplification defect this project has removed from four other sites. The
-# client already logs every received frame at DEBUG, so an operator
-# diagnosing a firmware variant has both halves in the same place.
+# frame. The client already logs every received frame at DEBUG, so an
+# operator diagnosing a firmware variant has both halves in the same place.
 
 
 #: The largest magnitude an ``int`` can have and still survive conversion
@@ -219,6 +210,31 @@ def _keep_bool(value: Any, cached: bool, field_name: str) -> bool:
     return cached
 
 
+def _keep_flag(value: Any, cached: bool, field_name: str) -> bool:
+    """Keep a ``make_bool``-coerced sensor flag only if it really is a bool.
+
+    ``make_bool`` returns its argument unchanged for a value that is
+    neither a string nor an int, so ``[]``, ``{}`` and ``0.0`` reach these
+    listeners as themselves rather than as None. ``if value is not None``
+    therefore let them into a strictly typed cache, where a known-ON
+    ``safety_lock`` receiving ``[]`` reads False - a safety flag failing in
+    the permissive direction. (The cache heals on the next
+    ``refresh_settings()`` or reconnect; it is wrong until then.)
+
+    Widening ``make_bool`` instead is not an option: ``compress_schedule``
+    calls it unguarded on day flags, where "unrecognized" has to stay
+    fail-closed.
+
+    None - the documented "unrecognized string" result - keeps the cached
+    value silently, because the client already logged the frame.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is not None:
+        _log_rejected(field_name, value, "bool")
+    return cached
+
+
 def _keep_str(value: Any, cached: str, field_name: str) -> str:
     """Keep a device value only if it is already a ``str``."""
     if isinstance(value, str):
@@ -253,31 +269,21 @@ class DoorStatus(Enum):
     UNKNOWN = "UNKNOWN"
 
     @classmethod
-    def from_string(cls, value: str, *, throttle: EventThrottle | None = None) -> DoorStatus:
+    def from_string(cls, value: str) -> DoorStatus:
         """Convert a string status to enum.
 
         Unrecognized status strings map to :attr:`UNKNOWN` with a warning
-        logged - never silently claim a possibly-open door is closed (L16).
+        logged - never silently claim a possibly-open door is closed.
 
         Args:
             value: The status string the device sent.
-            throttle: Optional per-connection :class:`EventThrottle`. This
-                runs once per device *frame* on the facade's status path, so
-                a peer answering as the door - or simply a firmware revision
-                reporting a status this library does not know - bought one
-                uncapped WARNING per status update: 20,000 records for
-                20,000 frames, and a single 65,086-byte record from one
-                frame (round-9 security M1). The facade passes its throttle
-                so the warning rides the same doubling schedule as the
-                client's four sibling sites; a one-off caller passes nothing
-                and is always told.
         """
         for status in cls:
             if status.value == value:
                 return status
-        rendered = sanitize_text(value, MAX_LOGGED_LENGTH)
-        if throttle is None or throttle.record(len(rendered)):
-            logger.warning("Unknown door status from device: %s", rendered)
+        logger.warning(
+            "Unknown door status from device: %s", sanitize_field(value, MAX_LOGGED_LENGTH)
+        )
         return cls.UNKNOWN
 
 
@@ -329,7 +335,7 @@ class ScheduleTime:
         Everything here comes off the wire and is untrusted: a device that
         answers ``in_start_time: 5`` (or ``null``, or a list) must produce a
         ``ValueError`` the caller can handle, not an ``AttributeError`` out
-        of a documented coroutine (R4-M1).
+        of a documented coroutine.
 
         Args:
             data: The ``{hour, min}`` mapping from the device.
@@ -422,7 +428,7 @@ class Schedule:
         # A list of 7 flags or the legacy integer bitmask. Read with
         # make_bool, never truthiness: bool("0") is True, so a firmware
         # variant sending "0"/"1" day flags would otherwise turn on every
-        # day of the week (L4).
+        # day of the week.
         days = coerce_schedule_days(data.get(FIELD_DAYSOFWEEK, [1, 1, 1, 1, 1, 1, 1]))
         inside = coerce_schedule_flag(data.get(FIELD_INSIDE, False), FIELD_INSIDE)
         outside = coerce_schedule_flag(data.get(FIELD_OUTSIDE, False), FIELD_OUTSIDE)
@@ -436,8 +442,8 @@ class Schedule:
             prefix = ""
 
         if prefix:
-            # A sensor is selected, so the window that gates it is required
-            # (L5) - the same rule the simulator's parser enforces.
+            # A sensor is selected, so the window that gates it is required -
+            # the same rule the simulator's parser enforces.
             start = ScheduleTime.from_dict(
                 require_schedule_field(data, f"{prefix}{FIELD_START_TIME_SUFFIX}"), "start time"
             )
@@ -453,7 +459,7 @@ class Schedule:
             index=index,
             # Read like every other wire flag rather than with a bespoke
             # `== "1"`, and normalized to a real bool so a field declared
-            # `enabled: bool` never holds 1/0 (T3).
+            # `enabled: bool` never holds 1/0.
             enabled=coerce_schedule_flag(data.get(FIELD_ENABLED, True), FIELD_ENABLED),
             days_of_week=days,
             inside=inside,
@@ -495,10 +501,10 @@ class PowerPetDoor:
        device emulation: ``open_and_hold()`` returned in 0.000 s during a
        reconnect window and the door latched open 4.0 s later.
 
-       This is deliberate (:class:`~powerpetdoor.PowerPetDoorClient` has
-       flushed its queue on connect since the round-1 fixes), and it is
-       what makes a command survive a transient drop. Check
-       :attr:`connected` first if you need "refuse when offline" instead::
+       This is deliberate (:class:`~powerpetdoor.PowerPetDoorClient` flushes
+       its queue on connect), and it is what makes a command survive a
+       transient drop. Check :attr:`connected` first if you need "refuse
+       when offline" instead::
 
            if not door.connected:
                raise ConnectionError("door is offline")
@@ -560,38 +566,12 @@ class PowerPetDoor:
         self._schedules: list[Schedule] = []
         self._latency: float | None = None
 
-        # Connection synchronization (M10): set by the client's on_connect
+        # Connection synchronization: set by the client's on_connect
         # hook, cleared on disconnect. _initialized marks that the initial
         # connect()+refresh() completed, so later on_connect events are
         # auto-reconnects that must resynchronize the cache.
         self._connected_event = asyncio.Event()
         self._initialized = False
-
-        # Per-frame log sites on the *facade*. Each fires once per device
-        # frame on a condition the peer picks, so without a throttle a peer
-        # answering as the door writes one WARNING per frame into the host
-        # application's log - which for the Home Assistant deployment target
-        # is the whole instance's log. Measured at 20,000 records per 20,000
-        # frames against 10 for the client's throttled siblings, plus a
-        # single 65,086-byte record from one frame (round-9 security M1).
-        # Connection-scoped like the client's, flushed and reset in
-        # :meth:`_on_disconnect`.
-        self._unknown_statuses = EventThrottle(
-            logger,
-            logging.WARNING,
-            "Received %d unknown door status(es) from device (%d bytes) on this connection",
-        )
-        self._bad_hw_info = EventThrottle(
-            logger,
-            logging.WARNING,
-            "Ignored %d non-mapping hardware info payload(s) from device (%d bytes) "
-            "on this connection",
-        )
-        self._bad_schedule_updates = EventThrottle(
-            logger,
-            logging.WARNING,
-            "Ignored %d malformed schedule update(s) from device (%d bytes) on this connection",
-        )
 
         # User callbacks
         self._status_callbacks: list[Callable[[DoorStatus], None]] = []
@@ -647,11 +627,10 @@ class PowerPetDoor:
         ``asyncio.wait_for`` raises a **bare** ``TimeoutError()`` - its
         ``repr`` is literally ``TimeoutError()``. A developer saw an empty
         exception after a 20-second stall with no way to tell "the door is
-        wedged" from "you never called ``connect()``" (round-9 frontend
-        M2). This is the least actionable exception the API can produce, so
-        the message names the command, the wait, the endpoint, and - when
-        there is no connection - the fact that the command is **queued**
-        rather than lost.
+        wedged" from "you never called ``connect()``". This is the least
+        actionable exception the API can produce, so the message names the
+        command, the wait, the endpoint, and - when there is no connection -
+        the fact that the command is **queued** rather than lost.
 
         Args:
             cmd: The protocol command being awaited, for the message.
@@ -685,7 +664,7 @@ class PowerPetDoor:
 
         Idempotent: calling connect() while already connected is a no-op,
         so a defensive re-connect cannot open a second socket to the
-        single-connection device and orphan the live one (M2).
+        single-connection device and orphan the live one.
 
         Args:
             timeout: Seconds to wait for the connection to establish.
@@ -701,7 +680,7 @@ class PowerPetDoor:
             logger.warning("Ignoring connect(): already connected to %s", self._host)
             return
 
-        # Re-arm the client in case disconnect() was called earlier (M6).
+        # Re-arm the client in case disconnect() was called earlier.
         self._client.reset_shutdown()
         self._connected_event.clear()
         self._initialized = False
@@ -749,7 +728,7 @@ class PowerPetDoor:
         await self._client.connect()
 
         # Wait for the connection, signalled by the client's on_connect
-        # hook - no polling (M10).
+        # hook - no polling.
         effective_timeout = timeout if timeout is not None else self.default_timeout
         try:
             async with asyncio.timeout(effective_timeout):
@@ -772,7 +751,7 @@ class PowerPetDoor:
 
         Async lifecycle handlers still in flight (e.g. the ``on_disconnect``
         this call itself triggers) are awaited, then cancelled if they
-        overrun ``default_timeout``, so nothing outlives this call (T2).
+        overrun ``default_timeout``, so nothing outlives this call.
 
         Idempotent: safe to call multiple times, and before connect().
         """
@@ -1254,7 +1233,7 @@ class PowerPetDoor:
         # raised a bare TypeError out of this documented coroutine for any
         # scalar, and quietly fanned out one GET_SCHEDULE *per character*
         # for a string - 200 sequential round trips against a device that
-        # rate-limits between messages (round-6 backend L2).
+        # rate-limits between messages.
         if not isinstance(indices, list):
             logger.warning(
                 "Device sent a non-list schedule index list: %s",
@@ -1279,7 +1258,7 @@ class PowerPetDoor:
             except TimeoutError:
                 # %s, not %d: the index is only an int if the device says
                 # so, and a string index turned this warning into a
-                # logging-internal formatting error on stderr (L2).
+                # logging-internal formatting error on stderr.
                 logger.warning("Timeout fetching schedule %s", sanitize_text(idx))
             except Exception:
                 logger.exception("Error fetching schedule %s", sanitize_text(idx))
@@ -1287,7 +1266,7 @@ class PowerPetDoor:
         # Sorted for the same reason _on_schedule_update sorts: the public
         # `schedules` property must not be ordered by whichever code path
         # last touched it. GET_SCHEDULE_LIST returns slots, and a device
-        # with slots filled out of order returns them out of order (T3).
+        # with slots filled out of order returns them out of order.
         schedules.sort(key=lambda s: s.index)
         self._schedules = schedules
         return self._schedules.copy()
@@ -1326,7 +1305,7 @@ class PowerPetDoor:
 
     @staticmethod
     def _log_refresh_failures(names: list[str], results: Sequence[Any]) -> None:
-        """Log each failed step of a gathered refresh (L5).
+        """Log each failed step of a gathered refresh.
 
         ``refresh()``/``refresh_settings()`` gather with
         ``return_exceptions=True`` so one dead command cannot abort the
@@ -1369,7 +1348,7 @@ class PowerPetDoor:
             self._client.send_message(CONFIG, CMD_GET_DOOR_STATUS, notify=True),
             timeout,
         )
-        self._status = DoorStatus.from_string(result, throttle=self._unknown_statuses)
+        self._status = DoorStatus.from_string(result)
         return self._status
 
     async def refresh_settings(self, *, timeout: float | None = None) -> None:
@@ -1440,7 +1419,7 @@ class PowerPetDoor:
         elif result:
             # The client stays liberal and resolves the future with
             # whatever the device sent; the facade must not cache a value
-            # its three public properties would then choke on (M1).
+            # its three public properties would then choke on.
             logger.warning(
                 "Ignoring non-mapping hardware info: %s",
                 sanitize_text(result, MAX_LOGGED_LENGTH),
@@ -1453,7 +1432,7 @@ class PowerPetDoor:
 
     def _on_door_status(self, status: str) -> None:
         """Handle door status update from client."""
-        new_status = DoorStatus.from_string(status, throttle=self._unknown_statuses)
+        new_status = DoorStatus.from_string(status)
         if new_status != self._status:
             self._status = new_status
             for callback in self._status_callbacks:
@@ -1465,10 +1444,10 @@ class PowerPetDoor:
     def _on_settings(self, settings: dict[str, Any]) -> None:
         """Handle settings update from client.
 
-        Wire values are protocol strings ("0"/"1"), so they must be
-        coerced with make_bool - bool("0") is True, which would cache the
-        inverse of the device state (test-fanatic H1). Unrecognized values
-        leave the cached state untouched.
+        Wire values are protocol strings ("0"/"1"), so they must be coerced
+        with make_bool - bool("0") is True, which would cache the inverse of
+        the device state. Unrecognized values leave the cached state
+        untouched.
         """
         # (settings field, cache attribute, inverted?)
         boolean_fields = (
@@ -1483,9 +1462,13 @@ class PowerPetDoor:
         )
         for field_name, attr, inverted in boolean_fields:
             if field_name in settings:
-                value = make_bool(settings[field_name])
-                if value is not None:
-                    setattr(self, attr, (not value) if inverted else value)
+                cached = getattr(self, attr)
+                value = _keep_flag(
+                    make_bool(settings[field_name]),
+                    (not cached) if inverted else cached,
+                    field_name,
+                )
+                setattr(self, attr, (not value) if inverted else value)
 
         for callback in self._settings_callbacks:
             try:
@@ -1493,38 +1476,33 @@ class PowerPetDoor:
             except Exception:
                 logger.exception("Error in settings callback")
 
-    # Sensor listeners are invoked by the client as callback(field, value)
-    # (decision D4); value is None when the wire value was unrecognized,
-    # in which case the cached state is left untouched.
+    # Sensor listeners are invoked by the client as callback(field, value);
+    # the cached state is left untouched unless the value is a real bool
+    # (see :func:`_keep_flag`).
 
     def _on_power_update(self, field_name: str, value: bool | None) -> None:
-        if value is not None:
-            self._power = value
+        self._power = _keep_flag(value, self._power, field_name)
 
     def _on_inside_update(self, field_name: str, value: bool | None) -> None:
-        if value is not None:
-            self._inside_sensor = value
+        self._inside_sensor = _keep_flag(value, self._inside_sensor, field_name)
 
     def _on_outside_update(self, field_name: str, value: bool | None) -> None:
-        if value is not None:
-            self._outside_sensor = value
+        self._outside_sensor = _keep_flag(value, self._outside_sensor, field_name)
 
     def _on_auto_update(self, field_name: str, value: bool | None) -> None:
-        if value is not None:
-            self._auto = value
+        self._auto = _keep_flag(value, self._auto, field_name)
 
     def _on_safety_lock_update(self, field_name: str, value: bool | None) -> None:
-        if value is not None:
-            self._safety_lock = value
+        self._safety_lock = _keep_flag(value, self._safety_lock, field_name)
 
     def _on_autoretract_update(self, field_name: str, value: bool | None) -> None:
-        if value is not None:
-            self._autoretract = value
+        self._autoretract = _keep_flag(value, self._autoretract, field_name)
 
     def _on_cmd_lockout_update(self, field_name: str, value: bool | None) -> None:
         # Inverted logic
-        if value is not None:
-            self._pet_proximity_keep_open = not value
+        self._pet_proximity_keep_open = not _keep_flag(
+            value, not self._pet_proximity_keep_open, field_name
+        )
 
     def _on_battery_update(self, data: dict[str, Any]) -> None:
         """Handle battery update from client.
@@ -1534,7 +1512,7 @@ class PowerPetDoor:
         used to rely on were dead code - ``_handle_battery`` always builds
         all three keys, holding None for a field the device omitted - so a
         reply that omitted ``batteryPercent`` replaced a good cached value
-        with None and made ``battery.charging`` raise (round-7 backend M1).
+        with None and made ``battery.charging`` raise.
         """
         self._battery = BatteryInfo(
             percent=_keep_int(
@@ -1551,25 +1529,21 @@ class PowerPetDoor:
     def _on_hold_time_update(self, value: int) -> None:
         """Handle hold time update (value is in centiseconds).
 
-        Found by the sibling sweep the round-7 fix ran over every retained
-        facade value, not by the report: a device that spells
-        ``holdOpenTime`` as ``"200"`` made ``value / 100.0`` raise
-        TypeError, which the client's listener isolation turned into a
-        full traceback *per frame* while the cache stayed silently stale;
-        and ``NaN`` (which ``json.loads`` accepts) was cached straight into
-        a property documented ``-> float``.
+        A device that spells ``holdOpenTime`` as ``"200"`` made
+        ``value / 100.0`` raise TypeError, which the client's listener
+        isolation turned into a full traceback *per frame* while the cache
+        stayed silently stale; and ``NaN`` (which ``json.loads`` accepts)
+        was cached straight into a property documented ``-> float``.
 
-        The guard closed the string and NaN spellings and left one open:
-        an arbitrary-precision *integer* is legal JSON, passes every type
-        check, and then makes ``value / 100.0`` raise ``OverflowError`` -
-        one unthrottled traceback per frame through the client's listener
-        isolation, with the cache left silently stale, which is the exact
-        shape described above (round-8 backend L1 / security L2). This is
-        the one retained facade value with float arithmetic on it, so it
-        is the one that passes ``maximum``. The bound is float
-        representability, **not** a protocol ceiling: bounding it at the
-        simulator's ``MAX_HOLD_TIME_CENTISECONDS`` would make the shipped
-        facade refuse a device value on the authority of a
+        An arbitrary-precision *integer* fails the same way: it is legal
+        JSON, passes every type check, and then makes ``value / 100.0``
+        raise ``OverflowError`` - one unthrottled traceback per frame
+        through the client's listener isolation, with the cache left
+        silently stale. This is the one retained facade value with float
+        arithmetic on it, so it is the one that passes ``maximum``. The
+        bound is float representability, **not** a protocol ceiling:
+        bounding it at the simulator's ``MAX_HOLD_TIME_CENTISECONDS`` would
+        make the shipped facade refuse a device value on the authority of a
         reverse-engineered constant.
         """
         centiseconds = _keep_int(
@@ -1591,26 +1565,24 @@ class PowerPetDoor:
         (``firmware_version``, ``hardware_version``, ``hardware_info`` all
         raise ``AttributeError``) with nothing in the log tying the failure
         to the frame that caused it, and it heals only on the next
-        well-formed reply (round-6 backend M1). The client already shields
-        this listener, so the guard is defence in depth against a
-        third-party client subclass calling it directly.
+        well-formed reply. The client already shields this listener, so the
+        guard is defence in depth against a third-party client subclass
+        calling it directly.
 
-        This docstring used to claim ``_hw_info`` was "the only device
-        payload the facade retains", which is false and is what stopped the
-        round-6 sweep one method short: ``_battery``,
-        ``_total_open_cycles``, ``_total_auto_retracts`` and ``_timezone``
-        are retained too, and all four were unguarded (round-7 backend
-        M1/L1). They go through the module-level ``_keep_*`` helpers now.
+        ``_hw_info`` is not the only device payload the facade retains:
+        ``_battery``, ``_total_open_cycles``, ``_total_auto_retracts`` and
+        ``_timezone`` are retained too, and all of them go through the
+        module-level ``_keep_*`` helpers.
         """
         if not isinstance(data, dict):
-            rendered = sanitize_text(data, MAX_LOGGED_LENGTH)
-            if self._bad_hw_info.record(len(rendered)):
-                logger.warning("Ignoring non-mapping hardware info: %s", rendered)
+            logger.warning(
+                "Ignoring non-mapping hardware info: %s", sanitize_field(data, MAX_LOGGED_LENGTH)
+            )
             return
         self._hw_info = data
 
     # Stats and notification listeners are invoked by the client as
-    # callback(field, value) (decision D4 / backend M2).
+    # callback(field, value).
 
     def _on_total_cycles_update(self, field_name: str, value: int) -> None:
         self._total_open_cycles = _keep_int(value, self._total_open_cycles, field_name)
@@ -1619,31 +1591,34 @@ class PowerPetDoor:
         self._total_auto_retracts = _keep_int(value, self._total_auto_retracts, field_name)
 
     def _on_notify_inside_on(self, field_name: str, value: bool | None) -> None:
-        if value is not None:
-            self._notifications.inside_on = value
+        self._notifications.inside_on = _keep_flag(value, self._notifications.inside_on, field_name)
 
     def _on_notify_inside_off(self, field_name: str, value: bool | None) -> None:
-        if value is not None:
-            self._notifications.inside_off = value
+        self._notifications.inside_off = _keep_flag(
+            value, self._notifications.inside_off, field_name
+        )
 
     def _on_notify_outside_on(self, field_name: str, value: bool | None) -> None:
-        if value is not None:
-            self._notifications.outside_on = value
+        self._notifications.outside_on = _keep_flag(
+            value, self._notifications.outside_on, field_name
+        )
 
     def _on_notify_outside_off(self, field_name: str, value: bool | None) -> None:
-        if value is not None:
-            self._notifications.outside_off = value
+        self._notifications.outside_off = _keep_flag(
+            value, self._notifications.outside_off, field_name
+        )
 
     def _on_notify_low_battery(self, field_name: str, value: bool | None) -> None:
-        if value is not None:
-            self._notifications.low_battery = value
+        self._notifications.low_battery = _keep_flag(
+            value, self._notifications.low_battery, field_name
+        )
 
     async def _on_connect(self) -> None:
         """Handle connection established."""
         self._connected_event.set()
         # After a client-level auto-reconnect the cached state may be
-        # stale; resynchronize before notifying callbacks (M10). The
-        # initial connect() performs its own refresh.
+        # stale; resynchronize before notifying callbacks. The initial
+        # connect() performs its own refresh.
         if self._initialized:
             try:
                 await self.refresh()
@@ -1659,11 +1634,6 @@ class PowerPetDoor:
         """Handle connection lost."""
         self._connected_event.clear()
         self._latency = None  # Reset latency since we're no longer connected
-        # Same connection scope as the client's throttles: report the
-        # suppressed tail, then start the next connection's count clean.
-        for throttle in (self._unknown_statuses, self._bad_hw_info, self._bad_schedule_updates):
-            throttle.flush()
-            throttle.reset()
         for callback in self._disconnect_callbacks:
             try:
                 callback()
@@ -1684,17 +1654,17 @@ class PowerPetDoor:
         A malformed entry is reported and dropped rather than allowed to
         raise: the client isolates listener exceptions, so an escaping
         error would leave the cached schedule list silently stale with
-        nothing in the log to say the update was lost (R4-M1).
+        nothing in the log to say the update was lost.
         """
         try:
             schedule = Schedule.from_dict(schedule_data)
         except ValueError as err:
-            # `err` embeds `{value!r}` of the untrusted payload, so this is
-            # a peer-chosen string on a per-frame path: capped and throttled
-            # like every other such site (round-9 security M1).
-            rendered = sanitize_text(err, MAX_LOGGED_LENGTH)
-            if self._bad_schedule_updates.record(len(rendered)):
-                logger.warning("Ignoring malformed schedule update from device: %s", rendered)
+            # `err` embeds `{value!r}` of the untrusted payload, so it is
+            # length-capped before it reaches the log.
+            logger.warning(
+                "Ignoring malformed schedule update from device: %s",
+                sanitize_field(err, MAX_LOGGED_LENGTH),
+            )
             return
         # Update or add the schedule in our cache
         for i, s in enumerate(self._schedules):

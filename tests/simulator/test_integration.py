@@ -187,7 +187,7 @@ class TestDoorOperationMessages:
 
         The old version asserted only that a CLOSE response arrived, so it
         passed with *every* door-status broadcast suppressed - it could not
-        fail for the thing it is named after (R3-L2).
+        fail for the thing it is named after.
         """
         # Open the door and wait until its final broadcast has been
         # *captured* before clearing, so no in-flight KEEPUP frame lands in
@@ -251,7 +251,7 @@ class TestMultiClient:
 
             # Both clients see the same broadcasts, in the same order: a
             # ">0 status updates" assertion could not tell a dropped state
-            # (or a command response) from a real broadcast (R3-L2).
+            # (or a command response) from a real broadcast.
             assert await cap1.receive_status_sequence(OPENING_SEQUENCE, 3.0) == OPENING_SEQUENCE
             assert await cap2.receive_status_sequence(OPENING_SEQUENCE, 3.0) == OPENING_SEQUENCE
 

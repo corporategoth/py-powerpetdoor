@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tests/test_wire_constants.py`: every constant in `powerpetdoor.const` whose
+  value appears in `docs/protocol.md` — 113 of the 121 — is pinned by literal.
+  Both sides of this project read the same symbol, so `CMD_OPEN`,
+  `FIELD_CMD_LOCKOUT` and `FIELD_AUTO` could all be renamed or re-spelled with
+  the whole suite green. The perimeter is derived from the document, not
+  hand-listed, so a newly documented constant has to be added
+- `powerpetdoor.sanitize.sanitize_field()`: `sanitize_text` plus LF, for a sink
+  that renders one device-supplied field value into a log record
 - `powerpetdoor.framing` module: a shared, string-aware JSON frame scanner used
   by both the client and the simulator (resyncs past garbage, tolerates
   whitespace between messages, caps the un-parsed buffer at 64 KiB, never raises)
@@ -50,9 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Any` to a consumer — `await door.set_hold_time("banana")` was silently
   accepted by mypy in a downstream repo
 - A `MANIFEST.in`, so the sdist ships the whole test suite (`conftest.py`,
-  `tests/__init__.py`, `tests/fuzz/`, `tests/simulator/`, `scripts/`, `docs/`)
-  rather than 9 loose modules and none of the machinery to run them. `pytest`
-  in the unpacked sdist now runs the same suite CI does
+  `tests/__init__.py`, `tests/fuzz/`, `tests/simulator/`, `docs/`) rather than
+  9 loose modules and none of the machinery to run them. `pytest` in the
+  unpacked sdist now runs the same suite CI does
 - CI: a `packaging` job that builds the artifacts and asserts both — the wheel
   carries `py.typed`, and the unpacked sdist's suite actually runs
 - `docs/door.md`: a "Behaviour While Disconnected" section, and a warning on
@@ -211,7 +219,80 @@ accepted, and the run still exited 0.
   per file version, and the completer is threaded. A 200-script `--scripts-dir`
   cost ~600 ms of the door server's own event loop per Tab; it is now ~4 ms
 
+### Removed
+- The hostile-peer hardening added over the previous review rounds. This client
+  dials **out** to a pet door on a home LAN and nothing connects inward; the
+  simulator is a test tool. Defending against a hostile peer defended a
+  scenario that does not exist, and the machinery cost far more than it bought:
+  - `EventThrottle` and all ~15 throttled log sites (client, facade, simulator
+    and framer). Those sites log plainly again — lazily, and still sanitized
+    where the value is network-derived
+  - `FrameDispatcher`: bounded in-flight tasks, the backlog,
+    `pause_reading`/`resume_reading` and the `call_soon` re-arm. Both receive
+    paths iterate the frames from one read and dispatch each, as before
+  - The simulator's door-transport write-backlog cap (`MAX_WRITE_BACKLOG`) and
+    its drop/abort machinery. The framing-overflow drop stays
+  - The client's `_declined` / `_pending_direct_losses` counters. They guarded
+    a path `connect()` routes around: it wires a `_ConnectionAttempt` shim per
+    attempt, which knows its own transport by identity
+  What is kept, because it is correctness rather than security: the 64 KiB
+  receive cap (a stuck door must not exhaust memory), every "never raises on
+  arbitrary input" behaviour in the framer, the client and the simulator
+  protocol, `sanitize_text` on network-derived values, the control channel's
+  loopback default bind, and the per-attempt transport identity
+- `scripts/generate_gaps_report.py`, `tests/TESTING_GAPS.md` and the CI step
+  that regenerated and committed the report. It stamped `datetime.now(UTC)`
+  unconditionally, so every push produced a bot commit. `[tool.coverage.run]
+  source` now covers shipping code only
+- Documentation tests that linted GitHub heading anchors and asserted CI step
+  names were specific English sentences. The two that check real behaviour —
+  keepalive framing against `docs/protocol.md`, sensor gating against
+  `docs/operation.md` — stay
+
 ### Fixed
+- The plain-input simulator prompt no longer busy-spins at EOF. `readline()`
+  returning `""` was treated as a bare Enter, and an fd at EOF is permanently
+  readable, so the reader callback re-fired forever: 98% of a core, tens of MB
+  of prompt text, and a process that never exited. EOF now ends the session
+  cleanly, exactly like Ctrl-D on a terminal (pipe-backed stdin only; a real
+  TTY was never affected)
+- `ppd-simulator` and `ppd-simulator-ctl` start on a stdin that cannot be
+  polled. `/dev/null`, a regular file and the temp file bash uses for a heredoc
+  make `loop.add_reader()` raise `PermissionError`, which was a 37-line
+  traceback and exit code 1 before the prompt appeared. Both fall back to
+  blocking reads
+- The `add_schedule` script action really is 24/7. Its window was built as
+  `00:00-23:59` against an *exclusive* end, so it covered 1439 of the day's
+  1440 minutes and blocked both sensors for exactly the minute 23:59 — two
+  schedule-script tests failed for 60 seconds a day. A schedule whose start and
+  end coincide is now the whole day, which is the only spelling a true 24h
+  window has with an exclusive end
+- `PowerPetDoor`'s twelve flag listeners no longer cache a falsy non-boolean.
+  `make_bool` returns its argument unchanged for a value it does not recognize,
+  so `[]`, `{}` or `0.0` reached the facade as themselves rather than as
+  `None` — and the `if value is not None` guard let them into a strictly typed
+  cache, where a known-ON `safety_lock` then read `False`. (It healed on the
+  next `refresh_settings()` or reconnect, but was wrong until then.)
+  `make_bool` itself is deliberately unchanged: `compress_schedule` calls it
+  unguarded on day flags, where "unrecognized" has to stay fail-closed
+- Device-supplied field values can no longer forge log records. `sanitize_text`
+  escapes CR but not LF — deliberately, because it is also applied to whole
+  formatted records, where a multi-line traceback is legitimate — so a field
+  carrying a newline wrote extra physical lines with a timestamp, a severity
+  and a message the device chose. The new `sanitize_field()` escapes LF as well
+  and is used at every single-value field sink
+- Simulator scripts: 9 of the 12 documented `assert` conditions were unusable.
+  PyYAML resolves `on`/`off` to booleans and bare digits to ints, and the
+  comparison called `.lower()` on them, so `assert power equals: off` failed a
+  **true** assertion with `AttributeError: 'bool' object has no attribute
+  'lower'`. Both sides of the comparison are now rendered as text first; that
+  also fixes `hold_time`, which is stored as a float and lost to `str(2.0)`
+  even when the expected value was quoted
+- CI: the coverage gate and the packaging, lint, format and type steps are
+  pinned by a test that **parses** `.github/workflows/test.yml`. Substring
+  assertions passed under three of the four ways the gate could be disabled
+  (lowering `--fail-under`, `continue-on-error: true`, `if: false`)
+
 - `ppd-simulator` no longer swallows the cancellation `asyncio.Runner` uses to
   deliver Ctrl-C, so `main()`'s `KeyboardInterrupt` handler is actually
   entered; the startup-script task is held and cancelled inside
@@ -221,28 +302,7 @@ accepted, and the run still exited 0.
   legal JSON, arrives as pure ASCII on the wire, and cannot be encoded to
   UTF-8 — so the "sanitized" record was exactly what a
   `logging.FileHandler(encoding="utf-8")` could not write: 200 hostile frames
-  produced **0** log lines and 359 KB of logging-internal tracebacks on stderr,
-  from a code path outside every `EventThrottle`
-- Four per-frame log sites in the shipped library and facade are now throttled
-  and length-capped like their four siblings: the unusable-`msgID` warning
-  (`client.py`), the unknown-door-status, non-mapping-hardware-info and
-  malformed-schedule warnings (`door.py`), plus the previously capped-but-
-  unthrottled non-mapping `fwInfo` warning. Measured at 20,000 frames:
-  **20,032 records → 64**, and a single **65,638-byte** record from one frame
-  → 332. `door.py`'s unknown-status site needs no attack at all — a firmware
-  revision reporting a status this library does not know produced one uncapped
-  WARNING per status update
-- `FrameDispatcher._pump()` re-arms the pump *and* updates flow control in a
-  `finally`, so no raising dispatch callback can leave the transport paused
-  with an undrainable backlog. (Round 8 moved only the flow-control update,
-  which closed the wedge for a backlog at or below `pause_at` and
-  re-established it above — measured at `backlog=934 inflight=0 paused=True`
-  forever on a 1000-frame burst.)
-- The malformed-message and device-error throttles record the bytes the peer
-  actually sent instead of `len(json.dumps(msg))`. A `{}` padded with 60,000
-  spaces was reported as "2 bytes" — a 30,001x under-report in the number an
-  operator reads to decide whether a peer is worth investigating — and a
-  compact 29-byte envelope over-reported by 12%
+  produced **0** log lines and 359 KB of logging-internal tracebacks on stderr
 - `PowerPetDoor`'s command timeouts carry a message. `asyncio.wait_for` raises
   a bare `TimeoutError()` whose `repr` is literally `TimeoutError()`; it now
   names the command, the wait, the endpoint, and — when there is no connection
@@ -270,13 +330,6 @@ accepted, and the run still exited 0.
 - CI: the changelog guard covers a whole multi-commit push
   (`github.event.before`, not just `HEAD^`), and an unresolvable base ref now
   fails the job instead of printing `OK: 0 file(s)` and exiting 0
-- Coverage: `partial_branches` is configured and anchored, so the branch half
-  of the exclusion mechanism is no longer coverage's own bare, unanchored
-  default; the prose sweep is fed both halves. `tests/test_gaps_report.py`
-  asserts the *values* of `branch`, `source`, `omit`, `exclude_lines` and
-  `partial_branches`, and `TESTING_GAPS.md` discloses the gate's configuration
-  — four one-line edits to `pyproject.toml` each shrank the gate silently while
-  it still printed `100.00%`
 - The 64 KiB framing cap bounds memory again, not just a character count: the
   retained remainder is coalesced once it grows past `MAX_RETAINED_PIECES`
   pieces (measured: 512 KiB/connection → 67 KiB at 1-byte chunks, for under 4%
@@ -319,9 +372,6 @@ accepted, and the run still exited 0.
   ERROR and burned a reconnect attempt. The local-failure paths (keepalive
   give-up, write failure, framing overflow) now schedule their reconnect
   explicitly instead of relying on that event
-- A superseded transport's `connection_lost` tore down the healthy connection
-  when `PowerPetDoorClient` was wired into `create_connection()` directly (the
-  per-attempt shim was already guarded)
 - `aclose()` cancelled while waiting on its handlers left them running,
   un-awaited and un-cancelled — the exact guarantee it exists to make
 - `PowerPetDoor.get_schedule()`/`refresh_schedules()`/schedule updates raised
@@ -336,8 +386,6 @@ accepted, and the run still exited 0.
   not flushed, so a redirected `--wait-for-client` log simply stopped
 - Simulator: the operator's `schedule add` could allocate index 256, past the
   bound the wire path enforces
-- `generate_gaps_report.py` truncated any `# pragma:` reason containing
-  parentheses, and did not scan `scripts/`
 - `connect()` escaped with `UnicodeEncodeError`/`OverflowError` for an invalid
   host or port instead of logging and scheduling a reconnect
 - Simulator: a status listener commanding the door with `hold_time` ~0 replayed
@@ -375,34 +423,8 @@ accepted, and the run still exited 0.
   traceback per frame, with the cached value silently unchanged. The bound is
   float representability, not a protocol ceiling: nothing a real device could
   meaningfully send is refused
-- Coverage's `exclude_lines` patterns are anchored to the constructs they name.
-  Bare phrases are matched against the whole source line, so six of them also
-  matched prose — removing three executable statements in
-  `scripts/generate_gaps_report.py` from the 100% gate and letting arbitrary
-  never-executed code pass it. `tests/TESTING_GAPS.md` now reports the gate's
-  real perimeter, and a test sweeps every configured pattern over every gated
-  file
 
 ### Security
-- Bounded per-frame dispatch on both client and simulator: one `asyncio.Task`
-  used to be created per framed message, synchronously, per read — one 256 KiB
-  read of `{}` admitted 131,072 live tasks (~165 MB measured) before any of them
-  ran. Dispatch now runs at most `MAX_INFLIGHT_FRAMES` handlers at a time and
-  pauses the transport while the backlog drains (measured: 131,072 tasks /
-  165.5 MB → 64 tasks / 6.5 MB; a `{"cmd":"a"}` flood that made `ctl status`
-  time out at 15 s is now answered in 12 ms)
-- The simulator's door transport got the write-buffer ceiling the control
-  channel already had: a client that issues valid commands and never reads the
-  answers is dropped instead of growing the daemon's heap without bound
-  (measured: +18.1 MB → +2.2 MB for 3.2 MB of requests)
-- Throttled the four per-*frame* log sites (malformed frame and malformed
-  message on the client; JSON parse error and unknown command on the
-  simulator). These fire at the peer's *byte* rate rather than its packet rate,
-  so one 64 KiB write of `{x}` bought ×64 write amplification in a third
-  party's log; now ×0.05. The echoed frame is also length-bounded
-- `EventThrottle` gained an elapsed-time floor and an interval ceiling, so a
-  *new* burst of events on a long-lived connection is always reported promptly
-  instead of being swallowed by a threshold the connection passed hours ago
 - Capped the receive buffer on both client and simulator (unbounded growth was a
   memory-exhaustion vector for a malicious peer)
 - The simulator control channel is unauthenticated, so it now binds loopback by
@@ -442,12 +464,6 @@ accepted, and the run still exited 0.
   (`uv sync --locked`), and the build backend is pinned exactly
 - Simulator history files are created with `0600` permissions
 - All CI actions pinned to full commit SHAs
-- Peer-driven log notices are aggregated per connection instead of once per
-  read. A peer sending one byte per TCP segment bought one log line per byte —
-  x247 write amplification with no self-limiting, in the shipped library and in
-  the simulator, and 91% of a core once the control channel fanned the records
-  out. Garbage discards and non-ASCII notices now report on a doubling
-  schedule, so log volume is logarithmic in the peer's traffic
 - Response handlers read their payload field defensively, so a legal envelope
   missing one field takes the existing "Response missing expected field" path
   instead of raising a `KeyError`/`TypeError` into a full ERROR traceback
@@ -467,20 +483,11 @@ accepted, and the run still exited 0.
   *subclass* of `ValueError`, not a superset of what `json.loads` raises: an
   integer literal over 4,300 digits raises a bare `ValueError` and deep nesting
   raises `RecursionError`, and both escaped the decoder. Brace-balanced and
-  well under the 64 KiB framing cap, ~5.4 KB per victim connection, they either
-  fatal-errored the transport — the client then reconnected in a hot loop
-  forever, because every attempt *connects* before dying and so resets the
-  backoff — or, landing in the pump's `call_soon` continuation, left the
-  dispatcher permanently wedged with reading paused, holding the file
-  descriptor and the connection slot after the peer had closed its socket.
-  Both frames now take the same throttled bad-frame path an unparseable frame
-  already took; nothing that decoded before is refused now
-- `FrameDispatcher._pump()` re-arms the pump *and* updates flow control in a
-  `finally`, so no raising dispatch callback can leave the transport paused
-  with an undrainable backlog. (Round 8 moved only the flow-control update,
-  which closed the wedge for a backlog at or below `pause_at` and
-  re-established it above — measured at `backlog=934 inflight=0 paused=True`
-  forever on a 1000-frame burst. Both lines moved in round 9.)
+  well under the 64 KiB framing cap, they fatal-errored the transport — the
+  client then reconnected in a hot loop forever, because every attempt
+  *connects* before dying and so resets the backoff. Both frames now take the
+  same bad-frame path an unparseable frame already took; nothing that decoded
+  before is refused now
 - Simulator: the interactive completer runs off the event loop
   (`ThreadedCompleter`), so no completer can stall the emulated door
 

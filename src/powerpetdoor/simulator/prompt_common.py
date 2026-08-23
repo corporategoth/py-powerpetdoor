@@ -409,8 +409,8 @@ if PROMPT_TOOLKIT_AVAILABLE:
                 # The meta column gets the ArgSpec's own description, not
                 # the value echoed back at itself: `stop ⇥⇥` showed
                 # "all    all" while bool_toggle showed "on    Enable"
-                # and days showed "weekdays    Monday-Friday" (T3). Covers
-                # both "choice" args and string args carrying choices
+                # and days showed "weekdays    Monday-Friday". Covers both
+                # "choice" args and string args carrying choices
                 # (history's "clear").
                 meta = arg.describe()
                 return [(c.lower(), meta or c) for c in arg.choices]
@@ -576,9 +576,9 @@ class InteractiveSession:
                 # Threaded so no completer can ever block the event loop:
                 # the interactive prompt is a task on the *same* loop as
                 # the door protocol server, so a slow completion stalled
-                # the emulated device from a keystroke (round-8 frontend
-                # M1). The pre-filter and description cache make that fast
-                # again; this makes it structurally impossible.
+                # the emulated device from a keystroke. The pre-filter and
+                # description cache make that fast again; this makes it
+                # structurally impossible.
                 completer=ThreadedCompleter(SimulatorCompleter()),
                 complete_while_typing=False,
                 lexer=SimulatorLexer(),
@@ -718,13 +718,10 @@ class InteractiveSession:
     def format_recall(input_line: InputLine) -> str:
         """Render the ``!!``/``!n`` echo for a resolved input line.
 
-        Both input loops print this *before* executing the command, which
-        is why the combined "recall plus result" helper this replaced
-        could never be used and sat dead - leaving the two live echoes as
-        raw f-strings, the only terminal writes in the tree that did not
-        go through :func:`render_result` (T6). History entries can carry
-        anything the operator ever pasted, so they are sanitized like
-        every other line.
+        Both input loops print this *before* executing the command, and both
+        go through :func:`render_result` rather than a raw f-string: history
+        entries can carry anything the operator ever pasted, so they are
+        sanitized like every other line.
 
         Args:
             input_line: The InputLine from the input loop.
