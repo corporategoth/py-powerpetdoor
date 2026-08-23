@@ -1066,9 +1066,12 @@ class TestTheBlockedRecheckFloorActuallyStopsTheSpin:
             await asyncio.sleep(0)
 
         assert state.door_status == DOOR_STATE_HOLDING
-        # 500 loop turns take far less than the 0.1 s floor, so a floored
-        # wait covers all of them. Without the floor this is ~500.
-        assert len(timeouts) <= 2
+        # Without the floor every one of the 500 turns rechecks. The floor
+        # collapses that to a handful, so a generous bound still catches the
+        # regression by ~50x without depending on how fast the host is: a
+        # loaded runner can take longer than 0.1 s to get through 500 turns
+        # and legitimately recheck more than once.
+        assert len(timeouts) <= 10
 
     @pytest.mark.parametrize(
         ("hold_time", "expected"),
