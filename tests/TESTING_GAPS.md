@@ -2,7 +2,7 @@
 
 This file is **auto-generated** by CI after each test run. Do not edit manually.
 
-**Last updated:** 2026-08-23 11:04 UTC
+**Last updated:** 2026-08-23 18:30 UTC
 
 ## Summary
 
@@ -10,7 +10,7 @@ This file is **auto-generated** by CI after each test run. Do not edit manually.
 |--------|-------|
 | Line Coverage | 100.00% |
 | Branch Coverage | 100.00% |
-| Lines Covered | 6,586 / 6,586 |
+| Lines Covered | 6,583 / 6,583 |
 | Branches Covered | 2,302 / 2,302 |
 | Lines Missing | 0 |
 
