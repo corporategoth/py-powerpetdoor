@@ -1,0 +1,83 @@
+# Pre-commit hooks for pypowerpetdoor.
+#
+# Install (or re-install after editing this file):
+#   ./scripts/setup-dev.sh
+# which runs:
+#   pre-commit install
+#   pre-commit install --hook-type pre-push
+#
+# Run manually:
+#   pre-commit run --all-files
+#
+# Split by stage on purpose. The pre-commit stage holds only checks that
+# finish in about a second, because a hook slow enough to be worth skipping
+# gets skipped. The full suite - the part that actually gates correctness -
+# runs at pre-push, where a few tens of seconds is the right trade.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Keep in step with the ruff pinned in pyproject's dev extra; a hook
+    # that formats differently from CI's `ruff format --check` turns every
+    # commit into a fight with the lint job.
+    rev: v0.16.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (src)
+        entry: uv run mypy src
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      # The fast slice: everything except the scripted end-to-end scenarios
+      # (tests/simulator/scripts, ~11 s of driving whole door cycles through
+      # the engine) and the randomized fuzz suite. 2887 tests in ~17 s, so
+      # the commit-time feedback is real without being worth skipping.
+      - id: pytest-fast
+        name: Fast tests
+        entry: uv run pytest --ignore=tests/fuzz --ignore=tests/simulator/scripts -q --tb=line
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      # The real gate, at push time rather than commit time. Includes the
+      # 100% line+branch coverage requirement, and `--ignore=tests/fuzz`
+      # because that is what CI's unit matrix runs: the deterministic suite
+      # must never lean on randomized fuzz coverage to reach the gate.
+      - id: pytest-cov
+        name: Full suite + 100% coverage gate
+        entry: uv run pytest --ignore=tests/fuzz --cov -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: dependency-freshness
+        name: Dependencies are current
+        entry: uv run python scripts/check_dependencies.py
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

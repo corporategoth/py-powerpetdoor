@@ -345,6 +345,10 @@ accepted, and the run still exited 0.
   `docs/operation.md` — stay
 
 ### Fixed
+- `get_available_timezones()` no longer advertises zones that the conversion
+  helpers cannot handle. tzdata ships a `localtime` pseudo-zone whose TZif
+  footer carries no POSIX rule, so `iana_to_posix()` had nothing to return for
+  a name the same module had just offered as valid
 - `PowerPetDoor.set_notifications()` sent `"1"`/`"0"` strings where every
   released version sent JSON booleans. Reverted: `docs/protocol.md` shows
   strings here, but it is reverse-engineered and is not authority over the

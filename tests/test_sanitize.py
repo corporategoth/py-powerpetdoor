@@ -231,8 +231,14 @@ class TestLibraryLogSinks:
         """A hostile sensorState (sent as a JSON \\u escape) is logged escaped."""
         client, _, _ = mock_client
         with caplog.at_level(logging.DEBUG, logger="powerpetdoor.client"):
+            before = set(client._tasks)
             client.data_received(rb'{"SENSOR_INDOOR": "", "sensorState": "on\u001b[2J"}')
-            await asyncio.gather(*list(client._tasks))
+            # Only what this frame spawned. `_tasks` is connection-scoped and
+            # so also holds the keepalive loop, whose first sleep is the
+            # fixture's 30 s: gathering all of it made this single test 30 s
+            # of the suite's 39 s wall time, and left it one slow runner away
+            # from tripping the 60 s per-test timeout.
+            await asyncio.gather(*(set(client._tasks) - before))
 
         messages = [
             r.getMessage() for r in caplog.records if "Notification event" in r.getMessage()
