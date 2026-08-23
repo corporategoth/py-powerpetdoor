@@ -298,5 +298,18 @@ jobs:
           if-no-files-found: ignore
       # The real gate: pyproject's fail_under=100 applies here, on the
       # coverage combined across every Python version in the matrix.
+      - name: Generate gaps report
+        run: python scripts/generate_gaps_report.py
+      - name: Commit updated TESTING_GAPS.md
+        if: github.event_name == 'push'
+        run: |
+          git config user.name "CI Bot"
+          git config user.email "ci@neuromancy.net"
+          git add tests/TESTING_GAPS.md
+          if ! git diff --cached --quiet; then
+            git commit -m "[skip ci] Update TESTING_GAPS.md from coverage report"
+            git push
+          fi
+        continue-on-error: true
       - name: Enforce 100% coverage
         run: coverage report --fail-under=100
