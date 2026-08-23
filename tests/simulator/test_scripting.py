@@ -1452,8 +1452,16 @@ class TestDescriptionsAreCachedPerFileVersion:
         script = tmp_path / "one.yaml"
 
         for index in range(10):
-            script.write_text(f"name: One\ndescription: v{index}\nsteps:\n  - close\n")
-            assert scripting._describe_script(script) == (f"v{index}", None)
+            # Each revision is a *different length*, so the key differs by
+            # `st_size` alone. The equal-length `v0`..`v9` this used to write
+            # leaned entirely on `st_mtime_ns` to tell revisions apart, and
+            # writes this close together get one timestamp on a filesystem
+            # with coarse mtime granularity - the whole case
+            # `test_a_same_mtime_edit_still_reparses` says `st_size` is in
+            # the key to cover. CI duly served a stale `v5` for `v6`.
+            description = "v" * (index + 1)
+            script.write_text(f"name: One\ndescription: {description}\nsteps:\n  - close\n")
+            assert scripting._describe_script(script) == (description, None)
 
         assert len(scripting._description_cache) <= 4
 

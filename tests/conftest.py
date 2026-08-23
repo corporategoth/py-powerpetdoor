@@ -8,12 +8,13 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import socket
 
 import pytest
 
-from powerpetdoor import PowerPetDoorClient
+from powerpetdoor import PowerPetDoorClient, framing
 from powerpetdoor.const import FIELD_SUCCESS
 
 # ============================================================================
@@ -312,9 +313,79 @@ def bigint_frame() -> bytes:
     return b'{"CMD":"X","msgID":1' + b"0" * 4400 + b"}"
 
 
-def nested_frame(depth: int = 9999) -> bytes:
-    """A frame nested deeply enough that `json.loads` raises RecursionError."""
+#: Bytes one nesting level costs in the payload below: `{"a":` plus its `}`.
+_LEVEL_BYTES = 6
+
+#: Deepest frame that still fits under the framing cap, so a probe never
+#: builds a payload the framer would have rejected anyway.
+_DEEPEST_THAT_FITS = (framing.MAX_BUFFER_SIZE - 1) // _LEVEL_BYTES
+
+
+def _nesting_payload(depth: int) -> bytes:
     return b'{"a":' * depth + b"1" + b"}" * depth
+
+
+def _parses(depth: int) -> bool:
+    try:
+        json.loads(_nesting_payload(depth))
+    except RecursionError:
+        return False
+    return True
+
+
+@functools.lru_cache(maxsize=1)
+def _first_depth_that_raises() -> int | None:
+    """Smallest nesting depth this interpreter refuses, or None if none fits.
+
+    Hard-coding this is a trap, and the tree fell into it: `9999` was one
+    single level above the threshold on the interpreter it was written
+    against. Measured, the first depth that raises is 995 on 3.11, 9998 on
+    3.12, 9999 on 3.13 and 52119 on 3.14 - the json C scanner is bounded by
+    the C stack, not by `sys.setrecursionlimit`, so the number moves with
+    the interpreter version, its build flags and the thread stack size. A
+    literal tuned to one of them sits one level from silently passing.
+
+    None means no nested frame under `MAX_BUFFER_SIZE` can reach the
+    decoder at all: on 3.14 it takes ~305 KiB of frame, so the framing cap
+    provably stops it first and this failure mode is unreachable there.
+    """
+    if _parses(_DEEPEST_THAT_FITS):
+        return None
+    lo, hi = 1, _DEEPEST_THAT_FITS
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if _parses(mid):
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+#: Whether a `RecursionError` from `json.loads` is reachable through the
+#: framing layer on this interpreter. False on 3.14; see above.
+NESTING_REACHES_THE_DECODER = _first_depth_that_raises() is not None
+
+#: Skips the one parametrized case that needs a real over-deep frame. The
+#: `except RecursionError` clause itself stays pinned on every interpreter
+#: by the monkeypatched twin tests, which do not depend on this.
+requires_reachable_nesting = pytest.mark.skipif(
+    not NESTING_REACHES_THE_DECODER,
+    reason=(
+        "this interpreter's json.loads needs a frame larger than "
+        "framing.MAX_BUFFER_SIZE to raise RecursionError, so the framing "
+        "cap stops it before the decoder sees it"
+    ),
+)
+
+
+def nested_frame() -> bytes:
+    """A frame nested deeply enough that `json.loads` raises RecursionError.
+
+    Falls back to the deepest frame that fits when the interpreter cannot
+    be pushed that far, so collection still works; the tests that need it
+    to actually raise carry `requires_reachable_nesting`.
+    """
+    return _nesting_payload(_first_depth_that_raises() or _DEEPEST_THAT_FITS)
 
 
 # ============================================================================

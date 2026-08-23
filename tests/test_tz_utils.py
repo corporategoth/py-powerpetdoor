@@ -109,14 +109,35 @@ class TestCacheInitialization:
         assert tz_utils.is_cache_initialized() is False
 
     def test_zones_without_footers_are_skipped(self, reset_cache, monkeypatch):
-        """Zones whose TZif has no footer get no POSIX mapping, no crash."""
+        """A zone with no POSIX rule is not advertised as available.
+
+        The door is set from a POSIX string, so a zone we cannot produce one
+        for is a choice a caller could select and never apply. A host whose
+        tzdata tree carries such an entry - CI containers surface
+        ``localtime``, a symlink rather than a zone - must not have it
+        offered. With every extraction stubbed out nothing is usable, and an
+        empty list is the honest answer rather than a list of dead options.
+        """
         monkeypatch.setattr(tz_utils, "_extract_posix_from_tzif", lambda tz: None)
 
         tz_utils.init_timezone_cache_sync()
 
         assert tz_utils.is_cache_initialized() is True
-        assert tz_utils.get_available_timezones()  # Zone list still built
+        assert tz_utils.get_available_timezones() == []
         assert tz_utils.get_posix_tz_string("UTC") is None
+
+    def test_only_zones_with_a_posix_rule_are_advertised(self, reset_cache, monkeypatch):
+        """The partial case: usable zones survive, unusable ones are dropped."""
+        monkeypatch.setattr(
+            tz_utils,
+            "_extract_posix_from_tzif",
+            lambda tz: "EST5EDT,M3.2.0,M11.1.0" if tz == "America/New_York" else None,
+        )
+
+        tz_utils.init_timezone_cache_sync()
+
+        assert tz_utils.get_available_timezones() == ["America/New_York"]
+        assert tz_utils.get_posix_tz_string("America/New_York") == "EST5EDT,M3.2.0,M11.1.0"
 
 
 # ============================================================================

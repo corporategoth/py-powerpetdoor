@@ -139,7 +139,12 @@ from powerpetdoor.simulator import protocol as protocol_module
 from powerpetdoor.simulator import state as state_module
 from powerpetdoor.simulator.engine import DoorMotionEngine
 from powerpetdoor.simulator.protocol import make_sensor_notification, sanitize_log_text
-from tests.conftest import GOLDEN_SCHEDULE_WIRE_TO_DEVICE, bigint_frame, nested_frame
+from tests.conftest import (
+    GOLDEN_SCHEDULE_WIRE_TO_DEVICE,
+    bigint_frame,
+    nested_frame,
+    requires_reachable_nesting,
+)
 
 # ============================================================================
 # Test Fixtures
@@ -2538,7 +2543,11 @@ class TestDecodeFailuresThatAreNotJSONDecodeError:
     framing cap is provably not what stops them.
     """
 
-    @pytest.mark.parametrize("frame", [bigint_frame(), nested_frame()], ids=["bigint", "nested"])
+    @pytest.mark.parametrize(
+        "frame",
+        [bigint_frame(), pytest.param(nested_frame(), marks=requires_reachable_nesting)],
+        ids=["bigint", "nested"],
+    )
     async def test_a_poisoned_frame_alone_does_not_escape_data_received(
         self, frame, protocol, mock_transport, caplog
     ):
@@ -2551,6 +2560,7 @@ class TestDecodeFailuresThatAreNotJSONDecodeError:
         mock_transport.abort.assert_not_called()
         assert "Simulator: JSON parse error" in caplog.text
 
+    @requires_reachable_nesting
     async def test_deep_nesting_split_across_reads_is_not_caught_by_the_framing_cap(
         self, protocol, caplog
     ):
@@ -2568,7 +2578,11 @@ class TestDecodeFailuresThatAreNotJSONDecodeError:
         ("frame", "detail"),
         [
             (bigint_frame(), "Exceeds the limit (4300 digits)"),
-            (nested_frame(), "maximum recursion depth exceeded"),
+            pytest.param(
+                nested_frame(),
+                "maximum recursion depth exceeded",
+                marks=requires_reachable_nesting,
+            ),
         ],
         ids=["bigint", "nested"],
     )
@@ -2590,14 +2604,41 @@ class TestDecodeFailuresThatAreNotJSONDecodeError:
         assert [record.msg for record in caplog.records] == control_shape
         assert detail in caplog.records[0].getMessage()
 
+    @pytest.mark.parametrize(
+        "poison",
+        [bigint_frame(), pytest.param(nested_frame(), marks=requires_reachable_nesting)],
+        ids=["bigint", "nested"],
+    )
     async def test_a_legitimate_command_after_a_poisoned_frame_is_still_answered(
-        self, protocol, mock_transport
+        self, poison, protocol, mock_transport
     ):
         protocol.data_received(
-            bigint_frame()
-            + nested_frame()
-            + json.dumps({"config": CMD_GET_DOOR_STATUS, "dir": "p2d"}).encode()
+            poison + json.dumps({"config": CMD_GET_DOOR_STATUS, "dir": "p2d"}).encode()
         )
         await protocol.drain()
 
         assert [reply["CMD"] for reply in all_responses(mock_transport)] == [CMD_GET_DOOR_STATUS]
+
+    async def test_a_recursion_error_from_the_decoder_is_caught_on_every_interpreter(
+        self, protocol, mock_transport, caplog, monkeypatch
+    ):
+        """Interpreter-independent twin of the `nested` cases above.
+
+        Whether a real frame can drive `json.loads` into RecursionError
+        *under the framing cap* moves with the interpreter - it needs
+        ~305 KiB of frame on 3.14, so those cases skip there. The
+        `except RecursionError` clause still has to hold on every version,
+        so this raises it directly rather than relying on a frame shape.
+        """
+
+        def boom(*_args, **_kwargs):
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr(json, "loads", boom)
+
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
+            protocol.data_received(b'{"CMD":"ANYTHING"}')
+            await protocol.drain()
+
+        mock_transport.abort.assert_not_called()
+        assert "Simulator: JSON parse error" in caplog.text

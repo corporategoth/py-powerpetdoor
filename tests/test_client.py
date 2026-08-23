@@ -94,7 +94,7 @@ from powerpetdoor.const import (
     PRIORITY_HIGH,
     PRIORITY_LOW,
 )
-from tests.conftest import bigint_frame, nested_frame
+from tests.conftest import bigint_frame, nested_frame, requires_reachable_nesting
 
 # ============================================================================
 # Helper Function Tests
@@ -3023,8 +3023,12 @@ class TestConnectErrorFunnel:
     @pytest.mark.parametrize(
         ("host", "port", "expected"),
         [
-            # loop.create_connection() does not raise OSError for these:
-            ("a" * 64 + ".example", 3000, UnicodeEncodeError),
+            # loop.create_connection() does not raise OSError for these.
+            # The over-long label is UnicodeError, not the UnicodeEncodeError
+            # subclass, on some builds - CI raised the base class where this
+            # host raised the subclass, so pin the base. What matters is that
+            # it is a ValueError and connect() must survive it either way.
+            ("a" * 64 + ".example", 3000, UnicodeError),
             ("127.0.0.1", 99999, OverflowError),
         ],
     )
@@ -3376,7 +3380,11 @@ class TestDecodeFailuresThatAreNotJSONDecodeError:
     framing cap is provably not what stops them.
     """
 
-    @pytest.mark.parametrize("frame", [bigint_frame(), nested_frame()], ids=["bigint", "nested"])
+    @pytest.mark.parametrize(
+        "frame",
+        [bigint_frame(), pytest.param(nested_frame(), marks=requires_reachable_nesting)],
+        ids=["bigint", "nested"],
+    )
     async def test_a_poisoned_frame_alone_does_not_escape_data_received(
         self, frame, mock_client, caplog
     ):
@@ -3389,6 +3397,7 @@ class TestDecodeFailuresThatAreNotJSONDecodeError:
         assert transport.is_closing() is False
         assert "Failed to decode JSON frame" in caplog.text
 
+    @requires_reachable_nesting
     async def test_deep_nesting_split_across_reads_is_not_caught_by_the_framing_cap(
         self, mock_client, caplog
     ):
@@ -3406,7 +3415,11 @@ class TestDecodeFailuresThatAreNotJSONDecodeError:
         ("frame", "detail"),
         [
             (bigint_frame(), "Exceeds the limit (4300 digits)"),
-            (nested_frame(), "maximum recursion depth exceeded"),
+            pytest.param(
+                nested_frame(),
+                "maximum recursion depth exceeded",
+                marks=requires_reachable_nesting,
+            ),
         ],
         ids=["bigint", "nested"],
     )
@@ -3427,18 +3440,49 @@ class TestDecodeFailuresThatAreNotJSONDecodeError:
         assert [record.msg for record in caplog.records] == control_shape
         assert detail in caplog.records[0].getMessage()
 
-    async def test_a_legitimate_frame_after_a_poisoned_one_is_still_handled(self, mock_client):
+    @pytest.mark.parametrize(
+        "poison",
+        [bigint_frame(), pytest.param(nested_frame(), marks=requires_reachable_nesting)],
+        ids=["bigint", "nested"],
+    )
+    async def test_a_legitimate_frame_after_a_poisoned_one_is_still_handled(
+        self, poison, mock_client
+    ):
         client, _, _ = mock_client
         seen: list[dict] = []
         client.process_message = lambda msg, **_kwargs: _record(seen, msg)
 
-        client.data_received(bigint_frame() + nested_frame() + b'{"CMD":"AFTER"}')
+        client.data_received(poison + b'{"CMD":"AFTER"}')
         for _ in range(100):
             if seen:
                 break
             await asyncio.sleep(0)
 
         assert seen == [{"CMD": "AFTER"}]
+
+    async def test_a_recursion_error_from_the_decoder_is_caught_on_every_interpreter(
+        self, mock_client, caplog, monkeypatch
+    ):
+        """Interpreter-independent twin of the `nested` cases above.
+
+        Whether a real frame can drive `json.loads` into RecursionError
+        *under the framing cap* moves with the interpreter - it needs
+        ~305 KiB of frame on 3.14, so those cases skip there. The
+        `except RecursionError` clause still has to hold on every version,
+        so this raises it directly rather than relying on a frame shape.
+        """
+        client, transport, _ = mock_client
+
+        def boom(*_args, **_kwargs):
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr(json, "loads", boom)
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.client"):
+            client.data_received(b'{"CMD":"ANYTHING"}')
+
+        assert transport.is_closing() is False
+        assert "Failed to decode JSON frame" in caplog.text
 
 
 async def _record(seen: list[dict], msg: dict) -> None:

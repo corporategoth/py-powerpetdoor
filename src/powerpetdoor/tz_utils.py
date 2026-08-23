@@ -90,18 +90,29 @@ def _build_timezone_caches() -> None:
 
     from zoneinfo import available_timezones
 
-    # Get all IANA timezone names
+    # Every name we publish must be a usable IANA zone, because callers set
+    # the door's timezone from this list. `available_timezones()` also
+    # surfaces whatever else the host's tzdata tree contains: a system with
+    # /usr/share/zoneinfo/localtime (CI containers have one) yields
+    # "localtime", which is a symlink to the local zone rather than a zone,
+    # has no TZif footer, and would be offered to a user as a choice that
+    # cannot be applied. Drop anything with no POSIX string rather than
+    # advertise it.
     all_tzs = sorted(available_timezones())
-    _iana_timezones = list(all_tzs)
 
-    # Build IANA -> POSIX and POSIX -> IANA mappings
+    usable: list[str] = []
     for tz_name in all_tzs:
         posix = _extract_posix_from_tzif(tz_name)
-        if posix:
-            _iana_to_posix[tz_name] = posix
-            # First match wins for reverse lookup
-            if posix not in _posix_to_iana:
-                _posix_to_iana[posix] = tz_name
+        if not posix:
+            _LOGGER.debug("Skipping %s: no POSIX rule in its TZif footer", tz_name)
+            continue
+        usable.append(tz_name)
+        _iana_to_posix[tz_name] = posix
+        # First match wins for reverse lookup
+        if posix not in _posix_to_iana:
+            _posix_to_iana[posix] = tz_name
+
+    _iana_timezones = usable
 
     _cache_initialized = True
     _LOGGER.debug(
