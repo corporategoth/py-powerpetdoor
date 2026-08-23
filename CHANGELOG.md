@@ -7,9 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — proven against a real door (firmware 1.7.18)
+
+A physical Power Pet Door was probed for the first time. It disproved a
+number of long-held assumptions that `docs/protocol.md` had recorded as
+fact, and exposed **four** ways in which this library did not work against
+real hardware. None of these were catchable by the test suite before,
+because the simulator implemented the same wrong assumptions.
+
+- **`PowerPetDoor.set_notifications()` never worked against a real door.**
+  The device requires a *nested* `notifications` object carrying **all
+  five** flags as **JSON booleans**. It answers a flat, top-level payload —
+  which is what this library sent, and what `docs/protocol.md` documented —
+  with `success: "false"` and writes nothing. Worse, a nested payload whose
+  values are *strings* is answered with a normal success envelope carrying
+  the **current** settings and is silently not applied. The shape now lives
+  in one place, `build_set_notifications_message()`
+- **`PowerPetDoor.set_schedule()` never worked against a real door.** The
+  device requires the slot `index` as a **sibling** of the `schedule`
+  object; a message carrying only `schedule` is answered `success: "false"`
+  and writes nothing, however the entry is spelled. The shape now lives in
+  `build_set_schedule_message()`
+- **Every individual setting command was sent under the wrong envelope
+  key.** `{"cmd": "ENABLE_INSIDE"}` is answered `success: "false"` by a real
+  door; only `OPEN`, `OPEN_AND_HOLD` and `CLOSE` are accepted as a `cmd`.
+  `set_inside_sensor()`, `set_outside_sensor()`, `set_power()`,
+  `set_auto()`, `set_safety_lock()`, `set_autoretract()` and
+  `set_pet_proximity_keep_open()` all sent `cmd` and are now `config`,
+  routed through the new `envelope_for_command()`
+- **`doorOptions` is an integer bitfield, not a flag.** Auto-retract is
+  **bit 1** (`DOOR_OPTION_AUTORETRACT`, value `2`); the field was read by
+  truthiness, which happened to be right only because `2` is truthy and
+  would have misreported the moment any other (still unidentified) bit was
+  set. It is now read through `autoretract_from_door_options()`
+- The remote-pairing replies carry **`has_id`** and **`has_key`**, not the
+  `hasRemoteId`/`hasRemoteKey` this project guessed at, so
+  `remote_id_update`/`remote_key_update` listeners never fired
+- Both sensor-trigger-voltage setters take a field named **`voltage`**, and
+  reject the `sensorTriggerVoltage`/`sleepSensorTriggerVoltage` name their
+  own getters answer with. Owned by `build_set_voltage_message()`
+
+### Added — hardware-verified simulator fidelity
+
+The simulator's job is to be wrong in the same ways a real door is wrong, so
+a client that gets a wire shape subtly wrong fails in tests rather than only
+in the field. Each item below is emulated deliberately and pinned by a test:
+
+- **Failure responses carry no `msgID`**, and neither does a `PONG`. A
+  client matching replies by id cannot pair a failure with its request;
+  `PowerPetDoorClient` now fails the in-flight command instead of waiting
+  out its timeout
+- **`cmd` vs `config` is enforced**: every non-motion command is rejected
+  under `cmd` and accepted under `config`
+- **`SET_NOTIFICATIONS` reproduces both failure modes**, including the
+  accepted-and-silently-ignored string payload
+- **`SET_SCHEDULE` without a sibling `index` is rejected**
+- **The voltage setters require `voltage`** and reject the getters' names
+- **Per-command value spellings are reproduced field by field** rather than
+  normalized: `"true"`/`"false"` strings in `GET_SETTINGS`,
+  `GET_NOTIFICATIONS` and `GET_DOOR_BATTERY`; ints in `GET_SENSORS`, the
+  individual setting replies, `doorOptions` and schedule entries; an
+  all-integer `fwInfo`; POSIX (never IANA) for `tz`
+- **`GET_TIMERS_ENABLED`, `GET_AUTORETRACT`, `GET_CMD_LOCKOUT`,
+  `GET_OUTSIDE_SENSOR_SAFETY_LOCK` and `CHECK_RESET_REASON` are rejected** —
+  firmware 1.7.18 does not implement them. Their state is read from
+  `GET_SETTINGS` instead. The constants are kept, since another firmware
+  revision may have them
+- **`SET_TIME` is answered with silence**, not a failure envelope — the one
+  command where "no error came back" does not mean success
+- **23:59 is end-of-day**: the device spells a full-day window
+  `00:00`–`23:59`, and its final minute is inside the window
+- **Deliberate divergence, documented in `docs/simulator.md`:** the
+  simulator keeps multi-client support. A real door is single-connection and
+  degrades into unexplained timeouts when a second client attaches; the
+  simulator instead serves every client as if exclusive, because the CLI and
+  `ppd-simulator-ctl` attach alongside the client under test
+
+### Added — new API surface
+
+- `envelope_for_command()` and `COMMAND_ENVELOPE_COMMANDS`: the single place
+  that decides whether a command is a `cmd` or a `config`
+- `build_set_notifications_message()`, `build_set_schedule_message()`,
+  `build_set_voltage_message()`, `build_set_hold_time_message()`: every
+  easy-to-get-wrong wire shape, built in one importable place so the
+  message level reaches it as well as `PowerPetDoor`
+- `autoretract_from_door_options()` and `DOOR_OPTION_AUTORETRACT`
+- `PowerPetDoor.sensor_trigger_voltage` / `sleep_sensor_trigger_voltage`
+  properties and setters — readable and settable on the device, but absent
+  from the facade until now
+- `PowerPetDoor.has_remote_id` / `has_remote_key` and
+  `refresh_remote_info()`
+- `CMD_GET_TIME`, `FIELD_TIME`, `TIME_FORMAT`, the client's `time_update`
+  listener, and `PowerPetDoor.device_time` / `refresh_time()`: the door's
+  own wall clock, undocumented by the vendor. Schedules are evaluated
+  against it, so it is the only way to check that a door will fire a
+  schedule when you expect it to. **The clock is read-only**
+
 ### Added
 - `tests/test_wire_constants.py`: every constant in `powerpetdoor.const` whose
-  value appears in `docs/protocol.md` — 113 of the 121 — is pinned by literal.
+  value appears in `docs/protocol.md` is pinned by literal.
   Both sides of this project read the same symbol, so `CMD_OPEN`,
   `FIELD_CMD_LOCKOUT` and `FIELD_AUTO` could all be renamed or re-spelled with
   the whole suite green. The perimeter is derived from the document, not

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from ..const import (
+    DOOR_OPTION_AUTORETRACT,
     DOOR_STATE_CLOSED,
     FIELD_AUTO,
     FIELD_AUTORETRACT,
@@ -48,19 +49,33 @@ from ..schedule import (
     coerce_schedule_int,
     coerce_schedule_time,
     require_schedule_field,
+    wire_bool_string,
 )
 from ..tz_utils import find_iana_for_posix, get_posix_tz_string, is_cache_initialized
 
 logger = logging.getLogger(__name__)
 
 # Note: FIELD_INSIDE and FIELD_OUTSIDE are used both as:
-# 1. Settings fields for sensor enable/disable (string "0"/"1")
-# 2. Schedule entry fields for which sensor the entry applies to (bool)
+# 1. Settings fields for sensor enable/disable (string "true"/"false")
+# 2. Schedule entry fields for which sensor the entry applies to (int 1/0)
+#
+# That difference is the device's own inconsistency, not ours: the same
+# concept is spelled differently per command, so each emitter names the
+# speller it needs (`wire_bool_string` / `wire_int_flag`, both in
+# powerpetdoor.schedule) rather than normalizing.
 #
 # The schedule-field coercion helpers (and MAX_SCHEDULE_INDEX) live in
 # powerpetdoor.schedule so this parser and the library's
 # powerpetdoor.door.Schedule parser share one implementation: hardening
 # either one hardens both.
+
+#: Last minute of the day, as the device itself encodes the end of a
+#: full-day schedule window (verified against firmware 1.7.18: its factory
+#: schedule is ``in 00:00-23:59``, ``out 00:00-23:59``). ``24:00`` is still
+#: accepted on the read path - see
+#: :func:`~powerpetdoor.schedule.coerce_schedule_time` - but never emitted.
+END_OF_DAY_HOUR = 23
+END_OF_DAY_MINUTE = 59
 
 
 @dataclass
@@ -134,12 +149,13 @@ class Schedule:
     def to_dict(self) -> dict:
         """Serialize for the wire, device-to-client.
 
-        The simulator plays the *device*, so this emits what a real door is
-        observed to reply with — spelled by
-        :data:`~powerpetdoor.schedule.SCHEDULE_WIRE_FROM_DEVICE`. It differs
-        from the library's client->device emitter in exactly one field
-        (``enabled``: ``"1"``/``"0"`` here, a JSON boolean there), and that
-        is deliberate: opposite directions are not twins. Do not unify them.
+        The simulator plays the *device*, so this emits what a real door
+        replies with — spelled by
+        :data:`~powerpetdoor.schedule.SCHEDULE_WIRE_FROM_DEVICE`. **Verified
+        against firmware 1.7.18**: ``enabled``, ``inside`` and ``outside``
+        come back as the integers ``1``/``0``, where the library SENDS them
+        as JSON booleans. That is deliberate: opposite directions are not
+        twins. Do not unify them.
         """
         return build_schedule_payload(
             SCHEDULE_WIRE_FROM_DEVICE,
@@ -258,12 +274,17 @@ class Schedule:
         start = self.start_hour * 60 + self.start_min
         end = self.end_hour * 60 + self.end_min
 
+        if (self.end_hour, self.end_min) == (END_OF_DAY_HOUR, END_OF_DAY_MINUTE):
+            # 23:59 is the device's own end-of-day: its factory schedule is
+            # `in 00:00-23:59` with every day enabled, which is plainly meant
+            # as "always". Treating the window end as exclusive here would
+            # block the sensor for exactly the minute 23:59 every day, so the
+            # final minute is included.
+            end = 24 * 60
         if start == end:
-            # The whole day. The end is exclusive, so [start, end) can cover
-            # at most 1439 of the day's 1440 minutes - coinciding ends are
-            # the only spelling a true 24h entry has. (00:00-23:59 looks
-            # like one and blocks the sensor for exactly the minute 23:59.)
-            # An entry that should gate nothing is spelled `enabled: false`.
+            # The whole day, the other way it can be spelled: [start, end)
+            # with coinciding ends. An entry that should gate nothing is
+            # spelled `enabled: false`.
             return True
         if start < end:
             return start <= current_minutes < end
@@ -311,8 +332,11 @@ class DoorSimulatorState:
     fw_major: int = 1
     fw_minor: int = 2
     fw_patch: int = 3
-    hw_ver: str = "1"  # Hardware version
-    hw_rev: str = "1"  # Hardware revision
+    # Verified against firmware 1.7.18: GET_HW_INFO's `fwInfo` object is
+    # all integers - `ver=1 rev=1 fw_maj=1 fw_min=7 fw_pat=18` - so these
+    # are ints, not the version-like strings docs/protocol.md once showed.
+    hw_ver: int = 1  # Hardware version
+    hw_rev: int = 1  # Hardware revision
 
     # Remote/reset info
     has_remote_id: bool = True
@@ -367,37 +391,64 @@ class DoorSimulatorState:
             return True
         return False
 
-    def get_settings(self) -> dict:
-        """Get full settings dict."""
-        # Convert IANA timezone to POSIX format if cache is initialized
-        tz_value = self.timezone
+    def wire_timezone(self) -> str:
+        """The timezone as the device puts it on the wire: **POSIX**.
+
+        **Verified against firmware 1.7.18**: the door answers
+        ``EST5EDT,M3.2.0,M11.1.0``, never an IANA name. The simulator
+        stores whichever form it was given (``get_tzinfo`` reads both) and
+        converts here, so ``GET_SETTINGS``, ``GET_TIMEZONE`` and the
+        timezone broadcast cannot disagree.
+
+        Falls back to the stored value when the timezone cache has not been
+        initialized, or when the zone has no POSIX rule to convert to.
+        :meth:`~powerpetdoor.simulator.server.DoorSimulator.start` warms
+        the cache, so a running simulator emits POSIX.
+        """
         if is_cache_initialized():
             posix_tz = get_posix_tz_string(self.timezone)
             if posix_tz:
-                tz_value = posix_tz
+                return posix_tz
+        return self.timezone
 
+    def get_settings(self) -> dict:
+        """Get full settings dict."""
+        # Field-by-field spellings verified against firmware 1.7.18: the six
+        # flags are "true"/"false" STRINGS, doorOptions/holdOpenTime/the two
+        # voltages are INTS, and tz is a POSIX string. Same key set the real
+        # unit returned, in the same spellings.
         return {
-            FIELD_POWER: "1" if self.power else "0",
-            FIELD_INSIDE: "1" if self.inside else "0",
-            FIELD_OUTSIDE: "1" if self.outside else "0",
-            FIELD_AUTO: "1" if self.auto else "0",
-            FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: "1" if self.safety_lock else "0",
-            FIELD_CMD_LOCKOUT: "1" if self.cmd_lockout else "0",
-            FIELD_AUTORETRACT: "1" if self.autoretract else "0",
-            FIELD_TZ: tz_value,
+            FIELD_POWER: wire_bool_string(self.power),
+            FIELD_INSIDE: wire_bool_string(self.inside),
+            FIELD_OUTSIDE: wire_bool_string(self.outside),
+            FIELD_AUTO: wire_bool_string(self.auto),
+            FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: wire_bool_string(self.safety_lock),
+            FIELD_CMD_LOCKOUT: wire_bool_string(self.cmd_lockout),
+            # A BITFIELD, not a flag: verified against firmware 1.7.18,
+            # DISABLE_AUTORETRACT leaves this 0 and ENABLE_AUTORETRACT
+            # leaves it 2. Other bits exist but are unidentified, so the
+            # simulator sets only the one it knows.
+            FIELD_AUTORETRACT: DOOR_OPTION_AUTORETRACT if self.autoretract else 0,
+            FIELD_TZ: self.wire_timezone(),
             FIELD_HOLD_OPEN_TIME: int(self.hold_time * 100),  # Convert to centiseconds
             FIELD_SENSOR_TRIGGER_VOLTAGE: self.sensor_trigger_voltage,
             FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE: self.sleep_sensor_trigger_voltage,
         }
 
     def get_notifications(self) -> dict:
-        """Get notifications settings."""
+        """Get notifications settings.
+
+        All five flags are ``"true"``/``"false"`` **strings**, verified
+        against firmware 1.7.18. Note the asymmetry with the write path:
+        ``SET_NOTIFICATIONS`` demands JSON *booleans* and silently ignores
+        strings.
+        """
         return {
-            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: "1" if self.sensor_on_indoor else "0",
-            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: "1" if self.sensor_off_indoor else "0",
-            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: "1" if self.sensor_on_outdoor else "0",
-            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: "1" if self.sensor_off_outdoor else "0",
-            FIELD_LOW_BATTERY_NOTIFICATIONS: "1" if self.low_battery else "0",
+            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: wire_bool_string(self.sensor_on_indoor),
+            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: wire_bool_string(self.sensor_off_indoor),
+            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: wire_bool_string(self.sensor_on_outdoor),
+            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: wire_bool_string(self.sensor_off_outdoor),
+            FIELD_LOW_BATTERY_NOTIFICATIONS: wire_bool_string(self.low_battery),
         }
 
     def get_schedule_list(self) -> list[int]:

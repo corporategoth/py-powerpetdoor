@@ -72,7 +72,7 @@ from ..const import (
 from ..sanitize import sanitize_text
 from ..schedule import MAX_SCHEDULE_INDEX, coerce_schedule_flag
 from .engine import SENSOR_NAMES
-from .state import Schedule
+from .state import END_OF_DAY_HOUR, END_OF_DAY_MINUTE, Schedule
 
 logger = logging.getLogger(__name__)
 
@@ -664,10 +664,10 @@ class ScriptRunner:
             index = int(self._script_number(params.get("index", 1), "index", 0, MAX_SCHEDULE_INDEX))
             enabled = self._script_bool(params.get("enabled", True))
             # A schedule that allows BOTH sensors 24/7, so a script that
-            # adds one behaves the same at every time of day. Midnight to
-            # midnight: the window end is exclusive, so 00:00-23:59 is 1439
-            # minutes and blocks the sensors for exactly the minute 23:59
-            # (see Schedule.is_sensor_allowed).
+            # adds one behaves the same at every time of day. Spelled the way
+            # the device itself spells a full day - 00:00-23:59 - rather than
+            # midnight-to-midnight (see Schedule.is_sensor_allowed, which
+            # treats 23:59 as end-of-day for exactly this reason).
             schedule = Schedule(
                 index=index,
                 enabled=enabled,
@@ -676,8 +676,8 @@ class ScriptRunner:
                 outside=True,  # Allow outside sensor
                 start_hour=0,
                 start_min=0,
-                end_hour=0,
-                end_min=0,
+                end_hour=END_OF_DAY_HOUR,
+                end_min=END_OF_DAY_MINUTE,
             )
             self.simulator.add_schedule(schedule)
 

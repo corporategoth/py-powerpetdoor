@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from powerpetdoor import PowerPetDoorClient
+from powerpetdoor import CommandError, PowerPetDoorClient, envelope_for_command
 from powerpetdoor.const import (
     CMD_CLOSE,
     CMD_DISABLE_INSIDE,
@@ -26,6 +26,7 @@ from powerpetdoor.const import (
     CMD_GET_HOLD_TIME,
     CMD_GET_HW_INFO,
     CMD_GET_POWER,
+    CMD_GET_SCHEDULE,
     CMD_GET_SENSORS,
     CMD_GET_SETTINGS,
     CMD_OPEN,
@@ -42,11 +43,14 @@ from powerpetdoor.const import (
     DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
     FIELD_INSIDE,
+    FIELD_MSG_ID_RESPONSE,
     FIELD_OUTSIDE,
     FIELD_POWER,
+    FIELD_SUCCESS,
     NOTIFY_LOW_BATTERY,
     NOTIFY_SENSOR_INDOOR,
     SENSOR_STATE_ON,
+    SUCCESS_FALSE,
 )
 from powerpetdoor.simulator import (
     DoorSimulator,
@@ -338,7 +342,9 @@ class TestControlCommands:
 
     async def test_power_off(self, client, simulator):
         """POWER_OFF should disable power."""
-        future = client.send_message(COMMAND, CMD_POWER_OFF, notify=True)
+        future = client.send_message(
+            envelope_for_command(CMD_POWER_OFF), CMD_POWER_OFF, notify=True
+        )
         result = await asyncio.wait_for(future, timeout=2.0)
 
         assert result is False
@@ -348,7 +354,7 @@ class TestControlCommands:
         """POWER_ON should enable power."""
         simulator.state.power = False
 
-        future = client.send_message(COMMAND, CMD_POWER_ON, notify=True)
+        future = client.send_message(envelope_for_command(CMD_POWER_ON), CMD_POWER_ON, notify=True)
         result = await asyncio.wait_for(future, timeout=2.0)
 
         assert result is True
@@ -356,7 +362,9 @@ class TestControlCommands:
 
     async def test_disable_inside_sensor(self, client, simulator):
         """DISABLE_INSIDE should disable inside sensor."""
-        future = client.send_message(COMMAND, CMD_DISABLE_INSIDE, notify=True)
+        future = client.send_message(
+            envelope_for_command(CMD_DISABLE_INSIDE), CMD_DISABLE_INSIDE, notify=True
+        )
         result = await asyncio.wait_for(future, timeout=2.0)
 
         assert FIELD_INSIDE in result
@@ -367,7 +375,9 @@ class TestControlCommands:
         """ENABLE_INSIDE should enable inside sensor."""
         simulator.state.inside = False
 
-        future = client.send_message(COMMAND, CMD_ENABLE_INSIDE, notify=True)
+        future = client.send_message(
+            envelope_for_command(CMD_ENABLE_INSIDE), CMD_ENABLE_INSIDE, notify=True
+        )
         result = await asyncio.wait_for(future, timeout=2.0)
 
         assert FIELD_INSIDE in result
@@ -414,7 +424,7 @@ class TestClientCallbacks:
         client.add_listener("test", sensor_update={FIELD_INSIDE: callback})
 
         # Change sensor state
-        client.send_message(COMMAND, CMD_DISABLE_INSIDE)
+        client.send_message(envelope_for_command(CMD_DISABLE_INSIDE), CMD_DISABLE_INSIDE)
 
         await tracker.wait_for("sensor", timeout=2.0)
 
@@ -431,7 +441,7 @@ class TestClientCallbacks:
         client.add_listener("test", sensor_update={"*": callback})
 
         # Change inside sensor state
-        client.send_message(COMMAND, CMD_DISABLE_INSIDE)
+        client.send_message(envelope_for_command(CMD_DISABLE_INSIDE), CMD_DISABLE_INSIDE)
 
         await tracker.wait_for("sensor", timeout=2.0)
 
@@ -448,7 +458,7 @@ class TestClientCallbacks:
         client.add_listener("test", sensor_update={"*": callback})
 
         # Change power state
-        client.send_message(COMMAND, CMD_POWER_OFF)
+        client.send_message(envelope_for_command(CMD_POWER_OFF), CMD_POWER_OFF)
 
         await tracker.wait_for("sensor", timeout=2.0)
 
@@ -723,10 +733,11 @@ class TestScheduleCallbacks:
 
         calls = tracker.get_calls("schedule")
         assert len(calls) > 0
-        # Callback receives schedule dict (values are strings from protocol)
+        # Callback receives the schedule dict exactly as the device sends
+        # it: the flag fields are ints (verified against firmware 1.7.18).
         schedule_data = calls[0][0]
         assert schedule_data["index"] == 0
-        assert schedule_data["enabled"] == "1"
+        assert schedule_data["enabled"] == 1
 
     async def test_schedule_delete_callback(self, client, simulator, tracker):
         """Schedule delete should trigger schedule_delete callback."""
@@ -767,7 +778,62 @@ class TestScheduleCallbacks:
 
         calls = tracker.get_calls("schedule")
         assert len(calls) > 0
-        # Callback receives schedule dict (values are strings from protocol)
+        # Callback receives the schedule dict exactly as the device sends it.
         schedule_data = calls[0][0]
         assert schedule_data["index"] == 0
-        assert schedule_data["enabled"] == "0"
+        assert schedule_data["enabled"] == 0
+
+
+class TestAFailureWithNoMsgIdStillFailsTheCaller:
+    """The end-to-end consequence of the device's failure envelope.
+
+    Verified against firmware 1.7.18: a failure carries **no** `msgID`, so
+    a client that pairs replies to requests by id has nothing to pair it
+    with. Before the fix the retry timer was cancelled by the reply and the
+    future was left pending, so `await` hung until the caller's own timeout
+    - or forever, for a message-level caller awaiting the future directly.
+    """
+
+    async def test_the_future_raises_command_error_rather_than_hanging(self, client, simulator):
+        """Awaited with a timeout far shorter than the client's own.
+
+        If the future were left pending this raises TimeoutError instead,
+        which is exactly the symptom being pinned against.
+        """
+        future = client.send_message(CONFIG, CMD_GET_SCHEDULE, notify=True, index=99)
+
+        with pytest.raises(CommandError) as err:
+            await asyncio.wait_for(future, timeout=2.0)
+
+        assert err.value.cmd == CMD_GET_SCHEDULE
+        assert err.value.reason == "Schedule not found"
+
+    async def test_the_rejection_really_did_arrive_without_an_id(self, client, simulator):
+        """The premise, so the test above cannot pass for the wrong reason."""
+        seen: list[dict] = []
+        original = client.process_message
+
+        async def record(msg):
+            seen.append(msg)
+            await original(msg)
+
+        client.process_message = record
+
+        future = client.send_message(CONFIG, CMD_GET_SCHEDULE, notify=True, index=99)
+        with pytest.raises(CommandError):
+            await asyncio.wait_for(future, timeout=2.0)
+
+        rejection = next(m for m in seen if m.get(FIELD_SUCCESS) == SUCCESS_FALSE)
+        assert FIELD_MSG_ID_RESPONSE not in rejection
+
+    async def test_a_later_command_still_works(self, client, simulator):
+        """The failure must not wedge the send queue behind it."""
+        future = client.send_message(CONFIG, CMD_GET_SCHEDULE, notify=True, index=99)
+        with pytest.raises(CommandError):
+            await asyncio.wait_for(future, timeout=2.0)
+
+        settings = await asyncio.wait_for(
+            client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True), timeout=2.0
+        )
+
+        assert FIELD_INSIDE in settings

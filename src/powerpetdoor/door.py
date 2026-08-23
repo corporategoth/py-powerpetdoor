@@ -33,10 +33,19 @@ import math
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from .client import PowerPetDoorClient, make_bool
+from .client import (
+    PowerPetDoorClient,
+    autoretract_from_door_options,
+    build_set_hold_time_message,
+    build_set_notifications_message,
+    build_set_voltage_message,
+    envelope_for_command,
+    make_bool,
+)
 from .const import (
     # Commands
     CMD_CLOSE,
@@ -61,6 +70,9 @@ from .const import (
     CMD_GET_SCHEDULE,
     CMD_GET_SCHEDULE_LIST,
     CMD_GET_SETTINGS,
+    CMD_GET_TIME,
+    CMD_HAS_REMOTE_ID,
+    CMD_HAS_REMOTE_KEY,
     CMD_OPEN,
     CMD_OPEN_AND_HOLD,
     CMD_POWER_OFF,
@@ -68,8 +80,9 @@ from .const import (
     CMD_SET_HOLD_TIME,
     CMD_SET_NOTIFICATIONS,
     CMD_SET_SCHEDULE,
+    CMD_SET_SENSOR_TRIGGER_VOLTAGE,
+    CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     CMD_SET_TIMEZONE,
-    COMMAND,
     CONFIG,
     # Door states
     DOOR_STATE_CLOSED,
@@ -93,6 +106,8 @@ from .const import (
     FIELD_FW_MAJOR,
     FIELD_FW_MINOR,
     FIELD_FW_PATCH,
+    FIELD_HAS_REMOTE_ID,
+    FIELD_HAS_REMOTE_KEY,
     FIELD_HOUR,
     FIELD_HW_REVISION,
     FIELD_HW_VERSION,
@@ -105,20 +120,24 @@ from .const import (
     FIELD_OUTSIDE_PREFIX,
     FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
     FIELD_POWER,
-    FIELD_SCHEDULE,
     FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
     FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
     FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
     FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
+    FIELD_SENSOR_TRIGGER_VOLTAGE,
+    FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     FIELD_START_TIME_SUFFIX,
+    FIELD_TIME,
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
+    TIME_FORMAT,
 )
 from .sanitize import MAX_LOGGED_LENGTH, sanitize_field, sanitize_text
 from .schedule import (
     MAX_SCHEDULE_INDEX,
     SCHEDULE_WIRE_TO_DEVICE,
     build_schedule_payload,
+    build_set_schedule_message,
     coerce_schedule_days,
     coerce_schedule_flag,
     coerce_schedule_int,
@@ -560,7 +579,12 @@ class PowerPetDoor:
         self._autoretract: bool = True
         self._pet_proximity_keep_open: bool = False
         self._hold_time: float = 2.0
+        self._sensor_trigger_voltage: int = 0
+        self._sleep_sensor_trigger_voltage: int = 0
         self._timezone: str = ""
+        self._device_time: str = ""
+        self._has_remote_id: bool = False
+        self._has_remote_key: bool = False
         self._battery = BatteryInfo()
         self._hw_info: dict[str, Any] = {}
         self._total_open_cycles: int = 0
@@ -704,7 +728,12 @@ class PowerPetDoor:
             },
             battery_update=self._on_battery_update,
             hold_time_update=self._on_hold_time_update,
+            sensor_trigger_voltage_update=self._on_sensor_trigger_voltage_update,
+            sleep_sensor_trigger_voltage_update=self._on_sleep_sensor_trigger_voltage_update,
+            remote_id_update=self._on_remote_id_update,
+            remote_key_update=self._on_remote_key_update,
             timezone_update=self._on_timezone_update,
+            time_update=self._on_time_update,
             hw_info_update=self._on_hw_info_update,
             stats_update={
                 FIELD_TOTAL_OPEN_CYCLES: self._on_total_cycles_update,
@@ -812,15 +841,15 @@ class PowerPetDoor:
 
     async def open(self) -> None:
         """Open the door (will auto-close after hold time)."""
-        self._client.send_message(COMMAND, CMD_OPEN)
+        self._client.send_message(envelope_for_command(CMD_OPEN), CMD_OPEN)
 
     async def open_and_hold(self) -> None:
         """Open the door and keep it open until manually closed."""
-        self._client.send_message(COMMAND, CMD_OPEN_AND_HOLD)
+        self._client.send_message(envelope_for_command(CMD_OPEN_AND_HOLD), CMD_OPEN_AND_HOLD)
 
     async def close(self) -> None:
         """Close the door."""
-        self._client.send_message(COMMAND, CMD_CLOSE)
+        self._client.send_message(envelope_for_command(CMD_CLOSE), CMD_CLOSE)
 
     async def toggle(self) -> None:
         """Toggle the door - open if closed, close if open."""
@@ -856,7 +885,7 @@ class PowerPetDoor:
         """
         cmd = CMD_ENABLE_INSIDE if enabled else CMD_DISABLE_INSIDE
         await self._await_response(
-            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
+            cmd, self._client.send_message(envelope_for_command(cmd), cmd, notify=True), timeout
         )
 
     @property
@@ -873,7 +902,7 @@ class PowerPetDoor:
         """
         cmd = CMD_ENABLE_OUTSIDE if enabled else CMD_DISABLE_OUTSIDE
         await self._await_response(
-            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
+            cmd, self._client.send_message(envelope_for_command(cmd), cmd, notify=True), timeout
         )
 
     # =========================================================================
@@ -894,7 +923,7 @@ class PowerPetDoor:
         """
         cmd = CMD_POWER_ON if enabled else CMD_POWER_OFF
         await self._await_response(
-            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
+            cmd, self._client.send_message(envelope_for_command(cmd), cmd, notify=True), timeout
         )
 
     # =========================================================================
@@ -915,7 +944,7 @@ class PowerPetDoor:
         """
         cmd = CMD_ENABLE_AUTO if enabled else CMD_DISABLE_AUTO
         await self._await_response(
-            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
+            cmd, self._client.send_message(envelope_for_command(cmd), cmd, notify=True), timeout
         )
 
     # =========================================================================
@@ -940,7 +969,7 @@ class PowerPetDoor:
             else CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK
         )
         await self._await_response(
-            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
+            cmd, self._client.send_message(envelope_for_command(cmd), cmd, notify=True), timeout
         )
 
     @property
@@ -957,7 +986,7 @@ class PowerPetDoor:
         """
         cmd = CMD_ENABLE_AUTORETRACT if enabled else CMD_DISABLE_AUTORETRACT
         await self._await_response(
-            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
+            cmd, self._client.send_message(envelope_for_command(cmd), cmd, notify=True), timeout
         )
 
     @property
@@ -983,7 +1012,7 @@ class PowerPetDoor:
         # Inverted: enable keep-open = disable cmd_lockout
         cmd = CMD_DISABLE_CMD_LOCKOUT if enabled else CMD_ENABLE_CMD_LOCKOUT
         await self._await_response(
-            cmd, self._client.send_message(COMMAND, cmd, notify=True), timeout
+            cmd, self._client.send_message(envelope_for_command(cmd), cmd, notify=True), timeout
         )
 
     # =========================================================================
@@ -1002,12 +1031,12 @@ class PowerPetDoor:
             seconds: Hold time in seconds.
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
-        # Protocol uses centiseconds
-        centiseconds = int(seconds * 100)
+        # `build_set_hold_time_message` owns the seconds -> centiseconds
+        # conversion, and is equally reachable from a message-level caller.
         await self._await_response(
             CMD_SET_HOLD_TIME,
             self._client.send_message(
-                CONFIG, CMD_SET_HOLD_TIME, notify=True, holdTime=centiseconds
+                CONFIG, CMD_SET_HOLD_TIME, notify=True, **build_set_hold_time_message(seconds)
             ),
             timeout,
         )
@@ -1029,6 +1058,149 @@ class PowerPetDoor:
             self._client.send_message(CONFIG, CMD_SET_TIMEZONE, notify=True, tz=tz),
             timeout,
         )
+
+    @property
+    def sensor_trigger_voltage(self) -> int:
+        """Capacitive sensor trigger threshold, in millivolts.
+
+        Read out of ``GET_SETTINGS``; the probed unit reported 2000.
+        """
+        return self._sensor_trigger_voltage
+
+    async def set_sensor_trigger_voltage(
+        self, millivolts: int, *, timeout: float | None = None
+    ) -> None:
+        """Set the sensor trigger threshold.
+
+        Args:
+            millivolts: The new threshold. Verified settable on firmware
+                1.7.18 (2000 -> 1500 -> 2000).
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
+        # `build_set_voltage_message` owns the wire shape - the setter's
+        # field is `voltage`, NOT the getter's `sensorTriggerVoltage` - and
+        # is equally reachable from a message-level caller.
+        await self._await_response(
+            CMD_SET_SENSOR_TRIGGER_VOLTAGE,
+            self._client.send_message(
+                CONFIG,
+                CMD_SET_SENSOR_TRIGGER_VOLTAGE,
+                notify=True,
+                **build_set_voltage_message(millivolts),
+            ),
+            timeout,
+        )
+
+    @property
+    def sleep_sensor_trigger_voltage(self) -> int:
+        """Sensor trigger threshold used in the door's sleep state, in mV."""
+        return self._sleep_sensor_trigger_voltage
+
+    async def set_sleep_sensor_trigger_voltage(
+        self, millivolts: int, *, timeout: float | None = None
+    ) -> None:
+        """Set the sleep-state sensor trigger threshold.
+
+        Args:
+            millivolts: The new threshold. Verified settable on firmware
+                1.7.18 (2000 -> 1800 -> 2000).
+            timeout: Seconds to wait for response. Defaults to default_timeout.
+        """
+        await self._await_response(
+            CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+            self._client.send_message(
+                CONFIG,
+                CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+                notify=True,
+                **build_set_voltage_message(millivolts),
+            ),
+            timeout,
+        )
+
+    # =========================================================================
+    # Remote pairing
+    # =========================================================================
+
+    @property
+    def has_remote_id(self) -> bool:
+        """Whether the door has a remote ID paired.
+
+        Populated by :meth:`refresh_remote_info`; it is not part of
+        ``GET_SETTINGS``, so it stays at its default until that runs.
+        """
+        return self._has_remote_id
+
+    @property
+    def has_remote_key(self) -> bool:
+        """Whether the door has a remote key paired."""
+        return self._has_remote_key
+
+    async def refresh_remote_info(self, *, timeout: float | None = None) -> None:
+        """Query whether a remote ID and remote key are paired.
+
+        Deliberately not part of :meth:`refresh`: it is static pairing
+        information, not live state, and two extra round trips on every
+        reconnect buy nothing.
+
+        Args:
+            timeout: Seconds to wait for each response. Defaults to
+                default_timeout.
+        """
+        for cmd in (CMD_HAS_REMOTE_ID, CMD_HAS_REMOTE_KEY):
+            await self._await_response(
+                cmd,
+                self._client.send_message(envelope_for_command(cmd), cmd, notify=True),
+                timeout,
+            )
+
+    @property
+    def device_time(self) -> str:
+        """The door's own wall clock, as it last reported it.
+
+        The raw ``asctime`` string the device sends, in *its* configured
+        timezone, or ``""`` before :meth:`refresh_time` has run. Kept as
+        the device spelled it: it is a snapshot, not a live clock, and the
+        door was observed to answer a stale frame occasionally.
+
+        Use :meth:`refresh_time` to fetch and parse a fresh one.
+        """
+        return self._device_time
+
+    async def refresh_time(self, *, timeout: float | None = None) -> datetime | None:
+        """Read the door's own wall clock.
+
+        Schedules are evaluated against this clock, so it is the only way
+        to check that a door will fire a schedule when you expect it to -
+        a door whose timezone or clock is wrong opens on the wrong
+        schedule with nothing else to show for it.
+
+        Deliberately not part of :meth:`refresh`: it is a diagnostic, and
+        it goes stale the moment it arrives.
+
+        Args:
+            timeout: Seconds to wait for the response. Defaults to
+                default_timeout.
+
+        Returns:
+            The reported time as a **naive** :class:`~datetime.datetime`
+            (the device sends no offset; it is local to
+            :attr:`timezone`), or None if the string was unparseable -
+            in which case :attr:`device_time` still holds it verbatim.
+        """
+        await self._await_response(
+            CMD_GET_TIME,
+            self._client.send_message(
+                envelope_for_command(CMD_GET_TIME), CMD_GET_TIME, notify=True
+            ),
+            timeout,
+        )
+        try:
+            return datetime.strptime(self._device_time, TIME_FORMAT)
+        except ValueError:
+            logger.debug(
+                "Device reported an unparseable time: %s", sanitize_text(self._device_time)
+            )
+            return None
 
     # =========================================================================
     # Battery
@@ -1129,26 +1301,18 @@ class PowerPetDoor:
             low_battery: Notify on low battery.
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
-        merged = {
-            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: (
-                inside_on if inside_on is not None else self._notifications.inside_on
-            ),
-            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: (
-                inside_off if inside_off is not None else self._notifications.inside_off
-            ),
-            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: (
-                outside_on if outside_on is not None else self._notifications.outside_on
-            ),
-            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: (
-                outside_off if outside_off is not None else self._notifications.outside_off
-            ),
-            FIELD_LOW_BATTERY_NOTIFICATIONS: (
-                low_battery if low_battery is not None else self._notifications.low_battery
-            ),
-        }
-        # Send JSON booleans, which is what every released version has sent and
-        # what real doors have accepted. docs/protocol.md shows "1"/"0" here,
-        # but it is reverse-engineered and is not authority over the firmware.
+        # The device is given the complete set every time (there is no
+        # partial form), so the unspecified flags come from the cache.
+        # `build_set_notifications_message` owns the wire shape - nested
+        # object, all five flags, JSON booleans - and is equally reachable
+        # from a message-level caller.
+        merged = build_set_notifications_message(
+            inside_on=self._notifications.inside_on if inside_on is None else inside_on,
+            inside_off=self._notifications.inside_off if inside_off is None else inside_off,
+            outside_on=self._notifications.outside_on if outside_on is None else outside_on,
+            outside_off=self._notifications.outside_off if outside_off is None else outside_off,
+            low_battery=self._notifications.low_battery if low_battery is None else low_battery,
+        )
         await self._await_response(
             CMD_SET_NOTIFICATIONS,
             self._client.send_message(CONFIG, CMD_SET_NOTIFICATIONS, notify=True, **merged),
@@ -1185,10 +1349,16 @@ class PowerPetDoor:
             schedule: The schedule to set.
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
+        # `build_set_schedule_message` owns the wire shape - the slot index
+        # as a sibling of the schedule object, which firmware 1.7.18
+        # requires - and is equally reachable from a message-level caller.
         await self._await_response(
             CMD_SET_SCHEDULE,
             self._client.send_message(
-                CONFIG, CMD_SET_SCHEDULE, notify=True, **{FIELD_SCHEDULE: schedule.to_dict()}
+                CONFIG,
+                CMD_SET_SCHEDULE,
+                notify=True,
+                **build_set_schedule_message(schedule.to_dict()),
             ),
             timeout,
         )
@@ -1460,6 +1630,8 @@ class PowerPetDoor:
             (FIELD_OUTSIDE, "_outside_sensor", False),
             (FIELD_AUTO, "_auto", False),
             (FIELD_OUTSIDE_SENSOR_SAFETY_LOCK, "_safety_lock", False),
+            # doorOptions is an int BITFIELD, so it is read through
+            # `autoretract_from_door_options` rather than `make_bool`.
             (FIELD_AUTORETRACT, "_autoretract", False),
             # Inverted: cmd_lockout disabled means pet proximity keep open
             (FIELD_CMD_LOCKOUT, "_pet_proximity_keep_open", True),
@@ -1467,12 +1639,24 @@ class PowerPetDoor:
         for field_name, attr, inverted in boolean_fields:
             if field_name in settings:
                 cached = getattr(self, attr)
+                reader = (
+                    autoretract_from_door_options if field_name == FIELD_AUTORETRACT else make_bool
+                )
                 value = _keep_flag(
-                    make_bool(settings[field_name]),
+                    reader(settings[field_name]),
                     (not cached) if inverted else cached,
                     field_name,
                 )
                 setattr(self, attr, (not value) if inverted else value)
+
+        for field_name, attr in (
+            (FIELD_SENSOR_TRIGGER_VOLTAGE, "_sensor_trigger_voltage"),
+            (FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE, "_sleep_sensor_trigger_voltage"),
+        ):
+            if field_name in settings:
+                setattr(
+                    self, attr, _keep_int(settings[field_name], getattr(self, attr), field_name)
+                )
 
         for callback in self._settings_callbacks:
             try:
@@ -1558,8 +1742,27 @@ class PowerPetDoor:
         )
         self._hold_time = centiseconds / 100.0
 
+    def _on_sensor_trigger_voltage_update(self, value: int) -> None:
+        self._sensor_trigger_voltage = _keep_int(
+            value, self._sensor_trigger_voltage, FIELD_SENSOR_TRIGGER_VOLTAGE
+        )
+
+    def _on_sleep_sensor_trigger_voltage_update(self, value: int) -> None:
+        self._sleep_sensor_trigger_voltage = _keep_int(
+            value, self._sleep_sensor_trigger_voltage, FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE
+        )
+
+    def _on_remote_id_update(self, value: bool) -> None:
+        self._has_remote_id = _keep_flag(value, self._has_remote_id, FIELD_HAS_REMOTE_ID)
+
+    def _on_remote_key_update(self, value: bool) -> None:
+        self._has_remote_key = _keep_flag(value, self._has_remote_key, FIELD_HAS_REMOTE_KEY)
+
     def _on_timezone_update(self, value: str) -> None:
         self._timezone = _keep_str(value, self._timezone, "timezone")
+
+    def _on_time_update(self, value: str) -> None:
+        self._device_time = _keep_str(value, self._device_time, FIELD_TIME)
 
     def _on_hw_info_update(self, data: dict[str, Any]) -> None:
         """Cache the device's hardware info.

@@ -47,7 +47,6 @@ from ..const import (
     DOOR_TO_PHONE,
     FIELD_AC_PRESENT,
     FIELD_AUTO,
-    FIELD_AUTORETRACT,
     FIELD_BATTERY_PERCENT,
     FIELD_BATTERY_PRESENT,
     FIELD_CMD,
@@ -77,7 +76,8 @@ from ..const import (
     SENSOR_STATE_ON,
     SUCCESS_TRUE,
 )
-from ..tz_utils import get_posix_tz_string, is_cache_initialized
+from ..schedule import wire_bool_string, wire_int_flag
+from ..tz_utils import async_init_timezone_cache
 from .engine import DoorMotionEngine
 from .protocol import DoorSimulatorProtocol, make_sensor_notification
 from .state import DoorSimulatorState, Schedule
@@ -138,7 +138,13 @@ class DoorSimulator:
         self._on_disconnect = on_disconnect
 
     async def start(self):
-        """Start the simulator server."""
+        """Start the simulator server.
+
+        Warms the timezone cache first: without it the door answers
+        ``GET_SETTINGS``/``GET_TIMEZONE`` with a raw IANA name, where a
+        real door always answers the POSIX form.
+        """
+        await async_init_timezone_cache()
         loop = asyncio.get_running_loop()
 
         def handle_disconnect(protocol):
@@ -353,7 +359,7 @@ class DoorSimulator:
             protocol._send(
                 {
                     FIELD_CMD: cmd,
-                    FIELD_SETTINGS: {FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: "1" if enabled else "0"},
+                    FIELD_SETTINGS: {FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: wire_bool_string(enabled)},
                     FIELD_SUCCESS: SUCCESS_TRUE,
                     FIELD_DIRECTION: DOOR_TO_PHONE,
                 }
@@ -367,7 +373,7 @@ class DoorSimulator:
             protocol._send(
                 {
                     FIELD_CMD: cmd,
-                    FIELD_SETTINGS: {FIELD_CMD_LOCKOUT: "1" if enabled else "0"},
+                    FIELD_SETTINGS: {FIELD_CMD_LOCKOUT: wire_bool_string(enabled)},
                     FIELD_SUCCESS: SUCCESS_TRUE,
                     FIELD_DIRECTION: DOOR_TO_PHONE,
                 }
@@ -375,13 +381,18 @@ class DoorSimulator:
         self.engine.notify_sensors_changed()
 
     def broadcast_autoretract(self, enabled: bool):
-        """Broadcast autoretract setting change to all connected clients."""
+        """Broadcast autoretract setting change to all connected clients.
+
+        Carries the whole settings object, and `doorOptions` as the
+        bitfield it is - the same shape ENABLE_/DISABLE_AUTORETRACT answers
+        with (verified against firmware 1.7.18).
+        """
         cmd = CMD_ENABLE_AUTORETRACT if enabled else CMD_DISABLE_AUTORETRACT
         for protocol in self.protocols:
             protocol._send(
                 {
                     FIELD_CMD: cmd,
-                    FIELD_SETTINGS: {FIELD_AUTORETRACT: "1" if enabled else "0"},
+                    FIELD_SETTINGS: self.state.get_settings(),
                     FIELD_SUCCESS: SUCCESS_TRUE,
                     FIELD_DIRECTION: DOOR_TO_PHONE,
                 }
@@ -403,12 +414,7 @@ class DoorSimulator:
 
     def broadcast_timezone(self):
         """Broadcast timezone setting change to all connected clients."""
-        # Convert IANA to POSIX if possible
-        tz_value = self.state.timezone
-        if is_cache_initialized():
-            posix_tz = get_posix_tz_string(self.state.timezone)
-            if posix_tz:
-                tz_value = posix_tz
+        tz_value = self.state.wire_timezone()
         for protocol in self.protocols:
             protocol._send(
                 {
@@ -438,7 +444,7 @@ class DoorSimulator:
             protocol._send(
                 {
                     FIELD_CMD: cmd,
-                    FIELD_POWER: "1" if enabled else "0",
+                    FIELD_POWER: wire_int_flag(enabled),
                     FIELD_SUCCESS: SUCCESS_TRUE,
                     FIELD_DIRECTION: DOOR_TO_PHONE,
                 }
@@ -451,7 +457,7 @@ class DoorSimulator:
             protocol._send(
                 {
                     FIELD_CMD: cmd,
-                    FIELD_AUTO: "1" if enabled else "0",
+                    FIELD_AUTO: wire_int_flag(enabled),
                     FIELD_SUCCESS: SUCCESS_TRUE,
                     FIELD_DIRECTION: DOOR_TO_PHONE,
                 }
@@ -464,7 +470,7 @@ class DoorSimulator:
             protocol._send(
                 {
                     FIELD_CMD: cmd,
-                    FIELD_INSIDE: "1" if enabled else "0",
+                    FIELD_INSIDE: wire_int_flag(enabled),
                     FIELD_SUCCESS: SUCCESS_TRUE,
                     FIELD_DIRECTION: DOOR_TO_PHONE,
                 }
@@ -478,7 +484,7 @@ class DoorSimulator:
             protocol._send(
                 {
                     FIELD_CMD: cmd,
-                    FIELD_OUTSIDE: "1" if enabled else "0",
+                    FIELD_OUTSIDE: wire_int_flag(enabled),
                     FIELD_SUCCESS: SUCCESS_TRUE,
                     FIELD_DIRECTION: DOOR_TO_PHONE,
                 }

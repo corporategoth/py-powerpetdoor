@@ -799,8 +799,17 @@ class TestMainArguments:
         assert "error: Firmware version must contain only numbers (e.g., '1.2.3')" in err
 
     def test_hardware_parsed_to_tuple(self, monkeypatch):
+        """Integers: a real door's fwInfo object is all ints."""
         captured = self._run_main(monkeypatch, ["ppd-simulator", "--hardware", "3.2"])
-        assert captured["hardware"] == ("3", "2")
+        assert captured["hardware"] == (3, 2)
+
+    def test_hardware_non_numeric_rejected(self, capsys, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--hardware", "a.b"])
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+        assert exc_info.value.code == 2
+        err = capsys.readouterr().err
+        assert "error: Hardware version must contain only numbers (e.g., '1.1')" in err
 
     def test_hardware_wrong_format_rejected(self, capsys, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--hardware", "1"])
@@ -1291,13 +1300,13 @@ class TestBuildState:
         assert (state.fw_major, state.fw_minor, state.fw_patch) == (9, 8, 7)
 
     def test_hardware_only(self):
-        state = cli._build_state(None, ("3", "2"))
-        assert (state.hw_ver, state.hw_rev) == ("3", "2")
+        state = cli._build_state(None, (3, 2))
+        assert (state.hw_ver, state.hw_rev) == (3, 2)
 
     def test_firmware_and_hardware(self):
-        state = cli._build_state((1, 2, 3), ("4", "5"))
+        state = cli._build_state((1, 2, 3), (4, 5))
         assert (state.fw_major, state.fw_minor, state.fw_patch) == (1, 2, 3)
-        assert (state.hw_ver, state.hw_rev) == ("4", "5")
+        assert (state.hw_ver, state.hw_rev) == (4, 5)
 
 
 # ============================================================================

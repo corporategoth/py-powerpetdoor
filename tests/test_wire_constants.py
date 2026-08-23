@@ -17,10 +17,11 @@ The perimeter is **derived**, not hand-listed: it is every constant in
 ``docs/protocol.md``. That is checked here too, so a newly documented
 constant has to be added below rather than silently escaping the pin.
 
-``docs/protocol.md`` is reverse-engineered and is *not* authority over what
-the firmware accepts. This module does not assert that these values are
-right - only that they are what has actually been running. Changing one
-must be a deliberate, visible line in a diff.
+``docs/protocol.md`` marks each claim **[V]** (verified against firmware
+1.7.18) or **[R]** (reverse-engineered, unverified), and the **[R]** half is
+*not* authority over what the firmware accepts. This module does not assert
+that these values are right - only that they are what has actually been
+running. Changing one must be a deliberate, visible line in a diff.
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ DOCUMENTED_WIRE_CONSTANTS = {
     "CMD_GET_SENSOR_TRIGGER_VOLTAGE": "GET_SENSOR_TRIGGER_VOLTAGE",
     "CMD_GET_SETTINGS": "GET_SETTINGS",
     "CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE": "GET_SLEEP_SENSOR_TRIGGER_VOLTAGE",
+    "CMD_GET_TIME": "GET_TIME",
     "CMD_GET_TIMEZONE": "GET_TIMEZONE",
     "CMD_HAS_REMOTE_ID": "HAS_REMOTE_ID",
     "CMD_HAS_REMOTE_KEY": "HAS_REMOTE_KEY",
@@ -79,6 +81,7 @@ DOCUMENTED_WIRE_CONSTANTS = {
     "CMD_SET_SCHEDULE_LIST": "SET_SCHEDULE_LIST",
     "CMD_SET_SENSOR_TRIGGER_VOLTAGE": "SET_SENSOR_TRIGGER_VOLTAGE",
     "CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE": "SET_SLEEP_SENSOR_TRIGGER_VOLTAGE",
+    "CMD_SET_TIME": "SET_TIME",
     "CMD_SET_TIMEZONE": "SET_TIMEZONE",
     "COMMAND": "cmd",
     "CONFIG": "config",
@@ -107,8 +110,8 @@ DOCUMENTED_WIRE_CONSTANTS = {
     "FIELD_FW_MAJOR": "fw_maj",
     "FIELD_FW_MINOR": "fw_min",
     "FIELD_FW_PATCH": "fw_pat",
-    "FIELD_HAS_REMOTE_ID": "hasRemoteId",
-    "FIELD_HAS_REMOTE_KEY": "hasRemoteKey",
+    "FIELD_HAS_REMOTE_ID": "has_id",
+    "FIELD_HAS_REMOTE_KEY": "has_key",
     "FIELD_HOLD_OPEN_TIME": "holdOpenTime",
     "FIELD_HOLD_TIME": "holdTime",
     "FIELD_HOUR": "hour",
@@ -120,6 +123,7 @@ DOCUMENTED_WIRE_CONSTANTS = {
     "FIELD_MINUTE": "min",
     "FIELD_MSG_ID": "msgId",
     "FIELD_MSG_ID_RESPONSE": "msgID",
+    "FIELD_NOTIFICATIONS": "notifications",
     "FIELD_OUTSIDE": "outside",
     "FIELD_OUTSIDE_SENSOR_SAFETY_LOCK": "outsideSensorSafetyLock",
     "FIELD_POWER": "power_state",
@@ -136,9 +140,11 @@ DOCUMENTED_WIRE_CONSTANTS = {
     "FIELD_SETTINGS": "settings",
     "FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE": "sleepSensorTriggerVoltage",
     "FIELD_SUCCESS": "success",
+    "FIELD_TIME": "time",
     "FIELD_TOTAL_AUTO_RETRACTS": "totalAutoRetracts",
     "FIELD_TOTAL_OPEN_CYCLES": "totalOpenCycles",
     "FIELD_TZ": "tz",
+    "FIELD_VOLTAGE": "voltage",
     "NOTIFY_LOW_BATTERY": "LOW_BATTERY",
     "NOTIFY_SENSOR_INDOOR": "SENSOR_INDOOR",
     "NOTIFY_SENSOR_OUTDOOR": "SENSOR_OUTDOOR",
@@ -149,6 +155,7 @@ DOCUMENTED_WIRE_CONSTANTS = {
     "SENSOR_STATE_ON": "on",
     "SUCCESS_FALSE": "false",
     "SUCCESS_TRUE": "true",
+    "TIME_FORMAT": "%a %b %d %H:%M:%S %Y",
 }
 
 

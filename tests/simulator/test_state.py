@@ -14,8 +14,12 @@ import pytest
 from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
     FIELD_AUTO,
+    FIELD_AUTORETRACT,
+    FIELD_HOLD_OPEN_TIME,
     FIELD_INSIDE,
     FIELD_POWER,
+    FIELD_SENSOR_TRIGGER_VOLTAGE,
+    FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     FIELD_TZ,
 )
 from powerpetdoor.simulator import (
@@ -24,6 +28,7 @@ from powerpetdoor.simulator import (
     DoorTimingConfig,
     Schedule,
 )
+from powerpetdoor.simulator.state import END_OF_DAY_HOUR, END_OF_DAY_MINUTE
 from tests.conftest import GOLDEN_SCHEDULE_WIRE_FROM_DEVICE, assert_schedule_wire_types
 
 # ============================================================================
@@ -133,17 +138,23 @@ class TestSchedule:
         payload = schedule.to_dict()
 
         assert payload == GOLDEN_SCHEDULE_WIRE_FROM_DEVICE
-        assert_schedule_wire_types(payload, enabled_type=str)
+        assert_schedule_wire_types(payload, flag_type=int)
 
     def test_to_dict(self):
-        """Should convert to protocol dict format."""
+        """Should convert to protocol dict format.
+
+        Verified against firmware 1.7.18: a GET_SCHEDULE reply spells the
+        three flag fields as the integers 1/0, not booleans and not
+        strings.
+        """
         schedule = Schedule(index=1, enabled=True, inside=True)
         result = schedule.to_dict()
         assert result["index"] == 1
-        assert result["enabled"] == "1"
+        assert result["enabled"] == 1
         assert "daysOfWeek" in result
-        assert result["inside"] is True
-        assert result["outside"] is False
+        assert result["inside"] == 1
+        assert result["outside"] == 0
+        assert not any(isinstance(result[name], bool) for name in ("enabled", "inside", "outside"))
         assert "in_start_time" in result
         assert "in_end_time" in result
         assert "out_start_time" in result
@@ -155,8 +166,8 @@ class TestSchedule:
             index=2, outside=True, start_hour=7, start_min=30, end_hour=19, end_min=15
         )
         result = schedule.to_dict()
-        assert result["outside"] is True
-        assert result["inside"] is False
+        assert result["outside"] == 1
+        assert result["inside"] == 0
         assert result["out_start_time"] == {"hour": 7, "min": 30}
         assert result["out_end_time"] == {"hour": 19, "min": 15}
         # Inside times default to zero for a non-inside entry
@@ -292,7 +303,7 @@ class TestSchedule:
         )
 
         assert schedule.enabled is expected
-        assert schedule.to_dict()["enabled"] == ("1" if expected else "0")
+        assert schedule.to_dict()["enabled"] == (1 if expected else 0)
 
     @pytest.mark.parametrize("bad_day", ["", None, "maybe", [1], 1.5, {}])
     def test_from_dict_rejects_unreadable_day_flags(self, bad_day):
@@ -409,8 +420,15 @@ class TestSchedule:
 
         assert len(allowed) == 1440
 
-    def test_an_exclusive_end_window_covers_every_minute_but_the_last(self):
-        """The shape that made 00:00-23:59 wrong, stated directly."""
+    def test_the_devices_own_end_of_day_includes_its_final_minute(self):
+        """23:59 is how the door itself spells "until the end of the day".
+
+        Verified against firmware 1.7.18: the probed unit's factory
+        schedule is ``in 00:00-23:59`` on all seven days, which plainly
+        means "always". A literal half-open ``[start, end)`` reading would
+        switch the sensor off for exactly the minute 23:59 every day, so
+        that final minute is inside the window.
+        """
         schedule = Schedule(
             index=0,
             enabled=True,
@@ -418,12 +436,28 @@ class TestSchedule:
             inside=True,
             start_hour=0,
             start_min=0,
-            end_hour=23,
-            end_min=59,
+            end_hour=END_OF_DAY_HOUR,
+            end_min=END_OF_DAY_MINUTE,
         )
 
         assert schedule.is_sensor_allowed("inside", 23, 58, 0) is True
-        assert schedule.is_sensor_allowed("inside", 23, 59, 0) is False
+        assert schedule.is_sensor_allowed("inside", 23, 59, 0) is True
+
+    def test_an_ordinary_exclusive_end_still_excludes_its_final_minute(self):
+        """The control: only 23:59 is special, not every end time."""
+        schedule = Schedule(
+            index=0,
+            enabled=True,
+            days_of_week=[True] * 7,
+            inside=True,
+            start_hour=0,
+            start_min=0,
+            end_hour=22,
+            end_min=0,
+        )
+
+        assert schedule.is_sensor_allowed("inside", 21, 59, 0) is True
+        assert schedule.is_sensor_allowed("inside", 22, 0, 0) is False
 
     def test_is_sensor_allowed_inside_normal_hours(self):
         """Inside sensor should be allowed during scheduled hours."""
@@ -747,10 +781,36 @@ class TestDoorSimulatorState:
         """get_settings should return protocol format."""
         state = DoorSimulatorState(power=True, inside=False, auto=True)
         settings = state.get_settings()
-        assert settings[FIELD_POWER] == "1"
-        assert settings[FIELD_INSIDE] == "0"
-        assert settings[FIELD_AUTO] == "1"
+        # Verified against firmware 1.7.18: these six are "true"/"false"
+        # STRINGS inside the settings object - the same `inside` that
+        # GET_SENSORS answers as the int 1.
+        assert settings[FIELD_POWER] == "true"
+        assert settings[FIELD_INSIDE] == "false"
+        assert settings[FIELD_AUTO] == "true"
         assert FIELD_TZ in settings
+
+    @pytest.mark.parametrize(("autoretract", "expected"), [(True, 2), (False, 0)])
+    def test_get_settings_spells_door_options_as_a_bitfield(self, autoretract, expected):
+        """doorOptions is an int bitfield; auto-retract is bit 1.
+
+        Verified against firmware 1.7.18: DISABLE_AUTORETRACT leaves it 0
+        and ENABLE_AUTORETRACT leaves it 2. Not a "0"/"1" string, and not
+        a bool - which JSON would render as `true`.
+        """
+        settings = DoorSimulatorState(autoretract=autoretract).get_settings()
+
+        assert settings[FIELD_AUTORETRACT] == expected
+        assert not isinstance(settings[FIELD_AUTORETRACT], bool)
+
+    def test_get_settings_spells_the_numeric_fields_as_ints(self):
+        """holdOpenTime and both voltages are ints, never strings."""
+        settings = DoorSimulatorState(
+            hold_time=2.0, sensor_trigger_voltage=2000, sleep_sensor_trigger_voltage=2000
+        ).get_settings()
+
+        assert settings[FIELD_HOLD_OPEN_TIME] == 200
+        assert settings[FIELD_SENSOR_TRIGGER_VOLTAGE] == 2000
+        assert settings[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE] == 2000
 
     def test_get_settings_converts_timezone_to_posix(self):
         """With the tz cache ready, settings carry the POSIX rule."""
@@ -785,9 +845,12 @@ class TestDoorSimulatorState:
             low_battery=True,
         )
         notifications = state.get_notifications()
-        assert notifications["sensorOnIndoorNotificationsEnabled"] == "1"
-        assert notifications["sensorOffIndoorNotificationsEnabled"] == "0"
-        assert notifications["lowBatteryNotificationsEnabled"] == "1"
+        # Verified against firmware 1.7.18: all five READ back as
+        # "true"/"false" strings - even though the write path demands JSON
+        # booleans and silently ignores strings.
+        assert notifications["sensorOnIndoorNotificationsEnabled"] == "true"
+        assert notifications["sensorOffIndoorNotificationsEnabled"] == "false"
+        assert notifications["lowBatteryNotificationsEnabled"] == "true"
 
     def test_get_schedule_list(self):
         """get_schedule_list should return list of schedule indices."""

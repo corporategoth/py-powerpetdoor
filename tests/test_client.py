@@ -20,6 +20,11 @@ import pytest
 from powerpetdoor import (
     PowerPetDoorClient,
     PrioritizedMessage,
+    autoretract_from_door_options,
+    build_set_hold_time_message,
+    build_set_notifications_message,
+    build_set_voltage_message,
+    envelope_for_command,
     find_end,
     framing,
     make_bool,
@@ -29,6 +34,9 @@ from powerpetdoor.const import (
     CMD_CHECK_RESET_REASON,
     CMD_CLOSE,
     CMD_DELETE_SCHEDULE,
+    CMD_DISABLE_INSIDE,
+    CMD_ENABLE_AUTORETRACT,
+    CMD_ENABLE_INSIDE,
     CMD_GET_AUTO,
     CMD_GET_AUTORETRACT,
     CMD_GET_CMD_LOCKOUT,
@@ -43,16 +51,24 @@ from powerpetdoor.const import (
     CMD_GET_SENSOR_TRIGGER_VOLTAGE,
     CMD_GET_SETTINGS,
     CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+    CMD_GET_TIME,
     CMD_GET_TIMEZONE,
     CMD_HAS_REMOTE_ID,
     CMD_HAS_REMOTE_KEY,
     CMD_OPEN,
+    CMD_OPEN_AND_HOLD,
+    CMD_POWER_ON,
+    CMD_SET_HOLD_TIME,
+    CMD_SET_SCHEDULE,
     COMMAND,
+    COMMAND_ENVELOPE_COMMANDS,
     CONFIG,
+    DOOR_OPTION_AUTORETRACT,
     FIELD_AUTO,
     FIELD_AUTORETRACT,
     FIELD_CMD_LOCKOUT,
     FIELD_HOLD_OPEN_TIME,
+    FIELD_HOLD_TIME,
     FIELD_INSIDE,
     FIELD_LOW_BATTERY_NOTIFICATIONS,
     FIELD_NOTIFICATIONS,
@@ -67,9 +83,11 @@ from powerpetdoor.const import (
     FIELD_SETTINGS,
     FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     FIELD_SUCCESS,
+    FIELD_TIME,
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
     FIELD_TZ,
+    FIELD_VOLTAGE,
     PING,
     PONG,
     PRIORITY_CRITICAL,
@@ -2237,7 +2255,7 @@ class TestResponseHandlerPayloads:
         msg_id, future = self._pending(client, CMD_HAS_REMOTE_ID)
 
         await client.process_message(
-            {"success": "true", "CMD": CMD_HAS_REMOTE_ID, "msgID": msg_id, "hasRemoteId": "1"}
+            {"success": "true", "CMD": CMD_HAS_REMOTE_ID, "msgID": msg_id, "has_id": "true"}
         )
 
         assert values == [True]
@@ -2250,7 +2268,7 @@ class TestResponseHandlerPayloads:
         msg_id, future = self._pending(client, CMD_HAS_REMOTE_KEY)
 
         await client.process_message(
-            {"success": "true", "CMD": CMD_HAS_REMOTE_KEY, "msgID": msg_id, "hasRemoteKey": "0"}
+            {"success": "true", "CMD": CMD_HAS_REMOTE_KEY, "msgID": msg_id, "has_key": "false"}
         )
 
         assert values == [False]
@@ -3534,16 +3552,22 @@ class TestAbsentSettingsFieldsAreGuarded:
     async def test_the_same_listener_is_called_when_the_field_is_present(
         self, mock_client, field_name
     ):
-        """The control: the guard must not be refusing everything."""
+        """The control: the guard must not be refusing everything.
+
+        ``doorOptions`` carries the ON value that its own bitfield uses,
+        because it is not a flag - see
+        :func:`~powerpetdoor.client.autoretract_from_door_options`.
+        """
         client, _, _ = mock_client
         client._can_dequeue = False
         calls: list[tuple] = []
         client.add_listener(
             "probe", sensor_update={field_name: lambda field, value: calls.append((field, value))}
         )
+        on = DOOR_OPTION_AUTORETRACT if field_name == FIELD_AUTORETRACT else "1"
 
         await client.process_message(
-            {"success": "true", "CMD": CMD_GET_SETTINGS, "settings": {field_name: "1"}}
+            {"success": "true", "CMD": CMD_GET_SETTINGS, "settings": {field_name: on}}
         )
 
         assert calls == [(field_name, True)]
@@ -3609,3 +3633,271 @@ class TestAbsentSettingsFieldsAreGuarded:
         )
         assert calls == [(listener_field, 9)]
         assert [record for record in caplog.records if record.exc_info] == []
+
+
+# ============================================================================
+# Wire-shape helpers - the message-level half of the parity rule
+# ============================================================================
+
+
+class TestEnvelopeForCommand:
+    """Verified against firmware 1.7.18: the two envelope keys are not
+    interchangeable, and only door motion is a `cmd`."""
+
+    @pytest.mark.parametrize("cmd", [CMD_OPEN, CMD_OPEN_AND_HOLD, CMD_CLOSE])
+    def test_door_motion_is_a_command(self, cmd):
+        assert envelope_for_command(cmd) == COMMAND
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            CMD_ENABLE_INSIDE,
+            CMD_DISABLE_INSIDE,
+            CMD_POWER_ON,
+            CMD_ENABLE_AUTORETRACT,
+            CMD_GET_SETTINGS,
+            CMD_SET_HOLD_TIME,
+            CMD_SET_SCHEDULE,
+            CMD_GET_TIME,
+        ],
+    )
+    def test_everything_else_is_a_config(self, cmd):
+        assert envelope_for_command(cmd) == CONFIG
+
+    def test_an_unknown_name_is_a_config(self):
+        """A hand-rolled command name gets the safe default, not `cmd`."""
+        assert envelope_for_command("NO_SUCH_COMMAND") == CONFIG
+
+    def test_the_set_and_the_helper_agree(self):
+        """One source of truth, so the two cannot drift."""
+        assert {
+            cmd for cmd in COMMAND_ENVELOPE_COMMANDS if envelope_for_command(cmd) != COMMAND
+        } == set()
+        assert COMMAND_ENVELOPE_COMMANDS == frozenset({CMD_OPEN, CMD_OPEN_AND_HOLD, CMD_CLOSE})
+
+
+class TestAutoretractFromDoorOptions:
+    """`doorOptions` is an int BITFIELD; auto-retract is bit 1.
+
+    Verified against firmware 1.7.18: DISABLE_AUTORETRACT leaves it 0 and
+    ENABLE_AUTORETRACT leaves it 2. Truthiness gives the right answer on
+    those two values by luck and the wrong one as soon as another bit is
+    set, which is the whole reason this reader exists.
+    """
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (0, False),
+            (2, True),
+            ("0", False),
+            ("2", True),
+            # Bit 0 alone is some other option: truthy, but NOT auto-retract.
+            (1, False),
+            (3, True),
+            # Higher unidentified bits, without bit 1.
+            (4, False),
+            (6, True),
+        ],
+        ids=repr,
+    )
+    def test_the_bit_is_masked_not_tested_for_truth(self, value, expected):
+        assert autoretract_from_door_options(value) is expected
+
+    @pytest.mark.parametrize(("value", "expected"), [(True, True), (False, False)])
+    def test_a_json_boolean_answers_the_question_directly(self, value, expected):
+        """int(True) is 1, which masks to False - bools must short-circuit."""
+        assert autoretract_from_door_options(value) is expected
+
+    @pytest.mark.parametrize(
+        ("value", "expected"), [("true", True), ("false", False), ("on", True), ("off", False)]
+    )
+    def test_a_flag_string_falls_back_to_make_bool(self, value, expected):
+        """Liberal: a firmware answering `true` is answering directly."""
+        assert autoretract_from_door_options(value) is expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [None, [], {}, "maybe", 2.5j],
+        ids=["None", "list", "dict", "maybe", "complex"],
+    )
+    def test_an_unreadable_value_is_none_not_a_guess(self, value):
+        assert autoretract_from_door_options(value) is None
+
+    def test_an_overflowing_float_is_unreadable_rather_than_raising(self):
+        """int(inf) raises OverflowError, not ValueError."""
+        assert autoretract_from_door_options(float("inf")) is None
+
+
+class TestBuildSetVoltageMessage:
+    """Verified against firmware 1.7.18: the setters take `voltage`."""
+
+    def test_it_uses_the_setters_field_not_the_getters(self):
+        message = build_set_voltage_message(1500)
+
+        assert message == {FIELD_VOLTAGE: 1500}
+        assert FIELD_SENSOR_TRIGGER_VOLTAGE not in message
+
+    def test_it_coerces_to_an_int(self):
+        assert build_set_voltage_message(1500.0) == {FIELD_VOLTAGE: 1500}
+
+
+class TestBuildSetHoldTimeMessage:
+    """Seconds in, the device's centiseconds out."""
+
+    @pytest.mark.parametrize(
+        ("seconds", "centiseconds"), [(2.0, 200), (15.0, 1500), (0.01, 1), (0, 0)]
+    )
+    def test_seconds_become_centiseconds(self, seconds, centiseconds):
+        assert build_set_hold_time_message(seconds) == {FIELD_HOLD_TIME: centiseconds}
+
+    def test_a_fractional_centisecond_truncates_as_it_always_has(self):
+        """`int()`, not `round()` - what every released version has sent."""
+        assert build_set_hold_time_message(3.999) == {FIELD_HOLD_TIME: 399}
+
+
+class TestBuildSetNotificationsMessage:
+    """The nested object of JSON booleans, and nothing else."""
+
+    def test_all_five_flags_are_nested_under_notifications(self):
+        message = build_set_notifications_message(
+            inside_on=True,
+            inside_off=False,
+            outside_on=True,
+            outside_off=False,
+            low_battery=True,
+        )
+
+        assert message == {
+            FIELD_NOTIFICATIONS: {
+                FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: True,
+                FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: False,
+                FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: True,
+                FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: False,
+                FIELD_LOW_BATTERY_NOTIFICATIONS: True,
+            }
+        }
+
+    def test_the_values_are_json_booleans_not_ints_or_strings(self):
+        """A nested object of strings is accepted by the door and IGNORED."""
+        nested = build_set_notifications_message(
+            inside_on=1,  # type: ignore[arg-type]
+            inside_off=0,  # type: ignore[arg-type]
+            outside_on="yes",  # type: ignore[arg-type]
+            outside_off="",  # type: ignore[arg-type]
+            low_battery=True,
+        )[FIELD_NOTIFICATIONS]
+
+        assert all(type(value) is bool for value in nested.values())
+
+    def test_no_field_is_left_at_the_top_level(self):
+        """Flat fields are rejected outright by the device."""
+        message = build_set_notifications_message(
+            inside_on=True,
+            inside_off=True,
+            outside_on=True,
+            outside_off=True,
+            low_battery=True,
+        )
+
+        assert set(message) == {FIELD_NOTIFICATIONS}
+
+
+class TestTheDoorClockResponse:
+    """`GET_TIME` is passed through verbatim - it is a string, not a clock."""
+
+    async def test_the_asctime_string_reaches_the_listener_and_the_future(self, mock_client):
+        client, _, _ = mock_client
+        values: list = []
+        client.add_listener("t", time_update=values.append)
+        client._can_dequeue = False
+        future = client._get_loop().create_future()
+        client._outstanding[5] = future
+
+        await client.process_message(
+            {
+                "success": "true",
+                "CMD": CMD_GET_TIME,
+                "msgID": 5,
+                FIELD_TIME: "Sat Aug 22 23:13:48 2026",
+            }
+        )
+
+        assert values == ["Sat Aug 22 23:13:48 2026"]
+        assert future.result() == "Sat Aug 22 23:13:48 2026"
+
+    async def test_a_reply_without_the_field_fails_the_future_typed(self, mock_client):
+        client, _, _ = mock_client
+        client._can_dequeue = False
+        future = client._get_loop().create_future()
+        client._outstanding[6] = future
+
+        await client.process_message({"success": "true", "CMD": CMD_GET_TIME, "msgID": 6})
+
+        with pytest.raises(CommandError):
+            future.result()
+
+
+class TestAnUnmatchedFailureDoesNotHangTheCaller:
+    """Verified against firmware 1.7.18: failures carry no `msgID`.
+
+    `process_message` therefore has to fall back to "this reply
+    acknowledges the in-flight command", and the guard that does it is a
+    compound condition - so the case where the *second* operand is the
+    deciding one is pinned here too.
+    """
+
+    @staticmethod
+    def _inflight(client, cmd):
+        """Put `cmd` in flight with a future, as `send_message` would."""
+        msg_id = client.msgId
+        future = client._get_loop().create_future()
+        client._outstanding[msg_id] = future
+        client._inflight_msg_id = msg_id
+        client._last_command = cmd
+        client._check_receipt = client._get_loop().call_later(60, lambda: None)
+        return future
+
+    async def test_a_failure_with_no_id_fails_the_inflight_future(self, mock_client):
+        client, _, _ = mock_client
+        future = self._inflight(client, CMD_GET_SCHEDULE)
+
+        await client.process_message(
+            {"success": "false", "CMD": CMD_GET_SCHEDULE, "reason": "Schedule not found"}
+        )
+
+        assert future.done()
+        with pytest.raises(CommandError) as err:
+            future.result()
+        assert err.value.reason == "Schedule not found"
+
+    async def test_an_id_matched_failure_still_takes_the_ordinary_path(self, mock_client):
+        """The control: the fallback is for *unmatched* failures only."""
+        client, _, _ = mock_client
+        msg_id = client.msgId
+        future = client._get_loop().create_future()
+        client._outstanding[msg_id] = future
+        client._can_dequeue = False
+
+        await client.process_message(
+            {"success": "false", "CMD": CMD_GET_SCHEDULE, "msgID": msg_id, "reason": "nope"}
+        )
+
+        with pytest.raises(CommandError):
+            future.result()
+
+    async def test_a_failure_for_a_command_not_in_flight_is_left_alone(self, mock_client):
+        """The second operand deciding: no id, and nothing was acknowledged.
+
+        A stray failure for some *other* command must not fail whatever
+        this client happens to be waiting on.
+        """
+        client, _, _ = mock_client
+        future = self._inflight(client, CMD_GET_SCHEDULE)
+
+        await client.process_message(
+            {"success": "false", "CMD": CMD_GET_SETTINGS, "reason": "unrelated"}
+        )
+
+        assert not future.done()
+        client._check_receipt.cancel()

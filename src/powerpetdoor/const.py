@@ -43,12 +43,18 @@ FIELD_OUTSIDE = "outside"
 FIELD_AUTO = "timersEnabled"
 FIELD_OUTSIDE_SENSOR_SAFETY_LOCK = "outsideSensorSafetyLock"
 FIELD_CMD_LOCKOUT = "allowCmdLockout"
-FIELD_AUTORETRACT = "doorOptions"
+FIELD_AUTORETRACT = "doorOptions"  # An int BITFIELD - see DOOR_OPTION_AUTORETRACT
 FIELD_TOTAL_OPEN_CYCLES = "totalOpenCycles"
 FIELD_TOTAL_AUTO_RETRACTS = "totalAutoRetracts"
 FIELD_SETTINGS = "settings"
 FIELD_NOTIFICATIONS = "notifications"
 FIELD_TZ = "tz"
+#: The door's local wall-clock time, in its configured timezone.
+FIELD_TIME = "time"
+#: How :data:`FIELD_TIME` is spelled: a C ``asctime()`` string, e.g.
+#: ``"Sat Aug 22 23:13:48 2026"``. Both sides of this project format and
+#: parse through this one constant.
+TIME_FORMAT = "%a %b %d %H:%M:%S %Y"
 FIELD_SCHEDULE = "schedule"
 FIELD_SCHEDULES = "schedules"
 FIELD_INDEX = "index"
@@ -60,6 +66,10 @@ FIELD_START_TIME_SUFFIX = "_start_time"
 FIELD_END_TIME_SUFFIX = "_end_time"
 FIELD_HOUR = "hour"
 FIELD_MINUTE = "min"
+#: The field a sensor-trigger-voltage **setter** takes. **Verified against
+#: firmware 1.7.18**: `SET_SENSOR_TRIGGER_VOLTAGE` and
+#: `SET_SLEEP_SENSOR_TRIGGER_VOLTAGE` require `voltage` and reject the
+#: getter's field name; the reply then echoes the *getter's* field.
 FIELD_VOLTAGE = "voltage"
 FIELD_HOLD_TIME = "holdTime"
 FIELD_HOLD_OPEN_TIME = "holdOpenTime"
@@ -76,6 +86,14 @@ FIELD_HW_REVISION = "rev"  # Hardware revision
 FIELD_FW_MAJOR = "fw_maj"
 FIELD_FW_MINOR = "fw_min"
 FIELD_FW_PATCH = "fw_pat"
+#: Bit 1 of the ``doorOptions`` bitfield: auto-retract on obstruction.
+#: **Verified against firmware 1.7.18**: ``DISABLE_AUTORETRACT`` leaves
+#: ``doorOptions`` at the integer ``0`` and ``ENABLE_AUTORETRACT`` leaves it
+#: at the integer ``2``. The other bits are unidentified, so ``2`` must not
+#: be read as "auto-retract and nothing else", and the field must never be
+#: read by plain truthiness.
+DOOR_OPTION_AUTORETRACT = 2
+
 FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS = "sensorOnIndoorNotificationsEnabled"
 FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS = "sensorOffIndoorNotificationsEnabled"
 FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS = "sensorOnOutdoorNotificationsEnabled"
@@ -136,11 +154,28 @@ CMD_SET_SENSOR_TRIGGER_VOLTAGE = "SET_SENSOR_TRIGGER_VOLTAGE"
 CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE = "GET_SLEEP_SENSOR_TRIGGER_VOLTAGE"
 CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE = "SET_SLEEP_SENSOR_TRIGGER_VOLTAGE"
 
+#: Read the door's own wall clock. **Verified against firmware 1.7.18**;
+#: undocumented by the vendor. The reply carries :data:`FIELD_TIME`.
+CMD_GET_TIME = "GET_TIME"
+#: **Verified against firmware 1.7.18: the clock is READ-ONLY.** This name
+#: is defined only so the simulator can reproduce the door's strangest
+#: observed behaviour - ``SET_TIME`` is answered with *silence*, not a
+#: failure envelope, where every other rejected shape answers
+#: ``success: "false"``. Never send it.
+CMD_SET_TIME = "SET_TIME"
+
 CMD_GET_SCHEDULE_LIST = "GET_SCHEDULE_LIST"
 CMD_SET_SCHEDULE_LIST = "SET_SCHEDULE_LIST"
 CMD_GET_SCHEDULE = "GET_SCHEDULE"
 CMD_SET_SCHEDULE = "SET_SCHEDULE"
 CMD_DELETE_SCHEDULE = "DELETE_SCHEDULE"
+
+#: The only commands a real door accepts under the ``cmd`` envelope key.
+#: **Verified against firmware 1.7.18**: ``{"cmd": "ENABLE_INSIDE"}`` is
+#: answered ``success: "false"`` while ``{"config": "ENABLE_INSIDE"}``
+#: succeeds, so every command that is not door motion - including the
+#: individual setting commands - has to be sent as ``config``.
+COMMAND_ENVELOPE_COMMANDS = frozenset({CMD_OPEN, CMD_OPEN_AND_HOLD, CMD_CLOSE})
 
 # Notification event types (sent by device when events occur)
 NOTIFY_SENSOR_INDOOR = "SENSOR_INDOOR"
@@ -154,9 +189,15 @@ FIELD_SENSOR_STATE = "sensorState"  # "on" or "off"
 SENSOR_STATE_ON = "on"
 SENSOR_STATE_OFF = "off"
 
-# Response field names for remote/reset commands
-FIELD_HAS_REMOTE_ID = "hasRemoteId"
-FIELD_HAS_REMOTE_KEY = "hasRemoteKey"
+# Response field names for remote/reset commands.
+# `has_id`/`has_key` are **verified against firmware 1.7.18** - the door does
+# NOT use the camelCase `hasRemoteId`/`hasRemoteKey` this project guessed at
+# for its first five years, which is why those readers never fired.
+FIELD_HAS_REMOTE_ID = "has_id"
+FIELD_HAS_REMOTE_KEY = "has_key"
+#: Reverse-engineered and **unverified**: firmware 1.7.18 has no
+#: CHECK_RESET_REASON command at all, so no reply carrying this field was
+#: ever observed. Kept because a different firmware revision may have one.
 FIELD_RESET_REASON = "resetReason"
 
 # Message priorities (lower = higher priority)
@@ -208,6 +249,7 @@ COMMAND_PRIORITIES = {
     CMD_GET_NOTIFICATIONS: PRIORITY_LOW,
     CMD_GET_HOLD_TIME: PRIORITY_LOW,
     CMD_GET_TIMEZONE: PRIORITY_LOW,
+    CMD_GET_TIME: PRIORITY_LOW,
     CMD_GET_SENSOR_TRIGGER_VOLTAGE: PRIORITY_LOW,
     CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE: PRIORITY_LOW,
     CMD_HAS_REMOTE_ID: PRIORITY_LOW,

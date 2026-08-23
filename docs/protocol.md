@@ -1,6 +1,31 @@
 # Power Pet Door Wire Protocol
 
-This document describes the network protocol used by Power Pet Door devices. For information about how the door operates and what settings mean, see [operation.md](operation.md).
+This document describes the network protocol used by Power Pet Door devices.
+For information about how the door operates and what settings mean, see
+[operation.md](operation.md).
+
+## How to read this document
+
+Every claim below is tagged with how it is known:
+
+| Tag | Meaning |
+|-----|---------|
+| **[V]** | **Verified** against a physical Power Pet Door running firmware **1.7.18** (`fwInfo: ver=1 rev=1 fw_maj=1 fw_min=7 fw_pat=18`), by sending the frame and recording the reply |
+| **[R]** | **Reverse-engineered** from observation of the vendor app or from this library's history, and **not** confirmed against hardware |
+
+That distinction exists because this document was wrong for years in ways
+nothing in the test suite could catch: it described newline-terminated
+framing, `"0"`/`"1"` string flags everywhere, `SET_NOTIFICATIONS` as a set of
+top-level fields, `SET_SCHEDULE` without an `index`, `doorOptions` as a
+boolean, `hasRemoteId`/`hasRemoteKey` as the remote-pairing field names, and
+`sensorTriggerVoltage` as the field its own setter takes. All of those were
+**[R]**, all of them were believed, and every one of them is now known to be
+wrong. Where a **[V]** statement and an **[R]** statement disagree, the
+**[V]** one wins; nothing here may be "tidied" to make the two agree.
+
+An **[R]** tag is not a licence to change what the library sends. Several
+**[R]** spellings have been running against real doors since v0.1.0, which is
+its own kind of evidence.
 
 ## Table of Contents
 
@@ -8,6 +33,7 @@ This document describes the network protocol used by Power Pet Door devices. For
 - [Message Format](#message-format)
 - [Message Types](#message-types)
 - [Data Formats](#data-formats)
+- [Value spellings](#value-spellings)
 - [Keepalive](#keepalive)
 - [Commands Reference](#commands-reference)
   - [Door Control](#door-control)
@@ -18,6 +44,11 @@ This document describes the network protocol used by Power Pet Door devices. For
   - [Query Commands](#query-commands)
   - [Schedule Commands](#schedule-commands)
   - [Diagnostic Commands](#diagnostic-commands)
+  - [The door clock](#the-door-clock)
+- [Commands that do not exist](#commands-that-do-not-exist)
+- [The vendor app, and why your setting changed back](#the-vendor-app-and-why-your-setting-changed-back)
+- [What the app calls these settings](#what-the-app-calls-these-settings)
+- [What this protocol cannot do](#what-this-protocol-cannot-do)
 - [Settings Fields](#settings-fields)
 - [Notification Events](#notification-events)
 - [Schedule Format](#schedule-format)
@@ -27,27 +58,44 @@ This document describes the network protocol used by Power Pet Door devices. For
 
 ## Connection
 
-| Parameter | Value |
-|-----------|-------|
-| Transport | TCP |
-| Default Port | 3000 |
-| Encoding | JSON (ASCII) |
-| Connection Limit | Single client only |
-| Message Framing | Brace-matched JSON objects (no terminator) |
+| Parameter | Value | |
+|-----------|-------|---|
+| Transport | TCP | **[V]** |
+| Default Port | 3000 | **[V]** |
+| Encoding | JSON (ASCII) | **[V]** |
+| Connection Limit | Single client only | **[V]** |
+| Message Framing | Brace-matched JSON objects, **no terminator** | **[V]** |
 
-The door only accepts one connection at a time.
+### Single connection, and the field-debugging trap it creates
+
+**[V]** The door serves **one** connection. A second connection does not get
+a refusal, a reset, or an error frame — the door simply stops answering the
+wire properly, and *both* sides see long waits and apparent timeouts. On an
+idle, exclusive connection every command answered in **0.03–0.53 s**, so a
+timeout an order of magnitude above that is almost always a second client
+(another app, a stale process, a home-automation integration you forgot was
+running), not a slow or broken door.
+
+If you are debugging "the door randomly stops responding": close every other
+connection first. Close cleanly between sessions.
+
+**The simulator deliberately does not reproduce this.** It accepts many
+clients and serves each one as if it were exclusive. See
+[simulator.md](simulator.md) for why, and do not "fix" it.
 
 ---
 
 ## Message Format
 
-Messages are JSON objects sent back-to-back over the TCP stream. There is
-**no message terminator**: neither side sends a trailing newline, and
-messages may be separated by optional whitespace. Receivers must frame the
-stream by scanning for balanced braces, ignoring braces that appear inside
-JSON string values (including backslash-escaped quotes). A message may
+**[V]** Messages are JSON objects sent back-to-back over the TCP stream.
+There is **no message terminator**: neither side sends a trailing newline,
+and a response ends at its closing `}` with nothing after it. Receivers must
+frame the stream by scanning for balanced braces, ignoring braces that appear
+inside JSON string values (including backslash-escaped quotes). A message may
 arrive split across multiple TCP segments, and one segment may contain
 several messages.
+
+The device accepts a request with no trailing newline. **[V]**
 
 Robust receivers should also:
 
@@ -60,20 +108,20 @@ All messages include envelope fields for message tracking and direction.
 
 ### Envelope Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `msgId` | int | Message ID (incrementing counter, in requests) |
-| `msgID` | int | Message ID echo (in responses, note different casing) |
-| `dir` | string | Direction: `"p2d"` (phone to door) or `"d2p"` (door to phone) |
+| Field | Type | Description | |
+|-------|------|-------------|---|
+| `msgId` | int | Message ID (incrementing counter, in **requests**) | **[V]** |
+| `msgID` | int | Message ID echo (in **responses**, note the different casing) | **[V]** |
+| `dir` | string | Direction: `"p2d"` (phone to door) or `"d2p"` (door to phone) | **[V]** |
 
 ### Request (client to door)
 
-**Command format** (actions that change state):
+**Command format** (door motion only — see [Message Types](#message-types)):
 ```json
 {"cmd": "COMMAND_NAME", "msgId": 1, "dir": "p2d", ...params}
 ```
 
-**Config format** (queries and configuration):
+**Config format** (everything else):
 ```json
 {"config": "COMMAND_NAME", "msgId": 2, "dir": "p2d", ...params}
 ```
@@ -84,17 +132,37 @@ All messages include envelope fields for message tracking and direction.
 {"CMD": "COMMAND_NAME", "msgID": 1, "dir": "d2p", "success": "true", ...response_data}
 ```
 
-or on error:
+**[V]** `success` is the **string** `"true"` / `"false"`, never a JSON
+boolean. `CMD` echoes the command name.
+
+### Failure responses carry no `msgID`
+
+**[V]** On failure the door answers:
 
 ```json
-{"CMD": "COMMAND_NAME", "msgID": 1, "dir": "d2p", "success": "false", "reason": "error message"}
+{"success": "false", "dir": "d2p", "CMD": "COMMAND_NAME"}
 ```
 
-Note: Response includes `CMD` echoing the command name, and `success` is a string `"true"`/`"false"`.
+Note what is **missing**: there is no `msgID`. A client that pairs replies to
+requests by id therefore cannot pair a failure with anything, and will sit
+waiting for a reply that has already arrived until its own timeout fires.
 
-Unknown or unsupported commands are answered with the error envelope
-(`"success": "false"`, `"reason": "Unknown command"`) rather than being
-silently accepted.
+A correct client needs a second rule: a response whose `CMD` matches the
+command currently in flight belongs to that command whether or not it
+carries an id. The door answers one command at a time, so this is
+unambiguous. (This library implements exactly that; see
+`PowerPetDoorClient.process_message`.)
+
+**[R]** Whether a real door ever supplies a `reason` string is unknown — none
+was observed. This project's simulator always includes one, as a debugging
+aid, and clients should treat it as optional:
+
+```json
+{"CMD": "COMMAND_NAME", "dir": "d2p", "success": "false", "reason": "error message"}
+```
+
+Unknown or unsupported commands are answered with the same failure envelope
+rather than being silently accepted. **[V]**
 
 ---
 
@@ -102,12 +170,36 @@ silently accepted.
 
 These are the top-level **envelope keys** that identify what a frame is:
 
-| Type | Field | Usage |
-|------|-------|-------|
-| Command | `"cmd"` | Actions: OPEN, CLOSE, ENABLE_*, DISABLE_*, POWER_* |
-| Config | `"config"` | Queries and settings: GET_*, SET_* |
-| Ping | `"PING"` | Keepalive request |
-| Pong | `"PONG"` | Keepalive response |
+| Type | Field | Usage | |
+|------|-------|-------|---|
+| Command | `"cmd"` | **Door motion only**: `OPEN`, `OPEN_AND_HOLD`, `CLOSE` | **[V]** |
+| Config | `"config"` | **Everything else**, including the individual setting commands | **[V]** |
+| Ping | `"PING"` | Keepalive request | **[V]** |
+| Pong | `"PONG"` | Keepalive response | **[V]** |
+
+### `config` vs `cmd` is not cosmetic
+
+**[V]** The two keys are **not** interchangeable, and getting it wrong fails
+silently in the sense that matters — the door answers, the answer says
+`"false"`, and nothing happens:
+
+```json
+{"cmd": "ENABLE_INSIDE"}
+```
+→ `{"success": "false", ...}`, nothing changed.
+
+```json
+{"config": "ENABLE_INSIDE"}
+```
+→ `{"inside": 1, "success": "true", ...}`, sensor enabled.
+
+Only `OPEN`, `OPEN_AND_HOLD` and `CLOSE` are accepted under `cmd`. Every
+other command in this document — including `ENABLE_*`, `DISABLE_*`,
+`POWER_ON` and `POWER_OFF`, which earlier versions of this document listed as
+`cmd` — must be sent as `config`.
+
+In this library the mapping lives in one place, `COMMAND_ENVELOPE_COMMANDS`
+in `powerpetdoor/const.py`, reached through `envelope_for_command()`.
 
 `DOOR_STATUS` is **not** an envelope key — it is a `CMD` *value* carried by
 an unsolicited device push. See
@@ -117,18 +209,9 @@ an unsolicited device push. See
 
 ## Data Formats
 
-### Boolean Values
-
-Most boolean settings use **string** values `"0"` and `"1"`, not JSON boolean:
-```json
-{"inside": "1", "outside": "0", "power_state": "1"}
-```
-
-The `success` field also uses strings: `"true"` or `"false"`.
-
 ### Timezone Format
 
-Timezones use **POSIX format**, not IANA names:
+**[V]** Timezones use **POSIX format**, not IANA names:
 ```json
 {"tz": "EST5EDT,M3.2.0,M11.1.0"}
 ```
@@ -140,18 +223,69 @@ Format: `STDoffset[DST[offset],start,end]`
 
 ### Time Values
 
-Hold time is in **centiseconds** (1/100 second):
+**[V]** Hold time is in **centiseconds** (1/100 second):
 ```json
 {"holdTime": 200}
 ```
-A value of 200 means 2 seconds.
+A value of 200 means 2 seconds. The probed unit was set to 200.
+
+---
+
+## Value spellings
+
+**[V]** **The device is not internally consistent.** The same concept is
+spelled differently depending on which command answered. This is not a
+mistake in the capture and must not be normalized away — it is the reason
+every reader in this project (and any other correct client) has to be
+liberal, accepting `true`/`"true"`/`1`/`"1"` interchangeably for a flag.
+
+| Where | Field(s) | Type on the wire | |
+|---|---|---|---|
+| `GET_SETTINGS.settings` | `inside`, `outside`, `power_state`, `timersEnabled`, `outsideSensorSafetyLock`, `allowCmdLockout` | string `"true"` / `"false"` | **[V]** |
+| `GET_SETTINGS.settings` | `holdOpenTime`, `sensorTriggerVoltage`, `sleepSensorTriggerVoltage`, `doorOptions` | int | **[V]** |
+| `GET_SETTINGS.settings`, `GET_TIMEZONE` | `tz` | POSIX string, **never** an IANA name | **[V]** |
+| `GET_TIME` | `time` | C `asctime()` string, local to `tz` | **[V]** |
+| `GET_SENSORS` | `inside`, `outside` | int `1` / `0` | **[V]** |
+| individual setting reply, e.g. `ENABLE_INSIDE` | the echoed field | int `1` / `0` | **[V]** |
+| `GET_SCHEDULE.schedule` | `enabled`, `inside`, `outside` | int `1` / `0` | **[V]** |
+| `GET_SCHEDULE.schedule` | `daysOfWeek` | list of int `1` / `0` | **[V]** |
+| `GET_NOTIFICATIONS.notifications` | all five flags | string `"true"` / `"false"` | **[V]** |
+| `GET_HOLD_TIME` | `holdTime` | int (centiseconds) | **[V]** |
+| `GET_DOOR_BATTERY` | `batteryPercent` | int | **[V]** |
+| `GET_DOOR_BATTERY` | `acPresent`, `batteryPresent` | string `"true"` / `"false"` | **[V]** |
+| `GET_HW_INFO` | `fwInfo` | object of **ints** — including `ver` and `rev` | **[V]** |
+| `HAS_REMOTE_ID` / `HAS_REMOTE_KEY` | `has_id` / `has_key` | string `"true"` / `"false"` | **[V]** |
+| any reply | `success` | string `"true"` / `"false"` | **[V]** |
+
+Note that `inside` is a **string** in `GET_SETTINGS`, an **int** in
+`GET_SENSORS`, and an **int** in a schedule entry. All three are the same
+door, in the same session.
+
+### `doorOptions` is a bitfield
+
+**[V]** `doorOptions` is an **integer bitfield**, not the `"0"`/`"1"` flag
+this document used to claim:
+
+| Action | Resulting `doorOptions` |
+|---|---|
+| `DISABLE_AUTORETRACT` | `0` |
+| `ENABLE_AUTORETRACT` | `2` |
+
+Auto-retract is therefore **bit 1** (value 2) — exported here as
+`DOOR_OPTION_AUTORETRACT`. The other bits are **unidentified**: do not read
+`doorOptions == 2` as "auto-retract and nothing else", and do not read the
+field by plain truthiness, which happens to work today only because `2` is
+truthy and would misreport the moment any other bit is set.
+
+**[V]** `ENABLE_AUTORETRACT` / `DISABLE_AUTORETRACT` reply with the **whole**
+`settings` object, not just the field they changed.
 
 ---
 
 ## Keepalive
 
-The `PING` value is an **opaque correlation token** chosen by the client
-(this library sends the current wall-clock time in milliseconds, as a
+**[V]** The `PING` value is an **opaque correlation token** chosen by the
+client (this library sends the current wall-clock time in milliseconds, as a
 string). The device echoes it back verbatim as the `PONG` value.
 
 **Request**:
@@ -164,6 +298,10 @@ string). The device echoes it back verbatim as the `PONG` value.
 {"CMD": "PONG", "PONG": "1710000000123", "success": "true", "dir": "d2p"}
 ```
 
+**[V]** **A `PONG` carries no `msgID`.** The echoed token is the whole
+correlation mechanism here; a client must not expect the response id it gets
+on ordinary replies.
+
 **The `PONG` value must be the exact `PING` value.** The client compares
 them and only counts an exact match as a reply; a mismatched or empty
 `PONG` is counted as a failed ping, and three failures in a row drop the
@@ -171,12 +309,6 @@ connection (`MAX_FAILED_PINGS = 3`). At the default 30 s interval that is a
 hard disconnect roughly every 90 seconds, reported as `Last PING not
 responded to 3 times.` — so an alternate implementation that answers
 `{"PONG": ""}` looks like a flaky network rather than a protocol mismatch.
-The token's *content* is not interpreted by the device; only the echo
-matters — the echoed token is the whole correlation mechanism, and the
-client never reads `msgID` on a `PONG`. Whether the firmware echoes `msgId`
-back as `msgID` here, the way it does on ordinary responses, is
-**unverified**; this project's simulator does not, and an alternate
-implementation must not depend on it being present.
 
 Typical interval: 30 seconds
 
@@ -184,15 +316,19 @@ Typical interval: 30 seconds
 
 ## Commands Reference
 
-> **Note**: In the examples below, envelope fields (`msgId`, `msgID`, `dir`) are omitted for brevity. See [Message Format](#message-format) for the complete structure.
+> **Note**: In the examples below, envelope fields (`msgId`, `msgID`, `dir`)
+> are omitted for brevity. See [Message Format](#message-format) for the
+> complete structure.
 
 ### Door Control
 
-| Command | Type | Description |
-|---------|------|-------------|
-| `OPEN` | cmd | Open door (auto-closes after hold time) |
-| `OPEN_AND_HOLD` | cmd | Open door and keep open until CLOSE |
-| `CLOSE` | cmd | Close the door |
+| Command | Type | Description | |
+|---------|------|-------------|---|
+| `OPEN` | cmd | Open door (auto-closes after hold time) | **[V]** |
+| `OPEN_AND_HOLD` | cmd | Open door and keep open until CLOSE | **[V]** |
+| `CLOSE` | cmd | Close the door | **[V]** |
+
+These three are the **only** commands accepted under the `cmd` key.
 
 **Request**:
 ```json
@@ -201,158 +337,217 @@ Typical interval: 30 seconds
 {"cmd": "CLOSE"}
 ```
 
-**Response**:
+**Response** (**[R]** — door motion was not provoked on the probed unit):
 ```json
 {"success": "true", "door_status": "DOOR_RISING"}
 ```
 
 ### Sensor Control
 
-| Command | Type | Description |
-|---------|------|-------------|
-| `ENABLE_INSIDE` | cmd | Enable inside sensor |
-| `DISABLE_INSIDE` | cmd | Disable inside sensor |
-| `ENABLE_OUTSIDE` | cmd | Enable outside sensor |
-| `DISABLE_OUTSIDE` | cmd | Disable outside sensor |
-| `GET_SENSORS` | config | Get sensor states |
+| Command | Type | Description | |
+|---------|------|-------------|---|
+| `ENABLE_INSIDE` | config | Enable inside sensor | **[V]** |
+| `DISABLE_INSIDE` | config | Disable inside sensor | **[V]** |
+| `ENABLE_OUTSIDE` | config | Enable outside sensor | **[V]** |
+| `DISABLE_OUTSIDE` | config | Disable outside sensor | **[V]** |
+| `GET_SENSORS` | config | Get sensor states | **[V]** |
 
 **Request**:
 ```json
-{"cmd": "ENABLE_INSIDE"}
-{"cmd": "DISABLE_OUTSIDE"}
+{"config": "ENABLE_INSIDE"}
+{"config": "DISABLE_OUTSIDE"}
 {"config": "GET_SENSORS"}
 ```
 
-**Response** (GET_SENSORS):
+**Response** (`ENABLE_INSIDE`, then `GET_SENSORS`) — **ints**, not strings:
 ```json
-{"success": "true", "inside": "1", "outside": "1"}
+{"success": "true", "inside": 1}
+{"success": "true", "inside": 1, "outside": 1}
 ```
 
 ### Power Control
 
-| Command | Type | Description |
-|---------|------|-------------|
-| `POWER_ON` | cmd | Turn door power on |
-| `POWER_OFF` | cmd | Turn door power off |
-| `GET_POWER` | config | Get power state |
+| Command | Type | Description | |
+|---------|------|-------------|---|
+| `POWER_ON` | config | Turn door power on | **[R]** envelope inferred from the other setting commands |
+| `POWER_OFF` | config | Turn door power off | **[R]** |
+| `GET_POWER` | config | Get power state | **[R]** |
 
 **Request**:
 ```json
-{"cmd": "POWER_ON"}
-{"cmd": "POWER_OFF"}
+{"config": "POWER_ON"}
+{"config": "POWER_OFF"}
 {"config": "GET_POWER"}
 ```
 
-**Response** (GET_POWER):
+**Response** (**[R]**, spelled like the other individual setting replies):
 ```json
-{"success": "true", "power_state": "1"}
+{"success": "true", "power_state": 1}
 ```
+
+Power state is readable for certain from `GET_SETTINGS`, as the string
+`power_state`. **[V]**
 
 ### Safety Settings
 
-| Command | Type | Description |
-|---------|------|-------------|
-| `ENABLE_AUTORETRACT` | cmd | Enable auto-retract |
-| `DISABLE_AUTORETRACT` | cmd | Disable auto-retract |
-| `GET_AUTORETRACT` | config | Get autoretract state |
-| `ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK` | cmd | Enable outside sensor safety lock |
-| `DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK` | cmd | Disable outside sensor safety lock |
-| `GET_OUTSIDE_SENSOR_SAFETY_LOCK` | config | Get safety lock state |
-| `ENABLE_CMD_LOCKOUT` | cmd | Enable command lockout |
-| `DISABLE_CMD_LOCKOUT` | cmd | Disable command lockout |
-| `GET_CMD_LOCKOUT` | config | Get command lockout state |
+| Command | Type | Description | |
+|---------|------|-------------|---|
+| `ENABLE_AUTORETRACT` | config | Enable auto-retract | **[V]** |
+| `DISABLE_AUTORETRACT` | config | Disable auto-retract | **[V]** |
+| `ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK` | config | Enable outside sensor safety lock | **[R]** |
+| `DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK` | config | Disable outside sensor safety lock | **[R]** |
+| `ENABLE_CMD_LOCKOUT` | config | Enable command lockout | **[R]** |
+| `DISABLE_CMD_LOCKOUT` | config | Disable command lockout | **[R]** |
+
+The read counterparts `GET_AUTORETRACT`, `GET_OUTSIDE_SENSOR_SAFETY_LOCK` and
+`GET_CMD_LOCKOUT` **do not exist** — see
+[Commands that do not exist](#commands-that-do-not-exist). Read these three
+settings from `GET_SETTINGS` instead.
 
 **Request**:
 ```json
-{"cmd": "ENABLE_AUTORETRACT"}
-{"cmd": "DISABLE_AUTORETRACT"}
-{"config": "GET_AUTORETRACT"}
-{"cmd": "ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK"}
-{"config": "GET_OUTSIDE_SENSOR_SAFETY_LOCK"}
-{"cmd": "ENABLE_CMD_LOCKOUT"}
-{"config": "GET_CMD_LOCKOUT"}
+{"config": "ENABLE_AUTORETRACT"}
+{"config": "DISABLE_AUTORETRACT"}
+{"config": "ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK"}
+{"config": "ENABLE_CMD_LOCKOUT"}
 ```
 
-**Response**:
+**Response** — `ENABLE_AUTORETRACT`/`DISABLE_AUTORETRACT` answer with the
+**whole** settings object **[V]**; the safety-lock and command-lockout
+toggles were not probed, and this library's simulator answers them with a
+one-field `settings` object spelled the way `GET_SETTINGS` spells it **[R]**:
 ```json
-{"success": "true", "settings": {"doorOptions": "1"}}
-{"success": "true", "settings": {"outsideSensorSafetyLock": "0"}}
-{"success": "true", "settings": {"allowCmdLockout": "0"}}
+{"success": "true", "settings": {"outsideSensorSafetyLock": "false"}}
+{"success": "true", "settings": {"allowCmdLockout": "true"}}
 ```
 
 ### Configuration
 
-| Command | Type | Parameters | Description |
-|---------|------|------------|-------------|
-| `GET_HOLD_TIME` | config | - | Get hold time |
-| `SET_HOLD_TIME` | config | `holdTime` | Set hold time (centiseconds) |
-| `GET_TIMEZONE` | config | - | Get timezone |
-| `SET_TIMEZONE` | config | `tz` | Set timezone (POSIX format) |
-| `GET_NOTIFICATIONS` | config | - | Get notification settings |
-| `SET_NOTIFICATIONS` | config | *(see below)* | Set notification settings |
-| `GET_SENSOR_TRIGGER_VOLTAGE` | config | - | Get sensor trigger voltage |
-| `SET_SENSOR_TRIGGER_VOLTAGE` | config | `sensorTriggerVoltage` | Set sensor trigger voltage |
-| `GET_SLEEP_SENSOR_TRIGGER_VOLTAGE` | config | - | Get sleep sensor trigger voltage |
-| `SET_SLEEP_SENSOR_TRIGGER_VOLTAGE` | config | `sleepSensorTriggerVoltage` | Set sleep sensor trigger voltage |
+| Command | Type | Parameters | Description | |
+|---------|------|------------|-------------|---|
+| `GET_HOLD_TIME` | config | - | Get hold time | **[V]** |
+| `SET_HOLD_TIME` | config | `holdTime` | Set hold time (centiseconds) | **[V]** |
+| `GET_TIMEZONE` | config | - | Get timezone | **[V]** |
+| `SET_TIMEZONE` | config | `tz` | Set timezone (POSIX format) | **[V]** |
+| `GET_NOTIFICATIONS` | config | - | Get notification settings | **[V]** |
+| `SET_NOTIFICATIONS` | config | `notifications` | Set notification settings | **[V]** |
+| `GET_SENSOR_TRIGGER_VOLTAGE` | config | - | Get sensor trigger voltage | **[V]** |
+| `SET_SENSOR_TRIGGER_VOLTAGE` | config | **`voltage`** | Set sensor trigger voltage | **[V]** |
+| `GET_SLEEP_SENSOR_TRIGGER_VOLTAGE` | config | - | Get sleep sensor trigger voltage | **[V]** |
+| `SET_SLEEP_SENSOR_TRIGGER_VOLTAGE` | config | **`voltage`** | Set sleep sensor trigger voltage | **[V]** |
 
-**GET_HOLD_TIME**:
+**GET_HOLD_TIME / SET_HOLD_TIME**:
 ```json
 {"config": "GET_HOLD_TIME"}
-```
-Response: `{"success": "true", "holdTime": 1500}`
-
-**SET_HOLD_TIME**:
-```json
 {"config": "SET_HOLD_TIME", "holdTime": 1500}
 ```
-Note: Value is in **centiseconds** (1500 = 15 seconds)
+Response: `{"success": "true", "holdTime": 1500}`. The value is in
+**centiseconds** (1500 = 15 seconds). **[V]**
 
-**GET_TIMEZONE**:
+**GET_TIMEZONE / SET_TIMEZONE**:
 ```json
 {"config": "GET_TIMEZONE"}
-```
-Response: `{"success": "true", "tz": "EST5EDT,M3.2.0,M11.1.0"}`
-
-**SET_TIMEZONE**:
-```json
 {"config": "SET_TIMEZONE", "tz": "EST5EDT,M3.2.0,M11.1.0"}
 ```
+Response: `{"success": "true", "tz": "EST5EDT,M3.2.0,M11.1.0"}` **[V]**
+
+#### The voltage setters take a different field from the one the getters answer
+
+**[V]** This is the one place in the protocol where a setter's parameter is
+*not* named after the value it sets. Both setters take **`voltage`**, and
+both **reject** the getter's field name:
+
+```json
+{"config": "SET_SENSOR_TRIGGER_VOLTAGE", "voltage": 1500}
+```
+→ `{"sensorTriggerVoltage": 1500, "success": "true", ...}`
+
+```json
+{"config": "SET_SENSOR_TRIGGER_VOLTAGE", "sensorTriggerVoltage": 1500}
+```
+→ `{"success": "false", ...}` — this is what earlier versions of this
+document told you to send.
+
+The same applies to `SET_SLEEP_SENSOR_TRIGGER_VOLTAGE`. Units are
+**millivolts**; the probed unit sat at 2000 for both and accepted 1500 and
+1800 respectively. What they physically tune was not determined — they are
+the capacitive sensor trigger thresholds, the second presumably applying in
+the door's sleep/low-power state. **[R]**
+
+In this library the asymmetry lives in one place,
+`build_set_voltage_message()`.
+
+#### SET_NOTIFICATIONS
+
+> ### ⚠ The most dangerous shape in this protocol
+>
+> **[V]** `SET_NOTIFICATIONS` has **two** wrong shapes, and the second one
+> reports **success** while writing nothing:
+>
+> | Sent | Result |
+> |---|---|
+> | flat top-level fields (any value type) | `success: "false"`, nothing written |
+> | nested `notifications` object, values as **strings** | **`success: "true"`, the current settings echoed back, and nothing written** |
+> | nested `notifications` object, values as **JSON booleans** | applied, new settings echoed back |
+>
+> The middle row is the trap. The reply is a normal success envelope
+> carrying a full notification set, so a client that checks `success` — or
+> even one that reads the echoed settings back — sees a healthy write. The
+> echoed values are simply the *old* ones. Nothing in the exchange says the
+> write was dropped.
+>
+> If your notification settings "won't stick", this is why.
+
+The correct shape is a **nested object** carrying **all five** flags as
+**JSON booleans**:
+
+```json
+{
+  "config": "SET_NOTIFICATIONS",
+  "notifications": {
+    "sensorOnIndoorNotificationsEnabled": true,
+    "sensorOffIndoorNotificationsEnabled": false,
+    "sensorOnOutdoorNotificationsEnabled": true,
+    "sensorOffOutdoorNotificationsEnabled": false,
+    "lowBatteryNotificationsEnabled": true
+  }
+}
+```
+
+There is no partial form: a client changing one flag must supply the other
+four. In this library the shape lives in one place,
+`build_set_notifications_message()`.
+
+Note the asymmetry with the read path: `GET_NOTIFICATIONS` answers with the
+same five flags as **strings**. **[V]**
 
 **GET_NOTIFICATIONS**:
 ```json
 {"config": "GET_NOTIFICATIONS"}
 ```
-
-**SET_NOTIFICATIONS**:
+Response:
 ```json
 {
-  "config": "SET_NOTIFICATIONS",
-  "sensorOnIndoorNotificationsEnabled": "1",
-  "sensorOffIndoorNotificationsEnabled": "0",
-  "sensorOnOutdoorNotificationsEnabled": "1",
-  "sensorOffOutdoorNotificationsEnabled": "0",
-  "lowBatteryNotificationsEnabled": "1"
+  "success": "true",
+  "notifications": {
+    "sensorOnIndoorNotificationsEnabled": "true",
+    "sensorOffIndoorNotificationsEnabled": "false",
+    "sensorOnOutdoorNotificationsEnabled": "true",
+    "sensorOffOutdoorNotificationsEnabled": "false",
+    "lowBatteryNotificationsEnabled": "true"
+  }
 }
-```
-
-**GET/SET_SENSOR_TRIGGER_VOLTAGE**:
-```json
-{"config": "GET_SENSOR_TRIGGER_VOLTAGE"}
-{"config": "SET_SENSOR_TRIGGER_VOLTAGE", "sensorTriggerVoltage": 50}
-{"config": "GET_SLEEP_SENSOR_TRIGGER_VOLTAGE"}
-{"config": "SET_SLEEP_SENSOR_TRIGGER_VOLTAGE", "sleepSensorTriggerVoltage": 50}
 ```
 
 ### Query Commands
 
-| Command | Type | Description |
-|---------|------|-------------|
-| `GET_DOOR_STATUS` | config | Get current door state |
-| `GET_SETTINGS` | config | Get all settings |
-| `GET_HW_INFO` | config | Get hardware/firmware info |
-| `GET_DOOR_BATTERY` | config | Get battery status |
-| `GET_DOOR_OPEN_STATS` | config | Get open cycle and retract counts |
-| `GET_TIMERS_ENABLED` | config | Get auto/schedule mode state |
+| Command | Type | Description | |
+|---------|------|-------------|---|
+| `GET_DOOR_STATUS` | config | Get current door state | **[V]** |
+| `GET_SETTINGS` | config | Get all settings | **[V]** |
+| `GET_HW_INFO` | config | Get hardware/firmware info | **[V]** |
+| `GET_DOOR_BATTERY` | config | Get battery status | **[V]** |
+| `GET_DOOR_OPEN_STATS` | config | Get open cycle and retract counts | **[V]** |
 
 **GET_DOOR_STATUS**:
 ```json
@@ -363,35 +558,38 @@ Response:
 {"success": "true", "door_status": "DOOR_CLOSED"}
 ```
 
-**GET_SETTINGS**:
+**GET_SETTINGS** — the single most useful command, because it is where the
+state of every setting whose dedicated `GET_*` command does not exist can
+still be read:
 ```json
 {"config": "GET_SETTINGS"}
 ```
-Response:
+Response, spelled exactly as the probed unit answered (**[V]**; note the
+mixed string/int types):
 ```json
 {
   "success": "true",
   "settings": {
-    "power_state": "1",
-    "inside": "1",
-    "outside": "1",
-    "timersEnabled": "0",
-    "outsideSensorSafetyLock": "0",
-    "allowCmdLockout": "0",
-    "doorOptions": "1",
-    "holdOpenTime": 1500,
+    "power_state": "true",
+    "inside": "true",
+    "outside": "true",
+    "timersEnabled": "false",
+    "outsideSensorSafetyLock": "false",
+    "allowCmdLockout": "true",
+    "doorOptions": 2,
+    "holdOpenTime": 200,
     "tz": "EST5EDT,M3.2.0,M11.1.0",
-    "sensorTriggerVoltage": 50,
-    "sleepSensorTriggerVoltage": 50
+    "sensorTriggerVoltage": 2000,
+    "sleepSensorTriggerVoltage": 2000
   }
 }
 ```
 
 Note: within the settings object the hold time key is `holdOpenTime`; the
 dedicated `GET_HOLD_TIME`/`SET_HOLD_TIME` commands use `holdTime`. Both are
-in centiseconds.
+in centiseconds. **[V]**
 
-**GET_HW_INFO**:
+**GET_HW_INFO** — every value in `fwInfo` is an **int**:
 ```json
 {"config": "GET_HW_INFO"}
 ```
@@ -400,11 +598,11 @@ Response:
 {
   "success": "true",
   "fwInfo": {
-    "ver": "1.2.3",
-    "rev": "abc123",
+    "ver": 1,
+    "rev": 1,
     "fw_maj": 1,
-    "fw_min": 2,
-    "fw_pat": 3
+    "fw_min": 7,
+    "fw_pat": 18
   }
 }
 ```
@@ -413,13 +611,14 @@ Response:
 ```json
 {"config": "GET_DOOR_BATTERY"}
 ```
-Response:
+Response — `batteryPercent` is an int, the other two are `"true"`/`"false"`
+strings:
 ```json
 {
   "success": "true",
   "batteryPercent": 85,
-  "batteryPresent": "1",
-  "acPresent": "1"
+  "batteryPresent": "true",
+  "acPresent": "true"
 }
 ```
 
@@ -427,7 +626,7 @@ Response:
 ```json
 {"config": "GET_DOOR_OPEN_STATS"}
 ```
-Response:
+Response (the probed unit reported 11057 and 1910):
 ```json
 {
   "success": "true",
@@ -438,23 +637,35 @@ Response:
 
 ### Schedule Commands
 
-| Command | Type | Parameters | Description |
-|---------|------|------------|-------------|
-| `GET_SCHEDULE_LIST` | config | - | Get all schedules |
-| `SET_SCHEDULE_LIST` | config | `schedules` | Set all schedules |
-| `GET_SCHEDULE` | config | `index` | Get specific schedule |
-| `SET_SCHEDULE` | config | `schedule` | Create/update schedule |
-| `DELETE_SCHEDULE` | config | `index` | Delete schedule |
+| Command | Type | Parameters | Description | |
+|---------|------|------------|-------------|---|
+| `GET_SCHEDULE_LIST` | config | - | Get the list of populated slots | **[R]** |
+| `SET_SCHEDULE_LIST` | config | `schedules` | Set all schedules | **[R]** |
+| `GET_SCHEDULE` | config | `index` | Get a specific schedule | **[V]** |
+| `SET_SCHEDULE` | config | **`index`** and `schedule` | Create/update a schedule | **[V]** |
+| `DELETE_SCHEDULE` | config | `index` | Delete a schedule | **[R]** |
 
 **Request**:
 ```json
 {"config": "GET_SCHEDULE_LIST"}
 {"config": "GET_SCHEDULE", "index": 0}
-{"config": "SET_SCHEDULE", "schedule": {...}}
+{"config": "SET_SCHEDULE", "index": 0, "schedule": {}}
 {"config": "DELETE_SCHEDULE", "index": 0}
 ```
 
+#### SET_SCHEDULE requires `index` alongside `schedule`
+
+**[V]** The slot `index` must be sent as a **sibling** of the `schedule`
+object, even though the schedule object carries an `index` of its own. A
+message carrying only `schedule` is answered `success: "false"` and writes
+nothing, however the entry itself is spelled.
+
+In this library the shape lives in one place,
+`build_set_schedule_message()`.
+
 See [Schedule Format](#schedule-format) for the schedule object structure.
+
+#### Simulator validation
 
 The simulator validates schedules coming off the wire before storing them:
 `index` must be an integer in 0-255, `daysOfWeek` must be a 7-element list of
@@ -464,9 +675,8 @@ disables the day. When `inside` or `outside` is true the corresponding
 `*_start_time`/`*_end_time` objects are **required**, each carrying an
 `hour` (`min` defaults to 0): an absent window is rejected rather than
 silently materialized as 06:00-22:00. A malformed schedule is rejected with
-the standard error envelope (`"success": "false"` plus a `reason` naming the
-offending field) and nothing is stored; `SET_SCHEDULE_LIST` rejects the whole
-batch rather than loading it partially.
+the standard error envelope and nothing is stored; `SET_SCHEDULE_LIST`
+rejects the whole batch rather than loading it partially.
 
 `SET_SCHEDULE_LIST` **requires** its `schedules` field, and it must be a list.
 An absent field is rejected (`schedules is required`) rather than treated as
@@ -483,54 +693,187 @@ command chokes on:
 |---------|-----------------|
 | `SET_HOLD_TIME` | a finite number of centiseconds in 0-90000 (`Infinity`/`NaN`, strings and containers are rejected) |
 | `SET_TIMEZONE` | a string of at most 128 characters |
-| `SET_SENSOR_TRIGGER_VOLTAGE` | a finite number in 0-65535 |
-| `SET_SLEEP_SENSOR_TRIGGER_VOLTAGE` | a finite number in 0-65535 |
-| `SET_NOTIFICATIONS` | each supplied field must be a 0/1 flag (`"1"`/`1`/`true` and `"0"`/`0`/`false`); one bad field rejects the whole message, so a notification set is never half-applied |
+| `SET_SENSOR_TRIGGER_VOLTAGE` | `voltage`, required, a finite number in 0-65535 |
+| `SET_SLEEP_SENSOR_TRIGGER_VOLTAGE` | `voltage`, required, a finite number in 0-65535 |
+| `SET_NOTIFICATIONS` | a nested `notifications` object; a flat message is rejected, and a nested one whose values are not JSON booleans is accepted-and-ignored, exactly as the device does |
 | `GET_SCHEDULE`, `DELETE_SCHEDULE` | `index` (when present) must be an integer in 0-255; a container, string, boolean or out-of-range value is rejected with a reason rather than raising |
+| `SET_SCHEDULE` | `index` is required alongside `schedule` |
 | `SET_SCHEDULE_LIST` | `schedules` is required and must be a list; absent or wrong-typed payloads are rejected with a reason and leave the store untouched |
 
 A rejection answers `{"success": "false", "reason": "<field> must be ..."}`
-and leaves state untouched.
+with **no** `msgID`, and leaves state untouched.
 
 ### Diagnostic Commands
 
-| Command | Type | Description |
-|---------|------|-------------|
-| `HAS_REMOTE_ID` | config | Check if remote ID is set |
-| `HAS_REMOTE_KEY` | config | Check if remote key is set |
-| `CHECK_RESET_REASON` | config | Get last reset reason |
+| Command | Type | Description | |
+|---------|------|-------------|---|
+| `HAS_REMOTE_ID` | config | Check if a remote ID is paired | **[V]** |
+| `HAS_REMOTE_KEY` | config | Check if a remote key is paired | **[V]** |
 
 **Request**:
 ```json
 {"config": "HAS_REMOTE_ID"}
 {"config": "HAS_REMOTE_KEY"}
-{"config": "CHECK_RESET_REASON"}
 ```
 
-**Response**:
+**Response** — **[V]** the fields are `has_id` and `has_key`, carrying
+`"true"`/`"false"` strings. They are **not** `hasRemoteId`/`hasRemoteKey`,
+which is what this document claimed for years and what this library read
+(and therefore never found):
 ```json
-{"success": "true", "hasRemoteId": "1"}
-{"success": "true", "hasRemoteKey": "1"}
-{"success": "true", "resetReason": "POWER_ON"}
+{"success": "true", "has_id": "true"}
+{"success": "true", "has_key": "true"}
 ```
+
+### The door clock
+
+| Command | Type | Description | |
+|---------|------|-------------|---|
+| `GET_TIME` | config | Read the door's local wall-clock time | **[V]** |
+
+**[V]** Undocumented by the vendor, but present, and worth having: schedules
+are evaluated against this clock, so it is the only way to check that a door
+will fire a schedule when you expect it to.
+
+```json
+{"config": "GET_TIME"}
+```
+→ `{"time": "Sun Aug 23 04:34:15 2026", "success": "true", ...}`
+
+The value is a C `asctime()` string — `"%a %b %d %H:%M:%S %Y"`, exported as
+`TIME_FORMAT` — carrying **local** time in the door's configured timezone,
+with no offset. It was accurate to within seconds of real local time. It
+answered nothing at all on one occasion, so treat a reply as a snapshot
+rather than proof of freshness.
+
+#### The clock is read-only, and `SET_TIME` answers with silence
+
+**[V]** There is no way to set it. `SET_CLOCK`, `SET_DATE` and `SYNC_TIME`
+are all rejected normally. `SET_TIME` is different, and it is the strangest
+observed behaviour in this protocol:
+
+```json
+{"config": "SET_TIME", "time": "Sun Aug 23 03:34:15 2026"}
+```
+→ **nothing**. No reply, no failure envelope, and no change to the clock
+(tested with a value an hour off, in the door's own format, twice).
+
+Every other rejected shape answers `success: "false"`. **A client must not
+read silence as success** — it is the one command where "no error came back"
+means the opposite. This project's simulator reproduces the silence.
+
+---
+
+## Commands that do not exist
+
+**[V]** These five names are defined by this library but are **rejected**
+(`success: "false"`) by firmware 1.7.18. The constants are kept — a different
+firmware revision may implement them, and clients stay liberal about what
+they can parse — but nothing should depend on them:
+
+| Command | Read the state here instead |
+|---------|-----------------------------|
+| `GET_TIMERS_ENABLED` | `timersEnabled` in `GET_SETTINGS` |
+| `GET_AUTORETRACT` | `doorOptions` in `GET_SETTINGS` (a bitfield) |
+| `GET_CMD_LOCKOUT` | `allowCmdLockout` in `GET_SETTINGS` |
+| `GET_OUTSIDE_SENSOR_SAFETY_LOCK` | `outsideSensorSafetyLock` in `GET_SETTINGS` |
+| `CHECK_RESET_REASON` | nothing — no substitute exists |
+
+`CHECK_RESET_REASON`'s response field `resetReason` is therefore **[R]** and
+was never observed from any device.
+
+This project's simulator rejects all five, so a client that depends on one
+fails in tests rather than only against hardware.
+
+---
+
+## The vendor app, and why your setting changed back
+
+**[V]** Established experimentally, with the door's owner driving the app:
+
+**The vendor app does not read live state from the door. It pushes its own
+cached copy.** The door was set to `allowCmdLockout: "false"` over this
+protocol; the app went on displaying the setting from its stale cache, and
+simply *confirming* that screen wrote `"true"` back — silently undoing the
+change.
+
+Two consequences for anyone writing a client:
+
+1. **A setting you change can be reverted later by the app, with no
+   warning and no event on the wire.** If a value keeps reappearing, the
+   phone in someone's pocket is the likeliest cause.
+2. **The app's display is not evidence of the door's state.** When
+   comparing, read the door with `GET_SETTINGS`; do not trust the screen.
+
+The app also holds the door's [single connection](#connection) for as long
+as it is open, which is the other half of the same debugging trap.
+
+---
+
+## What the app calls these settings
+
+**[V]** Proven by operating the app against a live capture, not inferred.
+The wire names are not descriptive, and one of them is actively misleading:
+
+| App setting | Wire field | Relationship |
+|-------------|-----------|--------------|
+| "Allow pet to keep door open" | `allowCmdLockout` | **INVERTED** — app OFF ⇒ `"true"` |
+| "Always allow pet entry inside override timers" | `outsideSensorSafetyLock` | Direct |
+| "Auto Retract" | `doorOptions` bit 1 | On ⇒ `2`, off ⇒ `0` |
+
+`outsideSensorSafetyLock` is the trap: the name reads as a safety interlock
+on the outside sensor, and the app presents it as *"always allow pet entry
+inside override timers"* — a schedule override, not a lock. Anyone reading
+the field name alone will get it backwards.
+
+`allowCmdLockout`'s inversion is why `PowerPetDoor` exposes it as
+`pet_proximity_keep_open`, the app's meaning rather than the wire's. That
+mapping is now confirmed and must not be "simplified".
+
+---
+
+## What this protocol cannot do
+
+**[V]** 62 further read-only command names were probed (only `GET_`, `CHECK_`
+and `HAS_` prefixes, so that a hit could not be destructive). **Every one was
+rejected.** That includes every spelling tried for: firmware version or
+update check, OTA status, serial number, model, MAC or IP address, WiFi/SSID/
+RSSI, cloud or account status, push tokens or subscriptions, logs, uptime,
+temperature, motor state and door position, and diagnostics.
+
+So, on this LAN protocol, there is **no way** to:
+
+- query for or trigger a firmware update;
+- read network configuration or signal strength;
+- read a serial number or model identifier;
+- subscribe to push notifications.
+
+Push notifications reach the vendor's app by some other path — the door's own
+outbound connection — which this protocol does not expose. The only
+device-initiated traffic on this connection is the
+[notification events](#notification-events) and
+[door status pushes](#unsolicited-door-status) described below, and those
+only arrive while you are connected.
 
 ---
 
 ## Settings Fields
 
+The `settings` object returned by `GET_SETTINGS`. **[V]** for every row.
+
 | Field | Wire Name | Type | Description |
 |-------|-----------|------|-------------|
-| Power | `power_state` | "0"/"1" | Door power on/off |
-| Inside Sensor | `inside` | "0"/"1" | Inside sensor enabled |
-| Outside Sensor | `outside` | "0"/"1" | Outside sensor enabled |
-| Timers/Auto | `timersEnabled` | "0"/"1" | Schedule mode enabled |
-| Safety Lock | `outsideSensorSafetyLock` | "0"/"1" | Outside sensor safety lock |
-| Command Lockout | `allowCmdLockout` | "0"/"1" | Command lockout enabled |
-| Autoretract | `doorOptions` | "0"/"1" | Auto-retract on obstruction |
+| Power | `power_state` | `"true"`/`"false"` | Door power on/off |
+| Inside Sensor | `inside` | `"true"`/`"false"` | Inside sensor enabled |
+| Outside Sensor | `outside` | `"true"`/`"false"` | Outside sensor enabled |
+| Timers/Auto | `timersEnabled` | `"true"`/`"false"` | Schedule mode enabled |
+| Safety Lock | `outsideSensorSafetyLock` | `"true"`/`"false"` | Outside sensor safety lock |
+| Command Lockout | `allowCmdLockout` | `"true"`/`"false"` | Command lockout enabled |
+| Door options | `doorOptions` | int bitfield | Bit 1 (`2`) is auto-retract on obstruction; other bits unidentified |
 | Hold Time | `holdOpenTime` | int | Hold time in centiseconds (the standalone GET/SET_HOLD_TIME commands use `holdTime`) |
 | Timezone | `tz` | string | POSIX timezone string |
-| Sensor Voltage | `sensorTriggerVoltage` | int | Sensor threshold |
-| Sleep Sensor Voltage | `sleepSensorTriggerVoltage` | int | Sleep mode sensor threshold |
+| Sensor Voltage | `sensorTriggerVoltage` | int | Sensor threshold, millivolts (set via the `voltage` field) |
+| Sleep Sensor Voltage | `sleepSensorTriggerVoltage` | int | Sleep mode sensor threshold, millivolts |
 
 ---
 
@@ -546,12 +889,16 @@ and leaves state untouched.
 | `sensorOffOutdoorNotificationsEnabled` | Outside sensor deactivated |
 | `lowBatteryNotificationsEnabled` | Battery level low |
 
+Read as strings, written as JSON booleans — see
+[SET_NOTIFICATIONS](#set_notifications). **[V]**
+
 ### Notification Messages (door to client)
 
-Notification events are device-initiated and use a **bare envelope**:
+**[R]** Notification events are device-initiated and use a **bare envelope**:
 they carry no `CMD`, `success`, or `msgID` fields. The event name appears
 as a key with an empty-string value; sensor events also carry a
-`sensorState` of `"on"` or `"off"`.
+`sensorState` of `"on"` or `"off"`. None were provoked on the probed unit,
+so the shape below remains reverse-engineered.
 
 ```json
 {"SENSOR_INDOOR": "", "sensorState": "on"}
@@ -565,8 +912,8 @@ without treating them as command responses.
 
 ### Unsolicited Door Status
 
-The device also pushes door-state changes that nobody asked for, using the
-normal response envelope with `CMD: "DOOR_STATUS"` and no `msgID`:
+**[R]** The device also pushes door-state changes that nobody asked for,
+using the normal response envelope with `CMD: "DOOR_STATUS"` and no `msgID`:
 
 ```json
 {"CMD": "DOOR_STATUS", "door_status": "DOOR_RISING", "success": "true", "dir": "d2p"}
@@ -582,62 +929,81 @@ that `DOOR_STATUS` here is a `CMD` value, not an envelope key.
 
 ## Schedule Format
 
+A `GET_SCHEDULE` reply, spelled as the probed unit answered (**[V]**):
+
 ```json
 {
   "index": 0,
-  "enabled": "1",
-  "inside": true,
-  "outside": false,
+  "enabled": 1,
+  "inside": 1,
+  "outside": 1,
   "daysOfWeek": [1, 1, 1, 1, 1, 1, 1],
-  "in_start_time": {"hour": 6, "min": 0},
-  "in_end_time": {"hour": 22, "min": 0},
+  "in_start_time": {"hour": 0, "min": 0},
+  "in_end_time": {"hour": 23, "min": 59},
   "out_start_time": {"hour": 0, "min": 0},
-  "out_end_time": {"hour": 0, "min": 0}
+  "out_end_time": {"hour": 23, "min": 59}
 }
 ```
 
-| Field | Type | Description |
+| Field | Type (device → client) | Description |
 |-------|------|-------------|
 | `index` | int | Schedule slot number (0-based) |
-| `enabled` | "0"/"1" | Whether schedule is active |
-| `inside` | bool | This schedule controls inside sensor |
-| `outside` | bool | This schedule controls outside sensor |
+| `enabled` | int `1`/`0` | Whether schedule is active |
+| `inside` | int `1`/`0` | This schedule controls the inside sensor |
+| `outside` | int `1`/`0` | This schedule controls the outside sensor |
 | `daysOfWeek` | [int] | [Sun, Mon, Tue, Wed, Thu, Fri, Sat], 1=active. A legacy integer bitmask (bit 0 = Sunday, 0-127) is also accepted on input; out-of-range masks are rejected rather than read modulo 7 bits, because a negative mask would otherwise activate every day |
 | `in_start_time` | {hour, min} | Inside sensor start time |
 | `in_end_time` | {hour, min} | Inside sensor end time |
 | `out_start_time` | {hour, min} | Outside sensor start time |
 | `out_end_time` | {hour, min} | Outside sensor end time |
 
-Note: Each schedule controls ONE sensor. Set times for that sensor; the other sensor's times should be zeros. If a payload sets *both* flags (out of spec, but the
-simulator's `schedule add both` produces it), the **inside** window wins.
+Note: Each schedule controls ONE sensor. Set times for that sensor; the other
+sensor's times should be zeros. If a payload sets *both* flags (out of spec,
+but the simulator's `schedule add both` produces it), the **inside** window
+wins.
 
-### `enabled` differs by direction (reverse-engineered, unverified)
+### End of day is 23:59
 
-The two directions of this protocol are documented separately here because
-they are not known to agree, and **this document is reverse-engineered from
-observation — it is not authority over what the firmware accepts**:
+**[V]** The probed unit's own factory schedule spells a full day as
+`00:00`–`23:59`, on all seven days, for both sensors. `23:59` is therefore
+the device's idiom for "until the end of the day", and an implementation must
+treat that final minute as *inside* the window rather than excluding it — a
+literal half-open `[start, end)` reading would switch the sensor off for
+exactly one minute a day.
 
-| Direction | `enabled` | Basis |
-|-----------|-----------|-------|
-| client → device (`SET_SCHEDULE`) | JSON boolean `true`/`false` | What `powerpetdoor.door.Schedule.to_dict()` (and every `compress_schedule()` result) has sent to real Power Pet Doors since v0.1.0 |
-| device → client (`GET_SCHEDULE`) | string `"1"`/`"0"` | What the device was observed to reply, and what the simulator emits |
+`24:00` is still **accepted** on the read path (this library's
+`coerce_schedule_time`), because it is a plausible spelling from other
+firmware, but it is never emitted.
 
-Every other field is identical in both directions: `index` int, `daysOfWeek`
-seven ints, `inside`/`outside` JSON booleans, `{hour, min}` ints. A
-golden-payload test on each side pins its own direction and compares every
-other field against the same reference, so neither can drift.
+### The two directions do not agree
 
-**Neither spelling has been confirmed against firmware**, so do not "unify"
-them. Each field's wire spelling lives in exactly one place —
+The client→device and device→client spellings of the same schedule entry
+differ, and that is not a bug:
+
+| Field | client → device (`SET_SCHEDULE`) | device → client (`GET_SCHEDULE`) |
+|-------|-------------------------------|-------------------------------|
+| `enabled` | JSON boolean **[R]** | int `1`/`0` **[V]** |
+| `inside` | JSON boolean **[R]** | int `1`/`0` **[V]** |
+| `outside` | JSON boolean **[R]** | int `1`/`0` **[V]** |
+| `index`, `daysOfWeek`, `{hour, min}` | int | int **[V]** |
+
+The client→device column is **[R]**: JSON booleans are what
+`powerpetdoor.door.Schedule.to_dict()` (and every `compress_schedule()`
+result) has sent to real Power Pet Doors since v0.1.0, and writes made that
+way were confirmed to land. Whether the device would *also* accept ints there
+was not tested, so do not "unify" the two columns.
+
+Each field's wire spelling lives in exactly one place —
 `SCHEDULE_WIRE_TO_DEVICE` / `SCHEDULE_WIRE_FROM_DEVICE` in
-`powerpetdoor/schedule.py` — so a definitive answer from a real device is a
-one-line change there.
+`powerpetdoor/schedule.py` — so a further finding is a one-line change there.
 
 **Readers on both sides are deliberately liberal** and accept `"1"`/`1`/`true`
 and `"0"`/`0`/`false` interchangeably for every flag, so an implementation
-that picks either spelling interoperates.
+that picks either spelling interoperates. Given the device's own
+inconsistency (see [Value spellings](#value-spellings)), this is a
+requirement, not a courtesy.
 
-`GET_SCHEDULE_LIST` returns slot indices sorted ascending.
+`GET_SCHEDULE_LIST` returns slot indices sorted ascending. **[R]**
 
 ---
 
@@ -654,3 +1020,5 @@ that picks either spelling interoperates.
 | `DOOR_CLOSING_TOP_OPEN` | Door closing from fully open |
 | `DOOR_CLOSING_MID_OPEN` | Door closing from mid position |
 
+**[R]** — only `DOOR_CLOSED` was observed on the probed unit, which was never
+made to move.

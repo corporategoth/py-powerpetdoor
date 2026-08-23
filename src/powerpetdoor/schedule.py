@@ -48,6 +48,7 @@ from .const import (
     FIELD_MINUTE,
     FIELD_OUTSIDE,
     FIELD_OUTSIDE_PREFIX,
+    FIELD_SCHEDULE,
     FIELD_START_TIME_SUFFIX,
 )
 from .sanitize import sanitize_field, sanitize_text
@@ -321,13 +322,26 @@ def wire_json_bool(value: bool) -> bool:
     return bool(value)
 
 
-def wire_flag_string(value: bool) -> str:
-    """Spell a flag as the string ``"1"``/``"0"``."""
-    return "1" if value else "0"
+def wire_bool_string(value: bool) -> str:
+    """Spell a flag as the string ``"true"``/``"false"``.
+
+    **Verified against firmware 1.7.18**: this is how the device spells
+    every flag inside ``GET_SETTINGS.settings`` (except ``doorOptions``,
+    which is an int) and every flag inside
+    ``GET_NOTIFICATIONS.notifications``.
+    """
+    return "true" if value else "false"
 
 
 def wire_int_flag(value: bool) -> int:
-    """Spell a flag as the integer ``1``/``0``."""
+    """Spell a flag as the integer ``1``/``0``.
+
+    **Verified against firmware 1.7.18**: this is how the device spells
+    ``inside``/``outside`` in ``GET_SENSORS``, the echoed field in an
+    individual setting reply (``ENABLE_INSIDE`` -> ``{"inside": 1}``),
+    ``doorOptions``, and ``enabled``/``inside``/``outside``/``daysOfWeek``
+    inside a ``GET_SCHEDULE`` entry.
+    """
     return 1 if value else 0
 
 
@@ -370,13 +384,20 @@ SCHEDULE_WIRE_TO_DEVICE = ScheduleWireFormat(
     minute=wire_int,
 )
 
-#: **device -> client**: the shape a real door is observed to REPLY with,
-#: and therefore what the simulator emits. It differs from
-#: :data:`SCHEDULE_WIRE_TO_DEVICE` in exactly one field, and that is not a
-#: bug: the two are opposite directions, not twins.
+#: **device -> client**: the shape a real door REPLIES with, and therefore
+#: what the simulator emits. **Verified against firmware 1.7.18**: a
+#: ``GET_SCHEDULE`` reply spells ``enabled``, ``inside`` and ``outside`` as
+#: the integers ``1``/``0``, and ``daysOfWeek`` as a list of integers.
+#:
+#: It differs from :data:`SCHEDULE_WIRE_TO_DEVICE` in three fields, and that
+#: is not a bug: the two are opposite directions, not twins. What we SEND is
+#: unchanged (JSON booleans, which real doors have accepted since v0.1.0);
+#: only what a door SAYS is pinned here.
 SCHEDULE_WIRE_FROM_DEVICE = replace(
     SCHEDULE_WIRE_TO_DEVICE,
-    enabled=wire_flag_string,  # "1"/"0" string - as observed from the device
+    enabled=wire_int_flag,
+    inside=wire_int_flag,
+    outside=wire_int_flag,
 )
 
 
@@ -425,6 +446,41 @@ def build_schedule_payload(
         payload[prefix + FIELD_START_TIME_SUFFIX] = fmt.time(*window[0])
         payload[prefix + FIELD_END_TIME_SUFFIX] = fmt.time(*window[1])
     return payload
+
+
+def build_set_schedule_message(schedule: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``SET_SCHEDULE`` message fields for a schedule payload.
+
+    **Verified against firmware 1.7.18**: the device requires the slot
+    ``index`` as a *sibling* of the ``schedule`` object. A message carrying
+    only ``schedule`` is answered ``success: "false"`` and writes nothing,
+    however the entry itself is spelled.
+
+    This is the single place that shape is built, so both the friendly
+    facade (:meth:`powerpetdoor.door.PowerPetDoor.set_schedule`) and a
+    message-level caller get it right::
+
+        client.send_message(
+            CONFIG, CMD_SET_SCHEDULE, notify=True,
+            **build_set_schedule_message(schedule.to_dict()),
+        )
+
+    Args:
+        schedule: A client->device schedule payload, i.e. the output of
+            :func:`build_schedule_payload` with
+            :data:`SCHEDULE_WIRE_TO_DEVICE` (which is what
+            :meth:`powerpetdoor.door.Schedule.to_dict` returns).
+
+    Returns:
+        ``{"index": <slot>, "schedule": <payload>}``, ready to splat into
+        :meth:`powerpetdoor.client.PowerPetDoorClient.send_message`.
+
+    Raises:
+        ValueError: If the payload carries no ``index`` to address.
+    """
+    if FIELD_INDEX not in schedule:
+        raise ValueError(f"Schedule payload is missing required field {FIELD_INDEX!r}")
+    return {FIELD_INDEX: schedule[FIELD_INDEX], FIELD_SCHEDULE: schedule}
 
 
 #: Schedule template with all fields initialized to defaults.

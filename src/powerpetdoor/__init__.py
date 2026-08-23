@@ -20,7 +20,18 @@ Example usage:
     client.start()
 """
 
-from .client import CommandError, PowerPetDoorClient, PrioritizedMessage, find_end, make_bool
+from .client import (
+    CommandError,
+    PowerPetDoorClient,
+    PrioritizedMessage,
+    autoretract_from_door_options,
+    build_set_hold_time_message,
+    build_set_notifications_message,
+    build_set_voltage_message,
+    envelope_for_command,
+    find_end,
+    make_bool,
+)
 from .const import (
     CMD_CHECK_RESET_REASON,
     CMD_CLOSE,
@@ -50,8 +61,11 @@ from .const import (
     CMD_GET_POWER,
     CMD_GET_SCHEDULE,
     CMD_GET_SCHEDULE_LIST,
+    CMD_GET_SENSOR_TRIGGER_VOLTAGE,
     CMD_GET_SENSORS,
     CMD_GET_SETTINGS,
+    CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+    CMD_GET_TIME,
     CMD_GET_TIMEZONE,
     CMD_HAS_REMOTE_ID,
     CMD_HAS_REMOTE_KEY,
@@ -62,9 +76,13 @@ from .const import (
     CMD_SET_HOLD_TIME,
     CMD_SET_NOTIFICATIONS,
     CMD_SET_SCHEDULE,
+    CMD_SET_SENSOR_TRIGGER_VOLTAGE,
+    CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     CMD_SET_TIMEZONE,
     COMMAND,
+    COMMAND_ENVELOPE_COMMANDS,
     CONFIG,
+    DOOR_OPTION_AUTORETRACT,
     DOOR_STATE_CLOSED,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSING_TOP_OPEN,
@@ -104,8 +122,10 @@ from .const import (
     FIELD_SENSOR_STATE,
     FIELD_SETTINGS,
     FIELD_SUCCESS,
+    FIELD_TIME,
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
+    FIELD_VOLTAGE,
     NOTIFY_LOW_BATTERY,
     NOTIFY_SENSOR_INDOOR,
     NOTIFY_SENSOR_OUTDOOR,
@@ -118,6 +138,7 @@ from .const import (
     PRIORITY_MEDIUM,
     SENSOR_STATE_OFF,
     SENSOR_STATE_ON,
+    TIME_FORMAT,
 )
 from .door import (
     BatteryInfo,
@@ -128,6 +149,7 @@ from .door import (
     ScheduleTime,
 )
 from .schedule import (
+    build_set_schedule_message,
     compress_schedule,
     compute_schedule_diff,
     schedule_entry_content_key,
@@ -159,9 +181,15 @@ __all__ = [
     "CommandError",
     "PowerPetDoorClient",
     "PrioritizedMessage",
+    "autoretract_from_door_options",
+    "build_set_hold_time_message",
+    "build_set_notifications_message",
+    "build_set_voltage_message",
+    "envelope_for_command",
     "find_end",
     "make_bool",
     # Schedule utilities
+    "build_set_schedule_message",
     "compress_schedule",
     "compute_schedule_diff",
     "schedule_entry_content_key",
@@ -179,6 +207,7 @@ __all__ = [
     "parse_posix_tz_string",
     # Constants - Message types
     "COMMAND",
+    "COMMAND_ENVELOPE_COMMANDS",
     "CONFIG",
     "DOOR_STATUS",
     "PING",
@@ -198,6 +227,7 @@ __all__ = [
     "NOTIFY_SENSOR_OUTDOOR",
     "SENSOR_STATE_OFF",
     "SENSOR_STATE_ON",
+    "TIME_FORMAT",
     # Constants - Commands
     "CMD_CHECK_RESET_REASON",
     "CMD_CLOSE",
@@ -227,8 +257,11 @@ __all__ = [
     "CMD_GET_POWER",
     "CMD_GET_SCHEDULE",
     "CMD_GET_SCHEDULE_LIST",
+    "CMD_GET_SENSOR_TRIGGER_VOLTAGE",
     "CMD_GET_SENSORS",
+    "CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE",
     "CMD_GET_SETTINGS",
+    "CMD_GET_TIME",
     "CMD_GET_TIMEZONE",
     "CMD_HAS_REMOTE_ID",
     "CMD_HAS_REMOTE_KEY",
@@ -239,6 +272,8 @@ __all__ = [
     "CMD_SET_HOLD_TIME",
     "CMD_SET_NOTIFICATIONS",
     "CMD_SET_SCHEDULE",
+    "CMD_SET_SENSOR_TRIGGER_VOLTAGE",
+    "CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE",
     "CMD_SET_TIMEZONE",
     # Constants - Fields
     "FIELD_AUTO",
@@ -247,6 +282,7 @@ __all__ = [
     "FIELD_DOOR_STATUS",
     "FIELD_HAS_REMOTE_ID",
     "FIELD_HAS_REMOTE_KEY",
+    "FIELD_VOLTAGE",
     "FIELD_INSIDE",
     "FIELD_LOW_BATTERY_NOTIFICATIONS",
     "FIELD_OUTSIDE",
@@ -259,6 +295,7 @@ __all__ = [
     "FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS",
     "FIELD_SETTINGS",
     "FIELD_SUCCESS",
+    "FIELD_TIME",
     "FIELD_TOTAL_AUTO_RETRACTS",
     "FIELD_TOTAL_OPEN_CYCLES",
     # Constants - Hardware/firmware version fields
@@ -268,6 +305,7 @@ __all__ = [
     "FIELD_HW_REVISION",
     "FIELD_HW_VERSION",
     # Constants - Door states
+    "DOOR_OPTION_AUTORETRACT",
     "DOOR_STATE_CLOSED",
     "DOOR_STATE_CLOSING_MID_OPEN",
     "DOOR_STATE_CLOSING_TOP_OPEN",

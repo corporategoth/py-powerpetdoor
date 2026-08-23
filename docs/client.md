@@ -191,8 +191,78 @@ future = client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
 result = await future
 
 # With additional parameters
-client.send_message(CONFIG, CMD_SET_HOLD_TIME, notify=True, holdTime=1500)
+client.send_message(CONFIG, CMD_SET_HOLD_TIME, notify=True, **build_set_hold_time_message(15.0))
 ```
+
+### Which envelope key? Use `envelope_for_command()`
+
+`COMMAND` (`"cmd"`) and `CONFIG` (`"config"`) are **not** interchangeable.
+Verified against firmware 1.7.18: only `OPEN`, `OPEN_AND_HOLD` and `CLOSE`
+are accepted as a `cmd`; every other command — including `ENABLE_INSIDE`,
+`POWER_ON` and the rest of the individual setting commands — is answered
+`success: "false"` under `cmd` and works under `config`. See
+[`config` vs `cmd`](protocol.md#config-vs-cmd-is-not-cosmetic).
+
+Rather than carrying that table around, ask for it:
+
+```python
+from powerpetdoor import CMD_ENABLE_INSIDE, envelope_for_command
+
+client.send_message(envelope_for_command(CMD_ENABLE_INSIDE), CMD_ENABLE_INSIDE)
+```
+
+The underlying set is exported as `COMMAND_ENVELOPE_COMMANDS`.
+`PowerPetDoor` routes every send through the same helper, so the two levels
+cannot drift.
+
+### Wire-shape builders
+
+Four commands have a payload shape that is easy to get wrong and, in two
+cases, fails *silently* against a real door. Each shape is built in exactly
+one place, and that place is importable — so a message-level caller reaches
+it just as `PowerPetDoor` does:
+
+| Builder | Command | What it owns |
+|---------|---------|--------------|
+| `build_set_notifications_message()` | `SET_NOTIFICATIONS` | The nested `notifications` object, all five flags, as JSON **booleans**. Flat fields are rejected by the door; a nested object of *strings* is accepted and **silently not applied** |
+| `build_set_schedule_message()` | `SET_SCHEDULE` | The slot `index` as a **sibling** of `schedule`. Without it the door answers `success: "false"` and writes nothing |
+| `build_set_voltage_message()` | `SET_SENSOR_TRIGGER_VOLTAGE`, `SET_SLEEP_SENSOR_TRIGGER_VOLTAGE` | The setter's field is `voltage` (`FIELD_VOLTAGE`), **not** the `sensorTriggerVoltage` name the getter answers with, which the door rejects |
+| `build_set_hold_time_message()` | `SET_HOLD_TIME` | Seconds → the centiseconds the device counts in |
+
+```python
+from powerpetdoor import (
+    CMD_SET_NOTIFICATIONS,
+    CMD_SET_SCHEDULE,
+    CMD_SET_SENSOR_TRIGGER_VOLTAGE,
+    CONFIG,
+    Schedule,
+    build_set_notifications_message,
+    build_set_schedule_message,
+    build_set_voltage_message,
+)
+
+await client.send_message(
+    CONFIG, CMD_SET_NOTIFICATIONS, notify=True,
+    **build_set_notifications_message(
+        inside_on=True, inside_off=False,
+        outside_on=True, outside_off=False, low_battery=True,
+    ),
+)
+
+await client.send_message(
+    CONFIG, CMD_SET_SCHEDULE, notify=True,
+    **build_set_schedule_message(Schedule(index=0, inside=True).to_dict()),
+)
+
+await client.send_message(
+    CONFIG, CMD_SET_SENSOR_TRIGGER_VOLTAGE, notify=True,
+    **build_set_voltage_message(1500),
+)
+```
+
+`SET_NOTIFICATIONS` has no partial form: the device is given all five flags
+every time, so a caller changing one must supply the other four.
+`PowerPetDoor.set_notifications()` merges the rest in from its cache.
 
 ### Parameters
 
@@ -248,22 +318,22 @@ from powerpetdoor import (
     CONFIG,     # For configuration queries and updates
     PING,       # For keepalive (used internally)
 
-    # Door control commands (use with COMMAND)
+    # Door control - the ONLY commands accepted with COMMAND
     CMD_OPEN,
     CMD_OPEN_AND_HOLD,
     CMD_CLOSE,
 
-    # Sensor commands (use with COMMAND)
+    # Sensor commands (use with CONFIG)
     CMD_ENABLE_INSIDE,
     CMD_DISABLE_INSIDE,
     CMD_ENABLE_OUTSIDE,
     CMD_DISABLE_OUTSIDE,
 
-    # Power commands (use with COMMAND)
+    # Power commands (use with CONFIG)
     CMD_POWER_ON,
     CMD_POWER_OFF,
 
-    # Auto/timer commands (use with COMMAND)
+    # Auto/timer commands (use with CONFIG)
     CMD_ENABLE_AUTO,
     CMD_DISABLE_AUTO,
 
@@ -272,7 +342,7 @@ from powerpetdoor import (
     CMD_GET_DOOR_STATUS,
     CMD_GET_SENSORS,
     CMD_GET_POWER,
-    CMD_GET_AUTO,
+    CMD_GET_AUTO,                        # NOT implemented by firmware
     CMD_GET_DOOR_BATTERY,
     CMD_GET_HW_INFO,
     CMD_GET_DOOR_OPEN_STATS,
@@ -281,14 +351,17 @@ from powerpetdoor import (
     CMD_GET_NOTIFICATIONS,
     CMD_GET_SCHEDULE_LIST,
     CMD_GET_SCHEDULE,
-    CMD_GET_AUTORETRACT,                 # read counterparts of the
-    CMD_GET_CMD_LOCKOUT,                 # enable/disable commands below
-    CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
+    CMD_GET_SENSOR_TRIGGER_VOLTAGE,
+    CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+    CMD_GET_TIME,                        # the door's own wall clock
+    CMD_GET_AUTORETRACT,                 # NOT implemented by firmware
+    CMD_GET_CMD_LOCKOUT,                 # NOT implemented by firmware
+    CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,  # NOT implemented by firmware
 
     # Diagnostic queries (use with CONFIG)
     CMD_HAS_REMOTE_ID,
     CMD_HAS_REMOTE_KEY,
-    CMD_CHECK_RESET_REASON,
+    CMD_CHECK_RESET_REASON,              # NOT implemented by firmware
 
     # Configuration commands (use with CONFIG)
     CMD_SET_HOLD_TIME,
@@ -296,8 +369,10 @@ from powerpetdoor import (
     CMD_SET_NOTIFICATIONS,
     CMD_SET_SCHEDULE,
     CMD_DELETE_SCHEDULE,
+    CMD_SET_SENSOR_TRIGGER_VOLTAGE,      # both take the `voltage` field
+    CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
 
-    # Safety commands (use with COMMAND)
+    # Safety commands (use with CONFIG)
     CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
     CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
     CMD_ENABLE_AUTORETRACT,
@@ -310,7 +385,7 @@ from powerpetdoor import (
 ### Common Command Patterns
 
 ```python
-# Open door (auto-closes after hold time)
+# Open door (auto-closes after hold time) - door motion is a COMMAND
 client.send_message(COMMAND, CMD_OPEN)
 
 # Open door and keep open
@@ -322,22 +397,25 @@ client.send_message(COMMAND, CMD_CLOSE)
 # Get current door status
 status = await client.send_message(CONFIG, CMD_GET_DOOR_STATUS, notify=True)
 
-# Get all settings
+# Get all settings - the one query that carries every setting whose own
+# GET_* command the firmware does not implement
 settings = await client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
 
-# Set hold time (in centiseconds)
-await client.send_message(CONFIG, CMD_SET_HOLD_TIME, notify=True, holdTime=1500)
+# Set hold time (the builder converts seconds to the wire's centiseconds)
+await client.send_message(
+    CONFIG, CMD_SET_HOLD_TIME, notify=True, **build_set_hold_time_message(15.0)
+)
 
 # Set timezone
 await client.send_message(CONFIG, CMD_SET_TIMEZONE, notify=True, tz="EST5EDT,M3.2.0,M11.1.0")
 
-# Enable/disable sensors
-client.send_message(COMMAND, CMD_ENABLE_INSIDE)
-client.send_message(COMMAND, CMD_DISABLE_OUTSIDE)
+# Enable/disable sensors - CONFIG, not COMMAND
+client.send_message(CONFIG, CMD_ENABLE_INSIDE)
+client.send_message(CONFIG, CMD_DISABLE_OUTSIDE)
 
-# Power control
-client.send_message(COMMAND, CMD_POWER_ON)
-client.send_message(COMMAND, CMD_POWER_OFF)
+# Power control - CONFIG, not COMMAND
+client.send_message(CONFIG, CMD_POWER_ON)
+client.send_message(CONFIG, CMD_POWER_OFF)
 ```
 
 ### Envelope, Field and State Constants
@@ -356,7 +434,11 @@ and semantics are documented in
 | Notification payload | `FIELD_SENSOR_STATE` (`"sensorState"`, `"on"`/`"off"`) | [Notification Messages](protocol.md#notification-messages-door-to-client) |
 | Notification flags | `FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS`, `FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS`, `FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS`, `FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS`, `FIELD_LOW_BATTERY_NOTIFICATIONS` | [Notification Settings Fields](protocol.md#notification-settings-fields) |
 | Hardware / firmware | `FIELD_FW_MAJOR` (`"fw_maj"`), `FIELD_FW_MINOR` (`"fw_min"`), `FIELD_FW_PATCH` (`"fw_pat"`), `FIELD_HW_VERSION` (`"ver"`), `FIELD_HW_REVISION` (`"rev"`) | [Query Commands](protocol.md#query-commands) (the `GET_HW_INFO` `fwInfo` object) |
-| Diagnostics | `FIELD_HAS_REMOTE_ID`, `FIELD_HAS_REMOTE_KEY`, `FIELD_RESET_REASON` | [Diagnostic Commands](protocol.md#diagnostic-commands) |
+| Diagnostics | `FIELD_HAS_REMOTE_ID` (`"has_id"`), `FIELD_HAS_REMOTE_KEY` (`"has_key"`), `FIELD_RESET_REASON` | [Diagnostic Commands](protocol.md#diagnostic-commands) |
+| Door clock | `FIELD_TIME` (`"time"`), `TIME_FORMAT` (the `asctime` pattern it is spelled in) | [The door clock](protocol.md#the-door-clock) |
+| Setter-only field | `FIELD_VOLTAGE` (`"voltage"`) — what both trigger-voltage setters take | [Configuration](protocol.md#configuration) |
+| Bitfield | `DOOR_OPTION_AUTORETRACT` (`2`) — the auto-retract bit of `doorOptions` | [`doorOptions` is a bitfield](protocol.md#dooroptions-is-a-bitfield) |
+| Envelope routing | `COMMAND_ENVELOPE_COMMANDS` | [`config` vs `cmd`](protocol.md#config-vs-cmd-is-not-cosmetic) |
 
 `DoorStatus.from_string()` ([door.md](door.md#doorstatus)) maps the
 `DOOR_STATE_*` values onto an enum if you would rather not compare strings.
@@ -477,7 +559,8 @@ client.del_listener("my_app")
 | `stats_update` | `{field: (field: str, val: int)}` | Statistics updates |
 | `hw_info_update` | `(info: dict)` | Hardware info |
 | `battery_update` | `(data: dict)` | Battery status |
-| `timezone_update` | `(tz: str)` | Timezone string |
+| `timezone_update` | `(tz: str)` | Timezone string (POSIX) |
+| `time_update` | `(asctime: str)` | The door's own wall clock, verbatim |
 | `hold_time_update` | `(time: int)` | Hold time in centiseconds |
 | `sensor_trigger_voltage_update` | `(voltage: int)` | Sensor trigger voltage |
 | `sleep_sensor_trigger_voltage_update` | `(voltage: int)` | Sleep sensor voltage |
@@ -545,6 +628,26 @@ make_bool("false")  # False
 make_bool(1)        # True
 make_bool(0)        # False
 ```
+
+### autoretract_from_door_options
+
+`doorOptions` is an integer **bitfield**, not a flag, so it must not be read
+by truthiness. This is the one reader for it, and the whole library goes
+through it:
+
+```python
+from powerpetdoor import autoretract_from_door_options
+
+autoretract_from_door_options(2)       # True  - bit 1 set
+autoretract_from_door_options(0)       # False
+autoretract_from_door_options(3)       # True  - bit 0 is something else
+autoretract_from_door_options("true")  # True  - liberal, like make_bool
+autoretract_from_door_options([])      # None  - unreadable
+```
+
+Verified against firmware 1.7.18: `DISABLE_AUTORETRACT` leaves `doorOptions`
+at `0` and `ENABLE_AUTORETRACT` leaves it at `2`. The remaining bits are
+unidentified, so do not read `doorOptions == 2` as "auto-retract only".
 
 ### PrioritizedMessage
 

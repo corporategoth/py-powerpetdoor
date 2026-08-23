@@ -43,6 +43,7 @@ from powerpetdoor.simulator.scripting import (
     list_builtin_scripts,
     script_completer,
 )
+from powerpetdoor.simulator.state import END_OF_DAY_HOUR, END_OF_DAY_MINUTE
 
 # Skip marker for tests that require PyYAML
 requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
@@ -893,10 +894,11 @@ class TestScriptActions:
         assert schedule.inside is True
         assert schedule.outside is True
         assert (schedule.start_hour, schedule.start_min) == (0, 0)
-        # Midnight to midnight. The end is exclusive, so 00:00-23:59 covers
-        # 1439 minutes and blocked the sensors for exactly the minute 23:59
-        # - which failed this file's schedule-script tests once a day.
-        assert (schedule.end_hour, schedule.end_min) == (0, 0)
+        # 00:00-23:59, spelled the way the device itself spells a full day
+        # (verified against firmware 1.7.18). Its final minute is inside
+        # the window, so the schedule really does allow both sensors at
+        # every minute of every day - which is what the sum below pins.
+        assert (schedule.end_hour, schedule.end_min) == (END_OF_DAY_HOUR, END_OF_DAY_MINUTE)
         assert (
             sum(
                 schedule.is_sensor_allowed("inside", minute // 60, minute % 60, weekday)
@@ -1821,7 +1823,7 @@ class TestScriptBooleanCoercion:
         )
 
         assert simulator.state.schedules[3].enabled is False
-        assert simulator.state.schedules[3].to_dict()["enabled"] == "0"
+        assert simulator.state.schedules[3].to_dict()["enabled"] == 0
 
     async def test_a_quoted_true_still_enables_a_schedule(self, runner, simulator):
         await runner._execute_step(

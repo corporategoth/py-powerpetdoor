@@ -51,6 +51,7 @@ from .const import (
     CMD_GET_SENSORS,
     CMD_GET_SETTINGS,
     CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+    CMD_GET_TIME,
     CMD_GET_TIMEZONE,
     CMD_HAS_REMOTE_ID,
     CMD_HAS_REMOTE_KEY,
@@ -63,8 +64,10 @@ from .const import (
     CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     CMD_SET_TIMEZONE,
     COMMAND,
+    COMMAND_ENVELOPE_COMMANDS,
     COMMAND_PRIORITIES,
     CONFIG,
+    DOOR_OPTION_AUTORETRACT,
     DOOR_STATUS,
     FIELD_AC_PRESENT,
     FIELD_AUTO,
@@ -102,9 +105,11 @@ from .const import (
     FIELD_SETTINGS,
     FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     FIELD_SUCCESS,
+    FIELD_TIME,
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
     FIELD_TZ,
+    FIELD_VOLTAGE,
     MINIMUM_TIME_BETWEEN_MSGS,
     NOTIFY_LOW_BATTERY,
     NOTIFY_SENSOR_INDOOR,
@@ -253,6 +258,175 @@ def make_bool(v: str | int | bool | None) -> bool | None:
         return v
 
 
+def autoretract_from_door_options(value: object) -> bool | None:
+    """Read the auto-retract flag out of a ``doorOptions`` value.
+
+    **Verified against firmware 1.7.18**: ``doorOptions`` is an integer
+    **bitfield**, not the ``"0"``/``"1"`` flag this project documented for
+    years. ``DISABLE_AUTORETRACT`` leaves it at ``0`` and
+    ``ENABLE_AUTORETRACT`` leaves it at ``2``, so auto-retract is
+    :data:`~powerpetdoor.const.DOOR_OPTION_AUTORETRACT` - **bit 1**.
+
+    Plain truthiness happens to give the right answer on that unit only
+    because ``2`` is truthy; it would misreport auto-retract as *on* the
+    moment any other (still unidentified) bit is set, which is why the
+    whole library reads this one field through here.
+
+    Liberal like every other reader in this module: a JSON boolean, or a
+    string that is a recognizable flag rather than a number, is answered by
+    :func:`make_bool` - a firmware that replies ``true`` there is answering
+    the question directly rather than handing over a bitfield.
+
+    Args:
+        value: The raw ``doorOptions`` value from the device.
+
+    Returns:
+        The auto-retract flag, or None if the value is not readable.
+    """
+    if isinstance(value, bool):
+        return value
+    try:
+        bits = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError, OverflowError):
+        return make_bool(value) if isinstance(value, str) else None
+    return bool(bits & DOOR_OPTION_AUTORETRACT)
+
+
+def build_set_voltage_message(millivolts: int) -> dict[str, int]:
+    """Build the message fields for either sensor-trigger-voltage setter.
+
+    **Verified against firmware 1.7.18**: both
+    ``SET_SENSOR_TRIGGER_VOLTAGE`` and
+    ``SET_SLEEP_SENSOR_TRIGGER_VOLTAGE`` take their new value in a field
+    named ``voltage`` - **not** the ``sensorTriggerVoltage`` /
+    ``sleepSensorTriggerVoltage`` name their *getters* answer with, which
+    the device rejects. The reply then echoes the getter's field name.
+    That asymmetry is the entire wire shape of these two commands, so it
+    lives here rather than in a caller::
+
+        client.send_message(
+            envelope_for_command(CMD_SET_SENSOR_TRIGGER_VOLTAGE),
+            CMD_SET_SENSOR_TRIGGER_VOLTAGE,
+            notify=True, **build_set_voltage_message(1500),
+        )
+
+    Args:
+        millivolts: The trigger threshold. The probed unit sat at 2000 and
+            accepted 1500/1800.
+
+    Returns:
+        ``{"voltage": <millivolts>}``, ready to splat into
+        :meth:`PowerPetDoorClient.send_message`.
+    """
+    return {FIELD_VOLTAGE: int(millivolts)}
+
+
+def envelope_for_command(cmd: str) -> str:
+    """Return the envelope key ``cmd`` must be sent under.
+
+    **Verified against firmware 1.7.18.** The two envelope keys are not
+    interchangeable: ``{"cmd": "ENABLE_INSIDE"}`` is answered
+    ``success: "false"`` and does nothing, while
+    ``{"config": "ENABLE_INSIDE"}`` succeeds. Only door motion is a
+    ``cmd``; everything else - queries, ``SET_*``, and the individual
+    setting commands - is a ``config``.
+
+    This is the single place that decision is made, so a message-level
+    caller does not have to carry the table around::
+
+        client.send_message(envelope_for_command(CMD_ENABLE_INSIDE), CMD_ENABLE_INSIDE)
+
+    Args:
+        cmd: A ``CMD_*`` command name.
+
+    Returns:
+        :data:`~powerpetdoor.const.COMMAND` or
+        :data:`~powerpetdoor.const.CONFIG`.
+    """
+    return COMMAND if cmd in COMMAND_ENVELOPE_COMMANDS else CONFIG
+
+
+def build_set_hold_time_message(seconds: float) -> dict[str, int]:
+    """Build the ``SET_HOLD_TIME`` message fields for a time in seconds.
+
+    The device counts the hold-open time in **centiseconds**, so the
+    seconds a caller thinks in have to be multiplied by 100 before they go
+    on the wire. That conversion is the whole wire shape of this command,
+    and it lives here so a message-level caller reaches it too::
+
+        client.send_message(
+            envelope_for_command(CMD_SET_HOLD_TIME), CMD_SET_HOLD_TIME,
+            notify=True, **build_set_hold_time_message(2.0),
+        )
+
+    The centisecond unit is **verified against firmware 1.7.18** - the
+    probed unit reported ``holdOpenTime: 200`` for its 2-second hold.
+
+    Args:
+        seconds: Hold-open time in seconds. Truncated, not rounded, to
+            whole centiseconds, which is what every released version has
+            sent.
+
+    Returns:
+        ``{"holdTime": <centiseconds>}``, ready to splat into
+        :meth:`PowerPetDoorClient.send_message`.
+    """
+    return {FIELD_HOLD_TIME: int(seconds * 100)}
+
+
+def build_set_notifications_message(
+    *,
+    inside_on: bool,
+    inside_off: bool,
+    outside_on: bool,
+    outside_off: bool,
+    low_battery: bool,
+) -> dict[str, dict[str, bool]]:
+    """Build the ``SET_NOTIFICATIONS`` message fields.
+
+    **Verified against firmware 1.7.18.** The device requires a nested
+    ``notifications`` object carrying **all five** flags as **JSON
+    booleans**. Two failure modes were observed, and the second is the
+    dangerous one:
+
+    * flat top-level fields (any value type) -> ``success: "false"``,
+      nothing written;
+    * nested object whose values are *strings* -> the device replies with
+      the current settings and **silently writes nothing**. It looks like
+      success.
+
+    This is the single place that shape is built, so both the friendly
+    facade (:meth:`powerpetdoor.door.PowerPetDoor.set_notifications`) and a
+    message-level caller get it right::
+
+        client.send_message(
+            CONFIG, CMD_SET_NOTIFICATIONS, notify=True,
+            **build_set_notifications_message(
+                inside_on=True, inside_off=False, outside_on=True,
+                outside_off=False, low_battery=True,
+            ),
+        )
+
+    There is no partial form: the device is given the complete set every
+    time, so a caller changing one flag must supply the other four (the
+    facade merges them from its cached
+    :class:`~powerpetdoor.door.NotificationSettings`).
+
+    Returns:
+        ``{"notifications": {<five flags>: bool}}``, ready to splat into
+        :meth:`PowerPetDoorClient.send_message`.
+    """
+    return {
+        FIELD_NOTIFICATIONS: {
+            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: bool(inside_on),
+            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: bool(inside_off),
+            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: bool(outside_on),
+            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: bool(outside_off),
+            FIELD_LOW_BATTERY_NOTIFICATIONS: bool(low_battery),
+        }
+    }
+
+
 class PowerPetDoorClient(asyncio.Protocol):
     """Client for communicating with Power Pet Door devices.
 
@@ -363,6 +537,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         self.battery_listeners: dict[str, Callable[[dict], None]] = {}
 
         self.timezone_listeners: dict[str, Callable[[str], None]] = {}
+        self.time_listeners: dict[str, Callable[[str], None]] = {}
         self.hold_time_listeners: dict[str, Callable[[int], None]] = {}
         self.sensor_trigger_voltage_listeners: dict[str, Callable[[int], None]] = {}
         self.sleep_sensor_trigger_voltage_listeners: dict[str, Callable[[int], None]] = {}
@@ -469,6 +644,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         hw_info_update: Callable[[dict], None] | None = None,
         battery_update: Callable[[dict], None] | None = None,
         timezone_update: Callable[[str], None] | None = None,
+        time_update: Callable[[str], None] | None = None,
         hold_time_update: Callable[[int], None] | None = None,
         sensor_trigger_voltage_update: Callable[[int], None] | None = None,
         sleep_sensor_trigger_voltage_update: Callable[[int], None] | None = None,
@@ -498,6 +674,9 @@ class PowerPetDoorClient(asyncio.Protocol):
             hw_info_update: Called with hardware info dict
             battery_update: Called with battery status dict
             timezone_update: Called with timezone string
+            time_update: Called with the door's wall-clock time as the raw
+                ``asctime`` string it sends (see
+                :data:`~powerpetdoor.const.TIME_FORMAT`)
             hold_time_update: Called with hold time in **centiseconds**,
                 the raw device value (``PowerPetDoor`` divides by 100 to
                 expose seconds)
@@ -605,6 +784,8 @@ class PowerPetDoorClient(asyncio.Protocol):
             self.battery_listeners[name] = battery_update
         if timezone_update:
             self.timezone_listeners[name] = timezone_update
+        if time_update:
+            self.time_listeners[name] = time_update
         if hold_time_update:
             self.hold_time_listeners[name] = hold_time_update
         if sensor_trigger_voltage_update:
@@ -648,6 +829,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         self.hw_info_listeners.pop(name, None)
         self.battery_listeners.pop(name, None)
         self.timezone_listeners.pop(name, None)
+        self.time_listeners.pop(name, None)
         self.hold_time_listeners.pop(name, None)
         self.sensor_trigger_voltage_listeners.pop(name, None)
         self.sleep_sensor_trigger_voltage_listeners.pop(name, None)
@@ -744,8 +926,12 @@ class PowerPetDoorClient(asyncio.Protocol):
         ]
         for field_name, listeners in sensor_fields:
             if listeners and field_name in settings:
-                val = make_bool(settings[field_name])
-                self._notify_listeners(listeners, field_name, val)
+                # doorOptions is a bitfield, not a flag - see
+                # `autoretract_from_door_options`.
+                reader = (
+                    autoretract_from_door_options if field_name == FIELD_AUTORETRACT else make_bool
+                )
+                self._notify_listeners(listeners, field_name, reader(settings[field_name]))
 
         # Notify other listeners; these fields may be absent on some
         # firmware variants, so guard each one (never assume presence).
@@ -882,10 +1068,15 @@ class PowerPetDoorClient(asyncio.Protocol):
         CMD_GET_AUTORETRACT, CMD_ENABLE_AUTORETRACT, CMD_DISABLE_AUTORETRACT
     )
     def _handle_autoretract(self, msg: dict, future) -> None:
-        """Handle autoretract responses."""
+        """Handle autoretract responses.
+
+        Firmware 1.7.18 answers ENABLE_/DISABLE_AUTORETRACT with the
+        **whole** settings object rather than the single changed field, so
+        this reads its one field out of whatever arrived.
+        """
         settings = self._payload_mapping(msg, FIELD_SETTINGS)
         if settings is not None and FIELD_AUTORETRACT in settings:
-            val = make_bool(settings[FIELD_AUTORETRACT])
+            val = autoretract_from_door_options(settings[FIELD_AUTORETRACT])
             self._notify_listeners(self.sensor_listeners[FIELD_AUTORETRACT], FIELD_AUTORETRACT, val)
             self._resolve_future(future, val)
 
@@ -931,6 +1122,20 @@ class PowerPetDoorClient(asyncio.Protocol):
         if FIELD_TZ in msg:
             val = msg[FIELD_TZ]
             self._notify_listeners(self.timezone_listeners, val)
+            self._resolve_future(future, val)
+
+    @ResponseHandlerRegistry.handler(CMD_GET_TIME)
+    def _handle_time(self, msg: dict, future) -> None:
+        """Handle the door's wall-clock reply.
+
+        The value is passed through verbatim - a C ``asctime()`` string in
+        the door's own timezone. It is *not* re-checked against the local
+        clock: the door was observed to answer a stale frame occasionally,
+        and a client is better served by seeing exactly what it said.
+        """
+        if FIELD_TIME in msg:
+            val = msg[FIELD_TIME]
+            self._notify_listeners(self.time_listeners, val)
             self._resolve_future(future, val)
 
     @ResponseHandlerRegistry.handler(CMD_GET_HOLD_TIME, CMD_SET_HOLD_TIME)
@@ -1682,11 +1887,13 @@ class PowerPetDoorClient(asyncio.Protocol):
         # Dequeuing awaits (rate-limit sleep), and completing the future
         # only after that await races with caller-side wait_for timeouts.
         dequeue = False
+        acknowledged_inflight = False
         if cmd is not None and cmd == self._last_command:
             if self._check_receipt:
                 self._check_receipt.cancel()
                 self._check_receipt = None
                 dequeue = True
+                acknowledged_inflight = True
             elif self._can_dequeue:
                 self._can_dequeue = False
                 dequeue = True
@@ -1723,6 +1930,17 @@ class PowerPetDoorClient(asyncio.Protocol):
                 )
                 if future is not None and not future.done():
                     future.set_exception(CommandError(cmd, reason))
+                elif reply_msg_id is None and acknowledged_inflight:
+                    # Verified against firmware 1.7.18: **failure responses
+                    # carry no msgID at all**, so they cannot be paired with
+                    # a request by id. Cancelling the retry timer (above)
+                    # without failing the future left the caller's `await`
+                    # hanging until its own timeout - or forever, for a
+                    # message-level caller that awaits the future directly.
+                    # The device answers one command at a time and this
+                    # response acknowledged the in-flight one, so it is that
+                    # command's failure.
+                    self._fail_inflight_future(CommandError(cmd, reason))
         finally:
             if dequeue:
                 await self.dequeue_data()

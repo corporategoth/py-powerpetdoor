@@ -454,7 +454,7 @@ class ControlChannel:
 
 def _build_state(
     firmware: tuple[int, int, int] | None,
-    hardware: tuple[str, str] | None,
+    hardware: tuple[int, int] | None,
 ) -> "DoorSimulatorState | None":
     """Build a simulator state for custom firmware/hardware versions.
 
@@ -465,7 +465,7 @@ def _build_state(
 
     if not (firmware or hardware):
         return None
-    kwargs: dict[str, int | str] = {}
+    kwargs: dict[str, int] = {}
     if firmware:
         kwargs["fw_major"] = firmware[0]
         kwargs["fw_minor"] = firmware[1]
@@ -752,7 +752,7 @@ async def run_simulator(
     scripts_dir: str | None = None,
     history_file: str | None = None,
     firmware: tuple[int, int, int] | None = None,
-    hardware: tuple[str, str] | None = None,
+    hardware: tuple[int, int] | None = None,
     on_ready: Callable[[int, int | None], None] | None = None,
 ):
     """Run the Power Pet Door simulator.
@@ -1280,10 +1280,15 @@ def main():
     # Parse hardware version if provided
     hardware = None
     if args.hardware:
-        parts = args.hardware.split(".")
-        if len(parts) != 2:
-            parser.error("Hardware version must be in format ver.rev (e.g., '1.1')")
-        hardware = (parts[0], parts[1])
+        try:
+            parts = args.hardware.split(".")
+            if len(parts) != 2:
+                parser.error("Hardware version must be in format ver.rev (e.g., '1.1')")
+            # Integers, because a real door's fwInfo object is all
+            # integers (verified against firmware 1.7.18).
+            hardware = (int(parts[0]), int(parts[1]))
+        except ValueError:
+            parser.error("Hardware version must contain only numbers (e.g., '1.1')")
 
     try:
         result = asyncio.run(

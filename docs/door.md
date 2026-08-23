@@ -281,6 +281,16 @@ When auto mode is enabled, the door follows the configured schedules.
 | `autoretract` | `bool` | Auto-retract on obstruction enabled |
 | `pet_proximity_keep_open` | `bool` | Keep door open when pet is nearby |
 
+`pet_proximity_keep_open` is the **inverse** of the wire's
+`allowCmdLockout`, and that inversion is now confirmed by driving the vendor
+app against a live capture: the app's *"Allow pet to keep door open"* switch
+OFF corresponds to `allowCmdLockout: "true"`. See
+[What the app calls these settings](protocol.md#what-the-app-calls-these-settings).
+`safety_lock` is the wire's `outsideSensorSafetyLock`, which the app
+presents as *"always allow pet entry inside override timers"* — a schedule
+override, not a lock. `autoretract` reads **bit 1** of the `doorOptions`
+bitfield, not the whole field.
+
 ### Safety Methods
 
 ```python
@@ -310,6 +320,48 @@ print(f"Hold time: {door.hold_time} seconds")
 # Set hold time (in seconds)
 await door.set_hold_time(15.0)
 ```
+
+### Sensor trigger voltage
+
+The capacitive sensor thresholds, in millivolts. The probed door sat at
+2000 for both.
+
+```python
+print(door.sensor_trigger_voltage)        # e.g. 2000
+print(door.sleep_sensor_trigger_voltage)  # applies in the door's sleep state
+
+await door.set_sensor_trigger_voltage(1500)
+await door.set_sleep_sensor_trigger_voltage(1800)
+```
+
+Both are also carried by `GET_SETTINGS`, so `refresh_settings()` keeps them
+current. The wire asymmetry (the setter's field is `voltage`, the getter
+answers `sensorTriggerVoltage`) is handled by `build_set_voltage_message()`
+— see [docs/client.md](client.md#wire-shape-builders).
+
+### The door clock
+
+Schedules are evaluated against the door's own clock, so this is the only
+way to check that a door will fire a schedule when you expect it to:
+
+```python
+when = await door.refresh_time()   # naive datetime, local to door.timezone
+print(door.device_time)            # the raw asctime string it sent
+```
+
+`refresh_time()` returns `None` if the string was unparseable;
+`device_time` still holds it verbatim in that case. It is deliberately not
+part of `refresh()`: it is a diagnostic, and it is stale on arrival. **The
+clock is read-only** — there is no setter, on this library or on the door.
+
+### Remote pairing
+
+```python
+await door.refresh_remote_info()
+print(door.has_remote_id, door.has_remote_key)
+```
+
+Static pairing information, so it is not part of `refresh()`.
 
 ### Timezone
 
@@ -426,6 +478,15 @@ await door.set_notifications(
     low_battery=True,
 )
 ```
+
+There is no partial form on the wire: the device demands all five flags, as
+JSON booleans, inside a nested `notifications` object, and **silently
+ignores** a payload whose values are strings while still answering
+`success: "true"`. The facade merges the unspecified four in from its cache
+and builds the shape through `build_set_notifications_message()`. See the
+[warning in docs/protocol.md](protocol.md#set_notifications) — this is the
+most dangerous shape in the protocol, and every release before 0.4.0 got it
+wrong.
 
 ## Schedules
 

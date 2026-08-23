@@ -53,7 +53,6 @@ from powerpetdoor.schedule import (
 )
 from powerpetdoor.simulator.protocol import (
     WireValueError,
-    _coerce_wire_flag,
     _coerce_wire_int,
     _coerce_wire_number,
     _coerce_wire_string,
@@ -190,12 +189,6 @@ class TestWireCoercerTotality:
             assert isinstance(result, str)
             assert len(result) <= 128
 
-    @settings(max_examples=200, deadline=None)
-    @given(value=st.one_of(_scalar_values, _well_shaped_wire_flag))
-    def test_flag_coercer_only_raises_wire_value_error(self, value):
-        with contextlib.suppress(WireValueError):
-            assert isinstance(_coerce_wire_flag(value, "field"), bool)
-
 
 class TestScheduleCoercerTotality:
     """The shared schedule helpers raise ValueError or nothing at all."""
@@ -317,14 +310,15 @@ class TestScheduleParserTotality:
 
     @settings(max_examples=200, deadline=None)
     @given(payload=_schedule_payloads)
-    def test_both_emitters_agree_on_every_field_except_enabled(self, payload):
+    def test_both_emitters_agree_on_every_field_except_the_three_flags(self, payload):
         """Whatever both parsers accept, both must re-emit identically.
 
-        ``enabled`` is excluded deliberately and is asserted separately
-        below: the two emitters are opposite protocol directions (the
-        library sends, the simulator replies), so they are not required to
-        spell that flag the same way. Every *other* field must match on
-        every input both parsers accept.
+        ``enabled``, ``inside`` and ``outside`` are excluded deliberately
+        and asserted separately below: the two emitters are opposite
+        protocol directions (the library sends, the simulator replies), and
+        firmware 1.7.18 spells those three as ints on the way back where we
+        send JSON booleans. Every *other* field must match on every input
+        both parsers accept.
         """
         try:
             library = LibrarySchedule.from_dict(payload)
@@ -332,18 +326,22 @@ class TestScheduleParserTotality:
         except ValueError:
             return
 
+        flags = ("enabled", "inside", "outside")
         emitted = library.to_dict()
         replied = simulator.to_dict()
 
-        assert {k: v for k, v in emitted.items() if k != "enabled"} == {
-            k: v for k, v in replied.items() if k != "enabled"
+        assert {k: v for k, v in emitted.items() if k not in flags} == {
+            k: v for k, v in replied.items() if k not in flags
         }
-        # Conservative in what we send: the client->device payload always
-        # carries a real JSON boolean, whatever spelling arrived.
-        assert emitted["enabled"] is True or emitted["enabled"] is False
-        # The device->client reply always carries the observed "1"/"0".
-        assert isinstance(replied["enabled"], str)
-        assert replied["enabled"] in ("0", "1")
+        for name in flags:
+            # Conservative in what we send: the client->device payload
+            # always carries a real JSON boolean, whatever spelling arrived.
+            assert emitted[name] is True or emitted[name] is False
+            # The device->client reply always carries the observed int.
+            assert replied[name] in (0, 1)
+            assert not isinstance(replied[name], bool)
+            # ...and the two still agree on the *value*, only not the spelling.
+            assert bool(replied[name]) is emitted[name]
         assert all(day in (0, 1) and not isinstance(day, bool) for day in emitted["daysOfWeek"])
 
     @settings(max_examples=200, deadline=None)

@@ -24,6 +24,55 @@ The Power Pet Door simulator is a full-featured testing tool that emulates the b
   - [Built-in Scripts](#built-in-scripts)
   - [Best Practices](#best-practices)
 - [Architecture](#architecture)
+- [Fidelity to the real device](#fidelity-to-the-real-device)
+
+## Fidelity to the real device
+
+The simulator's job is to be **wrong in the same ways a real Power Pet Door
+is wrong**, so a client that gets a wire shape subtly wrong fails in the
+test suite rather than only against hardware. Everything in
+[docs/protocol.md](protocol.md) marked **[V]** is reproduced here, including
+the parts that look like bugs:
+
+- failure responses carry **no** `msgID`, and neither does a `PONG`;
+- only `OPEN`/`OPEN_AND_HOLD`/`CLOSE` are accepted under `cmd`; every other
+  command must be a `config`;
+- `SET_NOTIFICATIONS` rejects a flat payload, and **accepts-and-ignores** a
+  nested one whose values are strings;
+- `SET_SCHEDULE` without a sibling `index` is rejected;
+- the voltage setters take `voltage` and reject the getter's field name;
+- `GET_TIMERS_ENABLED`, `GET_AUTORETRACT`, `GET_CMD_LOCKOUT`,
+  `GET_OUTSIDE_SENSOR_SAFETY_LOCK` and `CHECK_RESET_REASON` are rejected —
+  the firmware does not implement them;
+- `SET_TIME` is answered with **silence**, not a failure envelope;
+- the per-command value spellings are reproduced field by field
+  (`"true"`/`"false"` strings in `GET_SETTINGS`, ints in `GET_SENSORS`),
+  rather than normalized.
+
+### The one deliberate divergence: multiple clients
+
+**A real door serves exactly one connection.** A second connection is not
+refused — the door simply stops answering the wire properly and both
+clients see unexplained timeouts (see
+[Connection](protocol.md#connection)).
+
+**The simulator does not reproduce that, on purpose.** It accepts as many
+clients as connect and serves each one as if it were exclusive. That is a
+tool decision, not an oversight:
+
+- the interactive CLI and `ppd-simulator-ctl` are frequently attached at
+  the same time as the client under test, and contention emulation would
+  make the simulator's own front end the thing that breaks;
+- a test suite that runs cases in parallel against one daemon needs every
+  connection served;
+- "degrade into unexplained timeouts" is untestable by construction — a
+  test for it would be a test for a hang.
+
+Do **not** add `--max-clients`, connection refusal, or contention emulation.
+It would break the test suite, `ppd-simulator-ctl`, and the CLI at once.
+Field-debug single-connection symptoms against the real door, with
+[the protocol note](protocol.md#single-connection-and-the-field-debugging-trap-it-creates)
+in hand.
 
 ## Installation
 

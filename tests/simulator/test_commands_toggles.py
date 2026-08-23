@@ -127,13 +127,13 @@ class TestPowerCommand:
         assert state.power is False
         payload = _last_payload(mock_client)
         assert payload[FIELD_CMD] == CMD_POWER_OFF
-        assert payload[FIELD_POWER] == "0"
+        assert payload[FIELD_POWER] == 0
 
         result = await command_handler.execute("power on")
         assert result.message == "Power: ON"
         payload = _last_payload(mock_client)
         assert payload[FIELD_CMD] == CMD_POWER_ON
-        assert payload[FIELD_POWER] == "1"
+        assert payload[FIELD_POWER] == 1
 
     async def test_toggle_subcommand_and_aliases(self, command_handler):
         state = command_handler.simulator.state
@@ -162,13 +162,13 @@ class TestAutoCommand:
         assert state.auto is False
         payload = _last_payload(mock_client)
         assert payload[FIELD_CMD] == CMD_DISABLE_AUTO
-        assert payload[FIELD_AUTO] == "0"
+        assert payload[FIELD_AUTO] == 0
 
         result = await command_handler.execute("auto on")
         assert result.message == "Auto (schedule): ON"
         payload = _last_payload(mock_client)
         assert payload[FIELD_CMD] == CMD_ENABLE_AUTO
-        assert payload[FIELD_AUTO] == "1"
+        assert payload[FIELD_AUTO] == 1
 
     async def test_bare_toggle_alias_and_subcommand(self, command_handler):
         state = command_handler.simulator.state
@@ -193,13 +193,13 @@ class TestInsideEnableCommand:
         assert state.inside is False
         payload = _last_payload(mock_client)
         assert payload[FIELD_CMD] == CMD_DISABLE_INSIDE
-        assert payload[FIELD_INSIDE] == "0"
+        assert payload[FIELD_INSIDE] == 0
 
         result = await command_handler.execute("inside_enable on")
         assert result.message == "Inside sensor: enabled"
         payload = _last_payload(mock_client)
         assert payload[FIELD_CMD] == CMD_ENABLE_INSIDE
-        assert payload[FIELD_INSIDE] == "1"
+        assert payload[FIELD_INSIDE] == 1
 
     async def test_bare_toggle_alias_and_subcommand(self, command_handler):
         state = command_handler.simulator.state
@@ -228,13 +228,13 @@ class TestOutsideEnableCommand:
         assert state.outside is False
         payload = _last_payload(mock_client)
         assert payload[FIELD_CMD] == CMD_DISABLE_OUTSIDE
-        assert payload[FIELD_OUTSIDE] == "0"
+        assert payload[FIELD_OUTSIDE] == 0
 
         result = await command_handler.execute("outside_enable on")
         assert result.message == "Outside sensor: enabled"
         payload = _last_payload(mock_client)
         assert payload[FIELD_CMD] == CMD_ENABLE_OUTSIDE
-        assert payload[FIELD_OUTSIDE] == "1"
+        assert payload[FIELD_OUTSIDE] == 1
 
     async def test_bare_toggle_alias_and_subcommand(self, command_handler):
         state = command_handler.simulator.state

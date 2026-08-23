@@ -14,6 +14,7 @@ from dataclasses import replace
 import pytest
 
 from powerpetdoor import (
+    Schedule,
     compress_schedule,
     compute_schedule_diff,
     schedule,
@@ -34,6 +35,7 @@ from powerpetdoor.const import (
     FIELD_MINUTE,
     FIELD_OUTSIDE,
     FIELD_OUTSIDE_PREFIX,
+    FIELD_SCHEDULE,
     FIELD_START_TIME_SUFFIX,
 )
 from tests.conftest import assert_schedule_wire_types
@@ -258,7 +260,7 @@ class TestCompressSchedule:
         for entry in entries:
             # compress_schedule() builds payloads the library SENDS, so it
             # is pinned to the client->device shape.
-            assert_schedule_wire_types(entry, enabled_type=bool)
+            assert_schedule_wire_types(entry, flag_type=bool)
 
     def create_schedule_entry(
         self,
@@ -1190,7 +1192,14 @@ class TestScheduleWireFormat:
     or the parsers (layer 3).
     """
 
-    def test_the_two_directions_differ_only_in_enabled(self):
+    def test_the_two_directions_differ_in_exactly_the_three_flag_fields(self):
+        """Verified against firmware 1.7.18.
+
+        A GET_SCHEDULE reply spells ``enabled``, ``inside`` and ``outside``
+        as the integers 1/0; what the library SENDS is unchanged (JSON
+        booleans). ``index``, ``daysOfWeek`` and the ``{hour, min}`` blocks
+        are ints in both directions.
+        """
         to_device = schedule.SCHEDULE_WIRE_TO_DEVICE
         from_device = schedule.SCHEDULE_WIRE_FROM_DEVICE
 
@@ -1199,17 +1208,25 @@ class TestScheduleWireFormat:
             for name in ("index", "enabled", "inside", "outside", "day", "hour", "minute")
             if getattr(to_device, name) is not getattr(from_device, name)
         ]
-        assert differing == ["enabled"]
+        assert differing == ["enabled", "inside", "outside"]
 
     def test_the_client_to_device_enabled_spelling_is_a_json_boolean(self):
         """What has run against real Power Pet Doors since v0.1.0."""
         assert schedule.SCHEDULE_WIRE_TO_DEVICE.enabled(True) is True
         assert schedule.SCHEDULE_WIRE_TO_DEVICE.enabled(False) is False
 
-    def test_the_device_to_client_enabled_spelling_is_the_flag_string(self):
-        """What the device was observed to reply, and the simulator emits."""
-        assert schedule.SCHEDULE_WIRE_FROM_DEVICE.enabled(True) == "1"
-        assert schedule.SCHEDULE_WIRE_FROM_DEVICE.enabled(False) == "0"
+    @pytest.mark.parametrize("field_name", ["enabled", "inside", "outside"])
+    def test_the_device_to_client_flag_spelling_is_the_wire_int(self, field_name):
+        """What firmware 1.7.18 replies, and therefore what the simulator emits.
+
+        Ints, not the ``"1"``/``"0"`` strings this project assumed for
+        years - and not bools, which JSON would render as ``true``.
+        """
+        spell = getattr(schedule.SCHEDULE_WIRE_FROM_DEVICE, field_name)
+
+        assert spell(True) == 1
+        assert spell(False) == 0
+        assert not isinstance(spell(True), bool)
 
     def test_days_are_wire_ints_in_both_directions(self):
         for fmt in (schedule.SCHEDULE_WIRE_TO_DEVICE, schedule.SCHEDULE_WIRE_FROM_DEVICE):
@@ -1219,7 +1236,7 @@ class TestScheduleWireFormat:
 
     def test_flipping_one_field_changes_only_that_field(self):
         """The property the layering exists for, exercised directly."""
-        flipped = replace(schedule.SCHEDULE_WIRE_TO_DEVICE, enabled=schedule.wire_flag_string)
+        flipped = replace(schedule.SCHEDULE_WIRE_TO_DEVICE, enabled=schedule.wire_bool_string)
         kwargs = {
             "index": 1,
             "enabled": True,
@@ -1234,7 +1251,7 @@ class TestScheduleWireFormat:
         after = schedule.build_schedule_payload(flipped, **kwargs)
 
         assert before[FIELD_ENABLED] is True
-        assert after[FIELD_ENABLED] == "1"
+        assert after[FIELD_ENABLED] == "true"
         assert {k: v for k, v in before.items() if k != FIELD_ENABLED} == {
             k: v for k, v in after.items() if k != FIELD_ENABLED
         }
@@ -1283,15 +1300,62 @@ class TestScheduleWireFormat:
         }
 
     def test_both_emitters_go_through_the_boundary(self):
-        """No hand-spelled field is left in either to_dict()."""
+        """No hand-spelled field is left in either to_dict().
+
+        The three flag fields differ by direction on purpose (JSON booleans
+        out, ints back); every other field must be identical, which is what
+        proves both emitters really do go through
+        :func:`build_schedule_payload`.
+        """
         from powerpetdoor.door import Schedule as LibrarySchedule
         from powerpetdoor.simulator.state import Schedule as SimulatorSchedule
 
+        flag_fields = {FIELD_ENABLED, FIELD_INSIDE, FIELD_OUTSIDE}
         library = LibrarySchedule(index=2, enabled=False, inside=True).to_dict()
         simulator = SimulatorSchedule(index=2, enabled=False, inside=True).to_dict()
 
-        assert library[FIELD_ENABLED] is False
-        assert simulator[FIELD_ENABLED] == "0"
-        assert {k: v for k, v in library.items() if k != FIELD_ENABLED} == {
-            k: v for k, v in simulator.items() if k != FIELD_ENABLED
+        assert [library[name] for name in (FIELD_ENABLED, FIELD_INSIDE, FIELD_OUTSIDE)] == [
+            False,
+            True,
+            False,
+        ]
+        assert [simulator[name] for name in (FIELD_ENABLED, FIELD_INSIDE, FIELD_OUTSIDE)] == [
+            0,
+            1,
+            0,
+        ]
+        assert {k: v for k, v in library.items() if k not in flag_fields} == {
+            k: v for k, v in simulator.items() if k not in flag_fields
         }
+
+
+class TestBuildSetScheduleMessage:
+    """Verified against firmware 1.7.18: `index` must be a sibling.
+
+    A SET_SCHEDULE carrying only `schedule` is answered `success: "false"`
+    and writes nothing, however the entry itself is spelled - which is why
+    every `set_schedule()` this library shipped before now was a no-op
+    against a real door.
+    """
+
+    def test_the_index_is_lifted_alongside_the_schedule(self):
+        payload = Schedule(index=3, inside=True).to_dict()
+
+        message = schedule.build_set_schedule_message(payload)
+
+        assert message == {FIELD_INDEX: 3, FIELD_SCHEDULE: payload}
+
+    def test_the_schedule_object_keeps_its_own_index_too(self):
+        """Both copies are sent; the device carries the field twice."""
+        message = schedule.build_set_schedule_message(Schedule(index=7, inside=True).to_dict())
+
+        assert message[FIELD_INDEX] == 7
+        assert message[FIELD_SCHEDULE][FIELD_INDEX] == 7
+
+    def test_a_payload_with_no_index_is_refused_rather_than_sent(self):
+        """Sending it would look like success and write nothing."""
+        payload = Schedule(index=1, inside=True).to_dict()
+        del payload[FIELD_INDEX]
+
+        with pytest.raises(ValueError, match="missing required field 'index'"):
+            schedule.build_set_schedule_message(payload)

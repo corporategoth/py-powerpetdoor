@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -48,6 +49,7 @@ from powerpetdoor.const import (
     CMD_GET_SENSORS,
     CMD_GET_SETTINGS,
     CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+    CMD_GET_TIME,
     CMD_GET_TIMEZONE,
     CMD_HAS_REMOTE_ID,
     CMD_HAS_REMOTE_KEY,
@@ -61,17 +63,22 @@ from powerpetdoor.const import (
     CMD_SET_SCHEDULE_LIST,
     CMD_SET_SENSOR_TRIGGER_VOLTAGE,
     CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
+    CMD_SET_TIME,
     CMD_SET_TIMEZONE,
     COMMAND,
+    COMMAND_ENVELOPE_COMMANDS,
     CONFIG,
+    DOOR_OPTION_AUTORETRACT,
     DOOR_STATE_CLOSED,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
+    FIELD_AC_PRESENT,
     FIELD_AUTO,
     FIELD_AUTORETRACT,
     FIELD_BATTERY_PERCENT,
+    FIELD_BATTERY_PRESENT,
     FIELD_CMD,
     FIELD_CMD_LOCKOUT,
     FIELD_DOOR_STATUS,
@@ -94,7 +101,6 @@ from powerpetdoor.const import (
     FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
     FIELD_POWER,
     FIELD_REASON,
-    FIELD_RESET_REASON,
     FIELD_SCHEDULE,
     FIELD_SCHEDULES,
     FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
@@ -106,9 +112,11 @@ from powerpetdoor.const import (
     FIELD_SETTINGS,
     FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     FIELD_SUCCESS,
+    FIELD_TIME,
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
     FIELD_TZ,
+    FIELD_VOLTAGE,
     NOTIFY_SENSOR_INDOOR,
     NOTIFY_SENSOR_OUTDOOR,
     PING,
@@ -117,6 +125,7 @@ from powerpetdoor.const import (
     SENSOR_STATE_ON,
     SUCCESS_FALSE,
     SUCCESS_TRUE,
+    TIME_FORMAT,
 )
 from powerpetdoor.framing import MAX_BUFFER_SIZE
 from powerpetdoor.schedule import MAX_SCHEDULE_INDEX
@@ -127,6 +136,7 @@ from powerpetdoor.simulator import (
     DoorTimingConfig,
 )
 from powerpetdoor.simulator import protocol as protocol_module
+from powerpetdoor.simulator import state as state_module
 from powerpetdoor.simulator.engine import DoorMotionEngine
 from powerpetdoor.simulator.protocol import make_sensor_notification, sanitize_log_text
 from tests.conftest import GOLDEN_SCHEDULE_WIRE_TO_DEVICE, bigint_frame, nested_frame
@@ -307,13 +317,24 @@ class TestDoorSimulatorProtocol:
         assert FIELD_SETTINGS in response
 
     async def test_get_battery(self, protocol, mock_transport, state):
-        """Should respond to GET_DOOR_BATTERY."""
+        """Should respond to GET_DOOR_BATTERY.
+
+        Verified against firmware 1.7.18: `batteryPercent` is an int while
+        `acPresent`/`batteryPresent` are "true"/"false" STRINGS. Asserting
+        the types alone would not catch the "1"/"0" vocabulary this
+        project used to emit, so the literal values are pinned.
+        """
         state.battery_percent = 75
+        state.battery_present = True
+        state.ac_present = False
         await dispatch(protocol, {CONFIG: CMD_GET_DOOR_BATTERY, "msgId": 1})
 
         mock_transport.write.assert_called()
         response = last_response(mock_transport)
         assert response[FIELD_BATTERY_PERCENT] == 75
+        assert not isinstance(response[FIELD_BATTERY_PERCENT], bool)
+        assert response[FIELD_BATTERY_PRESENT] == "true"
+        assert response[FIELD_AC_PRESENT] == "false"
 
     async def test_power_on_off(self, protocol, mock_transport, state):
         """Should handle POWER_ON and POWER_OFF commands."""
@@ -408,7 +429,13 @@ class TestDoorSimulatorProtocol:
             "outEndTime": {"hour": 22, "min": 0},
         }
         await dispatch(
-            protocol, {CONFIG: CMD_SET_SCHEDULE, FIELD_SCHEDULE: schedule_data, "msgId": 1}
+            protocol,
+            {
+                CONFIG: CMD_SET_SCHEDULE,
+                FIELD_INDEX: 0,
+                FIELD_SCHEDULE: schedule_data,
+                "msgId": 1,
+            },
         )
         assert 0 in state.schedules
 
@@ -421,8 +448,15 @@ class TestDoorSimulatorProtocol:
         await dispatch(protocol, {CONFIG: CMD_DELETE_SCHEDULE, FIELD_INDEX: 0, "msgId": 3})
         assert 0 not in state.schedules
 
-    async def test_set_notifications_top_level_fields(self, protocol, mock_transport, state):
-        """SET_NOTIFICATIONS uses top-level "1"/"0" fields (docs/protocol.md)."""
+    async def test_set_notifications_applies_a_nested_object_of_booleans(
+        self, protocol, mock_transport, state
+    ):
+        """The one shape firmware 1.7.18 actually writes.
+
+        A nested `notifications` object carrying all five flags as JSON
+        booleans. The reply echoes the NEW settings, spelled as the
+        "true"/"false" strings the read path uses.
+        """
         assert state.sensor_on_indoor is False
         assert state.low_battery is True
 
@@ -430,11 +464,13 @@ class TestDoorSimulatorProtocol:
             protocol,
             {
                 CONFIG: CMD_SET_NOTIFICATIONS,
-                FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: "1",
-                FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: "0",
-                FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: "1",
-                FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: "0",
-                FIELD_LOW_BATTERY_NOTIFICATIONS: "0",
+                FIELD_NOTIFICATIONS: {
+                    FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: True,
+                    FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: False,
+                    FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: True,
+                    FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: False,
+                    FIELD_LOW_BATTERY_NOTIFICATIONS: False,
+                },
                 "msgId": 1,
             },
         )
@@ -446,22 +482,67 @@ class TestDoorSimulatorProtocol:
         assert state.low_battery is False
 
         response = last_response(mock_transport)
-        assert response[FIELD_NOTIFICATIONS][FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS] == "1"
-        assert response[FIELD_NOTIFICATIONS][FIELD_LOW_BATTERY_NOTIFICATIONS] == "0"
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert response[FIELD_NOTIFICATIONS][FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS] == "true"
+        assert response[FIELD_NOTIFICATIONS][FIELD_LOW_BATTERY_NOTIFICATIONS] == "false"
 
-    async def test_set_notifications_nested_dict_still_accepted(
+    async def test_set_notifications_rejects_flat_top_level_fields(
         self, protocol, mock_transport, state
     ):
-        """The legacy nested "notifications" payload is still honored."""
+        """Verified against firmware 1.7.18: flat fields are refused outright.
+
+        This is the shape docs/protocol.md documented, and the shape this
+        library sent - which is why `set_notifications()` never worked
+        against a real door.
+        """
+        assert state.sensor_on_indoor is False
+
         await dispatch(
             protocol,
             {
                 CONFIG: CMD_SET_NOTIFICATIONS,
-                FIELD_NOTIFICATIONS: {FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: "1"},
+                FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: True,
+                FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: False,
+                FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: True,
+                FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: False,
+                FIELD_LOW_BATTERY_NOTIFICATIONS: False,
                 "msgId": 1,
             },
         )
-        assert state.sensor_on_indoor is True
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert FIELD_MSG_ID_RESPONSE not in response
+        assert state.sensor_on_indoor is False
+
+    @pytest.mark.parametrize("value", ["true", "1", "on"], ids=repr)
+    async def test_set_notifications_accepts_but_ignores_string_values(
+        self, protocol, mock_transport, state, value
+    ):
+        """The most dangerous behaviour in the protocol, emulated.
+
+        Verified against firmware 1.7.18: a *nested* object whose values
+        are strings is answered with a normal success envelope carrying
+        the CURRENT settings - and nothing is written. It looks exactly
+        like a successful write.
+        """
+        assert state.sensor_on_indoor is False
+        before = state.get_notifications()
+
+        await dispatch(
+            protocol,
+            {
+                CONFIG: CMD_SET_NOTIFICATIONS,
+                FIELD_NOTIFICATIONS: {FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: value},
+                "msgId": 1,
+            },
+        )
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert response[FIELD_NOTIFICATIONS] == before
+        assert state.sensor_on_indoor is False
+        assert state.get_notifications() == before
 
     async def test_delete_schedule_echoes_index(self, protocol, mock_transport, state):
         """DELETE_SCHEDULE echoes the deleted index (real device behavior)."""
@@ -645,6 +726,114 @@ class TestFraming:
 # ============================================================================
 
 
+class TestAFailureCarriesNoMsgId:
+    """Verified against firmware 1.7.18.
+
+    A real door echoes `msgId` back as `msgID` on success and omits it
+    entirely on failure - the observed shape is
+    ``{"success":"false","dir":"d2p","CMD":"..."}``. That is emulated
+    rather than smoothed over, because a client that can only pair
+    id-matched replies passes against a simulator that echoes the id and
+    then waits out its timeout against the real door.
+    """
+
+    async def test_a_successful_response_still_echoes_the_id(self, protocol, mock_transport):
+        """The control: only failures drop it."""
+        await dispatch(protocol, {CONFIG: CMD_GET_SETTINGS, "msgId": 21})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert response[FIELD_MSG_ID_RESPONSE] == 21
+
+    async def test_a_rejected_command_carries_no_id(self, protocol, mock_transport):
+        await dispatch(protocol, {CONFIG: CMD_GET_SCHEDULE, "msgId": 22, FIELD_INDEX: 9})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert FIELD_MSG_ID_RESPONSE not in response
+
+    async def test_a_blocked_command_carries_no_id(self, protocol, mock_transport, state):
+        """The `_check_command_allowed` path, which builds its own envelope."""
+        state.power = False
+
+        await dispatch(protocol, {COMMAND: CMD_OPEN, "msgId": 23})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == "Power is OFF"
+        assert FIELD_MSG_ID_RESPONSE not in response
+
+    async def test_a_pong_carries_no_id_either(self, protocol, mock_transport):
+        """Verified: the echoed token is the whole correlation mechanism."""
+        await dispatch(protocol, {PING: "1710000000123", "msgId": 24})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_CMD] == PONG
+        assert response[PONG] == "1710000000123"
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert FIELD_MSG_ID_RESPONSE not in response
+
+
+class TestTheEnvelopeKeyIsNotCosmetic:
+    """Verified against firmware 1.7.18.
+
+    `{"cmd":"ENABLE_INSIDE"}` is answered success:"false" and changes
+    nothing; `{"config":"ENABLE_INSIDE"}` succeeds. Only door motion is a
+    `cmd`.
+    """
+
+    NOT_MOTION = [
+        CMD_ENABLE_INSIDE,
+        CMD_DISABLE_INSIDE,
+        CMD_POWER_ON,
+        CMD_ENABLE_AUTORETRACT,
+        CMD_GET_SETTINGS,
+        CMD_SET_HOLD_TIME,
+    ]
+
+    @pytest.mark.parametrize("cmd", NOT_MOTION)
+    async def test_a_non_motion_command_is_rejected_as_cmd(self, protocol, mock_transport, cmd):
+        await dispatch(protocol, {COMMAND: cmd, "msgId": 1})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_CMD] == cmd
+        assert FIELD_MSG_ID_RESPONSE not in response
+
+    @pytest.mark.parametrize("cmd", NOT_MOTION)
+    async def test_the_same_command_succeeds_as_config(self, protocol, mock_transport, cmd):
+        """The control, so the rejection above is about the key, not the command."""
+        await dispatch(protocol, {CONFIG: cmd, "msgId": 1})
+
+        assert last_response(mock_transport)[FIELD_SUCCESS] == SUCCESS_TRUE
+
+    @pytest.mark.parametrize("cmd", sorted(COMMAND_ENVELOPE_COMMANDS))
+    async def test_door_motion_is_accepted_as_cmd(self, protocol, mock_transport, cmd):
+        await dispatch(protocol, {COMMAND: cmd, "msgId": 1})
+
+        motion = next(r for r in all_responses(mock_transport) if r.get(FIELD_CMD) == cmd)
+        assert motion[FIELD_SUCCESS] == SUCCESS_TRUE
+
+    async def test_enable_inside_as_cmd_leaves_the_state_alone(
+        self, protocol, mock_transport, state
+    ):
+        """Not just a failure envelope - nothing is written, like the door."""
+        state.inside = False
+
+        await dispatch(protocol, {COMMAND: CMD_ENABLE_INSIDE, "msgId": 1})
+
+        assert state.inside is False
+        assert last_response(mock_transport)[FIELD_SUCCESS] == SUCCESS_FALSE
+
+    async def test_the_rejection_names_the_key_to_use(self, protocol, mock_transport):
+        """The simulator's reason is a debugging aid; it must be actionable."""
+        await dispatch(protocol, {COMMAND: CMD_ENABLE_INSIDE, "msgId": 1})
+
+        reason = last_response(mock_transport)[FIELD_REASON]
+        assert CONFIG in reason
+        assert COMMAND in reason
+
+
 class TestProtocolViolations:
     """Unknown commands and malformed messages get the error envelope."""
 
@@ -656,7 +845,7 @@ class TestProtocolViolations:
         assert response[FIELD_CMD] == "NO_SUCH_COMMAND"
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
         assert response[FIELD_REASON] == "Unknown command"
-        assert response[FIELD_MSG_ID_RESPONSE] == 7
+        assert FIELD_MSG_ID_RESPONSE not in response
 
     async def test_non_string_command_answers_failure(self, protocol, mock_transport):
         """A non-string command value must not crash and answers failure."""
@@ -665,7 +854,7 @@ class TestProtocolViolations:
         response = last_response(mock_transport)
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
         assert response[FIELD_REASON] == "Unknown command"
-        assert response[FIELD_MSG_ID_RESPONSE] == 8
+        assert FIELD_MSG_ID_RESPONSE not in response
 
     async def test_msgid_zero_echoed(self, protocol, mock_transport):
         """msgId 0 must be echoed back (0 is a valid message id)."""
@@ -694,16 +883,58 @@ class TestProtocolViolations:
         assert response[FIELD_CMD] == CMD_GET_SETTINGS
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
         assert response[FIELD_REASON] == "Command failed"
-        assert response[FIELD_MSG_ID_RESPONSE] == 9
+        assert FIELD_MSG_ID_RESPONSE not in response
         assert FIELD_SETTINGS not in response
 
     async def test_set_schedule_missing_payload_fails(self, protocol, mock_transport):
         """CMD_SET_SCHEDULE without a schedule payload answers failure + reason."""
-        await dispatch(protocol, {CONFIG: CMD_SET_SCHEDULE, "msgId": 4})
+        await dispatch(protocol, {CONFIG: CMD_SET_SCHEDULE, FIELD_INDEX: 0, "msgId": 4})
 
         response = last_response(mock_transport)
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
         assert response[FIELD_REASON] == "Missing schedule"
+
+    async def test_set_schedule_without_a_sibling_index_fails(
+        self, protocol, mock_transport, state
+    ):
+        """Verified against firmware 1.7.18.
+
+        The slot `index` must be sent alongside the schedule object, even
+        though the object carries one of its own. A message with only
+        `schedule` is answered success:"false" and writes nothing - which
+        is why every `set_schedule()` this library shipped before now was
+        a no-op against a real door.
+        """
+        await dispatch(
+            protocol,
+            {
+                CONFIG: CMD_SET_SCHEDULE,
+                FIELD_SCHEDULE: {**GOLDEN_SCHEDULE_WIRE_TO_DEVICE, "index": 0},
+                "msgId": 5,
+            },
+        )
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == "Missing index"
+        assert state.schedules == {}
+
+    async def test_the_same_payload_with_a_sibling_index_is_stored(
+        self, protocol, mock_transport, state
+    ):
+        """The control: the index is the only thing that was missing."""
+        await dispatch(
+            protocol,
+            {
+                CONFIG: CMD_SET_SCHEDULE,
+                FIELD_INDEX: 0,
+                FIELD_SCHEDULE: {**GOLDEN_SCHEDULE_WIRE_TO_DEVICE, "index": 0},
+                "msgId": 6,
+            },
+        )
+
+        assert last_response(mock_transport)[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert 0 in state.schedules
 
     async def test_set_schedule_with_truncated_days_is_rejected(
         self, protocol, mock_transport, state
@@ -713,6 +944,7 @@ class TestProtocolViolations:
             protocol,
             {
                 CONFIG: CMD_SET_SCHEDULE,
+                FIELD_INDEX: 0,
                 FIELD_SCHEDULE: {FIELD_INDEX: 0, FIELD_INSIDE: True, "daysOfWeek": [1]},
                 "msgId": 11,
             },
@@ -721,7 +953,7 @@ class TestProtocolViolations:
         response = last_response(mock_transport)
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
         assert response[FIELD_REASON] == ("Schedule daysOfWeek must be a list of 7 values, got [1]")
-        assert response[FIELD_MSG_ID_RESPONSE] == 11
+        assert FIELD_MSG_ID_RESPONSE not in response
         # Nothing was stored, so schedule evaluation can never trip over it.
         assert state.schedules == {}
 
@@ -738,6 +970,7 @@ class TestProtocolViolations:
             protocol,
             {
                 CONFIG: CMD_SET_SCHEDULE,
+                FIELD_INDEX: 0,
                 FIELD_SCHEDULE: {
                     FIELD_INDEX: 0,
                     FIELD_INSIDE: True,
@@ -1111,48 +1344,26 @@ class TestHoldTimeCentiseconds:
 class TestGetCommandHandlers:
     """Each query command answers its exact response field."""
 
-    @pytest.mark.parametrize(("enabled", "value"), [(True, "1"), (False, "0")])
-    async def test_get_auto(self, protocol, mock_transport, state, enabled, value):
-        """GET_AUTO reports the timers flag."""
-        state.auto = enabled
-        await dispatch(protocol, {CONFIG: CMD_GET_AUTO, "msgId": 1})
-        assert last_response(mock_transport)[FIELD_AUTO] == value
-
-    @pytest.mark.parametrize(("enabled", "value"), [(True, "1"), (False, "0")])
-    async def test_get_safety_lock(self, protocol, mock_transport, state, enabled, value):
-        """GET_OUTSIDE_SENSOR_SAFETY_LOCK reports via a settings dict."""
-        state.safety_lock = enabled
-        await dispatch(protocol, {CONFIG: CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK, "msgId": 1})
-        response = last_response(mock_transport)
-        assert response[FIELD_SETTINGS] == {FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: value}
-
-    @pytest.mark.parametrize(("enabled", "value"), [(True, "1"), (False, "0")])
-    async def test_get_cmd_lockout(self, protocol, mock_transport, state, enabled, value):
-        """GET_CMD_LOCKOUT reports via a settings dict."""
-        state.cmd_lockout = enabled
-        await dispatch(protocol, {CONFIG: CMD_GET_CMD_LOCKOUT, "msgId": 1})
-        assert last_response(mock_transport)[FIELD_SETTINGS] == {FIELD_CMD_LOCKOUT: value}
-
-    @pytest.mark.parametrize(("enabled", "value"), [(True, "1"), (False, "0")])
-    async def test_get_autoretract(self, protocol, mock_transport, state, enabled, value):
-        """GET_AUTORETRACT reports via a settings dict."""
-        state.autoretract = enabled
-        await dispatch(protocol, {CONFIG: CMD_GET_AUTORETRACT, "msgId": 1})
-        assert last_response(mock_transport)[FIELD_SETTINGS] == {FIELD_AUTORETRACT: value}
-
     async def test_get_notifications(self, protocol, mock_transport, state):
         """GET_NOTIFICATIONS returns the notification settings dict."""
         await dispatch(protocol, {CONFIG: CMD_GET_NOTIFICATIONS, "msgId": 1})
         assert last_response(mock_transport)[FIELD_NOTIFICATIONS] == state.get_notifications()
 
     async def test_get_sensors(self, protocol, mock_transport, state):
-        """GET_SENSORS reports both sensor enable flags."""
+        """GET_SENSORS reports both sensor enable flags as INTS.
+
+        Verified against firmware 1.7.18: the same `inside` that
+        GET_SETTINGS answers as the string "true" comes back here as the
+        integer 1. The device's own inconsistency, reproduced rather than
+        normalized.
+        """
         state.inside = True
         state.outside = False
         await dispatch(protocol, {CONFIG: CMD_GET_SENSORS, "msgId": 1})
         response = last_response(mock_transport)
-        assert response[FIELD_INSIDE] == "1"
-        assert response[FIELD_OUTSIDE] == "0"
+        assert response[FIELD_INSIDE] == 1
+        assert response[FIELD_OUTSIDE] == 0
+        assert not isinstance(response[FIELD_INSIDE], bool)
 
     async def test_get_hw_info(self, protocol, mock_transport, state):
         """GET_HW_INFO reports the firmware/hardware identity."""
@@ -1195,24 +1406,130 @@ class TestGetCommandHandlers:
         await dispatch(protocol, {CONFIG: CMD_GET_SCHEDULE_LIST, "msgId": 1})
         assert last_response(mock_transport)[FIELD_SCHEDULES] == [2]
 
-    @pytest.mark.parametrize(("has", "value"), [(True, "1"), (False, "0")])
+    @pytest.mark.parametrize(("has", "value"), [(True, "true"), (False, "false")])
     async def test_has_remote_id(self, protocol, mock_transport, state, has, value):
-        """HAS_REMOTE_ID reports the stored flag."""
+        """HAS_REMOTE_ID reports the stored flag.
+
+        Verified against firmware 1.7.18: the field is `has_id` - NOT the
+        `hasRemoteId` this project guessed at for five years - and its
+        value is a "true"/"false" string.
+        """
         state.has_remote_id = has
         await dispatch(protocol, {CONFIG: CMD_HAS_REMOTE_ID, "msgId": 1})
-        assert last_response(mock_transport)[FIELD_HAS_REMOTE_ID] == value
+        response = last_response(mock_transport)
+        assert response[FIELD_HAS_REMOTE_ID] == value
+        assert "hasRemoteId" not in response
 
-    @pytest.mark.parametrize(("has", "value"), [(True, "1"), (False, "0")])
+    @pytest.mark.parametrize(("has", "value"), [(True, "true"), (False, "false")])
     async def test_has_remote_key(self, protocol, mock_transport, state, has, value):
-        """HAS_REMOTE_KEY reports the stored flag."""
+        """HAS_REMOTE_KEY reports the stored flag, as `has_key`."""
         state.has_remote_key = has
         await dispatch(protocol, {CONFIG: CMD_HAS_REMOTE_KEY, "msgId": 1})
-        assert last_response(mock_transport)[FIELD_HAS_REMOTE_KEY] == value
+        response = last_response(mock_transport)
+        assert response[FIELD_HAS_REMOTE_KEY] == value
+        assert "hasRemoteKey" not in response
 
-    async def test_check_reset_reason(self, protocol, mock_transport, state):
-        """CHECK_RESET_REASON reports the stored reason."""
-        await dispatch(protocol, {CONFIG: CMD_CHECK_RESET_REASON, "msgId": 1})
-        assert last_response(mock_transport)[FIELD_RESET_REASON] == "POWER_ON"
+
+class TestTheDoorClock:
+    """`GET_TIME` - undocumented by the vendor, present on firmware 1.7.18.
+
+    Worth emulating because schedules are evaluated against this clock, so
+    it is the only way a client can check that a door will fire a schedule
+    when it expects it to.
+    """
+
+    async def test_get_time_answers_an_asctime_string(self, protocol, mock_transport):
+        await dispatch(protocol, {CONFIG: CMD_GET_TIME, "msgId": 1})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        # Round-trips through the one format constant both sides use.
+        assert datetime.strptime(response[FIELD_TIME], TIME_FORMAT)
+
+    async def test_the_clock_is_read_in_the_doors_own_timezone(
+        self, protocol, mock_transport, state
+    ):
+        """A door in the wrong timezone fires schedules at the wrong time,
+        so the clock has to follow `tz` rather than the host's zone."""
+        from powerpetdoor import tz_utils
+
+        tz_utils.init_timezone_cache_sync()
+        state.timezone = "Australia/Sydney"
+        await dispatch(protocol, {CONFIG: CMD_GET_TIME, "msgId": 1})
+        sydney = datetime.strptime(last_response(mock_transport)[FIELD_TIME], TIME_FORMAT)
+
+        state.timezone = "America/New_York"
+        await dispatch(protocol, {CONFIG: CMD_GET_TIME, "msgId": 2})
+        new_york = datetime.strptime(last_response(mock_transport)[FIELD_TIME], TIME_FORMAT)
+
+        # Two zones that are never on the same wall clock, at any date.
+        assert sydney.replace(second=0, microsecond=0) != new_york.replace(second=0, microsecond=0)
+
+    async def test_set_time_answers_with_silence(self, protocol, mock_transport, state):
+        """Verified against firmware 1.7.18, and reproduced twice there.
+
+        The clock is read-only, and this one command answers with **no
+        frame at all** where every other rejected shape answers
+        success:"false". A client that reads silence as success hangs.
+        """
+        await dispatch(
+            protocol,
+            {CONFIG: CMD_SET_TIME, FIELD_TIME: "Sun Aug 23 03:34:15 2026", "msgId": 1},
+        )
+
+        assert all_responses(mock_transport) == []
+
+    async def test_an_unknown_command_still_answers_a_failure(self, protocol, mock_transport):
+        """The control: silence is SET_TIME's alone, not the default."""
+        await dispatch(protocol, {CONFIG: "SET_CLOCK", "msgId": 1})
+
+        assert last_response(mock_transport)[FIELD_SUCCESS] == SUCCESS_FALSE
+
+
+class TestCommandsThisFirmwareDoesNotHave:
+    """Five names this project defines that firmware 1.7.18 rejects.
+
+    Verified by probing a physical door: each answers ``success: "false"``,
+    and the state each one would have reported is readable from
+    ``GET_SETTINGS`` instead (except the reset reason, which has no
+    substitute). The simulator rejects them too, so a client that depends
+    on one fails here rather than only against hardware.
+    """
+
+    UNSUPPORTED = [
+        CMD_GET_AUTO,
+        CMD_GET_AUTORETRACT,
+        CMD_GET_CMD_LOCKOUT,
+        CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
+        CMD_CHECK_RESET_REASON,
+    ]
+
+    @pytest.mark.parametrize("cmd", UNSUPPORTED)
+    async def test_the_command_is_rejected(self, protocol, mock_transport, cmd):
+        await dispatch(protocol, {CONFIG: cmd, "msgId": 1})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_CMD] == cmd
+        # And, like every failure, with no msgID to pair it by.
+        assert FIELD_MSG_ID_RESPONSE not in response
+
+    @pytest.mark.parametrize(
+        ("cmd", "settings_field"),
+        [
+            (CMD_GET_AUTO, FIELD_AUTO),
+            (CMD_GET_AUTORETRACT, FIELD_AUTORETRACT),
+            (CMD_GET_CMD_LOCKOUT, FIELD_CMD_LOCKOUT),
+            (CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK, FIELD_OUTSIDE_SENSOR_SAFETY_LOCK),
+        ],
+    )
+    async def test_the_state_is_still_reachable_through_get_settings(
+        self, protocol, mock_transport, cmd, settings_field
+    ):
+        """The substitute, so the rejection above is not a loss of function."""
+        await dispatch(protocol, {CONFIG: CMD_GET_SETTINGS, "msgId": 1})
+
+        assert settings_field in last_response(mock_transport)[FIELD_SETTINGS]
 
 
 class TestGetTimezone:
@@ -1231,7 +1548,7 @@ class TestGetTimezone:
         self, protocol, mock_transport, state, monkeypatch
     ):
         """Without the tz cache, the stored value is returned as-is."""
-        monkeypatch.setattr(protocol_module, "is_cache_initialized", lambda: False)
+        monkeypatch.setattr(state_module, "is_cache_initialized", lambda: False)
         await dispatch(protocol, {CONFIG: CMD_GET_TIMEZONE, "msgId": 1})
         assert last_response(mock_transport)[FIELD_TZ] == state.timezone
 
@@ -1239,10 +1556,26 @@ class TestGetTimezone:
         self, protocol, mock_transport, state, monkeypatch
     ):
         """An unconvertible zone falls back to the stored value."""
-        monkeypatch.setattr(protocol_module, "is_cache_initialized", lambda: True)
-        monkeypatch.setattr(protocol_module, "get_posix_tz_string", lambda tz: None)
+        monkeypatch.setattr(state_module, "is_cache_initialized", lambda: True)
+        monkeypatch.setattr(state_module, "get_posix_tz_string", lambda tz: None)
         await dispatch(protocol, {CONFIG: CMD_GET_TIMEZONE, "msgId": 1})
         assert last_response(mock_transport)[FIELD_TZ] == state.timezone
+
+    async def test_get_settings_and_get_timezone_cannot_disagree(
+        self, protocol, mock_transport, state
+    ):
+        """Both read the one conversion, so they answer the same string."""
+        from powerpetdoor import tz_utils
+
+        tz_utils.init_timezone_cache_sync()
+        state.timezone = "America/New_York"
+
+        await dispatch(protocol, {CONFIG: CMD_GET_TIMEZONE, "msgId": 1})
+        from_command = last_response(mock_transport)[FIELD_TZ]
+        await dispatch(protocol, {CONFIG: CMD_GET_SETTINGS, "msgId": 2})
+        from_settings = last_response(mock_transport)[FIELD_SETTINGS][FIELD_TZ]
+
+        assert from_command == from_settings == "EST5EDT,M3.2.0,M11.1.0"
 
 
 # ============================================================================
@@ -1256,18 +1589,23 @@ class TestEnableDisableHandlers:
     @pytest.mark.parametrize(
         ("cmd", "attr", "expected", "field", "value"),
         [
-            (CMD_ENABLE_OUTSIDE, "outside", True, FIELD_OUTSIDE, "1"),
-            (CMD_DISABLE_OUTSIDE, "outside", False, FIELD_OUTSIDE, "0"),
-            (CMD_ENABLE_AUTO, "auto", True, FIELD_AUTO, "1"),
-            (CMD_DISABLE_AUTO, "auto", False, FIELD_AUTO, "0"),
-            (CMD_POWER_ON, "power", True, FIELD_POWER, "1"),
-            (CMD_POWER_OFF, "power", False, FIELD_POWER, "0"),
+            (CMD_ENABLE_OUTSIDE, "outside", True, FIELD_OUTSIDE, 1),
+            (CMD_DISABLE_OUTSIDE, "outside", False, FIELD_OUTSIDE, 0),
+            (CMD_ENABLE_AUTO, "auto", True, FIELD_AUTO, 1),
+            (CMD_DISABLE_AUTO, "auto", False, FIELD_AUTO, 0),
+            (CMD_POWER_ON, "power", True, FIELD_POWER, 1),
+            (CMD_POWER_OFF, "power", False, FIELD_POWER, 0),
         ],
     )
     async def test_simple_field_commands(
         self, protocol, mock_transport, state, cmd, attr, expected, field, value
     ):
-        """Commands answering with a top-level field."""
+        """Commands answering with a top-level field, as an INT.
+
+        Verified against firmware 1.7.18 for the sensor pair:
+        ``{"config": "ENABLE_INSIDE"}`` answers ``{"inside": 1}``. The
+        others follow the same shape.
+        """
         setattr(state, attr, not expected)
         await dispatch(protocol, {CONFIG: cmd, "msgId": 1})
 
@@ -1275,6 +1613,7 @@ class TestEnableDisableHandlers:
         response = last_response(mock_transport)
         assert response[FIELD_CMD] == cmd
         assert response[field] == value
+        assert not isinstance(response[field], bool)
 
     @pytest.mark.parametrize(
         ("cmd", "attr", "expected", "field", "value"),
@@ -1284,25 +1623,27 @@ class TestEnableDisableHandlers:
                 "safety_lock",
                 True,
                 FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
-                "1",
+                "true",
             ),
             (
                 CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
                 "safety_lock",
                 False,
                 FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
-                "0",
+                "false",
             ),
-            (CMD_ENABLE_CMD_LOCKOUT, "cmd_lockout", True, FIELD_CMD_LOCKOUT, "1"),
-            (CMD_DISABLE_CMD_LOCKOUT, "cmd_lockout", False, FIELD_CMD_LOCKOUT, "0"),
-            (CMD_ENABLE_AUTORETRACT, "autoretract", True, FIELD_AUTORETRACT, "1"),
-            (CMD_DISABLE_AUTORETRACT, "autoretract", False, FIELD_AUTORETRACT, "0"),
+            (CMD_ENABLE_CMD_LOCKOUT, "cmd_lockout", True, FIELD_CMD_LOCKOUT, "true"),
+            (CMD_DISABLE_CMD_LOCKOUT, "cmd_lockout", False, FIELD_CMD_LOCKOUT, "false"),
         ],
     )
     async def test_settings_dict_commands(
         self, protocol, mock_transport, state, cmd, attr, expected, field, value
     ):
-        """Commands answering with a nested settings dict."""
+        """Commands answering with a nested settings dict.
+
+        A field carried inside ``settings`` is spelled the way
+        GET_SETTINGS spells it - "true"/"false" strings for these two.
+        """
         setattr(state, attr, not expected)
         await dispatch(protocol, {CONFIG: cmd, "msgId": 1})
 
@@ -1310,6 +1651,33 @@ class TestEnableDisableHandlers:
         response = last_response(mock_transport)
         assert response[FIELD_CMD] == cmd
         assert response[FIELD_SETTINGS] == {field: value}
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected", "door_options"),
+        [
+            (CMD_ENABLE_AUTORETRACT, True, DOOR_OPTION_AUTORETRACT),
+            (CMD_DISABLE_AUTORETRACT, False, 0),
+        ],
+    )
+    async def test_autoretract_answers_with_the_whole_settings_object(
+        self, protocol, mock_transport, state, cmd, expected, door_options
+    ):
+        """Verified against firmware 1.7.18, twice over.
+
+        These two answer with the **whole** settings object rather than
+        just the field they changed, and the field itself is the
+        ``doorOptions`` integer bitfield: 0 when disabled, 2 (bit 1) when
+        enabled - never "0"/"1".
+        """
+        state.autoretract = not expected
+        await dispatch(protocol, {CONFIG: cmd, "msgId": 1})
+
+        assert state.autoretract is expected
+        response = last_response(mock_transport)
+        assert response[FIELD_CMD] == cmd
+        assert response[FIELD_SETTINGS] == state.get_settings()
+        assert response[FIELD_SETTINGS][FIELD_AUTORETRACT] == door_options
+        assert not isinstance(response[FIELD_SETTINGS][FIELD_AUTORETRACT], bool)
 
     async def test_close_command_reverses_open_door(self, protocol, mock_transport, state):
         """CLOSE while open starts closing and echoes the new status."""
@@ -1365,28 +1733,66 @@ class TestSetHandlers:
         assert state.hold_time == 1
         assert last_response(mock_transport)[FIELD_HOLD_TIME] == 100
 
-    async def test_set_notifications_without_fields_changes_nothing(
+    async def test_set_notifications_without_a_nested_object_is_rejected(
         self, protocol, mock_transport, state
     ):
-        """SET_NOTIFICATIONS with no recognized fields echoes current settings."""
+        """A SET_NOTIFICATIONS with nothing to apply is refused, not ignored."""
         before = state.get_notifications()
+
         await dispatch(protocol, {CONFIG: CMD_SET_NOTIFICATIONS, "msgId": 1})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == "Missing notifications"
         assert state.get_notifications() == before
-        assert last_response(mock_transport)[FIELD_NOTIFICATIONS] == before
 
     async def test_set_sensor_trigger_voltage(self, protocol, mock_transport, state):
-        """SET_SENSOR_TRIGGER_VOLTAGE stores and echoes the value."""
+        """SET_SENSOR_TRIGGER_VOLTAGE takes `voltage` and echoes the getter's field.
+
+        Verified against firmware 1.7.18: the setter's parameter is
+        `voltage`, and the reply carries `sensorTriggerVoltage`.
+        """
         await dispatch(
             protocol,
-            {CONFIG: CMD_SET_SENSOR_TRIGGER_VOLTAGE, FIELD_SENSOR_TRIGGER_VOLTAGE: 150, "msgId": 1},
+            {CONFIG: CMD_SET_SENSOR_TRIGGER_VOLTAGE, FIELD_VOLTAGE: 1500, "msgId": 1},
         )
-        assert state.sensor_trigger_voltage == 150
-        assert last_response(mock_transport)[FIELD_SENSOR_TRIGGER_VOLTAGE] == 150
+        assert state.sensor_trigger_voltage == 1500
+        assert last_response(mock_transport)[FIELD_SENSOR_TRIGGER_VOLTAGE] == 1500
+
+    @pytest.mark.parametrize(
+        ("cmd", "getter_field"),
+        [
+            (CMD_SET_SENSOR_TRIGGER_VOLTAGE, FIELD_SENSOR_TRIGGER_VOLTAGE),
+            (CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE, FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE),
+        ],
+    )
+    async def test_the_voltage_setters_reject_the_getters_field_name(
+        self, protocol, mock_transport, state, cmd, getter_field
+    ):
+        """Verified against firmware 1.7.18, and the shape docs used to show.
+
+        `{"config":"SET_SENSOR_TRIGGER_VOLTAGE","sensorTriggerVoltage":1500}`
+        is rejected by a real door; only `voltage` is accepted.
+        """
+        state.sensor_trigger_voltage = 100
+        state.sleep_sensor_trigger_voltage = 100
+
+        await dispatch(protocol, {CONFIG: cmd, getter_field: 1500, "msgId": 1})
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == f"{FIELD_VOLTAGE} is required"
+        assert state.sensor_trigger_voltage == 100
+        assert state.sleep_sensor_trigger_voltage == 100
 
     async def test_set_sensor_trigger_voltage_without_value(self, protocol, mock_transport, state):
-        """Without a value the current voltage is echoed unchanged."""
+        """Without `voltage` there is nothing to set, so it fails."""
         await dispatch(protocol, {CONFIG: CMD_SET_SENSOR_TRIGGER_VOLTAGE, "msgId": 1})
-        assert last_response(mock_transport)[FIELD_SENSOR_TRIGGER_VOLTAGE] == 100
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == f"{FIELD_VOLTAGE} is required"
+        assert state.sensor_trigger_voltage == 100
 
     async def test_set_sleep_sensor_trigger_voltage(self, protocol, mock_transport, state):
         """SET_SLEEP_SENSOR_TRIGGER_VOLTAGE stores and echoes the value."""
@@ -1394,19 +1800,23 @@ class TestSetHandlers:
             protocol,
             {
                 CONFIG: CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
-                FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE: 75,
+                FIELD_VOLTAGE: 1800,
                 "msgId": 1,
             },
         )
-        assert state.sleep_sensor_trigger_voltage == 75
-        assert last_response(mock_transport)[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE] == 75
+        assert state.sleep_sensor_trigger_voltage == 1800
+        assert last_response(mock_transport)[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE] == 1800
 
     async def test_set_sleep_sensor_trigger_voltage_without_value(
         self, protocol, mock_transport, state
     ):
-        """Without a value the current sleep voltage is echoed unchanged."""
+        """Without `voltage` there is nothing to set, so it fails."""
         await dispatch(protocol, {CONFIG: CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE, "msgId": 1})
-        assert last_response(mock_transport)[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE] == 50
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_FALSE
+        assert response[FIELD_REASON] == f"{FIELD_VOLTAGE} is required"
+        assert state.sleep_sensor_trigger_voltage == 50
 
     async def test_set_schedule_list_replaces_schedules(self, protocol, mock_transport, state):
         """SET_SCHEDULE_LIST clears existing schedules and loads the new list."""
@@ -1499,7 +1909,7 @@ class TestMessageEnvelopeEdgeCases:
         """A command without msgId is answered without a msgID echo."""
         await dispatch(protocol, {CONFIG: CMD_GET_POWER})
         response = last_response(mock_transport)
-        assert response[FIELD_POWER] == "1"
+        assert response[FIELD_POWER] == 1
         assert FIELD_MSG_ID_RESPONSE not in response
 
     async def test_handler_crash_without_msgid(self, protocol, mock_transport, state, monkeypatch):
@@ -1678,7 +2088,8 @@ class TestWireValueValidation:
         assert response[FIELD_CMD] == (msg.get(CONFIG) or msg.get(COMMAND))
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
         assert reason_fragment in response[FIELD_REASON]
-        assert response[FIELD_MSG_ID_RESPONSE] == 77
+        # Verified against firmware 1.7.18: a failure carries no msgID.
+        assert FIELD_MSG_ID_RESPONSE not in response
         return response
 
     @pytest.mark.parametrize(
@@ -1716,7 +2127,7 @@ class TestWireValueValidation:
         GET_HOLD_TIME answered "Command failed" for the life of the process.
         """
         state.hold_time = 2.0
-        protocol.data_received(b'{"cmd":"SET_HOLD_TIME","holdTime":1e400}')
+        protocol.data_received(b'{"config":"SET_HOLD_TIME","holdTime":1e400}')
         await protocol.drain()
         assert last_response(mock_transport)[FIELD_SUCCESS] == SUCCESS_FALSE
 
@@ -1800,11 +2211,6 @@ class TestWireValueValidation:
     async def test_set_trigger_voltage_rejects_bad_values(
         self, protocol, mock_transport, state, command_name, value, reason
     ):
-        field = (
-            FIELD_SENSOR_TRIGGER_VOLTAGE
-            if command_name == CMD_SET_SENSOR_TRIGGER_VOLTAGE
-            else FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE
-        )
         attribute = (
             "sensor_trigger_voltage"
             if command_name == CMD_SET_SENSOR_TRIGGER_VOLTAGE
@@ -1812,66 +2218,74 @@ class TestWireValueValidation:
         )
         before = getattr(state, attribute)
         await self._assert_rejected(
-            protocol, mock_transport, {CONFIG: command_name, field: value}, reason
+            protocol, mock_transport, {CONFIG: command_name, FIELD_VOLTAGE: value}, reason
         )
         assert getattr(state, attribute) == before
 
     async def test_set_trigger_voltages_still_apply(self, protocol, mock_transport, state):
         await dispatch(
             protocol,
-            {CONFIG: CMD_SET_SENSOR_TRIGGER_VOLTAGE, FIELD_SENSOR_TRIGGER_VOLTAGE: 250, "msgId": 5},
+            {CONFIG: CMD_SET_SENSOR_TRIGGER_VOLTAGE, FIELD_VOLTAGE: 250, "msgId": 5},
         )
         assert last_response(mock_transport)[FIELD_SENSOR_TRIGGER_VOLTAGE] == 250
         assert state.sensor_trigger_voltage == 250
 
         await dispatch(
             protocol,
-            {
-                CONFIG: CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
-                FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE: 75,
-                "msgId": 6,
-            },
+            {CONFIG: CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE, FIELD_VOLTAGE: 75, "msgId": 6},
         )
         assert last_response(mock_transport)[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE] == 75
         assert state.sleep_sensor_trigger_voltage == 75
 
-    @pytest.mark.parametrize("flag", [["1"], {"a": 1}, "maybe", None, 2.5])
-    async def test_set_notifications_rejects_unreadable_flags(
+    @pytest.mark.parametrize("flag", [["1"], {"a": 1}, "maybe", None, 2.5, "1", 1, 0])
+    async def test_set_notifications_ignores_a_whole_object_with_one_non_boolean(
         self, protocol, mock_transport, state, flag
     ):
+        """One non-boolean value drops the write - for every field.
+
+        Verified against firmware 1.7.18 for the string case, and
+        reproduced for every other non-boolean: the reply is a success
+        envelope carrying the current settings, so the valid sibling field
+        must not land either.
+        """
         state.low_battery = True
         state.sensor_on_indoor = False
-        await self._assert_rejected(
-            protocol,
-            mock_transport,
-            {
-                CONFIG: CMD_SET_NOTIFICATIONS,
-                FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: "1",
-                FIELD_LOW_BATTERY_NOTIFICATIONS: flag,
-            },
-            "must be 0 or 1",
-        )
-        # Nothing applied: the valid sibling field must not land either.
-        assert state.sensor_on_indoor is False
-        assert state.low_battery is True
+        before = state.get_notifications()
 
-    @pytest.mark.parametrize(
-        ("wire_value", "expected"),
-        [("1", True), ("0", False), (1, True), (0, False), (True, True), (False, False)],
-    )
-    async def test_set_notifications_reads_flags_not_truthiness(
-        self, protocol, mock_transport, state, wire_value, expected
-    ):
-        """bool("0") is True; make_bool is what the client uses."""
-        state.low_battery = not expected
         await dispatch(
             protocol,
             {
                 CONFIG: CMD_SET_NOTIFICATIONS,
-                FIELD_LOW_BATTERY_NOTIFICATIONS: wire_value,
+                FIELD_NOTIFICATIONS: {
+                    FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: True,
+                    FIELD_LOW_BATTERY_NOTIFICATIONS: flag,
+                },
                 "msgId": 7,
             },
         )
+
+        response = last_response(mock_transport)
+        assert response[FIELD_SUCCESS] == SUCCESS_TRUE
+        assert response[FIELD_NOTIFICATIONS] == before
+        assert state.sensor_on_indoor is False
+        assert state.low_battery is True
+
+    @pytest.mark.parametrize("expected", [True, False])
+    async def test_set_notifications_applies_a_real_boolean(
+        self, protocol, mock_transport, state, expected
+    ):
+        """The control: a JSON boolean, and only a JSON boolean, is written."""
+        state.low_battery = not expected
+
+        await dispatch(
+            protocol,
+            {
+                CONFIG: CMD_SET_NOTIFICATIONS,
+                FIELD_NOTIFICATIONS: {FIELD_LOW_BATTERY_NOTIFICATIONS: expected},
+                "msgId": 7,
+            },
+        )
+
         response = last_response(mock_transport)
         assert response[FIELD_SUCCESS] == SUCCESS_TRUE
         assert state.low_battery is expected
@@ -1884,6 +2298,7 @@ class TestWireValueValidation:
             protocol,
             {
                 CONFIG: CMD_SET_SCHEDULE,
+                FIELD_INDEX: 0,
                 FIELD_SCHEDULE: {
                     FIELD_INDEX: 0,
                     FIELD_INSIDE: True,
@@ -1908,6 +2323,7 @@ class TestWireValueValidation:
             mock_transport,
             {
                 CONFIG: CMD_SET_SCHEDULE,
+                FIELD_INDEX: 0,
                 FIELD_SCHEDULE: {FIELD_INDEX: 0, FIELD_INSIDE: True, "daysOfWeek": [1] * 7},
             },
             "missing required field 'in_start_time'",
@@ -1919,7 +2335,9 @@ class TestWireValueValidation:
     ):
         """int(inf) raises OverflowError; it must not fall through to the
         generic "Command failed" with a stack trace."""
-        protocol.data_received(b'{"cmd":"SET_SCHEDULE","schedule":{"index":1e400,"inside":true}}')
+        protocol.data_received(
+            b'{"config":"SET_SCHEDULE","index":0,"schedule":{"index":1e400,"inside":true}}'
+        )
         await protocol.drain()
         response = last_response(mock_transport)
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
@@ -1929,7 +2347,7 @@ class TestWireValueValidation:
     async def test_rejection_is_logged_sanitized(self, protocol, mock_transport, state, caplog):
         """The reason reaches the operator's log with no raw control chars."""
         with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.protocol"):
-            protocol.data_received(b'{"cmd":"SET_TIMEZONE","tz":["\\u001b[2J"]}')
+            protocol.data_received(b'{"config":"SET_TIMEZONE","tz":["\\u001b[2J"]}')
             await protocol.drain()
 
         assert "Rejected SET_TIMEZONE" in caplog.text
@@ -2006,10 +2424,13 @@ class TestTheWireNumericBoundsAreInclusive:
     ):
         value = protocol_module.MAX_TRIGGER_VOLTAGE + offset
 
-        response = await self._round_trip(protocol, mock_transport, {CONFIG: command, field: value})
+        response = await self._round_trip(
+            protocol, mock_transport, {CONFIG: command, FIELD_VOLTAGE: value}
+        )
 
         assert response[FIELD_SUCCESS] == SUCCESS_TRUE
         assert getattr(state, attribute) == value
+        # Sent as `voltage`, echoed back under the getter's field name.
         assert response[field] == value
 
     @pytest.mark.parametrize(
@@ -2034,11 +2455,14 @@ class TestTheWireNumericBoundsAreInclusive:
         before = getattr(state, attribute)
         value = protocol_module.MAX_TRIGGER_VOLTAGE + 1
 
-        response = await self._round_trip(protocol, mock_transport, {CONFIG: command, field: value})
+        response = await self._round_trip(
+            protocol, mock_transport, {CONFIG: command, FIELD_VOLTAGE: value}
+        )
 
         assert response[FIELD_SUCCESS] == SUCCESS_FALSE
         assert response[FIELD_REASON] == (
-            f"{field} must be between 0 and {protocol_module.MAX_TRIGGER_VOLTAGE}, got {value}"
+            f"{FIELD_VOLTAGE} must be between 0 and {protocol_module.MAX_TRIGGER_VOLTAGE},"
+            f" got {value}"
         )
         assert getattr(state, attribute) == before
 
@@ -2083,6 +2507,7 @@ class TestTheWireNumericBoundsAreInclusive:
             protocol,
             {
                 CONFIG: CMD_SET_SCHEDULE,
+                FIELD_INDEX: MAX_SCHEDULE_INDEX,
                 FIELD_SCHEDULE: {**GOLDEN_SCHEDULE_WIRE_TO_DEVICE, "index": MAX_SCHEDULE_INDEX},
                 "msgId": 6,
             },

@@ -183,6 +183,12 @@ This prevents injury to pets or damage to the door mechanism. The `totalAutoRetr
 
 ### Outside Sensor Safety Lock
 
+The vendor app calls this *"always allow pet entry inside override timers"*
+— a schedule override, not a lock on the outside sensor. The wire name
+(`outsideSensorSafetyLock`) reads like the opposite, so trust the polarity
+rather than the name; see
+[What the app calls these settings](protocol.md#what-the-app-calls-these-settings).
+
 When enabled, the outside sensor is ignored for door activation, but still detects and can send notifications.
 
 | State | Behavior |
@@ -196,6 +202,12 @@ When enabled, the outside sensor is ignored for door activation, but still detec
 - Override schedule-based sensor activation
 
 ### Command Lockout / Pet Proximity Keep-Open
+
+The vendor app calls this *"Allow pet to keep door open"*, and the app switch
+is the **inverse** of the wire field — app OFF means
+`allowCmdLockout: "true"`. That inversion was confirmed by driving the app
+against a live capture, so the facade's `pet_proximity_keep_open` (which
+follows the app, not the wire) is correct and must not be "simplified".
 
 This setting has an inverse relationship that can be confusing:
 
@@ -258,9 +270,15 @@ When schedules are disabled (`timersEnabled = false`):
 **Window boundaries**: the start minute is included and the end minute is
 excluded, so `6:00`–`22:00` covers 6:00 through 21:59. An end earlier than
 the start wraps past midnight (`22:00`–`6:00`). A window whose start and end
-*coincide* is the whole day — with an exclusive end that is the only way to
-express 24/7, since `00:00`–`23:59` would leave the minute 23:59 uncovered.
-An entry that should gate nothing is spelled `enabled: false`.
+*coincide* is the whole day. An entry that should gate nothing is spelled
+`enabled: false`.
+
+**`23:59` is the device's own end-of-day**, and is the one exception to the
+exclusive end: a real door's factory schedule is `00:00`–`23:59` on all seven
+days for both sensors, which plainly means "always", so that final minute is
+treated as *inside* the window rather than switching the sensor off for one
+minute a day. See
+[End of day is 23:59](protocol.md#end-of-day-is-2359).
 
 ---
 

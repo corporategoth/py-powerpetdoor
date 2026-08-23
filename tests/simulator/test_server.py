@@ -40,6 +40,7 @@ from powerpetdoor.const import (
     CMD_SET_NOTIFICATIONS,
     CMD_SET_SCHEDULE,
     CMD_SET_TIMEZONE,
+    DOOR_OPTION_AUTORETRACT,
     DOOR_STATE_CLOSED,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSING_TOP_OPEN,
@@ -91,7 +92,7 @@ from powerpetdoor.simulator import (
     DoorTimingConfig,
     Schedule,
 )
-from powerpetdoor.simulator import server as server_module
+from powerpetdoor.simulator import state as state_module
 
 FULL_CYCLE_SEQUENCE = [
     DOOR_STATE_RISING,
@@ -919,8 +920,8 @@ class TestBroadcastPayloads:
     @pytest.mark.parametrize(
         ("enabled", "cmd", "value"),
         [
-            (True, CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK, "1"),
-            (False, CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK, "0"),
+            (True, CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK, "true"),
+            (False, CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK, "false"),
         ],
     )
     def test_broadcast_safety_lock(self, simulator, recorder, enabled, cmd, value):
@@ -932,7 +933,7 @@ class TestBroadcastPayloads:
 
     @pytest.mark.parametrize(
         ("enabled", "cmd", "value"),
-        [(True, CMD_ENABLE_CMD_LOCKOUT, "1"), (False, CMD_DISABLE_CMD_LOCKOUT, "0")],
+        [(True, CMD_ENABLE_CMD_LOCKOUT, "true"), (False, CMD_DISABLE_CMD_LOCKOUT, "false")],
     )
     def test_broadcast_cmd_lockout(self, simulator, recorder, enabled, cmd, value):
         """broadcast_cmd_lockout sends the enable/disable command envelope."""
@@ -940,13 +941,24 @@ class TestBroadcastPayloads:
         assert recorder == [{FIELD_CMD: cmd, FIELD_SETTINGS: {FIELD_CMD_LOCKOUT: value}, **OK}]
 
     @pytest.mark.parametrize(
-        ("enabled", "cmd", "value"),
-        [(True, CMD_ENABLE_AUTORETRACT, "1"), (False, CMD_DISABLE_AUTORETRACT, "0")],
+        ("enabled", "cmd", "door_options"),
+        [
+            (True, CMD_ENABLE_AUTORETRACT, DOOR_OPTION_AUTORETRACT),
+            (False, CMD_DISABLE_AUTORETRACT, 0),
+        ],
     )
-    def test_broadcast_autoretract(self, simulator, recorder, enabled, cmd, value):
-        """broadcast_autoretract sends the enable/disable command envelope."""
+    def test_broadcast_autoretract(self, simulator, recorder, enabled, cmd, door_options):
+        """broadcast_autoretract mirrors the handler: whole settings object.
+
+        Verified against firmware 1.7.18 - and `doorOptions` is the int
+        bitfield, so bit 1 is what changes.
+        """
+        simulator.state.autoretract = enabled
+
         simulator.broadcast_autoretract(enabled)
-        assert recorder == [{FIELD_CMD: cmd, FIELD_SETTINGS: {FIELD_AUTORETRACT: value}, **OK}]
+
+        assert recorder == [{FIELD_CMD: cmd, FIELD_SETTINGS: simulator.state.get_settings(), **OK}]
+        assert recorder[0][FIELD_SETTINGS][FIELD_AUTORETRACT] == door_options
 
     def test_broadcast_hold_time_sends_centiseconds(self, simulator, recorder):
         """broadcast_hold_time converts seconds to centiseconds."""
@@ -955,10 +967,14 @@ class TestBroadcastPayloads:
         assert recorder == [{FIELD_CMD: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: 500, **OK}]
 
     def test_broadcast_timezone_posix(self, simulator, recorder, monkeypatch):
-        """broadcast_timezone converts IANA to POSIX when the cache is ready."""
-        monkeypatch.setattr(server_module, "is_cache_initialized", lambda: True)
+        """broadcast_timezone sends the POSIX form a real door sends.
+
+        The conversion lives on the state, so this cannot answer
+        differently from GET_SETTINGS or GET_TIMEZONE.
+        """
+        monkeypatch.setattr(state_module, "is_cache_initialized", lambda: True)
         monkeypatch.setattr(
-            server_module, "get_posix_tz_string", lambda tz: "EST5EDT,M3.2.0,M11.1.0"
+            state_module, "get_posix_tz_string", lambda tz: "EST5EDT,M3.2.0,M11.1.0"
         )
         simulator.broadcast_timezone()
         assert recorder == [{FIELD_CMD: CMD_SET_TIMEZONE, FIELD_TZ: "EST5EDT,M3.2.0,M11.1.0", **OK}]
@@ -967,14 +983,14 @@ class TestBroadcastPayloads:
         self, simulator, recorder, monkeypatch
     ):
         """Without the tz cache, the stored value is sent as-is."""
-        monkeypatch.setattr(server_module, "is_cache_initialized", lambda: False)
+        monkeypatch.setattr(state_module, "is_cache_initialized", lambda: False)
         simulator.broadcast_timezone()
         assert recorder == [{FIELD_CMD: CMD_SET_TIMEZONE, FIELD_TZ: simulator.state.timezone, **OK}]
 
     def test_broadcast_timezone_raw_when_unconvertible(self, simulator, recorder, monkeypatch):
         """An unconvertible zone falls back to the stored value."""
-        monkeypatch.setattr(server_module, "is_cache_initialized", lambda: True)
-        monkeypatch.setattr(server_module, "get_posix_tz_string", lambda tz: None)
+        monkeypatch.setattr(state_module, "is_cache_initialized", lambda: True)
+        monkeypatch.setattr(state_module, "get_posix_tz_string", lambda tz: None)
         simulator.broadcast_timezone()
         assert recorder == [{FIELD_CMD: CMD_SET_TIMEZONE, FIELD_TZ: simulator.state.timezone, **OK}]
 
@@ -990,7 +1006,7 @@ class TestBroadcastPayloads:
         ]
 
     @pytest.mark.parametrize(
-        ("enabled", "cmd", "value"), [(True, CMD_POWER_ON, "1"), (False, CMD_POWER_OFF, "0")]
+        ("enabled", "cmd", "value"), [(True, CMD_POWER_ON, 1), (False, CMD_POWER_OFF, 0)]
     )
     def test_broadcast_power(self, simulator, recorder, enabled, cmd, value):
         """broadcast_power sends the power command envelope."""
@@ -998,7 +1014,7 @@ class TestBroadcastPayloads:
         assert recorder == [{FIELD_CMD: cmd, FIELD_POWER: value, **OK}]
 
     @pytest.mark.parametrize(
-        ("enabled", "cmd", "value"), [(True, CMD_ENABLE_AUTO, "1"), (False, CMD_DISABLE_AUTO, "0")]
+        ("enabled", "cmd", "value"), [(True, CMD_ENABLE_AUTO, 1), (False, CMD_DISABLE_AUTO, 0)]
     )
     def test_broadcast_auto(self, simulator, recorder, enabled, cmd, value):
         """broadcast_auto sends the timers command envelope."""
@@ -1007,7 +1023,7 @@ class TestBroadcastPayloads:
 
     @pytest.mark.parametrize(
         ("enabled", "cmd", "value"),
-        [(True, CMD_ENABLE_INSIDE, "1"), (False, CMD_DISABLE_INSIDE, "0")],
+        [(True, CMD_ENABLE_INSIDE, 1), (False, CMD_DISABLE_INSIDE, 0)],
     )
     def test_broadcast_inside_sensor(self, simulator, recorder, enabled, cmd, value):
         """broadcast_inside_sensor sends the sensor command envelope."""
@@ -1016,7 +1032,7 @@ class TestBroadcastPayloads:
 
     @pytest.mark.parametrize(
         ("enabled", "cmd", "value"),
-        [(True, CMD_ENABLE_OUTSIDE, "1"), (False, CMD_DISABLE_OUTSIDE, "0")],
+        [(True, CMD_ENABLE_OUTSIDE, 1), (False, CMD_DISABLE_OUTSIDE, 0)],
     )
     def test_broadcast_outside_sensor(self, simulator, recorder, enabled, cmd, value):
         """broadcast_outside_sensor sends the sensor command envelope."""
@@ -1033,8 +1049,8 @@ class TestBroadcastPayloads:
                     FIELD_FW_MAJOR: 1,
                     FIELD_FW_MINOR: 2,
                     FIELD_FW_PATCH: 3,
-                    FIELD_HW_VERSION: "1",
-                    FIELD_HW_REVISION: "1",
+                    FIELD_HW_VERSION: 1,
+                    FIELD_HW_REVISION: 1,
                 },
                 **OK,
             }

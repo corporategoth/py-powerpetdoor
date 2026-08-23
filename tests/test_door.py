@@ -11,6 +11,7 @@ import asyncio
 import copy
 import logging
 import sys
+from datetime import datetime
 
 import pytest
 
@@ -21,14 +22,20 @@ from powerpetdoor import (
     PowerPetDoor,
     Schedule,
     ScheduleTime,
+    envelope_for_command,
 )
 from powerpetdoor import door as door_module
 from powerpetdoor.client import CommandError
 from powerpetdoor.const import (
+    CMD_ENABLE_INSIDE,
     CMD_GET_DOOR_BATTERY,
     CMD_GET_NOTIFICATIONS,
     CMD_GET_SCHEDULE_LIST,
     CMD_GET_SETTINGS,
+    CMD_OPEN,
+    COMMAND,
+    CONFIG,
+    DOOR_OPTION_AUTORETRACT,
     DOOR_STATE_CLOSED,
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
@@ -43,8 +50,12 @@ from powerpetdoor.const import (
     FIELD_OUTSIDE,
     FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
     FIELD_POWER,
+    FIELD_SENSOR_TRIGGER_VOLTAGE,
+    FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
+    FIELD_VOLTAGE,
+    TIME_FORMAT,
 )
 from powerpetdoor.sanitize import MAX_LOGGED_LENGTH, sanitize_text
 from powerpetdoor.simulator import (
@@ -315,7 +326,7 @@ class TestSchedule:
         payload = schedule.to_dict()
 
         assert payload == GOLDEN_SCHEDULE_WIRE_TO_DEVICE
-        assert_schedule_wire_types(payload, enabled_type=bool)
+        assert_schedule_wire_types(payload, flag_type=bool)
 
     def test_to_dict_disabled_emits_json_false(self):
         """``enabled: False`` goes out as JSON ``false``, not the string "0".
@@ -1374,6 +1385,7 @@ class TestSetNotifications:
         """Unspecified settings are sent with their cached values."""
         from powerpetdoor.const import (
             FIELD_LOW_BATTERY_NOTIFICATIONS,
+            FIELD_NOTIFICATIONS,
             FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
             FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
             FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
@@ -1393,16 +1405,19 @@ class TestSetNotifications:
 
         await door.set_notifications(low_battery=True)
 
-        # JSON booleans, as every released version has sent. docs/protocol.md
-        # shows "1"/"0" here but is reverse-engineered, not authority.
+        # A NESTED object of JSON booleans. Verified against firmware
+        # 1.7.18: flat top-level fields are rejected outright, and a nested
+        # object of strings is accepted and silently not applied.
         assert sent == {
-            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: True,  # Preserved from cache
-            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: False,
-            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: False,
-            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: False,
-            FIELD_LOW_BATTERY_NOTIFICATIONS: True,  # Explicitly set
+            FIELD_NOTIFICATIONS: {
+                FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: True,  # Preserved from cache
+                FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: False,
+                FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: False,
+                FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: False,
+                FIELD_LOW_BATTERY_NOTIFICATIONS: True,  # Explicitly set
+            }
         }
-        assert all(type(v) is bool for v in sent.values())
+        assert all(type(v) is bool for v in sent[FIELD_NOTIFICATIONS].values())
 
     async def test_custom_cached_settings_drive_the_wire_payload(self, door):
         """Every field of a custom NotificationSettings reaches the wire.
@@ -1412,6 +1427,7 @@ class TestSetNotifications:
         """
         from powerpetdoor.const import (
             FIELD_LOW_BATTERY_NOTIFICATIONS,
+            FIELD_NOTIFICATIONS,
             FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
             FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
             FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
@@ -1434,15 +1450,18 @@ class TestSetNotifications:
         await door.set_notifications()  # no overrides: pure cache passthrough
 
         assert sent == {
-            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: True,
-            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: False,
-            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: False,
-            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: True,
-            FIELD_LOW_BATTERY_NOTIFICATIONS: True,
+            FIELD_NOTIFICATIONS: {
+                FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: True,
+                FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: False,
+                FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: False,
+                FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: True,
+                FIELD_LOW_BATTERY_NOTIFICATIONS: True,
+            }
         }
         # bool, not the int 1: True == 1 in Python, so dict equality alone
-        # would not catch a regression back to a stringified/int payload.
-        assert all(type(v) is bool for v in sent.values())
+        # would not catch a regression back to a stringified/int payload -
+        # and the device silently ignores a payload whose values are strings.
+        assert all(type(v) is bool for v in sent[FIELD_NOTIFICATIONS].values())
         assert door.notifications is door._notifications
 
 
@@ -2521,3 +2540,318 @@ class TestTheFacadeTimeoutSaysWhatTimedOut:
 
         assert await door.refresh_status() is DoorStatus.HOLDING
         assert await door.refresh_hardware_info() == door.hardware_info
+
+
+# ============================================================================
+# Facade surface added once hardware settled the protocol
+# ============================================================================
+
+
+class TestSensorTriggerVoltageFacade:
+    """`sensorTriggerVoltage` is readable and settable; the facade exposes both.
+
+    It was reachable only from the message level before: `GET_SETTINGS`
+    carries it, and the client has always had a listener for it, but
+    `PowerPetDoor` had neither a property nor a setter.
+    """
+
+    async def test_the_settings_refresh_populates_both_voltages(self, door, simulator):
+        simulator.state.sensor_trigger_voltage = 2000
+        simulator.state.sleep_sensor_trigger_voltage = 1800
+
+        await door.refresh_settings()
+
+        assert door.sensor_trigger_voltage == 2000
+        assert door.sleep_sensor_trigger_voltage == 1800
+
+    async def test_set_sensor_trigger_voltage_reaches_the_device(self, door, simulator):
+        await door.set_sensor_trigger_voltage(1500)
+
+        assert simulator.state.sensor_trigger_voltage == 1500
+
+    async def test_set_sleep_sensor_trigger_voltage_reaches_the_device(self, door, simulator):
+        await door.set_sleep_sensor_trigger_voltage(1800)
+
+        assert simulator.state.sleep_sensor_trigger_voltage == 1800
+
+    async def test_the_setters_send_the_voltage_field_not_the_getters(self, door):
+        """The whole point of `build_set_voltage_message`, pinned end to end.
+
+        Verified against firmware 1.7.18: a real door rejects the getter's
+        field name, so a facade that sent `sensorTriggerVoltage` would
+        silently do nothing.
+        """
+        sent: dict = {}
+
+        def fake_send(msg_type, cmd, notify=False, **kwargs):
+            sent.update(kwargs)
+            future = asyncio.get_running_loop().create_future()
+            future.set_result({})
+            return future
+
+        door._client.send_message = fake_send
+
+        await door.set_sensor_trigger_voltage(1500)
+
+        assert sent == {FIELD_VOLTAGE: 1500}
+        assert FIELD_SENSOR_TRIGGER_VOLTAGE not in sent
+
+    @pytest.mark.parametrize(
+        ("field_name", "attribute"),
+        [
+            (FIELD_SENSOR_TRIGGER_VOLTAGE, "sensor_trigger_voltage"),
+            (FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE, "sleep_sensor_trigger_voltage"),
+        ],
+    )
+    def test_an_unusable_voltage_keeps_the_cached_value(self, field_name, attribute):
+        """A device value that is not an int must not poison an int property."""
+        door = PowerPetDoor("127.0.0.1")
+        setattr(door, f"_{attribute}", 2000)
+
+        door._on_settings({field_name: "lots"})
+
+        assert getattr(door, attribute) == 2000
+
+    @pytest.mark.parametrize(
+        ("listener", "attribute"),
+        [
+            ("_on_sensor_trigger_voltage_update", "sensor_trigger_voltage"),
+            ("_on_sleep_sensor_trigger_voltage_update", "sleep_sensor_trigger_voltage"),
+        ],
+    )
+    def test_the_dedicated_listener_also_caches(self, listener, attribute):
+        """The GET_/SET_ replies arrive through their own listener, not settings."""
+        door = PowerPetDoor("127.0.0.1")
+
+        getattr(door, listener)(1234)
+        assert getattr(door, attribute) == 1234
+
+        getattr(door, listener)([])
+        assert getattr(door, attribute) == 1234
+
+
+class TestRemotePairingFacade:
+    """HAS_REMOTE_ID / HAS_REMOTE_KEY had no facade surface at all."""
+
+    async def test_refresh_remote_info_populates_both(self, door, simulator):
+        simulator.state.has_remote_id = True
+        simulator.state.has_remote_key = False
+
+        await door.refresh_remote_info()
+
+        assert door.has_remote_id is True
+        assert door.has_remote_key is False
+
+    def test_defaults_before_the_first_refresh(self):
+        """Not part of GET_SETTINGS, so they stay at their default until asked."""
+        door = PowerPetDoor("127.0.0.1")
+
+        assert door.has_remote_id is False
+        assert door.has_remote_key is False
+
+    @pytest.mark.parametrize(
+        ("listener", "prop"),
+        [("_on_remote_id_update", "has_remote_id"), ("_on_remote_key_update", "has_remote_key")],
+    )
+    def test_an_unreadable_value_keeps_the_cached_flag(self, listener, prop):
+        door = PowerPetDoor("127.0.0.1")
+        getattr(door, listener)(True)
+
+        getattr(door, listener)(None)
+
+        assert getattr(door, prop) is True
+
+
+class TestDoorClockFacade:
+    """`GET_TIME`: undocumented by the vendor, and the only way to check that
+    a door will fire a schedule when you expect it to."""
+
+    async def test_refresh_time_parses_the_devices_asctime(self, door):
+        when = await door.refresh_time()
+
+        assert isinstance(when, datetime)
+        # The simulator answers from its own clock, in its own timezone, so
+        # only the *shape* is deterministic - that it round-trips through
+        # TIME_FORMAT is the contract.
+        assert when.strftime(TIME_FORMAT) == door.device_time
+
+    async def test_device_time_keeps_the_raw_string(self, door):
+        await door.refresh_time()
+
+        assert door.device_time
+        assert datetime.strptime(door.device_time, TIME_FORMAT)
+
+    def test_device_time_is_empty_before_the_first_refresh(self):
+        assert PowerPetDoor("127.0.0.1").device_time == ""
+
+    async def test_an_unparseable_time_returns_none_but_keeps_the_string(self, door):
+        """The door was observed answering a stale/odd frame; do not raise."""
+        door._on_time_update("not a time")
+
+        parsed = await door.refresh_time()
+
+        assert parsed is None or isinstance(parsed, datetime)
+
+    def test_a_non_string_time_keeps_the_cached_one(self):
+        door = PowerPetDoor("127.0.0.1")
+        door._on_time_update("Sat Aug 22 23:13:48 2026")
+
+        door._on_time_update(12345)
+
+        assert door.device_time == "Sat Aug 22 23:13:48 2026"
+
+
+class TestTheFacadeSendsEveryCommandUnderTheRightEnvelopeKey:
+    """Verified against firmware 1.7.18: `{"cmd": "ENABLE_INSIDE"}` fails.
+
+    Every released version before this one sent the individual setting
+    commands under `cmd`, so none of them worked against a real door. Each
+    facade call is driven here and the envelope key it chose is compared
+    against the single source of truth.
+    """
+
+    @staticmethod
+    def _recorder(door):
+        sent: list[tuple[str, str]] = []
+
+        def fake_send(msg_type, cmd, notify=False, **kwargs):
+            sent.append((msg_type, cmd))
+            future = asyncio.get_running_loop().create_future()
+            future.set_result({})
+            return future
+
+        door._client.send_message = fake_send
+        return sent
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            pytest.param(lambda d: d.open(), id="open"),
+            pytest.param(lambda d: d.open_and_hold(), id="open_and_hold"),
+            pytest.param(lambda d: d.close(), id="close"),
+            pytest.param(lambda d: d.set_inside_sensor(True), id="set_inside_sensor"),
+            pytest.param(lambda d: d.set_outside_sensor(False), id="set_outside_sensor"),
+            pytest.param(lambda d: d.set_power(True), id="set_power"),
+            pytest.param(lambda d: d.set_auto(False), id="set_auto"),
+            pytest.param(lambda d: d.set_safety_lock(True), id="set_safety_lock"),
+            pytest.param(lambda d: d.set_autoretract(False), id="set_autoretract"),
+            pytest.param(
+                lambda d: d.set_pet_proximity_keep_open(True), id="set_pet_proximity_keep_open"
+            ),
+            pytest.param(lambda d: d.set_hold_time(2.0), id="set_hold_time"),
+            pytest.param(lambda d: d.set_timezone("UTC0"), id="set_timezone"),
+            pytest.param(lambda d: d.set_notifications(low_battery=True), id="set_notifications"),
+            pytest.param(lambda d: d.set_sensor_trigger_voltage(1500), id="set_sensor_voltage"),
+            pytest.param(
+                lambda d: d.set_sleep_sensor_trigger_voltage(1800), id="set_sleep_voltage"
+            ),
+            pytest.param(lambda d: d.refresh_remote_info(), id="refresh_remote_info"),
+            pytest.param(lambda d: d.refresh_time(), id="refresh_time"),
+            pytest.param(lambda d: d.refresh_status(), id="refresh_status"),
+            pytest.param(lambda d: d.refresh_battery(), id="refresh_battery"),
+            pytest.param(lambda d: d.refresh_stats(), id="refresh_stats"),
+            pytest.param(lambda d: d.refresh_hardware_info(), id="refresh_hardware_info"),
+            pytest.param(lambda d: d.delete_schedule(0), id="delete_schedule"),
+        ],
+    )
+    async def test_the_envelope_key_matches_envelope_for_command(self, call):
+        door = PowerPetDoor("127.0.0.1")
+        sent = self._recorder(door)
+
+        await call(door)
+
+        assert sent
+        assert [
+            (msg_type, cmd) for msg_type, cmd in sent if msg_type != envelope_for_command(cmd)
+        ] == []
+
+    async def test_door_motion_really_is_the_cmd_envelope(self):
+        """The control: the mapping under test is not "everything is config"."""
+        door = PowerPetDoor("127.0.0.1")
+        sent = self._recorder(door)
+
+        await door.open()
+
+        assert sent == [(COMMAND, CMD_OPEN)]
+
+    async def test_a_setting_command_really_is_the_config_envelope(self):
+        door = PowerPetDoor("127.0.0.1")
+        sent = self._recorder(door)
+
+        await door.set_inside_sensor(True)
+
+        assert sent == [(CONFIG, CMD_ENABLE_INSIDE)]
+
+
+class TestTheAppSettingPolarities:
+    """The mapping from the vendor app's switches to wire fields.
+
+    Established experimentally, with the door's owner driving the app
+    against a live capture - measurement, not inference. Two of the three
+    are counter-intuitive enough that "simplifying" them is a standing
+    temptation, so each polarity is pinned here.
+    """
+
+    async def test_keep_open_is_the_inverse_of_command_lockout(self, door, simulator):
+        """App *"Allow pet to keep door open"* OFF  ⇒  allowCmdLockout "true".
+
+        `PowerPetDoor` exposes the app's meaning, so the facade flag and
+        the wire field must always be opposites.
+        """
+        await door.set_pet_proximity_keep_open(True)
+        assert simulator.state.cmd_lockout is False
+        assert door.pet_proximity_keep_open is True
+
+        await door.set_pet_proximity_keep_open(False)
+        assert simulator.state.cmd_lockout is True
+        assert door.pet_proximity_keep_open is False
+
+    def test_a_cmd_lockout_settings_frame_is_inverted_on_the_way_in(self):
+        """The read path carries the same inversion as the write path."""
+        door = PowerPetDoor("127.0.0.1")
+
+        door._on_settings({FIELD_CMD_LOCKOUT: "true"})
+        assert door.pet_proximity_keep_open is False
+
+        door._on_settings({FIELD_CMD_LOCKOUT: "false"})
+        assert door.pet_proximity_keep_open is True
+
+    async def test_safety_lock_is_direct_not_inverted(self, door, simulator):
+        """App *"always allow pet entry inside override timers"* ⇒
+        `outsideSensorSafetyLock`, direct.
+
+        The field name reads like a lock on the outside sensor; the app
+        presents it as a schedule override. The polarity is the thing that
+        settles it.
+        """
+        await door.set_safety_lock(True)
+        assert simulator.state.safety_lock is True
+        assert door.safety_lock is True
+
+        await door.set_safety_lock(False)
+        assert simulator.state.safety_lock is False
+        assert door.safety_lock is False
+
+    async def test_autoretract_is_bit_one_of_door_options(self, door, simulator):
+        """App *"Auto Retract"* ⇒ `doorOptions` bit 1: on ⇒ 2, off ⇒ 0."""
+        await door.set_autoretract(True)
+        assert simulator.state.get_settings()[FIELD_AUTORETRACT] == DOOR_OPTION_AUTORETRACT
+        assert door.autoretract is True
+
+        await door.set_autoretract(False)
+        assert simulator.state.get_settings()[FIELD_AUTORETRACT] == 0
+        assert door.autoretract is False
+
+    def test_an_unrelated_door_options_bit_does_not_read_as_autoretract(self):
+        """Bit 0 and bits 2+ are unidentified; only bit 1 is auto-retract.
+
+        Plain truthiness would report `doorOptions: 1` as auto-retract ON.
+        """
+        door = PowerPetDoor("127.0.0.1")
+        door._autoretract = False
+
+        door._on_settings({FIELD_AUTORETRACT: 1})
+        assert door.autoretract is False
+
+        door._on_settings({FIELD_AUTORETRACT: 3})
+        assert door.autoretract is True

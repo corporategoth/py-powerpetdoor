@@ -326,17 +326,15 @@ def nested_frame(depth: int = 9999) -> bytes:
 #: ``SET_SCHEDULE`` payload ``powerpetdoor.door.Schedule.to_dict`` builds
 #: and sends to the device.
 #:
-#: ``enabled`` is a JSON boolean here and the string ``"1"`` in
-#: :data:`GOLDEN_SCHEDULE_WIRE_FROM_DEVICE`, and that difference is
-#: deliberate. **These two emitters are opposite directions, not twins**:
-#: the library's is client->device (what we send to firmware that has
-#: accepted a JSON boolean since v0.1.0) and the simulator's is
-#: device->client (what a door replies, where ``"1"`` is what was
-#: observed). ``docs/protocol.md`` is reverse-engineered and is not
-#: authority over what the firmware accepts, so these two payloads must
-#: not be "unified". Every field except ``enabled`` is identical and
-#: pinned on both sides, so a divergence in any other field still fails
-#: immediately.
+#: ``enabled``, ``inside`` and ``outside`` are JSON booleans here and the
+#: integers ``1``/``0`` in :data:`GOLDEN_SCHEDULE_WIRE_FROM_DEVICE`, and
+#: that difference is deliberate. **These two emitters are opposite
+#: directions, not twins**: the library's is client->device (what we send
+#: to firmware that has accepted JSON booleans since v0.1.0) and the
+#: simulator's is device->client (**verified against firmware 1.7.18**: a
+#: GET_SCHEDULE reply carries those three as ints). These two payloads must
+#: not be "unified". Every other field is identical and pinned on both
+#: sides, so a divergence anywhere else still fails immediately.
 GOLDEN_SCHEDULE_WIRE_TO_DEVICE = {
     "index": 3,
     "enabled": True,
@@ -351,9 +349,14 @@ GOLDEN_SCHEDULE_WIRE_TO_DEVICE = {
 
 #: The same schedule as the **simulator** emits it, i.e. the device->client
 #: ``GET_SCHEDULE`` reply. Identical to
-#: :data:`GOLDEN_SCHEDULE_WIRE_TO_DEVICE` except for the ``enabled``
-#: spelling; see that constant for why the two directions differ.
-GOLDEN_SCHEDULE_WIRE_FROM_DEVICE = {**GOLDEN_SCHEDULE_WIRE_TO_DEVICE, "enabled": "1"}
+#: :data:`GOLDEN_SCHEDULE_WIRE_TO_DEVICE` except for the three flag
+#: fields; see that constant for why the two directions differ.
+GOLDEN_SCHEDULE_WIRE_FROM_DEVICE = {
+    **GOLDEN_SCHEDULE_WIRE_TO_DEVICE,
+    "enabled": 1,
+    "inside": 1,
+    "outside": 0,
+}
 
 
 def _is_wire_int(value: object) -> bool:
@@ -361,7 +364,7 @@ def _is_wire_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def assert_schedule_wire_types(payload: dict, *, enabled_type: type) -> None:
+def assert_schedule_wire_types(payload: dict, *, flag_type: type) -> None:
     """Assert an emitted schedule's field types, per protocol direction.
 
     Dict equality alone is not enough: ``True == 1`` in Python, so a
@@ -371,26 +374,26 @@ def assert_schedule_wire_types(payload: dict, *, enabled_type: type) -> None:
 
     Args:
         payload: The emitted schedule dict.
-        enabled_type: ``bool`` for the library's client->device emitter,
-            ``str`` for the simulator's device->client emitter. The two
-            directions are not required to agree (see
-            :data:`GOLDEN_SCHEDULE_WIRE_TO_DEVICE`), so the expected
-            spelling is passed in rather than assumed.
+        flag_type: ``bool`` for the library's client->device emitter,
+            ``int`` for the simulator's device->client emitter (**verified
+            against firmware 1.7.18**). The two directions are not required
+            to agree (see :data:`GOLDEN_SCHEDULE_WIRE_TO_DEVICE`), so the
+            expected spelling is passed in rather than assumed. It governs
+            exactly the three flag fields.
     """
     assert set(payload) == set(GOLDEN_SCHEDULE_WIRE_TO_DEVICE)
     assert _is_wire_int(payload["index"])
-    assert isinstance(payload["enabled"], enabled_type)
-    if enabled_type is str:
-        assert payload["enabled"] in ("0", "1")
-    else:
-        assert payload["enabled"] is True or payload["enabled"] is False
+    for name in ("enabled", "inside", "outside"):
+        value = payload[name]
+        if flag_type is bool:
+            assert value is True or value is False
+        else:
+            assert _is_wire_int(value)
+            assert value in (0, 1)
     days = payload["daysOfWeek"]
     assert isinstance(days, list)
     assert len(days) == 7
     assert all(_is_wire_int(day) and day in (0, 1) for day in days)
-    # JSON booleans on both sides, unlike enabled.
-    assert isinstance(payload["inside"], bool)
-    assert isinstance(payload["outside"], bool)
     for key in ("in_start_time", "in_end_time", "out_start_time", "out_end_time"):
         block = payload[key]
         assert isinstance(block, dict)
