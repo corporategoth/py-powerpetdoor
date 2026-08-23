@@ -26,6 +26,17 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
 
+# These assert on the *repository's* CI configuration, which is deliberately
+# not shipped in the sdist (MANIFEST.in grafts tests and docs, not .github/ or
+# .gitea/). The packaging job unpacks that sdist and runs the suite from it, so
+# without this guard the gate tests fail there for the one reason that is not a
+# defect: what they inspect is a checkout-only artifact. Skipping keeps them
+# enforcing where they matter, in the repo.
+pytestmark = pytest.mark.skipif(
+    not WORKFLOW.is_file(),
+    reason="CI workflow files are not in the sdist; these pin the repo's own config",
+)
+
 
 @pytest.fixture(scope="module")
 def workflow() -> dict:

@@ -11,6 +11,16 @@ inputs:
   python-version:
     required: true
     description: Python version for uv to install
+  enable-cache:
+    required: false
+    default: 'false'
+    description: >
+      Whether setup-uv should use the Actions cache service. Defaults to
+      OFF because Gitea's act_runner cache backend is slow to unreachable:
+      it made every job idle at setup and then time out, and because this
+      wrapper retries three times a single cache stall cost three stalls
+      plus 40s of sleeps. This project resolves 28 packages in about a
+      millisecond, so the cache never paid for itself even when it worked.
 
 runs:
   using: composite
@@ -20,7 +30,7 @@ runs:
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
       with:
         python-version: ${{ inputs.python-version }}
-        enable-cache: true
+        enable-cache: ${{ inputs.enable-cache }}
 
     - if: steps.try1.outcome == 'failure'
       shell: bash
@@ -32,7 +42,7 @@ runs:
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
       with:
         python-version: ${{ inputs.python-version }}
-        enable-cache: true
+        enable-cache: ${{ inputs.enable-cache }}
 
     - if: steps.try1.outcome == 'failure' && steps.try2.outcome == 'failure'
       shell: bash
@@ -42,4 +52,4 @@ runs:
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
       with:
         python-version: ${{ inputs.python-version }}
-        enable-cache: true
+        enable-cache: ${{ inputs.enable-cache }}
