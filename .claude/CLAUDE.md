@@ -28,6 +28,45 @@ faithful to observed device behavior.
 Related repos: `ha-powerpetdoor` (Home Assistant integration built on this
 library), `git.neuromancy.net/pypi/ostinato-powerpetdoor` (Ostinato plugin).
 
+## Gitea is the source of truth. NEVER write to GitHub. (MANDATORY)
+
+`origin` is **Gitea** (`git.neuromancy.net`). GitHub is a **push mirror**,
+and a mirror is downstream: anything created there is either overwritten by
+the next sync or stranded forever.
+
+**Never, on GitHub:** create or edit a release, push, merge a pull request,
+commit, edit the wiki, or move a tag. Not with `gh`, not through the web UI,
+not through the API.
+
+**Reading GitHub is fine and often necessary** - that is where users file
+issues and pull requests, and `gh issue view` / `gh pr view` are the right
+tools for it. The prohibition is on *writing*.
+
+### Why - this has already gone wrong
+
+A push mirror carries git refs only: "branches, tags, and commits", per
+Gitea's own docs. A **release is a database object on each forge, not git
+data**, so it can never cross that way.
+
+pypowerpetdoor v0.4.1 was released by creating the release **on GitHub**.
+The tag existed on both sides, so it looked fine - but Gitea had no release
+object, the release-sync webhook had nothing to fire on, and the two forges
+disagreed until it was recreated by hand. v0.4.0, cut correctly on Gitea,
+appears on both at the same timestamp. That is the difference.
+
+There is a second, sharper reason for pypowerpetdoor specifically:
+`.github/workflows/release.yml` triggers on `release: published`. What
+publishes to PyPI is therefore the **GitHub release object**. Cutting a
+release on Gitea drives that chain correctly through the webhook; cutting it
+on GitHub skips Gitea entirely and leaves the source of truth behind.
+
+### How to cut a release
+
+1. Tag and push to Gitea.
+2. Create the release **in Gitea** - its UI, its API, or
+   `tea releases create --repo <owner>/<repo> --tag vX.Y.Z --title ... --note ...`.
+3. Let the webhook carry it to GitHub. Do not create it there yourself.
+
 ## Component Reuse (Critical)
 
 **Before writing any code, check for existing implementations.** This codebase
