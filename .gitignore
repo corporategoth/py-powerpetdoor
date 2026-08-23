@@ -273,8 +273,9 @@ http-client.private.env.json
 # Local data/database files
 data/
 
-# direnv
-.envrc
+# direnv - the checked-in .envrc only activates .venv; keep it tracked so a
+# fresh clone gets it. Uncomment to ignore a local override instead.
+#.envrc
 .idea/
 
 # AI review process residue - not product
