@@ -344,7 +344,10 @@ class ScheduleTime:
         Raises:
             ValueError: If the value is not a valid ``{hour, min}`` mapping.
         """
-        hour, minute = coerce_schedule_time(data, name)
+        # Read path: this is the device telling us what it has. Refusing an
+        # entry here makes refresh_schedules() drop it, hiding a schedule that
+        # exists on the door, so an absent hour becomes midnight instead.
+        hour, minute = coerce_schedule_time(data, name, require_hour=False)
         return cls(hour=hour, minute=minute)
 
 
@@ -1143,11 +1146,12 @@ class PowerPetDoor:
                 low_battery if low_battery is not None else self._notifications.low_battery
             ),
         }
-        # The wire protocol uses "1"/"0" strings (docs/protocol.md).
-        settings = {key: "1" if value else "0" for key, value in merged.items()}
+        # Send JSON booleans, which is what every released version has sent and
+        # what real doors have accepted. docs/protocol.md shows "1"/"0" here,
+        # but it is reverse-engineered and is not authority over the firmware.
         await self._await_response(
             CMD_SET_NOTIFICATIONS,
-            self._client.send_message(CONFIG, CMD_SET_NOTIFICATIONS, notify=True, **settings),
+            self._client.send_message(CONFIG, CMD_SET_NOTIFICATIONS, notify=True, **merged),
             timeout,
         )
 

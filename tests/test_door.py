@@ -551,18 +551,32 @@ class TestDoorScheduleFromDictRejectsHostileInput:
         ("time_field", "message"),
         [
             ({"hour": "six", "min": 0}, "start time hour must be a number"),
-            ({"hour": 24, "min": 0}, "start time hour must be between 0 and 23"),
+            ({"hour": 25, "min": 0}, "start time hour must be between 0 and 24"),
             ({"hour": 6, "min": 60}, "start time minute must be between 0 and 59"),
-            ({"min": 0}, "start time must specify hour"),
         ],
-        ids=["non-numeric-hour", "hour-too-large", "minute-too-large", "no-hour"],
+        ids=["non-numeric-hour", "hour-too-large", "minute-too-large"],
     )
     def test_out_of_range_times_rejected(self, time_field, message):
         with pytest.raises(ValueError, match=message):
             Schedule.from_dict(_inside_payload(in_start_time=time_field))
 
+    @pytest.mark.parametrize(
+        ("time_field", "expected_hour"),
+        [({"hour": 24, "min": 0}, 24), ({"min": 0}, 0)],
+        ids=["end-of-day", "no-hour"],
+    )
+    def test_the_read_path_keeps_entries_it_cannot_fully_parse(self, time_field, expected_hour):
+        """Refusing here would make refresh_schedules() drop the whole entry.
+
+        24:00 is a natural end-of-day encoding and an absent hour is a shape a
+        firmware variant could send; either way the schedule really exists on
+        the door, so hiding it is worse than reading it generously.
+        """
+        sched = Schedule.from_dict(_inside_payload(in_start_time=time_field))
+        assert sched.start.hour == expected_hour
+
     def test_outside_entry_times_are_validated_too(self):
-        with pytest.raises(ValueError, match="end time hour must be between 0 and 23"):
+        with pytest.raises(ValueError, match="end time hour must be between 0 and 24"):
             Schedule.from_dict(
                 {
                     "index": 0,
@@ -1379,14 +1393,16 @@ class TestSetNotifications:
 
         await door.set_notifications(low_battery=True)
 
-        # Wire values are "1"/"0" strings per docs/protocol.md.
+        # JSON booleans, as every released version has sent. docs/protocol.md
+        # shows "1"/"0" here but is reverse-engineered, not authority.
         assert sent == {
-            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: "1",  # Preserved from cache
-            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: "0",
-            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: "0",
-            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: "0",
-            FIELD_LOW_BATTERY_NOTIFICATIONS: "1",  # Explicitly set
+            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: True,  # Preserved from cache
+            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: False,
+            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: False,
+            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: False,
+            FIELD_LOW_BATTERY_NOTIFICATIONS: True,  # Explicitly set
         }
+        assert all(type(v) is bool for v in sent.values())
 
     async def test_custom_cached_settings_drive_the_wire_payload(self, door):
         """Every field of a custom NotificationSettings reaches the wire.
@@ -1418,12 +1434,15 @@ class TestSetNotifications:
         await door.set_notifications()  # no overrides: pure cache passthrough
 
         assert sent == {
-            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: "1",
-            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: "0",
-            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: "0",
-            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: "1",
-            FIELD_LOW_BATTERY_NOTIFICATIONS: "1",
+            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: True,
+            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: False,
+            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: False,
+            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: True,
+            FIELD_LOW_BATTERY_NOTIFICATIONS: True,
         }
+        # bool, not the int 1: True == 1 in Python, so dict equality alone
+        # would not catch a regression back to a stringified/int payload.
+        assert all(type(v) is bool for v in sent.values())
         assert door.notifications is door._notifications
 
 

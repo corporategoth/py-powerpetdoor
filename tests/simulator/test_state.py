@@ -589,7 +589,7 @@ class TestScheduleFromDictRejectsHostileInput:
         ("time_field", "message"),
         [
             ({"hour": "six", "min": 0}, "start time hour must be a number"),
-            ({"hour": 24, "min": 0}, "start time hour must be between 0 and 23"),
+            ({"hour": 25, "min": 0}, "start time hour must be between 0 and 24"),
             ({"hour": 6, "min": 60}, "start time minute must be between 0 and 59"),
         ],
     )
@@ -598,7 +598,7 @@ class TestScheduleFromDictRejectsHostileInput:
             Schedule.from_dict({"index": 0, "inside": True, "in_start_time": time_field})
 
     def test_outside_entry_times_are_validated_too(self):
-        with pytest.raises(ValueError, match="end time hour must be between 0 and 23"):
+        with pytest.raises(ValueError, match="end time hour must be between 0 and 24"):
             Schedule.from_dict(
                 {
                     "index": 0,

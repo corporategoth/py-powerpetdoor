@@ -171,23 +171,29 @@ def require_schedule_field(data: dict, key: str) -> object:
     return data[key]
 
 
-def coerce_schedule_time(value: object, name: str) -> tuple[int, int]:
+def coerce_schedule_time(value: object, name: str, *, require_hour: bool = True) -> tuple[int, int]:
     """Coerce an untrusted ``{hour, min}`` mapping to a valid (hour, minute).
 
-    The hour is required: this entry's whole purpose is to gate sensor
-    access, so materializing a permissive window out of an absent field is
-    the wrong way to fail. The minute defaults to 0, matching the protocol's
-    own ``{hour: H, min: 0}`` shape.
+    The minute defaults to 0, matching the protocol's own ``{hour: H, min: 0}``
+    shape. Hour 24 is accepted: ``24:00`` is a natural end-of-day encoding and
+    the firmware is not ours to constrain.
+
+    Args:
+        require_hour: True when validating a schedule someone is asking us to
+            store, where a missing hour is a malformed request worth refusing.
+            False when parsing a schedule the *device* reported: dropping the
+            whole entry would hide a schedule that really exists on the door,
+            so an absent hour becomes midnight instead.
 
     Raises:
-        ValueError: If the value is not a mapping, carries no hour, or the
-            fields are not valid times.
+        ValueError: If the value is not a mapping, the fields are not valid
+            times, or the hour is absent and ``require_hour`` is set.
     """
     if not isinstance(value, dict):
         raise ValueError(f"Schedule {name} must be an object, got {value!r}")
-    if FIELD_HOUR not in value:
+    if require_hour and FIELD_HOUR not in value:
         raise ValueError(f"Schedule {name} must specify {FIELD_HOUR}, got {value!r}")
-    hour = coerce_schedule_int(value[FIELD_HOUR], f"{name} hour", 23)
+    hour = coerce_schedule_int(value.get(FIELD_HOUR, 0), f"{name} hour", 24)
     minute = coerce_schedule_int(value.get(FIELD_MINUTE, 0), f"{name} minute", 59)
     return hour, minute
 

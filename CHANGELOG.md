@@ -106,9 +106,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simulator flags scoped to a mode are rejected by argparse instead of ignored
 - Bare `battery` and `holdtime` show the current value instead of mutating it
 - Dropped the `async-timeout` dependency in favor of stdlib `asyncio.timeout`
-- `Schedule.to_dict()` and `schedule_template` emit `enabled` as the wire's
-  `"1"`/`"0"` string, matching `docs/protocol.md` and the simulator. Readers on
-  both sides already accepted either spelling
 - `GET_SCHEDULE_LIST` returns slot indices sorted, and
   `PowerPetDoor.refresh_schedules()` sorts the list it caches, so the public
   `door.schedules` order no longer depends on which code path last touched it
@@ -250,6 +247,16 @@ accepted, and the run still exited 0.
   `docs/operation.md` — stay
 
 ### Fixed
+- `PowerPetDoor.set_notifications()` sent `"1"`/`"0"` strings where every
+  released version sent JSON booleans. Reverted: `docs/protocol.md` shows
+  strings here, but it is reverse-engineered and is not authority over the
+  firmware, and the change was never needed — the simulator accepted booleans
+  throughout
+- Reading a schedule from the device no longer refuses `hour: 24` (a natural
+  end-of-day encoding) or a time block with no hour. Refusing made
+  `refresh_schedules()` drop the entry silently, hiding a schedule that really
+  exists on the door; the simulator still validates strictly what a client asks
+  it to store
 - The plain-input simulator prompt no longer busy-spins at EOF. `readline()`
   returning `""` was treated as a bare Enter, and an fd at EOF is permanently
   readable, so the reader callback re-fired forever: 98% of a core, tens of MB
