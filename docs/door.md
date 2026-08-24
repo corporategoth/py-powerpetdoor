@@ -768,8 +768,9 @@ window_minutes((22, 0), END_OF_DAY) == (1320, 1440)
 schedule_window_is_empty((9, 0), (9, 0))          # True - stored, never fires
 ```
 
-`set_schedule` refuses a window that ends before it begins, because the door
-would accept it, echo it back unchanged and silently never act on it:
+`set_schedule` refuses a window that covers no time — one whose end does not
+EXCEED its start — because the door would accept it, echo it back unchanged
+and silently never act on it:
 
 ```python
 await door.set_schedule(Schedule(inside=True,

@@ -490,7 +490,7 @@ class TestSchedule:
             end=ScheduleTime(hour=1, minute=0),
         )
 
-        with pytest.raises(ValueError, match="ends before it starts"):
+        with pytest.raises(ValueError, match="covers no time"):
             schedule.validate_for_send()
 
     def test_validate_for_send_allows_a_window_ending_at_midnight(self):
@@ -504,12 +504,15 @@ class TestSchedule:
 
         schedule.validate_for_send()
 
-    def test_validate_for_send_allows_equal_ends(self):
-        """Refused only when the end is EARLIER, not when it coincides.
+    def test_validate_for_send_refuses_equal_ends_too(self):
+        """Coinciding ends are refused as well, and that changed.
 
-        An entry with coinciding ends never fires on a real door, but it is
-        not malformed and the caller may have meant it; `enabled=False` is
-        the clearer way to say the same thing.
+        This used to assert the opposite, reasoning that such an entry is not
+        malformed and the caller may have meant it. Measured on firmware
+        1.7.18, `09:00-09:00` is an EMPTY window: the door accepts it and
+        then simply stops permitting the sensor, with nothing anywhere to say
+        why. `enabled=False` says the same thing and says it visibly, so
+        there is no reason to let the silent spelling through.
         """
         schedule = Schedule(
             index=0,
@@ -518,7 +521,20 @@ class TestSchedule:
             end=ScheduleTime(hour=9, minute=0),
         )
 
-        schedule.validate_for_send()
+        with pytest.raises(ValueError, match="covers no time"):
+            schedule.validate_for_send()
+
+    def test_validate_for_send_still_allows_a_whole_day(self):
+        """The boundary: 00:00-00:00 normalises to 00:00-24:00 and passes.
+
+        Refusing it would block the commonest window anyone writes.
+        """
+        Schedule(
+            index=0,
+            inside=True,
+            start=ScheduleTime(hour=0, minute=0),
+            end=ScheduleTime(hour=0, minute=0),
+        ).validate_for_send()
 
     def test_from_dict_days_are_bools(self):
         """Wire 1/0 lists are converted to real booleans."""
@@ -1537,7 +1553,7 @@ class TestDoorSchedules:
             end=ScheduleTime(hour=1, minute=0),
         )
 
-        with pytest.raises(ValueError, match="ends before it starts"):
+        with pytest.raises(ValueError, match="covers no time"):
             await door.set_schedule(schedule)
 
         assert 2 not in simulator.state.schedules

@@ -476,19 +476,26 @@ class Schedule:
         cannot express a window running into the next day at all, and the
         caller has to spell it as two entries.
 
+        ``<=``, not ``<``: a window whose end EQUALS its start is empty too -
+        measured on firmware 1.7.18, ``09:00-09:00`` leaves the sensor
+        disabled - and it is the worst of the three to let through, because
+        the door takes it and simply stops permitting the sensor with nothing
+        anywhere to say why.
+
         Raises:
-            ValueError: If the window ends before it starts.
+            ValueError: If the window covers no time.
         """
         start = (self.start.hour, self.start.minute)
         end = normalise_window_end((self.end.hour, self.end.minute))
         start_min, end_min = window_minutes(start, end)
-        if end_min < start_min:
+        if end_min <= start_min:
             raise ValueError(
                 t(
                     "door.schedule_end_before_start",
-                    "Schedule window {start} to {end} ends before it starts. "
-                    "The door cannot schedule past midnight in one entry - use "
-                    "{start} to 24:00 on this day and 00:00 to {end} on the next.",
+                    "Schedule window {start} to {end} covers no time. The end "
+                    "must be later than the start, and the door cannot schedule "
+                    "past midnight in one entry - use {start} to 24:00 on this "
+                    "day and 00:00 to {end} on the next.",
                     start=f"{start[0]:02d}:{start[1]:02d}",
                     end=f"{self.end.hour:02d}:{self.end.minute:02d}",
                 )

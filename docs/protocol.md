@@ -1019,7 +1019,9 @@ and `00:00`–`24:00` all round-trip byte for byte. The device stores nonsense
 faithfully and simply never acts on it, so **nothing downstream catches a
 malformed window**. `Schedule.validate_for_send()` is therefore the only
 thing standing between a caller and a schedule that reads correctly and does
-nothing; `PowerPetDoor.set_schedule()` applies it.
+nothing; `PowerPetDoor.set_schedule()` applies it. It refuses any window whose
+end does not exceed its start — `end <= start`, coinciding ends included,
+because those are empty too.
 
 ### End of day is 24:00, and 23:59 is not special
 
