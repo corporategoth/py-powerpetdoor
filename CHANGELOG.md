@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-24
+
+Everything below was **measured against a real Power Pet Door** (firmware
+1.7.18) rather than inferred from `docs/protocol.md` or from this library's
+own simulator. Several long-standing beliefs turned out to be wrong, and the
+simulator was wrong in the same way, so no test could have caught them.
+
+### Fixed — schedule semantics
+
+The schedule engine is exactly:
+
+```
+active iff start <= now < end      (24:00 is a legal end, meaning 1440)
+if end <= start the entry is EMPTY and never fires
+```
+
+- **A window does NOT cross midnight.** `23:00-01:00` is stored perfectly and
+  never fires — not by wrapping within the day, and not by spilling into the
+  next. Measured both ways: a `23:00-21:30` entry leaves the sensor disabled
+  on the day it names *and* on the day after. Overnight access needs two
+  entries. This library previously reported such a window as active for
+  eight hours a night that the door was refusing.
+- **`start == end` is an EMPTY window, not a whole day.** `16:01-16:01` and
+  `21:01-21:01` both leave the sensor disabled. A whole day is `00:00-24:00`.
+- **Hour 24 is honoured and preserved.** Write `00:00-24:00` and the door
+  reads back `00:00-24:00` unchanged, so end-of-day now has an unambiguous
+  spelling and it is what this library emits.
+- **`00:00` as an END is rewritten to `24:00` on the send path.** Midnight
+  closing a window is the day's last minute; the device does not reinterpret
+  it, so `20:00-00:00` was stored faithfully and never fired. The rule is
+  positional — a `00:00` *start* is untouched, and so is the all-zero filler
+  block of the sensor an entry is not about.
+- **`23:59` is no longer special-cased** as end-of-day. That was an inference
+  from the factory schedule, and an unnecessary one now that `24:00` works.
+  A window ending at `23:59` really does stop one minute short, which is what
+  it says.
+- `set_schedule()` now **refuses a window that covers no time** (`end <=
+  start` after normalisation). The door accepts such an entry, echoes it back
+  unchanged and silently never acts on it, so nothing downstream could catch
+  it — the schedule reads correctly and simply does not work.
+
+### Fixed — door status
+
+- **`DOOR_CLOSING` added.** Closing has THREE states, not two:
+  `DOOR_HOLDING/KEEPUP -> DOOR_CLOSING -> DOOR_CLOSING_TOP_OPEN ->
+  DOOR_CLOSING_MID_OPEN -> DOOR_CLOSED`. The first was missing entirely, so
+  **every close on a real door produced `DoorStatus.UNKNOWN`** — neither open
+  nor closed, `is_closing` false, `position` 0 — plus a logged warning. A
+  consumer had no way to render it. Measured on both closing paths: after a
+  timed hold, and after an explicit close from `KEEPUP`.
+- `DoorStatus.CLOSING` reports `position` 100 and `is_closing` True: the
+  motor has started while the flap is still up.
+
+### Changed — simulator
+
+- Emits `DOOR_CLOSING`, with `DoorTimingConfig.closing_start_time` so tests
+  can compress it like every other phase. Its absence is why no test caught
+  the missing state.
+- `trigger_sensor` treats `DOOR_CLOSING` as a closing state, so a pet
+  arriving as the motor starts retracts the door instead of falling through
+  to the "door is closed, open it" path.
+- Auto-retract fires from `DOOR_CLOSING`, returning to holding without the
+  flap travelling; reversing an open from it returns to `HOLDING`/`KEEPUP`.
+- `is_sensor_allowed` corrected to the measured rule above.
+- `WHOLE_DAY_END_HOUR` / `WHOLE_DAY_END_MINUTE` (24:00) added, and the
+  built-in scripts' "always" window uses them.
+
+### Added
+
+- `END_OF_DAY`, `MIDNIGHT`, `normalise_window_end`,
+  `schedule_window_is_empty`, `window_minutes`, `DOOR_STATE_CLOSING`.
+- `Schedule.validate_for_send()` and `Schedule.window_is_empty()`.
+
+### Documented
+
+- **A hazard, measured:** the schedule engine writes its verdict through to
+  the `inside`/`outside` sensor flags, and turning `timersEnabled` off does
+  **not** restore them. A schedule that never fires can leave a door's
+  sensors disabled permanently, even after schedules are switched off. Any
+  client that writes schedules should be prepared to re-enable them.
+- `docs/protocol.md`'s status table and schedule section are now `**[V]**`
+  rather than inferred, and carry the probe results.
+
 ## [0.4.1] - 2026-08-23
 
 ### Changed — breaking
