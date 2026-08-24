@@ -101,6 +101,10 @@ class DoorTimingConfig:
 
     # Time for each phase of closing
     slowing_time: float = 0.3
+    #: The brief first closing state, before the flap has moved. Measured on
+    #: firmware 1.7.18 at roughly 180ms between DOOR_CLOSING and
+    #: DOOR_CLOSING_TOP_OPEN.
+    closing_start_time: float = 0.2
     closing_top_time: float = 0.4
     closing_mid_time: float = 0.4
 

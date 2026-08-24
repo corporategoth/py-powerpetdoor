@@ -222,15 +222,32 @@ DoorStatus.RISING          # Door opening
 DoorStatus.SLOWING         # Door slowing near top
 DoorStatus.HOLDING         # Door open, holding before auto-close
 DoorStatus.KEEPUP          # Door locked open (open)
+DoorStatus.CLOSING            # Closing has begun, flap has not moved yet
 DoorStatus.CLOSING_TOP_OPEN   # Door closing from top
 DoorStatus.CLOSING_MID_OPEN   # Door closing from middle
 DoorStatus.UNKNOWN         # Unrecognized status string from the device
 ```
 
+Closing has **three** states, not two. Measured on firmware 1.7.18 by
+cycling a real door:
+
+```
+IDLE -> RISING -> SLOWING -> HOLDING
+     -> CLOSING -> CLOSING_TOP_OPEN -> CLOSING_MID_OPEN -> CLOSED -> IDLE
+```
+
+`CLOSING` is the motor starting while the flap is still up, so `position` is
+`100` and `is_closing` is `True`. A close from `KEEPUP` reports it too — it is
+not specific to a timed open.
+
 `DoorStatus.UNKNOWN` is reported (with a warning logged) when the
 device sends a status string this library does not recognize - for
 example from a newer firmware. While the status is `UNKNOWN`, `is_open`,
 `is_closed`, and `is_closing` are all `False` and `position` is `0`.
+
+`CLOSING` was itself an `UNKNOWN` until it was measured, which is what that
+fallback is for: every close on a real door briefly produced a status no
+consumer could render.
 
 ## Sensors
 

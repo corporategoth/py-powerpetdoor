@@ -107,6 +107,14 @@ DOOR_STATE_HOLDING = "DOOR_HOLDING"
 DOOR_STATE_KEEPUP = "DOOR_KEEPUP"
 DOOR_STATE_RISING = "DOOR_RISING"
 DOOR_STATE_SLOWING = "DOOR_SLOWING"
+#: The FIRST of the three closing states. **Measured against firmware
+#: 1.7.18** by cycling a real door: the full sequence is
+#: ``DOOR_IDLE -> DOOR_RISING -> DOOR_SLOWING -> DOOR_HOLDING ->
+#: DOOR_CLOSING -> DOOR_CLOSING_TOP_OPEN -> DOOR_CLOSING_MID_OPEN ->
+#: DOOR_CLOSED -> DOOR_IDLE``. It was missing here, so every close spent a
+#: moment in ``DoorStatus.UNKNOWN`` - neither open nor closed - and logged a
+#: warning.
+DOOR_STATE_CLOSING = "DOOR_CLOSING"
 DOOR_STATE_CLOSING_TOP_OPEN = "DOOR_CLOSING_TOP_OPEN"
 DOOR_STATE_CLOSING_MID_OPEN = "DOOR_CLOSING_MID_OPEN"
 

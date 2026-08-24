@@ -20,6 +20,7 @@ import pytest
 
 from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
@@ -39,6 +40,7 @@ FULL_CYCLE = [
     DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
     DOOR_STATE_HOLDING,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSED,
@@ -122,6 +124,7 @@ def script_timing():
         rise_time=0.05,
         default_hold_time=1,
         slowing_time=0.02,
+        closing_start_time=0.02,
         closing_top_time=0.02,
         closing_mid_time=0.02,
         sensor_retrigger_window=0.1,

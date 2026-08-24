@@ -429,7 +429,7 @@ and semantics are documented in
 |-------|-----------|---------------|
 | Envelope | `FIELD_CMD`, `FIELD_SUCCESS`, `FIELD_REASON`, `FIELD_MSG_ID`, `FIELD_MSG_ID_RESPONSE`, `FIELD_DIRECTION` | [Message Envelope](protocol.md#message-format) |
 | Direction | `DOOR_TO_PHONE`, `PHONE_TO_DOOR` | [Message Envelope](protocol.md#message-format) |
-| Door state values | `DOOR_STATE_IDLE`, `DOOR_STATE_CLOSED`, `DOOR_STATE_RISING`, `DOOR_STATE_SLOWING`, `DOOR_STATE_HOLDING`, `DOOR_STATE_KEEPUP`, `DOOR_STATE_CLOSING_TOP_OPEN`, `DOOR_STATE_CLOSING_MID_OPEN` | [Door Status Values](protocol.md#door-status-values) |
+| Door state values | `DOOR_STATE_IDLE`, `DOOR_STATE_CLOSED`, `DOOR_STATE_RISING`, `DOOR_STATE_SLOWING`, `DOOR_STATE_HOLDING`, `DOOR_STATE_KEEPUP`, `DOOR_STATE_CLOSING`, `DOOR_STATE_CLOSING_TOP_OPEN`, `DOOR_STATE_CLOSING_MID_OPEN` | [Door Status Values](protocol.md#door-status-values) |
 | Status payload | `FIELD_DOOR_STATUS` (`"door_status"`) | [Unsolicited Door Status](protocol.md#unsolicited-door-status) |
 | Notification payload | `FIELD_SENSOR_STATE` (`"sensorState"`, `"on"`/`"off"`) | [Notification Messages](protocol.md#notification-messages-door-to-client) |
 | Notification flags | `FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS`, `FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS`, `FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS`, `FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS`, `FIELD_LOW_BATTERY_NOTIFICATIONS` | [Notification Settings Fields](protocol.md#notification-settings-fields) |

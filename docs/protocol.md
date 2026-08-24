@@ -1102,8 +1102,30 @@ requirement, not a courtesy.
 | `DOOR_SLOWING` | Door is slowing near top |
 | `DOOR_HOLDING` | Door is open, hold timer running |
 | `DOOR_KEEPUP` | Door is locked open |
+| `DOOR_CLOSING` | Closing has begun; the flap has not moved yet |
 | `DOOR_CLOSING_TOP_OPEN` | Door closing from fully open |
 | `DOOR_CLOSING_MID_OPEN` | Door closing from mid position |
 
-**[R]** — only `DOOR_CLOSED` was observed on the probed unit, which was never
-made to move.
+**[V]** — the full sequence was measured on firmware 1.7.18 by cycling a
+physical unit:
+
+```
+DOOR_IDLE -> DOOR_RISING -> DOOR_SLOWING -> DOOR_HOLDING
+          -> DOOR_CLOSING -> DOOR_CLOSING_TOP_OPEN -> DOOR_CLOSING_MID_OPEN
+          -> DOOR_CLOSED -> DOOR_IDLE
+```
+
+**Closing has THREE states, not two.** `DOOR_CLOSING` comes first, about
+180 ms before `DOOR_CLOSING_TOP_OPEN`, and it was missing from this library
+entirely — so every close briefly produced `DoorStatus.UNKNOWN` (neither open
+nor closed), a status a consumer cannot render, plus a logged warning. The
+simulator did not emit it either, which is precisely why no test caught it.
+
+It is measured on **both** closing paths: after a timed hold, and after an
+explicit close from `DOOR_KEEPUP`. "Only a timed open reports it" was a
+plausible reading of the first measurement and is not what the door does.
+
+`DOOR_CLOSING` means the motor has started while the flap is still up, so
+`position` is 100 and `is_closing` is true. A pet detected during it must
+still trigger an auto-retract — the door simply returns to holding without
+having travelled.

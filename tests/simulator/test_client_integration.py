@@ -36,6 +36,7 @@ from powerpetdoor.const import (
     COMMAND,
     CONFIG,
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
@@ -65,6 +66,9 @@ from powerpetdoor.simulator import (
 #: registered for GET_DOOR_STATUS and DOOR_STATUS only).
 OPENING_SEQUENCE = [DOOR_STATE_RISING, DOOR_STATE_SLOWING, DOOR_STATE_HOLDING]
 CLOSING_SEQUENCE = [
+    # DOOR_CLOSING first: measured on a real door (firmware 1.7.18), the
+    # motor starts before the flap moves and the device reports it.
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSED,
@@ -84,6 +88,7 @@ def fast_timing():
         rise_time=0.1,
         default_hold_time=1,
         slowing_time=0.05,
+        closing_start_time=0.05,
         closing_top_time=0.05,
         closing_mid_time=0.05,
         sensor_retrigger_window=0.1,

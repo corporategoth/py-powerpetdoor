@@ -78,6 +78,7 @@ def fast_timing():
         rise_time=0.1,
         default_hold_time=1,
         slowing_time=0.05,
+        closing_start_time=0.05,
         closing_top_time=0.05,
         closing_mid_time=0.05,
         sensor_retrigger_window=0.1,

@@ -11,6 +11,7 @@ import pytest
 
 from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
@@ -21,15 +22,21 @@ from powerpetdoor.simulator.scripting import YAML_AVAILABLE, get_builtin_script
 
 requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
 
-# Open, close attempt, obstruction retract (reverses from CLOSING_TOP back
-# through SLOWING to HOLDING), then the final undisturbed close.
+# Open, close attempt, obstruction retract, then the final undisturbed close.
+#
+# The retract happens from DOOR_CLOSING - the motor has started but the flap
+# has not moved - so the door goes straight back to HOLDING without
+# travelling. It does NOT pass through CLOSING_TOP_OPEN and back up through
+# SLOWING, which is what this expected before DOOR_CLOSING was known about:
+# the obstruction is present when the close begins, so it is caught at the
+# first opportunity rather than one phase later.
 RETRACT_SEQUENCE = [
     DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
     DOOR_STATE_HOLDING,
-    DOOR_STATE_CLOSING_TOP_OPEN,
-    DOOR_STATE_SLOWING,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_HOLDING,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSED,

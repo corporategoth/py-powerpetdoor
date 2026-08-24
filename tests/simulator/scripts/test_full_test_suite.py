@@ -11,6 +11,7 @@ import pytest
 
 from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_KEEPUP,
@@ -28,6 +29,9 @@ KEEPUP_CYCLE = [
     DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
     DOOR_STATE_KEEPUP,
+    # Measured on a real door: a close from KEEPUP reports DOOR_CLOSING
+    # first, exactly as a close after a timed hold does.
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSED,

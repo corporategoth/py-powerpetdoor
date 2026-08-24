@@ -317,8 +317,17 @@ class TestScheduleParserTotality:
         and asserted separately below: the two emitters are opposite
         protocol directions (the library sends, the simulator replies), and
         firmware 1.7.18 spells those three as ints on the way back where we
-        send JSON booleans. Every *other* field must match on every input
-        both parsers accept.
+        send JSON booleans.
+
+        The selected sensor's END TIME is excluded for the same reason. The
+        library rewrites a window end of ``00:00`` to ``24:00`` on the way
+        OUT, because midnight closing a window means the end of the day and
+        the device does not reinterpret it - a stored ``22:00-00:00`` never
+        fires. The simulator is the device replying, so it must report what
+        it holds, unnormalised. The two directions genuinely differ here and
+        making them agree would break one of them.
+
+        Every *other* field must match on every input both parsers accept.
         """
         try:
             library = LibrarySchedule.from_dict(payload)
@@ -330,9 +339,31 @@ class TestScheduleParserTotality:
         emitted = library.to_dict()
         replied = simulator.to_dict()
 
-        assert {k: v for k, v in emitted.items() if k not in flags} == {
-            k: v for k, v in replied.items() if k not in flags
+        # The normalisation only touches the end block of a sensor this entry
+        # actually gates. An entry that gates NEITHER carries all-zero filler
+        # in both blocks and in both directions, so nothing is rewritten and
+        # everything must match exactly - which is the case an earlier
+        # version of this exclusion got wrong.
+        selected_ends = [
+            key
+            for key, selected in (
+                ("in_end_time", library.inside),
+                ("out_end_time", library.outside),
+            )
+            if selected
+        ]
+        excluded = (*flags, *selected_ends)
+
+        assert {k: v for k, v in emitted.items() if k not in excluded} == {
+            k: v for k, v in replied.items() if k not in excluded
         }
+        for key in selected_ends:
+            # The end times agree unless the window ends at midnight, which
+            # is the one value the send path rewrites.
+            if replied[key] == {"hour": 0, "min": 0}:
+                assert emitted[key] == {"hour": 24, "min": 0}
+            else:
+                assert emitted[key] == replied[key]
         for name in flags:
             # Conservative in what we send: the client->device payload
             # always carries a real JSON boolean, whatever spelling arrived.

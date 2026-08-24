@@ -70,7 +70,7 @@ from powerpetdoor.const import (
     CONFIG,
     DOOR_OPTION_AUTORETRACT,
     DOOR_STATE_CLOSED,
-    DOOR_STATE_CLOSING_TOP_OPEN,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
@@ -158,6 +158,7 @@ def timing_config():
         rise_time=0.05,
         default_hold_time=1,
         slowing_time=0.02,
+        closing_start_time=0.02,
         closing_top_time=0.02,
         closing_mid_time=0.02,
         sensor_retrigger_window=0.1,
@@ -359,7 +360,9 @@ class TestDoorSimulatorProtocol:
 
         await dispatch(protocol, {CONFIG: CMD_POWER_OFF, "msgId": 1})
 
-        assert state.door_status == DOOR_STATE_CLOSING_TOP_OPEN
+        # DOOR_CLOSING: the motor has started and the flap has not moved
+        # yet, which is the first state a real door reports when closing.
+        assert state.door_status == DOOR_STATE_CLOSING
         assert (
             await protocol.engine.wait_for_status(DOOR_STATE_CLOSED, timeout=2.0)
             == DOOR_STATE_CLOSED
@@ -1693,7 +1696,7 @@ class TestEnableDisableHandlers:
 
         responses = all_responses(mock_transport)
         close_response = next(r for r in responses if r.get(FIELD_CMD) == CMD_CLOSE)
-        assert close_response[FIELD_DOOR_STATUS] == DOOR_STATE_CLOSING_TOP_OPEN
+        assert close_response[FIELD_DOOR_STATUS] == DOOR_STATE_CLOSING
         assert (
             await protocol.engine.wait_for_status(DOOR_STATE_CLOSED, timeout=2.0)
             == DOOR_STATE_CLOSED

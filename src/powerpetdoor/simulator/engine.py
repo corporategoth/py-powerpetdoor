@@ -38,6 +38,7 @@ from collections.abc import Callable, Iterable
 
 from ..const import (
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
@@ -250,10 +251,22 @@ class DoorMotionEngine:
         if self._defer_sequence(_INTENT_OPEN, hold):
             return True
 
-        # CLOSING_TOP_OPEN (66%) -> SLOWING (66%)
-        # CLOSING_MID_OPEN (33%) -> RISING (33%)
-        # CLOSED -> RISING
-        if current == DOOR_STATE_CLOSING_TOP_OPEN:
+        # CLOSING (100%)          -> HOLDING / KEEPUP (100%)
+        # CLOSING_TOP_OPEN (66%)  -> SLOWING (66%)
+        # CLOSING_MID_OPEN (33%)  -> RISING (33%)
+        # CLOSED                  -> RISING
+        if current == DOOR_STATE_CLOSING:
+            # The motor has started but the flap has not moved, so the door
+            # is still fully open. Reversing puts it straight back into the
+            # open state rather than re-running a rise it never undid.
+            start_state = DOOR_STATE_KEEPUP if hold else DOOR_STATE_HOLDING
+            logger.info(
+                t(
+                    "simulator.engine.simulator_reversing_close_start_still_open",
+                    "Simulator: Reversing close before the flap moved, still open",
+                )
+            )
+        elif current == DOOR_STATE_CLOSING_TOP_OPEN:
             start_state = DOOR_STATE_SLOWING
             logger.info(
                 t(
@@ -296,7 +309,11 @@ class DoorMotionEngine:
                 )
             )
             return False
-        if current in (DOOR_STATE_CLOSING_TOP_OPEN, DOOR_STATE_CLOSING_MID_OPEN):
+        if current in (
+            DOOR_STATE_CLOSING,
+            DOOR_STATE_CLOSING_TOP_OPEN,
+            DOOR_STATE_CLOSING_MID_OPEN,
+        ):
             logger.debug(
                 t(
                     "simulator.engine.simulator_close_command_ignored_already_1",
@@ -328,7 +345,9 @@ class DoorMotionEngine:
                 )
             )
         else:
-            start_state = DOOR_STATE_CLOSING_TOP_OPEN
+            # A close from open (HOLDING or KEEPUP) starts at the top of the
+            # closing sequence, which begins with the motor starting.
+            start_state = DOOR_STATE_CLOSING
 
         self._replace_sequence(start_state, False)
         return True
@@ -508,8 +527,15 @@ class DoorMotionEngine:
                 self._notify_sensor(sensor, SENSOR_STATE_ON)
             return
 
-        # If door is closing, activate the sensor to trigger auto-retract
-        if state.door_status in (DOOR_STATE_CLOSING_TOP_OPEN, DOOR_STATE_CLOSING_MID_OPEN):
+        # If door is closing, activate the sensor to trigger auto-retract.
+        # DOOR_CLOSING counts: the motor has started, so a pet arriving now
+        # must retract the door rather than fall through to the "door is
+        # closed, open it" path below.
+        if state.door_status in (
+            DOOR_STATE_CLOSING,
+            DOOR_STATE_CLOSING_TOP_OPEN,
+            DOOR_STATE_CLOSING_MID_OPEN,
+        ):
             logger.info(
                 t(
                     "simulator.engine.simulator_sensor_during_close_activating",
@@ -711,7 +737,11 @@ class DoorMotionEngine:
                     "Simulator: Obstruction set (blocking close)",
                 )
             )
-        elif state.door_status in (DOOR_STATE_CLOSING_TOP_OPEN, DOOR_STATE_CLOSING_MID_OPEN):
+        elif state.door_status in (
+            DOOR_STATE_CLOSING,
+            DOOR_STATE_CLOSING_TOP_OPEN,
+            DOOR_STATE_CLOSING_MID_OPEN,
+        ):
             logger.info(
                 t(
                     "simulator.engine.simulator_obstruction_during_close_will",
@@ -779,6 +809,19 @@ class DoorMotionEngine:
                 self._set_status(DOOR_STATE_HOLDING)
             elif status == DOOR_STATE_HOLDING:
                 await self._hold_open()
+                self._set_status(DOOR_STATE_CLOSING)
+            elif status == DOOR_STATE_CLOSING:
+                # The motor has started but the flap has not moved yet.
+                # Measured on a real door: HOLDING -> DOOR_CLOSING ->
+                # DOOR_CLOSING_TOP_OPEN, about 180ms apart. Omitting it here
+                # meant no test could catch the library not knowing the
+                # state, which is exactly what happened.
+                await asyncio.sleep(timing.closing_start_time)
+                # A pet that steps under the door as the motor starts must
+                # still trigger a retract. The flap has not moved, so the
+                # door goes back to holding rather than re-opening.
+                if self._auto_retract_if_blocked(DOOR_STATE_HOLDING):
+                    continue
                 self._set_status(DOOR_STATE_CLOSING_TOP_OPEN)
             elif status == DOOR_STATE_CLOSING_TOP_OPEN:
                 await asyncio.sleep(timing.closing_top_time)

@@ -18,6 +18,7 @@ from powerpetdoor.const import (
     CMD_OPEN,
     CONFIG,
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
@@ -40,6 +41,9 @@ from tests.simulator.wire import WireCapture
 #: HOLDING, and for a complete open/hold/close cycle.
 OPENING_SEQUENCE = [DOOR_STATE_RISING, DOOR_STATE_SLOWING, DOOR_STATE_HOLDING]
 CLOSING_SEQUENCE = [
+    # DOOR_CLOSING first: measured on a real door (firmware 1.7.18), the
+    # motor starts before the flap moves and the device reports it.
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSED,
@@ -58,6 +62,7 @@ def timing_config():
         rise_time=0.05,
         default_hold_time=1,
         slowing_time=0.02,
+        closing_start_time=0.02,
         closing_top_time=0.02,
         closing_mid_time=0.02,
         sensor_retrigger_window=0.1,

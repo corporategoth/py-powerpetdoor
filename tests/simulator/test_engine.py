@@ -14,6 +14,7 @@ import pytest
 
 from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
@@ -26,10 +27,23 @@ from powerpetdoor.simulator import DoorSimulatorState, DoorTimingConfig
 from powerpetdoor.simulator import engine as engine_module
 from powerpetdoor.simulator.engine import DoorMotionEngine
 
+#: The exact status sequence a REAL door reports across one open/close
+#: cycle. **Measured against firmware 1.7.18** by cycling a physical unit:
+#:
+#:     DOOR_IDLE -> DOOR_RISING -> DOOR_SLOWING -> DOOR_HOLDING
+#:               -> DOOR_CLOSING -> DOOR_CLOSING_TOP_OPEN
+#:               -> DOOR_CLOSING_MID_OPEN -> DOOR_CLOSED -> DOOR_IDLE
+#:
+#: DOOR_CLOSING was missing from this library entirely, so every close spent
+#: a moment in DoorStatus.UNKNOWN - neither open nor closed - and logged a
+#: warning. The simulator did not emit it either, which is why no test could
+#: catch that. It is measured on BOTH closing paths: after a timed hold, and
+#: after an explicit close from KEEPUP.
 FULL_OPEN_CLOSE_SEQUENCE = [
     DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
     DOOR_STATE_HOLDING,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSED,
@@ -43,6 +57,7 @@ def timing_config():
         rise_time=0.03,
         default_hold_time=1,
         slowing_time=0.02,
+        closing_start_time=0.02,
         closing_top_time=0.02,
         closing_mid_time=0.02,
         sensor_retrigger_window=0.1,
@@ -293,17 +308,20 @@ class TestReentrantStatusListeners:
             await engine.stop()
 
         assert sampled_inside_dispatch == [(True, DOOR_STATE_CLOSING_TOP_OPEN, True)]
-        # HOLDING -> CLOSING_TOP_OPEN (the listener asks to open) -> the door
-        # is still at CLOSING_TOP_OPEN when the deferral runs, so it reverses
-        # to SLOWING. No status is ever emitted twice in a row.
+        # HOLDING -> CLOSING (motor starts) -> CLOSING_TOP_OPEN (the listener
+        # asks to open) -> the door is still at CLOSING_TOP_OPEN when the
+        # deferral runs, so it reverses to SLOWING. No status is ever emitted
+        # twice in a row.
         assert all(a != b for a, b in zip(seen, seen[1:], strict=False))
         assert seen == [
             DOOR_STATE_RISING,
             DOOR_STATE_SLOWING,
             DOOR_STATE_HOLDING,
+            DOOR_STATE_CLOSING,
             DOOR_STATE_CLOSING_TOP_OPEN,
             DOOR_STATE_SLOWING,
             DOOR_STATE_HOLDING,
+            DOOR_STATE_CLOSING,
             DOOR_STATE_CLOSING_TOP_OPEN,
             DOOR_STATE_CLOSING_MID_OPEN,
             DOOR_STATE_CLOSED,
@@ -379,7 +397,20 @@ class TestOpenClose:
         assert state.door_status == DOOR_STATE_CLOSED
 
     async def test_close_from_keepup_runs_close_sequence(self, engine, state):
-        """close() from KEEPUP walks CLOSING_TOP -> CLOSING_MID -> CLOSED."""
+        """close() from KEEPUP walks CLOSING -> CLOSING_TOP -> CLOSING_MID -> CLOSED.
+
+        Four states, not three. **Measured against firmware 1.7.18** by
+        closing a real door from KEEPUP:
+
+            DOOR_KEEPUP -> DOOR_CLOSING -> DOOR_CLOSING_TOP_OPEN
+                        -> DOOR_CLOSING_MID_OPEN -> DOOR_CLOSED
+
+        DOOR_CLOSING was missing from this library entirely, so every close
+        spent a moment in DoorStatus.UNKNOWN - neither open nor closed - and
+        logged a warning. It was measured on the HOLDING path first and then
+        here, because "only a timed open reports it" was a plausible reading
+        of the first measurement and is not what the door does.
+        """
         engine.open(hold=True)
         await engine.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
 
@@ -389,6 +420,7 @@ class TestOpenClose:
 
         await engine.wait_for_status(DOOR_STATE_CLOSED, timeout=2.0)
         assert seen == [
+            DOOR_STATE_CLOSING,
             DOOR_STATE_CLOSING_TOP_OPEN,
             DOOR_STATE_CLOSING_MID_OPEN,
             DOOR_STATE_CLOSED,
@@ -399,10 +431,10 @@ class TestOpenClose:
         engine.open(hold=True)
         await engine.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
         assert engine.close() is True
-        assert state.door_status == DOOR_STATE_CLOSING_TOP_OPEN
+        assert state.door_status == DOOR_STATE_CLOSING
 
         assert engine.close() is False  # already closing -> no-op
-        assert state.door_status == DOOR_STATE_CLOSING_TOP_OPEN
+        assert state.door_status == DOOR_STATE_CLOSING
         await engine.wait_for_status(DOOR_STATE_CLOSED, timeout=2.0)
 
     async def test_run_started_in_terminal_state_exits(self, engine, state):
@@ -427,7 +459,7 @@ class TestOpenClose:
         await engine.wait_for_status(DOOR_STATE_SLOWING, timeout=2.0)
 
         engine.close()
-        assert state.door_status == DOOR_STATE_CLOSING_TOP_OPEN
+        await engine.wait_for_status(DOOR_STATE_CLOSING_TOP_OPEN, timeout=2.0)
         await engine.wait_for_status(DOOR_STATE_CLOSED, timeout=2.0)
 
     async def test_open_reverses_closing_top_to_slowing(self, engine, state):
@@ -435,11 +467,42 @@ class TestOpenClose:
         engine.open(hold=True)
         await engine.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
         engine.close()
-        assert state.door_status == DOOR_STATE_CLOSING_TOP_OPEN
+        # Wait past DOOR_CLOSING, the brief first closing state, to reach the
+        # one this test is about.
+        await engine.wait_for_status(DOOR_STATE_CLOSING_TOP_OPEN, timeout=2.0)
 
         engine.open()
         assert state.door_status == DOOR_STATE_SLOWING
         await engine.wait_for_status(DOOR_STATE_HOLDING, timeout=2.0)
+
+    async def test_open_reverses_the_very_start_of_a_close_without_moving(self, engine, state):
+        """Reversing before the flap has moved returns straight to holding.
+
+        DOOR_CLOSING is the motor starting while the door is still fully
+        open, so an open() here has nothing to undo: it must NOT re-run a
+        rise the door never performed. Position stays 100 throughout, which
+        is what says the flap never travelled.
+        """
+        engine.open(hold=True)
+        await engine.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+        engine.close()
+        assert state.door_status == DOOR_STATE_CLOSING
+
+        engine.open()
+
+        assert state.door_status == DOOR_STATE_HOLDING
+        await engine.wait_for_status(DOOR_STATE_CLOSED, timeout=5.0)
+
+    async def test_open_with_hold_reverses_the_start_of_a_close_to_keepup(self, engine, state):
+        """The same reversal carries `hold`, so the door parks open again."""
+        engine.open(hold=True)
+        await engine.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+        engine.close()
+        assert state.door_status == DOOR_STATE_CLOSING
+
+        engine.open(hold=True)
+
+        assert state.door_status == DOOR_STATE_KEEPUP
 
     async def test_open_reverses_closing_mid_to_rising(self, engine, state):
         """open() while CLOSING_MID reverses position-consistently to RISING."""
@@ -536,7 +599,7 @@ class TestAutoRetract:
         engine.open(hold=True)
         await engine.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
         engine.close()
-        assert state.door_status == DOOR_STATE_CLOSING_TOP_OPEN
+        await engine.wait_for_status(DOOR_STATE_CLOSING_TOP_OPEN, timeout=2.0)
 
         # Pet in the doorway while closing
         engine.trigger_sensor("inside")
@@ -550,14 +613,18 @@ class TestAutoRetract:
         assert not task.cancelled()
         assert state.total_auto_retracts == 1
         assert state.inside_sensor_active is False
-        # Full observed sequence: keepup-open, close attempt, retract, close
+        # Full observed sequence: keepup-open, close attempt, retract, close.
+        # Each close run begins with DOOR_CLOSING - the motor starting before
+        # the flap moves - which is what a real door reports.
         assert seen == [
             DOOR_STATE_RISING,
             DOOR_STATE_SLOWING,
             DOOR_STATE_KEEPUP,
+            DOOR_STATE_CLOSING,
             DOOR_STATE_CLOSING_TOP_OPEN,
             DOOR_STATE_SLOWING,
             DOOR_STATE_HOLDING,
+            DOOR_STATE_CLOSING,
             DOOR_STATE_CLOSING_TOP_OPEN,
             DOOR_STATE_CLOSING_MID_OPEN,
             DOOR_STATE_CLOSED,
@@ -582,7 +649,7 @@ class TestAutoRetract:
         await engine.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
         state.inside_sensor_active = False
         engine.close()
-        assert state.door_status == DOOR_STATE_CLOSING_TOP_OPEN
+        await engine.wait_for_status(DOOR_STATE_CLOSING_TOP_OPEN, timeout=2.0)
 
         engine.trigger_sensor("outside")
         assert state.outside_sensor_active is True
@@ -943,7 +1010,7 @@ class TestSimulateObstruction:
         engine.open(hold=True)
         await engine.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
         engine.close()
-        assert state.door_status == DOOR_STATE_CLOSING_TOP_OPEN
+        await engine.wait_for_status(DOOR_STATE_CLOSING_TOP_OPEN, timeout=2.0)
 
         engine.simulate_obstruction()
         await engine.wait_for_status(DOOR_STATE_HOLDING, timeout=2.0)

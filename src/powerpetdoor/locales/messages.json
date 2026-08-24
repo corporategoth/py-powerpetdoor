@@ -248,6 +248,7 @@
   "simulator.engine.simulator_outside_sensor_deactivated_duration": "Simulator: Outside sensor deactivated (duration expired)",
   "simulator.engine.simulator_outside_sensor_toggle": "Simulator: Outside sensor %s (toggle)",
   "simulator.engine.simulator_reversing_close_mid_continuing": "Simulator: Reversing close at mid, continuing to open",
+  "simulator.engine.simulator_reversing_close_start_still_open": "Simulator: Reversing close before the flap moved, still open",
   "simulator.engine.simulator_reversing_close_top_continuing": "Simulator: Reversing close at top, continuing to open",
   "simulator.engine.simulator_reversing_open_rising_closing": "Simulator: Reversing open at rising, closing from mid",
   "simulator.engine.simulator_reversing_open_slowing_closing": "Simulator: Reversing open at slowing, closing from top",

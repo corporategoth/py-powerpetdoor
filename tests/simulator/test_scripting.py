@@ -19,6 +19,7 @@ import pytest
 
 from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
@@ -69,6 +70,7 @@ def fast_timing():
         rise_time=0.05,
         default_hold_time=1,
         slowing_time=0.02,
+        closing_start_time=0.02,
         closing_top_time=0.02,
         closing_mid_time=0.02,
         sensor_retrigger_window=0.1,
@@ -445,7 +447,9 @@ class TestScriptRunner:
                 "trigger inside",
                 "wait_for door_holding 5",
                 "wait_for door_closing 5",
-                f"assert door_status {DOOR_STATE_CLOSING_TOP_OPEN}",
+                # The FIRST closing state, which a real door reports as the
+                # motor starts and before the flap moves.
+                f"assert door_status {DOOR_STATE_CLOSING}",
             ]
         )
         result = await runner.run(script, verbose=False)

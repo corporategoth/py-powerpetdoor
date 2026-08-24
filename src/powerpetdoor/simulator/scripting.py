@@ -64,6 +64,7 @@ if TYPE_CHECKING:
 
 from ..const import (
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
@@ -123,7 +124,11 @@ _STATUS_WAIT_CONDITIONS: dict[str, tuple[str, ...]] = {
     "door_rising": (DOOR_STATE_RISING,),
     "door_holding": (DOOR_STATE_HOLDING,),
     "door_keepup": (DOOR_STATE_KEEPUP,),
-    "door_closing": (DOOR_STATE_CLOSING_TOP_OPEN, DOOR_STATE_CLOSING_MID_OPEN),
+    "door_closing": (
+        DOOR_STATE_CLOSING,
+        DOOR_STATE_CLOSING_TOP_OPEN,
+        DOOR_STATE_CLOSING_MID_OPEN,
+    ),
 }
 
 # The accepted vocabulary of each `Unknown X` message below.

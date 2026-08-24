@@ -86,6 +86,7 @@ from .const import (
     CONFIG,
     # Door states
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
@@ -288,6 +289,9 @@ class DoorStatus(Enum):
     SLOWING = DOOR_STATE_SLOWING
     HOLDING = DOOR_STATE_HOLDING
     KEEPUP = DOOR_STATE_KEEPUP
+    #: The door has begun closing and the flap is still up. Measured as the
+    #: first of the three closing states a real door reports.
+    CLOSING = DOOR_STATE_CLOSING
     CLOSING_TOP_OPEN = DOOR_STATE_CLOSING_TOP_OPEN
     CLOSING_MID_OPEN = DOOR_STATE_CLOSING_MID_OPEN
     #: Status string not recognized (e.g. newer firmware); the door is in
@@ -903,6 +907,7 @@ class PowerPetDoor:
     def is_closing(self) -> bool:
         """Whether the door is currently closing."""
         return self._status in (
+            DoorStatus.CLOSING,
             DoorStatus.CLOSING_TOP_OPEN,
             DoorStatus.CLOSING_MID_OPEN,
         )
@@ -917,6 +922,9 @@ class PowerPetDoor:
             DoorStatus.SLOWING: 66,
             DoorStatus.HOLDING: 100,
             DoorStatus.KEEPUP: 100,
+            # CLOSING is the moment the motor starts: the flap has not moved
+            # yet, so the door is still fully open.
+            DoorStatus.CLOSING: 100,
             DoorStatus.CLOSING_TOP_OPEN: 66,
             DoorStatus.CLOSING_MID_OPEN: 33,
         }
