@@ -1021,22 +1021,33 @@ malformed window**. `Schedule.validate_for_send()` is therefore the only
 thing standing between a caller and a schedule that reads correctly and does
 nothing; `PowerPetDoor.set_schedule()` applies it.
 
-### End of day: 23:59 vs 24:00
+### End of day is 24:00, and 23:59 is not special
 
-**[R] — inferred, NOT measured.** The probed unit's factory schedule spells a
-full day as `00:00`–`23:59` on all seven days for both sensors, which plainly
-means "always", so this library treats an end of exactly `23:59` as the end
-of the day (1440) rather than excluding that final minute.
+**[V]** `24:00` is a legal end and the device honours it: `20:00`–`24:00`
+reports the sensor enabled at 21:07, and `00:00`–`24:00` enables it outright.
+It is also **preserved** — write `00:00`–`24:00` and the door reads back
+`00:00`–`24:00`, unchanged. So a whole day has an unambiguous spelling and
+this library uses it.
 
-That inference is **weaker than it looks** now that the engine is known to be
-strictly `start <= now < end` and to honour `24:00`. A literal reading says
-`00:00`–`23:59` leaves the sensor off for exactly the minute `23:59`, and the
-vendor app may simply write `23:59` and accept the gap. Deciding it needs a
-probe with the door's clock at `23:59`, which has not been run.
+`23:59` is therefore treated as an ordinary time. Earlier versions special-
+cased it as end-of-day, reasoning that the probed unit's factory schedule is
+`00:00`–`23:59` on all seven days and plainly means "always". That was always
+an inference, and it became an unnecessary one: since the engine is strictly
+`start <= now < end` and `24:00` works, there is nothing to round up to and
+nothing to guess at. A window ending at `23:59` leaves the sensor off for
+that final minute, which is what such a window says.
 
-The special case is kept because it is the shipped behaviour and the risk is
-one minute a day either way. **`24:00` is the unambiguous spelling and is
-what this library emits** for a whole day.
+One consequence worth stating: a factory door does have a one-minute nightly
+gap, and this library reports it rather than papering over it. **This is the
+last claim here that has not been probed at the boundary** — confirming it
+needs the door's clock at `23:59`. If a probe ever shows the firmware
+special-casing `23:59`, the tests named
+`test_the_factory_spelling_really_does_stop_one_minute_short` and
+`test_a_window_ending_at_2359_stops_one_minute_short_of_the_day` are the ones
+that should fail.
+
+Reading is faithful either way: an entry is never rewritten on the way
+through, so a door holding `00:00`–`23:59` keeps it.
 
 ### Hazard: the engine leaves the sensor flags where it last set them
 

@@ -288,11 +288,13 @@ used to claim:
 An entry that should gate nothing is still best spelled `enabled: false`: it
 says so, where an empty window merely behaves that way.
 
-**`23:59`** is treated as end-of-day by this library, because a real door's
-factory schedule is `00:00`–`23:59` on all seven days for both sensors, which
-plainly means "always". That is an inference rather than a measurement, and a
-weaker one now that `24:00` is known to work — see
-[End of day: 23:59 vs 24:00](protocol.md#end-of-day-2359-vs-2400).
+**`23:59` is not special.** It is the last real minute of the day, and a
+window ending there leaves the sensor off for that minute. The end of the day
+is `24:00`, which the device is measured to honour and to preserve. A factory
+door spells its full-day windows `00:00`–`23:59` and so does have a
+one-minute nightly gap; this library reports that rather than papering over
+it. See
+[End of day is 24:00, and 23:59 is not special](protocol.md#end-of-day-is-2400-and-2359-is-not-special).
 
 **Hazard**: the engine writes its verdict through to the sensor enable flags,
 and turning `timersEnabled` off does *not* put them back. A schedule that

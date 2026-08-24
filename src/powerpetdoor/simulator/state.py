@@ -70,13 +70,23 @@ logger = logging.getLogger(__name__)
 # powerpetdoor.door.Schedule parser share one implementation: hardening
 # either one hardens both.
 
-#: Last minute of the day, as the device itself encodes the end of a
-#: full-day schedule window (verified against firmware 1.7.18: its factory
-#: schedule is ``in 00:00-23:59``, ``out 00:00-23:59``). ``24:00`` is still
-#: accepted on the read path - see
-#: :func:`~powerpetdoor.schedule.coerce_schedule_time` - but never emitted.
+#: The last real minute of the day, and how a probed unit's FACTORY schedule
+#: happens to spell the end of its full-day windows (``in 00:00-23:59``,
+#: ``out 00:00-23:59`` on firmware 1.7.18).
+#:
+#: It is a spelling, not a special case. The schedule engine is measured to
+#: be strictly ``start <= now < end``, so a window ending here really does
+#: leave the sensor off for that final minute. Use :data:`WHOLE_DAY_END_HOUR`
+#: to mean the end of the day.
 END_OF_DAY_HOUR = 23
 END_OF_DAY_MINUTE = 59
+
+#: The end of the day, unambiguously. **Measured against firmware 1.7.18**:
+#: the device honours hour 24 (``20:00-24:00`` reports the sensor enabled at
+#: 21:07) and preserves it (write ``00:00-24:00``, read back
+#: ``00:00-24:00``), so this is what a whole-day window should be written as.
+WHOLE_DAY_END_HOUR = 24
+WHOLE_DAY_END_MINUTE = 0
 
 
 @dataclass
@@ -281,15 +291,14 @@ class Schedule:
         start = self.start_hour * 60 + self.start_min
         end = self.end_hour * 60 + self.end_min
 
-        if (self.end_hour, self.end_min) == (END_OF_DAY_HOUR, END_OF_DAY_MINUTE):
-            # 23:59 as the device's end-of-day. NOT measured - see the note
-            # in docs/protocol.md. It is inferred from the factory schedule
-            # being `00:00-23:59` on every day, which plainly means "always";
-            # a strictly exclusive reading would block the sensor for exactly
-            # the minute 23:59 each night. Kept because it is the shipped
-            # behaviour, but it is the one rule here without a measurement
-            # behind it, and 24:00 is the unambiguous spelling.
-            end = 24 * 60
+        # 23:59 is deliberately NOT special. An earlier version treated it as
+        # end-of-day, reasoning that the factory schedule is `00:00-23:59`
+        # and plainly means "always". That was an inference, and once the
+        # device was measured to accept AND preserve `24:00` - write
+        # `00:00-24:00` and a real door hands back `00:00-24:00` unchanged -
+        # there was no longer any reason to guess. The rule below is taken
+        # literally, so an entry that really does end at 23:59 really does
+        # leave the sensor off for that final minute.
 
         # Everything below IS measured, against firmware 1.7.18 with
         # timersEnabled on, by reading the sensor flags the engine writes

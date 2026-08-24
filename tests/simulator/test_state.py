@@ -451,14 +451,19 @@ class TestSchedule:
 
         assert len(allowed) == 1440
 
-    def test_the_devices_own_end_of_day_includes_its_final_minute(self):
-        """23:59 is how the door itself spells "until the end of the day".
+    def test_the_factory_spelling_really_does_stop_one_minute_short(self):
+        """23:59 is a time, not a special case.
 
-        Verified against firmware 1.7.18: the probed unit's factory
-        schedule is ``in 00:00-23:59`` on all seven days, which plainly
-        means "always". A literal half-open ``[start, end)`` reading would
-        switch the sensor off for exactly the minute 23:59 every day, so
-        that final minute is inside the window.
+        This asserted the opposite, on the reasoning that the probed unit's
+        factory schedule is ``in 00:00-23:59`` on all seven days and plainly
+        means "always". That was an inference, and an unnecessary one: the
+        device is measured to accept AND preserve ``24:00``, so a caller who
+        means the whole day can simply say so.
+
+        The engine is strictly ``start <= now < end``, so this window really
+        does leave the sensor off for the last minute of the day. If the
+        firmware turns out to special-case 23:59 after all, this is the test
+        that should fail.
         """
         schedule = Schedule(
             index=0,
@@ -472,7 +477,7 @@ class TestSchedule:
         )
 
         assert schedule.is_sensor_allowed("inside", 23, 58, 0) is True
-        assert schedule.is_sensor_allowed("inside", 23, 59, 0) is True
+        assert schedule.is_sensor_allowed("inside", 23, 59, 0) is False
 
     def test_an_ordinary_exclusive_end_still_excludes_its_final_minute(self):
         """The control: only 23:59 is special, not every end time."""

@@ -74,7 +74,7 @@ from ..i18n import t
 from ..sanitize import sanitize_text
 from ..schedule import MAX_SCHEDULE_INDEX, coerce_schedule_flag
 from .engine import SENSOR_NAMES
-from .state import END_OF_DAY_HOUR, END_OF_DAY_MINUTE, Schedule
+from .state import WHOLE_DAY_END_HOUR, WHOLE_DAY_END_MINUTE, Schedule
 
 logger = logging.getLogger(__name__)
 
@@ -788,8 +788,12 @@ class ScriptRunner:
                 outside=True,  # Allow outside sensor
                 start_hour=0,
                 start_min=0,
-                end_hour=END_OF_DAY_HOUR,
-                end_min=END_OF_DAY_MINUTE,
+                # 24:00, not 23:59: the engine is strictly
+                # `start <= now < end`, so 23:59 would leave the sensor off
+                # for the last minute of every day and a script that means
+                # "always" would behave differently at 23:59 than at 23:58.
+                end_hour=WHOLE_DAY_END_HOUR,
+                end_min=WHOLE_DAY_END_MINUTE,
             )
             self.simulator.add_schedule(schedule)
 

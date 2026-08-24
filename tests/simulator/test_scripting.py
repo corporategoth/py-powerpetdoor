@@ -43,7 +43,7 @@ from powerpetdoor.simulator.scripting import (
     list_builtin_scripts,
     script_completer,
 )
-from powerpetdoor.simulator.state import END_OF_DAY_HOUR, END_OF_DAY_MINUTE
+from powerpetdoor.simulator.state import WHOLE_DAY_END_HOUR, WHOLE_DAY_END_MINUTE
 
 # Skip marker for tests that require PyYAML
 requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
@@ -898,7 +898,9 @@ class TestScriptActions:
         # (verified against firmware 1.7.18). Its final minute is inside
         # the window, so the schedule really does allow both sensors at
         # every minute of every day - which is what the sum below pins.
-        assert (schedule.end_hour, schedule.end_min) == (END_OF_DAY_HOUR, END_OF_DAY_MINUTE)
+        # 24:00: a script's "always" window has to be active at 23:59 too.
+        assert (schedule.end_hour, schedule.end_min) == (WHOLE_DAY_END_HOUR, WHOLE_DAY_END_MINUTE)
+        assert schedule.is_sensor_allowed("inside", 23, 59, 0) is True
         assert (
             sum(
                 schedule.is_sensor_allowed("inside", minute // 60, minute % 60, weekday)
