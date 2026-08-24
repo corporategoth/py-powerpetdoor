@@ -143,7 +143,10 @@ from .schedule import (
     coerce_schedule_flag,
     coerce_schedule_int,
     coerce_schedule_time,
+    normalise_window_end,
     require_schedule_field,
+    schedule_window_is_empty,
+    window_minutes,
 )
 
 logger = logging.getLogger(__name__)
@@ -426,8 +429,66 @@ class Schedule:
             inside=self.inside,
             outside=self.outside,
             start=(self.start.hour, self.start.minute),
-            end=(self.end.hour, self.end.minute),
+            # A window end of 00:00 goes out as 24:00. Midnight is the first
+            # minute of a day, so as an end it says the opposite of what it
+            # means, and the device does NOT reinterpret it: measured on
+            # firmware 1.7.18, 20:00-00:00 is stored faithfully and never
+            # fires. Only the SELECTED sensor's window is translated - the
+            # other sensor's block stays the all-zero filler the protocol
+            # asks for, which must not become a whole-day window.
+            end=normalise_window_end((self.end.hour, self.end.minute)),
         )
+
+    def window_is_empty(self) -> bool:
+        """Whether this entry, AS THIS LIBRARY WOULD SEND IT, never fires.
+
+        The end is normalised first, so this answers the useful question -
+        "if I write this, will it do anything?" - rather than the literal
+        one. The two differ for exactly one spelling: a door that literally
+        holds ``00:00-00:00`` is gating that sensor OFF right now (measured),
+        while this reports False because sending it would produce
+        ``00:00-24:00``, a whole day. That spelling only exists on a door by
+        mistake, and re-saving it makes the door agree.
+
+        See :func:`powerpetdoor.schedule.schedule_window_is_empty`. Worth
+        asking, because a window that can never fire and one that is switched
+        off look identical in a listing but only one of them is deliberate.
+        """
+        return schedule_window_is_empty(
+            (self.start.hour, self.start.minute),
+            normalise_window_end((self.end.hour, self.end.minute)),
+        )
+
+    def validate_for_send(self) -> None:
+        """Raise if this entry could never fire on a real door.
+
+        Applied when SENDING only. A door asked for a window that ends before
+        it begins accepts it, echoes it back unchanged, and then silently
+        never acts on it - so nothing downstream catches the mistake, and the
+        user is left with a schedule that reads correctly and does nothing.
+
+        The end is normalised first, so ``22:00-00:00`` passes (it goes out
+        as ``22:00-24:00``) while ``23:00-01:00`` is refused: the device
+        cannot express a window running into the next day at all, and the
+        caller has to spell it as two entries.
+
+        Raises:
+            ValueError: If the window ends before it starts.
+        """
+        start = (self.start.hour, self.start.minute)
+        end = normalise_window_end((self.end.hour, self.end.minute))
+        start_min, end_min = window_minutes(start, end)
+        if end_min < start_min:
+            raise ValueError(
+                t(
+                    "door.schedule_end_before_start",
+                    "Schedule window {start} to {end} ends before it starts. "
+                    "The door cannot schedule past midnight in one entry - use "
+                    "{start} to 24:00 on this day and 00:00 to {end} on the next.",
+                    start=f"{start[0]:02d}:{start[1]:02d}",
+                    end=f"{self.end.hour:02d}:{self.end.minute:02d}",
+                )
+            )
 
     @classmethod
     def from_dict(cls, data: object) -> Schedule:
@@ -1383,7 +1444,13 @@ class PowerPetDoor:
         Args:
             schedule: The schedule to set.
             timeout: Seconds to wait for response. Defaults to default_timeout.
+
+        Raises:
+            ValueError: If the window ends before it begins. The device would
+                accept such an entry and never act on it, so it is refused
+                here rather than written and quietly ignored.
         """
+        schedule.validate_for_send()
         # `build_set_schedule_message` owns the wire shape - the slot index
         # as a sibling of the schedule object, which firmware 1.7.18
         # requires - and is equally reachable from a message-level caller.

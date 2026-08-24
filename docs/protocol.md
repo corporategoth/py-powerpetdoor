@@ -962,18 +962,92 @@ sensor's times should be zeros. If a payload sets *both* flags (out of spec,
 but the simulator's `schedule add both` produces it), the **inside** window
 wins.
 
-### End of day is 23:59
+### How the schedule engine actually evaluates a window
 
-**[V]** The probed unit's own factory schedule spells a full day as
-`00:00`–`23:59`, on all seven days, for both sensors. `23:59` is therefore
-the device's idiom for "until the end of the day", and an implementation must
-treat that final minute as *inside* the window rather than excluding it — a
-literal half-open `[start, end)` reading would switch the sensor off for
-exactly one minute a day.
+**[V] Measured against firmware 1.7.18.** The engine writes its verdict
+through to the sensor enable flags, so `GET_SETTINGS` reports it live: with
+`timersEnabled` on, `inside`/`outside` follow the schedule minute by minute.
+That is what made the table below measurable rather than inferred.
 
-`24:00` is still **accepted** on the read path (this library's
-`coerce_schedule_time`), because it is a plausible spelling from other
-firmware, but it is never emitted.
+The rule is exactly:
+
+```
+active  iff  start <= now < end        (24:00 is a legal end, meaning 1440)
+if end <= start the entry is EMPTY and never fires
+```
+
+| window probed | verdict | establishes |
+|---|---|---|
+| `20:00`–`23:00` at 21:07 | enabled | control |
+| `21:01`–`21:31` at 21:01 | enabled | **start is inclusive** |
+| `20:31`–`21:01` at 21:01 | disabled | **end is exclusive** |
+| `16:01`–`16:01`, `21:01`–`21:01` | disabled | **`start == end` is EMPTY** |
+| `20:00`–`24:00` at 21:07 | enabled | **hour 24 is honoured as end-of-day** |
+| `00:00`–`24:00` | enabled | ditto |
+| `20:00`–`00:00` | disabled | **`00:00` as an end is EMPTY** |
+| `00:00`–`00:00` | disabled | ditto |
+| `23:00`–`21:30` on the day it names | disabled | **not a same-day wrap** |
+| `23:00`–`21:30` on the following day | disabled | **not a next-day spill either** |
+
+Three consequences that are easy to get wrong:
+
+* **A window cannot cross midnight.** Not by wrapping within the day, and not
+  by spilling into the next one. `23:00`–`01:00` is stored perfectly and
+  never fires. To let a pet out overnight you need **two** entries:
+  `23:00`–`24:00` on the day and `00:00`–`01:00` on the next.
+* **`start == end` is not a whole day.** It is nothing. A whole day is
+  `00:00`–`24:00`.
+* **`00:00` is a start, never an end.** The rule is positional, not
+  contextual: midnight as a START is always the first minute of a day, and
+  midnight as an END is always the last. The device does not reinterpret it —
+  it compares the raw numbers and the entry never fires — so this library
+  rewrites a window end of `00:00` to `24:00` on the **send** path
+  (`powerpetdoor.schedule.normalise_window_end`), applied to the selected
+  sensor's window only and never to the all-zero filler block of the sensor
+  the entry is not about.
+
+  That makes `00:00`–`00:00` a **whole day**, which is what anyone writing
+  "midnight to midnight" means. The one caveat: a door that literally holds
+  `00:00`–`00:00` is gating that sensor **off** right now, so a client
+  displaying it as all-day is describing intent rather than current
+  behaviour. Re-saving the entry makes the door agree. The spelling only ends
+  up on a door by mistake, and this library no longer emits it.
+
+**Storage is entirely separate from evaluation.** The schedule table accepts
+and echoes back anything — `22:00`–`06:00`, `22:00`–`00:00`, `09:00`–`09:00`
+and `00:00`–`24:00` all round-trip byte for byte. The device stores nonsense
+faithfully and simply never acts on it, so **nothing downstream catches a
+malformed window**. `Schedule.validate_for_send()` is therefore the only
+thing standing between a caller and a schedule that reads correctly and does
+nothing; `PowerPetDoor.set_schedule()` applies it.
+
+### End of day: 23:59 vs 24:00
+
+**[R] — inferred, NOT measured.** The probed unit's factory schedule spells a
+full day as `00:00`–`23:59` on all seven days for both sensors, which plainly
+means "always", so this library treats an end of exactly `23:59` as the end
+of the day (1440) rather than excluding that final minute.
+
+That inference is **weaker than it looks** now that the engine is known to be
+strictly `start <= now < end` and to honour `24:00`. A literal reading says
+`00:00`–`23:59` leaves the sensor off for exactly the minute `23:59`, and the
+vendor app may simply write `23:59` and accept the gap. Deciding it needs a
+probe with the door's clock at `23:59`, which has not been run.
+
+The special case is kept because it is the shipped behaviour and the risk is
+one minute a day either way. **`24:00` is the unambiguous spelling and is
+what this library emits** for a whole day.
+
+### Hazard: the engine leaves the sensor flags where it last set them
+
+**[V]** Turning `timersEnabled` off does **not** restore the sensor flags to
+what they were before a schedule disabled them. Observed directly: a probe
+window of `21:01`–`21:01` left `inside=false outside=false`, and disabling
+timers left them off; they had to be re-enabled explicitly.
+
+So a schedule that never fires can leave a door's sensors switched off
+permanently, even after schedules are turned off entirely. Any client that
+writes schedules should be prepared to re-enable the sensors.
 
 ### The two directions do not agree
 

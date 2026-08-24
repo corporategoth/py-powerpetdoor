@@ -710,3 +710,64 @@ Entries handed to `compress_schedule` must be fully populated — start from
 a deep copy of `schedule_template`, which carries every field in the wire
 types `docs/protocol.md` specifies. `validate_schedule_entry` checks an
 entry for the required fields without raising.
+
+### What the device does with a window — and what it refuses to do
+
+Measured against firmware 1.7.18 (see `docs/protocol.md` for the probe
+table), the schedule engine is exactly:
+
+```
+active  iff  start <= now < end        # 24:00 is a legal end, meaning 1440
+```
+
+Three consequences shape the API:
+
+* **A window cannot cross midnight.** `23:00`–`01:00` is stored perfectly and
+  never fires — it does not wrap within the day and it does not spill into
+  the next one. Overnight access needs **two** entries: `23:00`–`24:00` on
+  the day and `00:00`–`01:00` on the next.
+* **`start == end` is empty**, not a whole day. A whole day is
+  `00:00`–`24:00`.
+* **`00:00` as an END is always the end of the day.** The rule is positional:
+  midnight opening a window is the first minute of the day, midnight closing
+  one is the last.
+
+`END_OF_DAY` is `(24, 0)` and `MIDNIGHT` is `(0, 0)`. `normalise_window_end`
+applies the positional rule, and `Schedule.to_dict()` calls it for you, so
+anything sent through `set_schedule` already carries the spelling the device
+acts on:
+
+```python
+from powerpetdoor import (
+    END_OF_DAY,
+    MIDNIGHT,
+    normalise_window_end,
+    schedule_window_is_empty,
+    window_minutes,
+)
+
+normalise_window_end(MIDNIGHT) == END_OF_DAY      # 00:00 end -> 24:00
+window_minutes((22, 0), END_OF_DAY) == (1320, 1440)
+schedule_window_is_empty((9, 0), (9, 0))          # True - stored, never fires
+```
+
+`set_schedule` refuses a window that ends before it begins, because the door
+would accept it, echo it back unchanged and silently never act on it:
+
+```python
+await door.set_schedule(Schedule(inside=True,
+                                 start=ScheduleTime(23, 0),
+                                 end=ScheduleTime(1, 0)))
+# ValueError: ...ends before it starts...
+```
+
+Use `Schedule.validate_for_send()` to check without sending, and
+`Schedule.window_is_empty()` to ask whether an entry would do anything at
+all — the difference between a schedule that is switched off and one that
+merely never fires, which a listing cannot show you.
+
+**One hazard worth handling:** the engine writes its verdict through to the
+`inside`/`outside` sensor flags, and turning `timersEnabled` off does **not**
+put them back. A schedule that never fires can therefore leave a door's
+sensors disabled even after schedules are switched off entirely. If you write
+schedules, be prepared to re-enable the sensors.

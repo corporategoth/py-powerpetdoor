@@ -366,6 +366,159 @@ class TestSchedule:
         assert d["in_start_time"] == {"hour": 0, "min": 0}
         assert d["in_end_time"] == {"hour": 0, "min": 0}
 
+    def test_a_window_ending_at_midnight_goes_out_as_hour_24(self):
+        """Midnight as an END is rewritten to the device's end-of-day.
+
+        Measured against firmware 1.7.18: the door does NOT reinterpret it.
+        A stored `20:00-00:00` leaves the sensor disabled, because the engine
+        is `start <= now < end` and an end of 0 never exceeds a start of
+        1200. So "22:00 until midnight" has to leave here as 22:00-24:00 or
+        it silently never fires.
+        """
+        schedule = Schedule(
+            index=0,
+            inside=True,
+            start=ScheduleTime(hour=22, minute=0),
+            end=ScheduleTime(hour=0, minute=0),
+        )
+
+        d = schedule.to_dict()
+
+        assert d["in_start_time"] == {"hour": 22, "min": 0}
+        assert d["in_end_time"] == {"hour": 24, "min": 0}
+
+    def test_the_unselected_sensors_filler_is_not_mistaken_for_a_whole_day(self):
+        """The zeroed block stays zeroed.
+
+        The boundary the end-of-day rewrite has to respect: the protocol
+        wants the other sensor's times as all-zero filler, and turning that
+        00:00 end into 24:00 would spell a WHOLE DAY window for the sensor
+        this entry is not even about.
+        """
+        schedule = Schedule(
+            index=0,
+            inside=True,
+            outside=False,
+            start=ScheduleTime(hour=22, minute=0),
+            end=ScheduleTime(hour=0, minute=0),
+        )
+
+        d = schedule.to_dict()
+
+        assert d["in_end_time"] == {"hour": 24, "min": 0}
+        assert d["out_start_time"] == {"hour": 0, "min": 0}
+        assert d["out_end_time"] == {"hour": 0, "min": 0}
+
+    def test_midnight_to_midnight_goes_out_as_a_whole_day(self):
+        """00:00-00:00 is 00:00-24:00 on the wire.
+
+        The rule is positional, not contextual: 00:00 as a START is always
+        the first minute of the day, and 00:00 as an END is always the last.
+        So the one spelling that means nothing at all to the device becomes
+        the one that means everything - which is what anyone writing
+        "midnight to midnight" intended, and what this integration's own card
+        used to emit before it knew better.
+        """
+        schedule = Schedule(
+            index=0,
+            inside=True,
+            start=ScheduleTime(hour=0, minute=0),
+            end=ScheduleTime(hour=0, minute=0),
+        )
+
+        d = schedule.to_dict()
+
+        assert d["in_start_time"] == {"hour": 0, "min": 0}
+        assert d["in_end_time"] == {"hour": 24, "min": 0}
+
+    def test_an_ordinary_end_is_left_alone(self):
+        """Only 00:00 is rewritten - the control for the rule above."""
+        schedule = Schedule(
+            index=0,
+            inside=True,
+            start=ScheduleTime(hour=6, minute=0),
+            end=ScheduleTime(hour=20, minute=0),
+        )
+
+        assert schedule.to_dict()["in_end_time"] == {"hour": 20, "min": 0}
+
+    @pytest.mark.parametrize(
+        ("start", "end", "empty"),
+        [
+            ((6, 0), (20, 0), False),
+            ((22, 0), (0, 0), False),  # becomes 22:00-24:00
+            ((0, 0), (0, 0), False),  # becomes 00:00-24:00, a whole day
+            ((0, 0), (24, 0), False),
+            ((9, 0), (9, 0), True),
+            ((23, 0), (1, 0), True),
+        ],
+        ids=[
+            "ordinary",
+            "ends-at-midnight",
+            "midnight-to-midnight",
+            "whole-day",
+            "equal-ends",
+            "inverted",
+        ],
+    )
+    def test_window_is_empty_matches_the_device(self, start, end, empty):
+        """Which windows a real door stores and then never acts on.
+
+        Every row measured on firmware 1.7.18 by reading the sensor flags the
+        schedule engine writes through to.
+        """
+        schedule = Schedule(
+            index=0,
+            inside=True,
+            start=ScheduleTime(hour=start[0], minute=start[1]),
+            end=ScheduleTime(hour=end[0], minute=end[1]),
+        )
+
+        assert schedule.window_is_empty() is empty
+
+    def test_validate_for_send_refuses_a_window_that_ends_before_it_starts(self):
+        """23:00-01:00 cannot be expressed, so it is refused rather than sent.
+
+        The door would accept it, echo it back unchanged and never act on it,
+        so nothing downstream catches the mistake.
+        """
+        schedule = Schedule(
+            index=0,
+            inside=True,
+            start=ScheduleTime(hour=23, minute=0),
+            end=ScheduleTime(hour=1, minute=0),
+        )
+
+        with pytest.raises(ValueError, match="ends before it starts"):
+            schedule.validate_for_send()
+
+    def test_validate_for_send_allows_a_window_ending_at_midnight(self):
+        """The normalisation runs first, so 22:00-00:00 is 22:00-24:00."""
+        schedule = Schedule(
+            index=0,
+            inside=True,
+            start=ScheduleTime(hour=22, minute=0),
+            end=ScheduleTime(hour=0, minute=0),
+        )
+
+        schedule.validate_for_send()
+
+    def test_validate_for_send_allows_equal_ends(self):
+        """Refused only when the end is EARLIER, not when it coincides.
+
+        An entry with coinciding ends never fires on a real door, but it is
+        not malformed and the caller may have meant it; `enabled=False` is
+        the clearer way to say the same thing.
+        """
+        schedule = Schedule(
+            index=0,
+            inside=True,
+            start=ScheduleTime(hour=9, minute=0),
+            end=ScheduleTime(hour=9, minute=0),
+        )
+
+        schedule.validate_for_send()
+
     def test_from_dict_days_are_bools(self):
         """Wire 1/0 lists are converted to real booleans."""
         restored = Schedule.from_dict(
@@ -1367,6 +1520,43 @@ class TestDoorSchedules:
         assert stored.end_hour == 22
         assert stored.end_min == 45
         assert [s.index for s in door.schedules] == [3]
+
+    async def test_set_schedule_refuses_a_window_that_ends_before_it_starts(self, door, simulator):
+        """Nothing reaches the door, so nothing is stored to be ignored later.
+
+        Measured on firmware 1.7.18: the device accepts such an entry, echoes
+        it back unchanged and never acts on it. Asserting the simulator's
+        slot is still empty is the point - a rejection that still wrote would
+        leave the user a schedule that reads correctly and does nothing.
+        """
+        schedule = Schedule(
+            index=2,
+            inside=True,
+            start=ScheduleTime(hour=23, minute=0),
+            end=ScheduleTime(hour=1, minute=0),
+        )
+
+        with pytest.raises(ValueError, match="ends before it starts"):
+            await door.set_schedule(schedule)
+
+        assert 2 not in simulator.state.schedules
+
+    async def test_set_schedule_sends_a_midnight_end_as_hour_24(self, door, simulator):
+        """22:00-00:00 lands on the door as 22:00-24:00, so it actually fires."""
+        await door.set_schedule(
+            Schedule(
+                index=4,
+                inside=True,
+                start=ScheduleTime(hour=22, minute=0),
+                end=ScheduleTime(hour=0, minute=0),
+            )
+        )
+
+        stored = simulator.state.schedules[4]
+        assert (stored.start_hour, stored.start_min) == (22, 0)
+        assert (stored.end_hour, stored.end_min) == (24, 0)
+        # ...and the door agrees it is a real window, not an empty one.
+        assert stored.is_sensor_allowed("inside", 23, 30, 0) is True
 
     async def test_delete_schedule_removes(self, door, simulator):
         """delete_schedule removes it from the device and the cache."""

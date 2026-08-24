@@ -149,14 +149,19 @@ from .door import (
     ScheduleTime,
 )
 from .schedule import (
+    END_OF_DAY,
+    MIDNIGHT,
     build_set_schedule_message,
     compress_schedule,
     compute_schedule_diff,
+    normalise_window_end,
     schedule_entry_content_key,
     schedule_template,
+    schedule_window_is_empty,
     validate_schedule_entry,
     week_0_mon_to_sun,
     week_0_sun_to_mon,
+    window_minutes,
 )
 from .tz_utils import (
     async_init_timezone_cache,
@@ -189,12 +194,17 @@ __all__ = [
     "find_end",
     "make_bool",
     # Schedule utilities
+    "END_OF_DAY",
+    "MIDNIGHT",
     "build_set_schedule_message",
     "compress_schedule",
     "compute_schedule_diff",
+    "normalise_window_end",
     "schedule_entry_content_key",
     "schedule_template",
+    "schedule_window_is_empty",
     "validate_schedule_entry",
+    "window_minutes",
     "week_0_mon_to_sun",
     "week_0_sun_to_mon",
     # Timezone utilities

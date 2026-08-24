@@ -392,14 +392,19 @@ class TestSchedule:
         assert schedule.is_day_active(0) is False
         assert schedule.is_day_active(6) is False
 
-    def test_coinciding_ends_are_a_full_twenty_four_hour_window(self):
-        """All 1440 minutes, not 1439 and not 0.
+    def test_coinciding_ends_match_no_minute_at_all(self):
+        """Zero minutes, not 1440.
 
-        The window end is exclusive, so `[start, end)` covers at most 1439
-        of the day's minutes: `00:00-23:59` looks like a 24/7 entry and
-        blocks the sensor for exactly the minute 23:59. Two schedule-script
-        tests failed for that one minute a day. Coinciding ends are
-        therefore the only spelling a true 24h window has.
+        This test previously asserted the opposite, on the reasoning that an
+        exclusive end makes coinciding ends the only spelling of a true 24h
+        window. **Measured against firmware 1.7.18 and that is not what the
+        device does**: with timersEnabled on, entries of ``16:01-16:01`` and
+        ``21:01-21:01`` both leave the sensor DISABLED. The engine is simply
+        ``start <= now < end``, so a window whose end does not exceed its
+        start matches nothing. The door stores it and never acts on it.
+
+        A true 24h window is spelled ``00:00-24:00``, which the same probe
+        confirmed the device honours.
         """
         schedule = Schedule(
             index=0,
@@ -409,6 +414,32 @@ class TestSchedule:
             start_hour=0,
             start_min=0,
             end_hour=0,
+            end_min=0,
+        )
+
+        allowed = [
+            minute
+            for minute in range(1440)
+            if schedule.is_sensor_allowed("inside", minute // 60, minute % 60, 0)
+        ]
+
+        assert allowed == []
+
+    def test_hour_twenty_four_is_a_full_twenty_four_hour_window(self):
+        """``00:00-24:00`` is how a whole day is spelled unambiguously.
+
+        Measured: ``20:00-24:00`` reports the sensor enabled at 21:07 and
+        ``00:00-24:00`` enables it outright, so hour 24 is not merely
+        tolerated on input - the schedule engine honours it as end-of-day.
+        """
+        schedule = Schedule(
+            index=0,
+            enabled=True,
+            days_of_week=[True] * 7,
+            inside=True,
+            start_hour=0,
+            start_min=0,
+            end_hour=24,
             end_min=0,
         )
 
@@ -511,38 +542,18 @@ class TestSchedule:
         # The same time on Tuesday is allowed
         assert schedule.is_sensor_allowed("inside", 10, 0, 1) is True
 
-    def test_is_sensor_allowed_crosses_midnight(self):
-        """Should handle schedules that cross midnight."""
-        schedule = Schedule(
-            index=0,
-            enabled=True,
-            days_of_week=[1, 1, 1, 1, 1, 1, 1],
-            inside=True,
-            outside=False,
-            start_hour=22,
-            end_hour=6,
-        )
-        # 23:00 should be allowed
-        assert schedule.is_sensor_allowed("inside", 23, 0, 0) is True
-        # 2:00 should be allowed
-        assert schedule.is_sensor_allowed("inside", 2, 0, 0) is True
-        # 12:00 should NOT be allowed
-        assert schedule.is_sensor_allowed("inside", 12, 0, 0) is False
+    def test_a_window_that_ends_before_it_starts_never_fires(self):
+        """22:00-06:00 is not a midnight-crossing window. It is nothing.
 
-    @pytest.mark.parametrize(
-        ("hour", "minute", "allowed"),
-        [(21, 59, False), (22, 0, True), (5, 59, True), (6, 0, False)],
-        ids=["before-start", "at-start", "last-minute", "at-end"],
-    )
-    def test_a_midnight_crossing_window_at_its_four_edge_minutes(self, hour, minute, allowed):
-        """Assert *at* the boundary, not only inside it.
+        This test used to assert the opposite - that such an entry covered
+        23:00 and 02:00 and wrapped past midnight. **Measured against
+        firmware 1.7.18 and the device does not do that.** With timersEnabled
+        on, a ``23:00-21:30`` entry leaves the sensor disabled BOTH on the day
+        it names and on the following day, so it is neither a same-day wrap
+        nor a spill into tomorrow.
 
-        This test's older half asserts 23:00, 02:00 and 12:00 - the
-        interior of the window and one point far outside it - so both
-        comparisons that define the window were unpinned: `>= start` -> `>`
-        and `< end` -> `<=` each survived the whole suite. The window is
-        inclusive at the start and exclusive at the end, and those are the
-        two minutes that say so.
+        To let a pet out from 22:00 to 06:00 you need two entries:
+        ``22:00-24:00`` on the day and ``00:00-06:00`` on the next.
         """
         schedule = Schedule(
             index=0,
@@ -552,6 +563,43 @@ class TestSchedule:
             outside=False,
             start_hour=22,
             end_hour=6,
+        )
+
+        assert schedule.is_sensor_allowed("inside", 23, 0, 0) is False
+        assert schedule.is_sensor_allowed("inside", 2, 0, 0) is False
+        assert schedule.is_sensor_allowed("inside", 12, 0, 0) is False
+        # ...and not one minute of the day, on any weekday.
+        assert not [
+            (day, minute)
+            for day in range(7)
+            for minute in range(1440)
+            if schedule.is_sensor_allowed("inside", minute // 60, minute % 60, day)
+        ]
+
+    @pytest.mark.parametrize(
+        ("hour", "minute", "allowed"),
+        [(21, 59, False), (22, 0, True), (23, 59, True), (0, 0, False)],
+        ids=["before-start", "at-start", "last-minute", "after-midnight"],
+    )
+    def test_a_window_running_to_end_of_day_at_its_edge_minutes(self, hour, minute, allowed):
+        """Assert *at* the boundary, not only inside it.
+
+        ``22:00-24:00`` is the half of an overnight schedule that lives on
+        this day, and hour 24 is the device's own end-of-day - measured, not
+        assumed. The last minute of the day is inside the window; the first
+        minute of the next is not, because a window cannot cross midnight.
+
+        Both comparisons that define a window need pinning at the boundary or
+        `>= start` -> `>` and `< end` -> `<=` each survive the whole suite.
+        """
+        schedule = Schedule(
+            index=0,
+            enabled=True,
+            days_of_week=[1, 1, 1, 1, 1, 1, 1],
+            inside=True,
+            outside=False,
+            start_hour=22,
+            end_hour=24,
         )
 
         assert schedule.is_sensor_allowed("inside", hour, minute, 0) is allowed
@@ -1112,7 +1160,9 @@ class TestGetTzinfo:
         tz_utils.init_timezone_cache_sync()
         state = DoorSimulatorState(timezone="EST5EDT,M3.2.0,M11.1.0", auto=True)
 
-        # A 24/7 schedule window allows the sensor regardless of local time
+        # A 24/7 window allows the sensor regardless of local time. Spelled
+        # 00:00-24:00: coinciding ends are an EMPTY window on real firmware,
+        # not a whole day.
         state.schedules[0] = Schedule(
             index=0,
             enabled=True,
@@ -1120,7 +1170,7 @@ class TestGetTzinfo:
             inside=True,
             start_hour=0,
             start_min=0,
-            end_hour=0,
+            end_hour=24,
             end_min=0,
         )
         assert state.is_sensor_allowed_by_schedule("inside") is True
@@ -1133,7 +1183,7 @@ class TestGetTzinfo:
             inside=True,
             start_hour=0,
             start_min=0,
-            end_hour=0,
+            end_hour=24,
             end_min=0,
         )
         assert state.is_sensor_allowed_by_schedule("inside") is False

@@ -282,21 +282,34 @@ class Schedule:
         end = self.end_hour * 60 + self.end_min
 
         if (self.end_hour, self.end_min) == (END_OF_DAY_HOUR, END_OF_DAY_MINUTE):
-            # 23:59 is the device's own end-of-day: its factory schedule is
-            # `in 00:00-23:59` with every day enabled, which is plainly meant
-            # as "always". Treating the window end as exclusive here would
-            # block the sensor for exactly the minute 23:59 every day, so the
-            # final minute is included.
+            # 23:59 as the device's end-of-day. NOT measured - see the note
+            # in docs/protocol.md. It is inferred from the factory schedule
+            # being `00:00-23:59` on every day, which plainly means "always";
+            # a strictly exclusive reading would block the sensor for exactly
+            # the minute 23:59 each night. Kept because it is the shipped
+            # behaviour, but it is the one rule here without a measurement
+            # behind it, and 24:00 is the unambiguous spelling.
             end = 24 * 60
-        if start == end:
-            # The whole day, the other way it can be spelled: [start, end)
-            # with coinciding ends. An entry that should gate nothing is
-            # spelled `enabled: false`.
-            return True
-        if start < end:
-            return start <= current_minutes < end
-        # Crosses midnight.
-        return current_minutes >= start or current_minutes < end
+
+        # Everything below IS measured, against firmware 1.7.18 with
+        # timersEnabled on, by reading the sensor flags the engine writes
+        # through to (GET_SETTINGS reports the door's own verdict):
+        #
+        #   20:00-24:00 -> enabled at 21:07   hour 24 is a real end-of-day
+        #   21:01-21:31 -> enabled at 21:01   start is INCLUSIVE
+        #   20:31-21:01 -> disabled at 21:01  end is EXCLUSIVE
+        #   16:01-16:01 -> disabled           start == end is EMPTY
+        #   20:00-00:00 -> disabled           end 00:00 is EMPTY, not midnight
+        #   23:00-21:30 -> disabled on the day it names AND on the next day,
+        #                  so an inverted window is neither a same-day wrap
+        #                  nor a spill into tomorrow. It is nothing at all.
+        #
+        # The engine is exactly `start <= now < end`, so any window whose end
+        # does not exceed its start matches no minute. The device stores such
+        # an entry perfectly and simply never acts on it.
+        if end <= start:
+            return False
+        return start <= current_minutes < end
 
 
 @dataclass

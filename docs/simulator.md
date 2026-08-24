@@ -852,8 +852,10 @@ Toggle a boolean setting.
 #### Schedules
 
 **add_schedule**
-Add a schedule entry covering both sensors, every day, 24 hours (midnight to
-midnight), so a script behaves the same at every time of day.
+Add a schedule entry covering both sensors, every day, 24 hours
+(`00:00`–`24:00`), so a script behaves the same at every time of day. Note
+`24:00`, not `00:00`: coinciding ends are an EMPTY window on real firmware,
+not a whole day.
 ```yaml
 - action: add_schedule
   index: 1

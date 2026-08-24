@@ -57,6 +57,7 @@
   "door.ignoring_malformed_schedule_update_device": "Ignoring malformed schedule update from device: %s",
   "door.ignoring_non_mapping_hardware_info": "Ignoring non-mapping hardware info: %s",
   "door.refresh_step_failed": "Refresh step %s failed: %r",
+  "door.schedule_end_before_start": "Schedule window {start} to {end} ends before it starts. The door cannot schedule past midnight in one entry - use {start} to 24:00 on this day and 00:00 to {end} on the next.",
   "door.schedule_must_object_got": "Schedule must be an object, got {data!r}",
   "door.timeout_fetching_schedule": "Timeout fetching schedule %s",
   "door.unknown_door_status_device": "Unknown door status from device: %s",

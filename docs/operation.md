@@ -267,18 +267,37 @@ When schedules are disabled (`timersEnabled = false`):
 
 **Example**: A schedule for inside sensor from 6:00 to 22:00 means pets can only exit during those hours (assuming inside sensor opens door for exit).
 
-**Window boundaries**: the start minute is included and the end minute is
-excluded, so `6:00`–`22:00` covers 6:00 through 21:59. An end earlier than
-the start wraps past midnight (`22:00`–`6:00`). A window whose start and end
-*coincide* is the whole day. An entry that should gate nothing is spelled
-`enabled: false`.
+**Window boundaries** — measured against firmware 1.7.18, not inferred. The
+engine is exactly `start <= now < end`, so the start minute is included and
+the end minute excluded: `6:00`–`22:00` covers 6:00 through 21:59.
 
-**`23:59` is the device's own end-of-day**, and is the one exception to the
-exclusive end: a real door's factory schedule is `00:00`–`23:59` on all seven
-days for both sensors, which plainly means "always", so that final minute is
-treated as *inside* the window rather than switching the sensor off for one
-minute a day. See
-[End of day is 23:59](protocol.md#end-of-day-is-2359).
+Three things follow, and the first two are the opposite of what this document
+used to claim:
+
+- **A window cannot cross midnight.** An end earlier than the start does
+  *not* wrap. `23:00`–`01:00` is stored perfectly and never fires — not on
+  the day it names, and not on the next. Overnight access needs **two**
+  entries: `23:00`–`24:00` on the day and `00:00`–`01:00` on the next.
+- **A window whose start and end coincide is empty**, not the whole day. A
+  whole day is `00:00`–`24:00`.
+- **`00:00` as an END always means the end of the day.** The rule is
+  positional — midnight opening a window is the day's first minute, midnight
+  closing one is its last. The device does not reinterpret it, so this
+  library rewrites it to `24:00` when sending.
+
+An entry that should gate nothing is still best spelled `enabled: false`: it
+says so, where an empty window merely behaves that way.
+
+**`23:59`** is treated as end-of-day by this library, because a real door's
+factory schedule is `00:00`–`23:59` on all seven days for both sensors, which
+plainly means "always". That is an inference rather than a measurement, and a
+weaker one now that `24:00` is known to work — see
+[End of day: 23:59 vs 24:00](protocol.md#end-of-day-2359-vs-2400).
+
+**Hazard**: the engine writes its verdict through to the sensor enable flags,
+and turning `timersEnabled` off does *not* put them back. A schedule that
+never fires can leave the door's sensors disabled even after schedules are
+switched off. Re-enable them explicitly.
 
 ---
 

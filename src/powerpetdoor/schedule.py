@@ -34,7 +34,7 @@ from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import time
-from typing import Any
+from typing import Any, Final
 
 from .client import make_bool
 from .const import (
@@ -497,6 +497,57 @@ SCHEDULE_WIRE_FROM_DEVICE = replace(
     inside=wire_int_flag,
     outside=wire_int_flag,
 )
+
+
+#: How the device spells "the end of the day": hour 24, minute 0.
+#:
+#: **Measured against firmware 1.7.18.** A window of ``20:00-24:00`` reports
+#: the sensor enabled at 21:07, and ``00:00-24:00`` enables it outright, so
+#: hour 24 is not merely tolerated on input - the schedule engine honours it.
+END_OF_DAY: Final = (24, 0)
+
+#: Midnight, which is a legal START and never a meaningful END.
+MIDNIGHT: Final = (0, 0)
+
+
+def normalise_window_end(end: tuple[int, int]) -> tuple[int, int]:
+    """Rewrite a window end of ``00:00`` to the device's ``24:00``.
+
+    Midnight is the *first* minute of a day, so as an END it says the
+    opposite of what anyone writing it means. The device does not reinterpret
+    it: measured on firmware 1.7.18, a window of ``20:00-00:00`` leaves the
+    sensor DISABLED, because the engine simply compares ``start <= now < end``
+    and ``end`` of 0 is never greater than a start of 1200. The entry is
+    stored perfectly and never fires.
+
+    So "22:00 until midnight" has to be spelled ``22:00-24:00`` on the wire,
+    and this is where that translation happens. Applied on the SEND path
+    only - what a door reports is read back exactly as it behaves.
+    """
+    return END_OF_DAY if tuple(end) == MIDNIGHT else end
+
+
+def window_minutes(start: tuple[int, int], end: tuple[int, int]) -> tuple[int, int]:
+    """``(start, end)`` as minutes past midnight, with ``24:00`` as 1440."""
+    return start[0] * 60 + start[1], end[0] * 60 + end[1]
+
+
+def schedule_window_is_empty(start: tuple[int, int], end: tuple[int, int]) -> bool:
+    """Whether the device would store this window and never act on it.
+
+    The engine is ``start <= now < end``. Any window whose end does not
+    exceed its start therefore matches no minute at all.
+
+    **Measured against firmware 1.7.18**, all with the entry enabled and
+    ``timersEnabled`` on: ``16:01-16:01`` and ``21:01-21:01`` (start == end)
+    both report the sensor DISABLED, as do ``20:00-00:00`` and
+    ``00:00-00:00``. A window that ends before it begins does NOT wrap past
+    midnight - ``23:00-21:30`` reports disabled both on the day it names and
+    on the day after, so it is neither a same-day wrap nor a spill into
+    tomorrow. It is nothing.
+    """
+    start_min, end_min = window_minutes(start, end)
+    return end_min <= start_min
 
 
 def build_schedule_payload(
