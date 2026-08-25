@@ -2,7 +2,7 @@
 
 This file is **auto-generated** by CI after each test run. Do not edit manually.
 
-**Last updated:** 2026-08-24 22:26 UTC
+**Last updated:** 2026-08-25 15:17 UTC
 
 ## Summary
 
