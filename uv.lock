@@ -605,7 +605,7 @@ wheels = [
 
 [[package]]
 name = "pypowerpetdoor"
-version = "0.4.2"
+version = "0.4.3"
 source = { editable = "." }
 dependencies = [
     { name = "tzdata" },
@@ -649,7 +649,7 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'simulator'", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
-    { name = "tzdata", specifier = ">=2024.1" },
+    { name = "tzdata", specifier = ">=2026.3" },
 ]
 provides-extras = ["interactive", "simulator", "dev"]
 

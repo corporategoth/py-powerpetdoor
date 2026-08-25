@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-25
+
+### Changed
+
+- **`tzdata` floor raised to 2026.3**, from 2024.1. `tz_utils` reads IANA
+  rules out of tzdata to build the POSIX string written to the door, so the
+  package decides when the door actually opens; a zone whose DST rules moved
+  since 2024 would push a stale rule to real hardware and no test here could
+  see it.
+
+  This is where that guarantee belongs. `ha-powerpetdoor` had been carrying
+  an exact `tzdata==` pin in its Home Assistant manifest to get it, but a
+  manifest requirement must ship `py.typed` to satisfy the quality scale's
+  platinum `strict-typing` rule and tzdata does not. Nothing in that
+  integration imports tzdata - this library does - so the floor moves to the
+  package that actually uses it.
+
 ## [0.4.2] - 2026-08-24
 
 Everything below was **measured against a real Power Pet Door** (firmware

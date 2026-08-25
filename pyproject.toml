@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pypowerpetdoor"
-version = "0.4.2"
+version = "0.4.3"
 description = "Python library for communicating with Power Pet Door devices"
 readme = "README.md"
 license = {text = "MIT"}
@@ -35,7 +35,17 @@ classifiers = [
 ]
 keywords = ["power pet door", "pet door", "home automation", "iot"]
 dependencies = [
-    "tzdata>=2024.1",
+    # Floored at the release this library is tested against, not merely at
+    # "recent enough to exist". tz_utils reads IANA rules out of tzdata to
+    # compute the POSIX string written to the door, so the package decides
+    # when the door actually opens: a zone whose DST rules moved since 2024
+    # would have a stale rule pushed to real hardware, and no test here
+    # could see it. ha-powerpetdoor used to carry an exact `tzdata==` pin of
+    # its own for this reason; that pin cannot live in a Home Assistant
+    # manifest (the platinum strict-typing rule requires every declared
+    # requirement to ship py.typed, and tzdata does not), so the guarantee
+    # moves here, to the only package that actually imports it.
+    "tzdata>=2026.3",
 ]
 
 [project.optional-dependencies]
