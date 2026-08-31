@@ -19,7 +19,7 @@ repos:
     # Keep in step with the ruff pinned in pyproject's dev extra; a hook
     # that formats differently from CI's `ruff format --check` turns every
     # commit into a fight with the lint job.
-    rev: v0.16.4
+    rev: v0.16.5
     hooks:
       - id: ruff-check
         args: [--fix]
@@ -46,6 +46,20 @@ repos:
       - id: mypy
         name: mypy (src)
         entry: uv run mypy src
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      # The architectural invariants, on their own so a violation says so
+      # rather than arriving as three of 3500 test failures. Two seconds,
+      # and it is the check most likely to be tripped by an ordinary-
+      # looking change: reading a value off the state, adding a command to
+      # one surface and not the others, spelling a wire payload twice.
+      - id: architecture
+        name: Shared paths, wire table, surface parity
+        entry: uv run pytest tests/simulator/test_shared_paths.py tests/test_wire_constants.py
+          -q --tb=short
         language: system
         types: [python]
         pass_filenames: false
@@ -99,6 +113,18 @@ repos:
         pass_filenames: false
         stages: [pre-commit]
 
+      # schemas/ is generated from the same tables the runtime reads - the
+      # action table, the value registry, the wire table. Regenerates in
+      # place and fails like a formatter if anything moved, so a published
+      # spec cannot drift from the code it describes.
+      - id: schemas
+        name: Generated schemas are current
+        entry: uv run python scripts/generate_schemas.py
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
+
       # The Gitea copy of the test workflow is generated, never hand-edited.
       # It has to exist (Gitea reads only .gitea/workflows once that
       # directory exists, and sync-wiki.yml forces it to), and a symlink
@@ -113,9 +139,21 @@ repos:
         pass_filenames: false
         stages: [pre-commit]
 
+      # `--strict`, so "a newer version exists" fails rather than being
+      # reported. Dependabot files a ticket for exactly that condition, and
+      # it only ever sees what was *pushed* - so failing here is what makes
+      # a ticket impossible, and it is the last point where refreshing the
+      # lock and re-running the suite is affordable.
+      #
+      # Not a commit-stage hook: this resolves against PyPI and queries
+      # GitHub, so at commit stage it would add network latency to every
+      # `git commit` and make committing offline impossible.
+      #
+      # When it fails: `uv run python scripts/check_dependencies.py --fix`,
+      # then re-run the suite before pushing the lock.
       - id: dependency-freshness
         name: Dependencies are current
-        entry: uv run python scripts/check_dependencies.py
+        entry: uv run python scripts/check_dependencies.py --strict
         language: system
         pass_filenames: false
         stages: [pre-push]

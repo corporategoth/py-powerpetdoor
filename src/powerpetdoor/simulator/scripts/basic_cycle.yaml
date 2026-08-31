@@ -7,14 +7,15 @@ steps:
   - action: set
     name: hold_time
     value: "1"
-  - action: trigger_sensor
+  - action: trigger
     sensor: inside
   # trigger_sensor starts the door rising synchronously
   - action: assert
     condition: door_status
     equals: DOOR_RISING
   - action: wait_for
-    condition: door_holding
+    condition: door_status
+    equals: DOOR_HOLDING
     timeout: 5
   - action: wait_for
     condition: door_closed

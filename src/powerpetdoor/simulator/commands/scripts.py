@@ -15,11 +15,11 @@ from ...i18n import t
 from ..scripting import (
     describe_out_of_directory_remedy,
     describe_script_argument,
+    path_escapes_directory,
     render_script_listing,
     script_completer,
-    script_escapes_directory,
 )
-from .base import ArgSpec, CommandResult, command
+from .base import ArgSpec, CommandResult, SubcommandInfo, command, subcommand
 
 if TYPE_CHECKING:
     from ..scripting import Script, ScriptRunner
@@ -256,7 +256,7 @@ class ScriptsCommandsMixin:
                 if not candidate.is_file():
                     continue
                 # Never follow a resolved path out of the base dir.
-                if script_escapes_directory(candidate, base):
+                if path_escapes_directory(candidate, base):
                     raise ValueError(
                         t(
                             "simulator.commands.scripts.script_resolves_outside_cannot_run",
@@ -284,7 +284,25 @@ class ScriptsCommandsMixin:
             pending=tuple(queue.pending()) if queue else (),
         )
 
-    @command("list", ["/", "scripts"], "List runnable scripts", category="scripts")
+    @command(
+        "list",
+        # `scripts` stays a top-level alias: it resolves to `list`, whose
+        # default *is* scripts, so muscle memory keeps working. There is
+        # deliberately no `states` alias - it would resolve to `list` too
+        # and quietly show scripts instead.
+        ["/", "scripts"],
+        "List what can be run or loaded by name",
+        category="scripts",
+        subcommands=[
+            SubcommandInfo("scripts", [], "Runnable scripts (the default)"),
+            SubcommandInfo("states", [], "State documents `reset` can load"),
+        ],
+    )
+    def list_runnable(self) -> CommandResult:
+        """Default to scripts, which is what a bare ``list`` always meant."""
+        return self.list_scripts()
+
+    @subcommand("list", "scripts", [], "Runnable scripts")
     def list_scripts(self) -> CommandResult:
         """List available scripts (built-in plus any from --scripts-dir).
 

@@ -8,6 +8,8 @@
 from typing import TYPE_CHECKING
 
 from ...i18n import t
+from ..notifications import NOTIFICATION_NAMES, NOTIFICATION_SETTINGS
+from ..values import VALUES
 from .base import ArgSpec, CommandResult, command, subcommand
 
 if TYPE_CHECKING:
@@ -18,15 +20,26 @@ if TYPE_CHECKING:
 #: setter and ``notify``'s display all read it, so adding a notification is
 #: one row. Do not respell these definitions in the decorators or the
 #: display block - keep both reading this table.
-_NOTIFY_DEFS: tuple[tuple[str, str, str, list[str]], ...] = (
-    ("inside_on", "sensor_on_indoor", "Notify when inside sensor triggers", []),
-    ("inside_off", "sensor_off_indoor", "Notify when inside sensor stops", []),
-    ("outside_on", "sensor_on_outdoor", "Notify when outside sensor triggers", []),
-    ("outside_off", "sensor_off_outdoor", "Notify when outside sensor stops", []),
-    ("low_battery", "low_battery", "Notify on low battery", ["low_bat", "lowbat"]),
-)
+#: The `on`/`off` half of each name is **whether the sensor was enabled**,
+#: not whether it activated: `inside_off` is "a pet reached the inside
+#: sensor while it was switched off".
+_NOTIFY_DESCRIPTIONS: dict[str, str] = {
+    "inside_on": "Notify when a pet reaches the inside sensor and it is on",
+    "inside_off": "Notify when a pet reaches the inside sensor and it is off",
+    "outside_on": "Notify when a pet reaches the outside sensor and it is on",
+    "outside_off": "Notify when a pet reaches the outside sensor and it is off",
+    "low_battery": "Notify on low battery",
+}
+_NOTIFY_EXTRA_ALIASES: dict[str, list[str]] = {"low_battery": ["low_bat", "lowbat"]}
 
-_NOTIFY_ATTR = {name: attr for name, attr, _, _ in _NOTIFY_DEFS}
+#: Name -> state attribute, from the shared table so the CLI, the script
+#: action and the simulator itself cannot disagree about what a name means.
+_NOTIFY_ATTR = dict(NOTIFICATION_SETTINGS)
+
+_NOTIFY_DEFS: tuple[tuple[str, str, str, list[str]], ...] = tuple(
+    (name, _NOTIFY_ATTR[name], _NOTIFY_DESCRIPTIONS[name], _NOTIFY_EXTRA_ALIASES.get(name, []))
+    for name in NOTIFICATION_NAMES
+)
 _NOTIFY_DESC = {name: desc for name, _, desc, _ in _NOTIFY_DEFS}
 _NOTIFY_ALIASES = {name: aliases for name, _, _, aliases in _NOTIFY_DEFS}
 #: Label column width for the ``notify`` display, derived rather than hand-padded.
@@ -58,17 +71,15 @@ class NotifyCommandsMixin:
                 key into :data:`_NOTIFY_DEFS`.
             value: True/False to set, or None to toggle
         """
-        s = self.simulator.state
-        attr = _NOTIFY_ATTR[name]
-
+        # Through the value registry, which is also what `set
+        # notify_<name>`, the script action and `SET_NOTIFICATIONS` off
+        # the wire write through - so a switch is flipped the same way
+        # and announced the same way whoever flipped it.
+        spec = VALUES[f"notify_{name}"]
         if value is None:
-            # Toggle
-            current = getattr(s, attr)
-            setattr(s, attr, not current)
-            new_state = "ON" if not current else "OFF"
-        else:
-            setattr(s, attr, value)
-            new_state = "ON" if value else "OFF"
+            value = not spec.get(self.simulator.state)
+        spec.apply(self.simulator, value)
+        new_state = "ON" if value else "OFF"
 
         # Broadcast notification settings change to connected PPD clients
         self.simulator.broadcast_notification_settings()

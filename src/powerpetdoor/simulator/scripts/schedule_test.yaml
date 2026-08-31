@@ -7,7 +7,7 @@ steps:
   - action: set
     name: hold_time
     value: "1"
-  - action: trigger_sensor
+  - action: trigger
     sensor: inside
   - action: wait_for
     condition: door_open
@@ -24,7 +24,7 @@ steps:
     message: "=== Test 2: With Active Schedule (should work) ==="
   - action: add_schedule
     index: 1
-  - action: trigger_sensor
+  - action: trigger
     sensor: inside
   - action: wait_for
     condition: door_open

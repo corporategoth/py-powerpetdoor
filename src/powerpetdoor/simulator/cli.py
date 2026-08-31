@@ -501,25 +501,31 @@ class ControlChannel:
 def _build_state(
     firmware: tuple[int, int, int] | None,
     hardware: tuple[int, int] | None,
+    initial_state: dict | None = None,
 ) -> "DoorSimulatorState | None":
-    """Build a simulator state for custom firmware/hardware versions.
+    """Build the starting state from a document and any version overrides.
 
-    Returns None when no override is requested (the simulator then uses its
+    Returns None when nothing is requested (the simulator then uses its
     default state).
+
+    ``--firmware``/``--hardware`` are applied **after** the document, so an
+    explicit flag beats a file. That is the ordinary precedence for a
+    command line over its config, and the alternative - a document silently
+    overriding the flag the operator just typed - is the surprising one.
     """
     from .state import DoorSimulatorState
+    from .state_io import apply_document
 
-    if not (firmware or hardware):
+    if not (firmware or hardware or initial_state):
         return None
-    kwargs: dict[str, int] = {}
+    state = DoorSimulatorState()
+    if initial_state:
+        apply_document(state, initial_state)
     if firmware:
-        kwargs["fw_major"] = firmware[0]
-        kwargs["fw_minor"] = firmware[1]
-        kwargs["fw_patch"] = firmware[2]
+        state.fw_major, state.fw_minor, state.fw_patch = firmware
     if hardware:
-        kwargs["hw_ver"] = hardware[0]
-        kwargs["hw_rev"] = hardware[1]
-    return DoorSimulatorState(**kwargs)  # type: ignore[arg-type]
+        state.hw_ver, state.hw_rev = hardware
+    return state
 
 
 async def _process_script_queue(
@@ -880,6 +886,8 @@ async def run_simulator(
     control_port: int | None = None,
     control_host: str = DEFAULT_CONTROL_HOST,
     scripts_dir: str | None = None,
+    states_dir: str | None = None,
+    initial_state: dict | None = None,
     history_file: str | None = None,
     firmware: tuple[int, int, int] | None = None,
     hardware: tuple[int, int] | None = None,
@@ -898,6 +906,9 @@ async def run_simulator(
         daemon: If True, run without interactive input and no scripts.
         run_for: Maximum run time in seconds (oneshot can exit earlier)
         wait_for_client: If True, delay script start until a client connects
+        states_dir: Directory of state documents `reset` can load by bare name
+        initial_state: State document applied over the defaults at startup,
+                       and restored by a bare `reset`
         control_port: Port for control commands (only used in daemon mode;
                       main() defaults it to port + 1 there)
         control_host: Address to bind the control channel (default: 127.0.0.1).
@@ -920,7 +931,7 @@ async def run_simulator(
     await async_init_timezone_cache()
 
     # Create state with optional firmware/hardware version
-    state = _build_state(firmware, hardware)
+    state = _build_state(firmware, hardware, initial_state)
 
     # Holder for interactive session (set later if in interactive mode)
     # Used by callbacks to invalidate prompt on connect/disconnect
@@ -962,7 +973,7 @@ async def run_simulator(
     if simulator.server and simulator.server.sockets:  # pragma: no branch (bound after start())
         actual_port = simulator.server.sockets[0].getsockname()[1]
 
-    script_runner = ScriptRunner(simulator)
+    script_runner = ScriptRunner(simulator, initial_state_document=initial_state)
 
     # Set up control structures
     loop = asyncio.get_running_loop()
@@ -980,7 +991,14 @@ async def run_simulator(
         script_queue=script_queue,
         scripts_dir=scripts_dir,
         allow_script_paths=not daemon,
+        states_dir=states_dir,
+        initial_state_document=initial_state,
     )
+    # The handler owns the state-file path policy, so a `reset` step in a
+    # script resolves names through it rather than reaching the filesystem
+    # on its own - a script arriving over the control channel must not be
+    # able to read a file the channel itself would refuse.
+    script_runner.load_state_document = cmd_handler.load_state_document
 
     # The handler publishes scripts_dir on construction; say so out loud when
     # the directory turns out to hold nothing runnable.
@@ -1297,6 +1315,24 @@ def main():
         "(e.g. 0.0.0.0) on a trusted network.",
     )
     parser.add_argument(
+        "--list-states",
+        action="store_true",
+        help="List state documents in --states-dir (loadable by bare name) and exit",
+    )
+    parser.add_argument(
+        "--initial-state",
+        metavar="FILE",
+        default=None,
+        help="State document (JSON, or YAML with PyYAML) applied over the defaults "
+        "at startup. A bare 'reset' returns to it.",
+    )
+    parser.add_argument(
+        "--states-dir",
+        metavar="DIR",
+        default=None,
+        help="Directory of state documents that 'reset' can load by bare name",
+    )
+    parser.add_argument(
         "--scripts-dir",
         metavar="DIR",
         default=None,
@@ -1349,6 +1385,34 @@ def main():
             )
         )
 
+    if args.states_dir is not None and not Path(args.states_dir).is_dir():
+        parser.error(
+            t(
+                "simulator.cli.states_dir_directory",
+                "--states-dir {states_dir}: not a directory",
+                states_dir=args.states_dir,
+            )
+        )
+
+    # Parsed here rather than at start(): a malformed initial state must
+    # fail the command line, not a running daemon several seconds later,
+    # for the same reason a typo'd --scripts-dir does.
+    initial_state_document = None
+    if args.initial_state is not None:
+        from .state_io import StateDocumentError, load_document
+
+        try:
+            initial_state_document = load_document(args.initial_state)
+        except StateDocumentError as exc:
+            parser.error(
+                t(
+                    "simulator.cli.initial_state_invalid",
+                    "--initial-state {initial_state}: {arg0}",
+                    initial_state=args.initial_state,
+                    arg0=str(exc),
+                )
+            )
+
     # Bind-time values were the one class of bad argument this parser did
     # not check, so `--port 99999` reached socket.bind() and exited with a
     # 30-line `OverflowError: bind(): port must be 0-65535` through asyncio
@@ -1395,6 +1459,15 @@ def main():
         set_extra_scripts_dir(args.scripts_dir)
         for line in render_script_listing(args.scripts_dir).lines:
             # Names and descriptions come out of YAML files.
+            print(sanitize_text(line))
+        return
+
+    # List state documents and exit. The pre-flight surface for `reset`,
+    # needing no daemon, exactly as --list-scripts is for `run`.
+    if args.list_states:
+        from .state_io import render_state_listing
+
+        for line in render_state_listing(args.states_dir):
             print(sanitize_text(line))
         return
 
@@ -1490,8 +1563,7 @@ def main():
                         "Hardware version must be in format ver.rev (e.g., '1.1')",
                     )
                 )
-            # Integers, because a real door's fwInfo object is all
-            # integers (verified against firmware 1.7.18).
+            # Integers, because a real door's fwInfo object is all integers.
             hardware = (int(parts[0]), int(parts[1]))
         except ValueError:
             parser.error(
@@ -1516,6 +1588,8 @@ def main():
                 control_port=control_port,
                 control_host=args.control_host,
                 scripts_dir=args.scripts_dir,
+                states_dir=args.states_dir,
+                initial_state=initial_state_document,
                 history_file=args.history,
                 firmware=firmware,
                 hardware=hardware,

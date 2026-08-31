@@ -22,19 +22,24 @@ from powerpetdoor.simulator.scripting import YAML_AVAILABLE, get_builtin_script
 
 requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
 
-# Open, close attempt, obstruction retract, then the final undisturbed close.
+# Open, a full close attempt, the obstruction retract, then the final
+# undisturbed close.
 #
-# The retract happens from DOOR_CLOSING - the motor has started but the flap
-# has not moved - so the door goes straight back to HOLDING without
-# travelling. It does NOT pass through CLOSING_TOP_OPEN and back up through
-# SLOWING, which is what this expected before DOOR_CLOSING was known about:
-# the obstruction is present when the close begins, so it is caught at the
-# first opportunity rather than one phase later.
+# The door travels the whole way down before it discovers the obstruction: a
+# physical blockage is not a sensor, so it does not stop the close from
+# starting and is not seen until the flap cannot complete its last
+# transition. That is why the first close runs CLOSING -> TOP_OPEN ->
+# MID_OPEN before reversing, where a sensor-detected pet reverses at
+# whichever phase it appears in.
 RETRACT_SEQUENCE = [
     DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
     DOOR_STATE_HOLDING,
     DOOR_STATE_CLOSING,
+    DOOR_STATE_CLOSING_TOP_OPEN,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    DOOR_STATE_RISING,
+    DOOR_STATE_SLOWING,
     DOOR_STATE_HOLDING,
     DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_TOP_OPEN,
@@ -64,14 +69,22 @@ class TestObstructionTest:
         assert script.steps[0].action == "set"
         assert script.steps[0].params == {"name": "autoretract", "value": "on"}
 
-    def test_script_obstructs_during_close(self):
-        """The obstruction fires only after the door has started closing."""
+    def test_script_places_the_obstruction_while_the_door_is_up(self):
+        """Placed before the close, the way a real obstruction gets there.
+
+        Arming it mid-close would race the last closing phase; an
+        obstruction does not block the close from starting, so there is no
+        reason to wait for one.
+        """
         script = get_builtin_script("obstruction_test")
         actions = [s.action for s in script.steps]
         obstruction_at = actions.index("obstruction")
-        closing_wait = script.steps[obstruction_at - 1]
-        assert closing_wait.action == "wait_for"
-        assert closing_wait.params["condition"] == "door_closing"
+        holding_wait = script.steps[obstruction_at - 1]
+        assert holding_wait.action == "wait_for"
+        assert holding_wait.params["condition"] == "door_status"
+        assert holding_wait.params["equals"] == "DOOR_HOLDING"
+        # ...and the close is only awaited afterwards.
+        assert actions.index("wait_for", obstruction_at) > obstruction_at
 
     async def test_script_passes_with_one_retract(self, runner, simulator):
         """The script passes, having auto-retracted exactly once."""
@@ -81,7 +94,9 @@ class TestObstructionTest:
         assert simulator.state.total_auto_retracts == 1
         # The script ends as soon as the retract re-opens the door
         assert simulator.state.door_status == DOOR_STATE_HOLDING
-        # The retract cleared the simulated obstruction
+        # The retract cleared the one-shot obstruction, and never touched
+        # a sensor - the two are different things.
+        assert simulator.state.obstruction_active is False
         assert simulator.state.inside_sensor_active is False
 
 

@@ -10,7 +10,6 @@ protocol and the interactive front end; untrusted data must not reach a
 terminal (or a log record read on one) raw.
 """
 
-import asyncio
 import contextlib
 import io
 import json
@@ -226,26 +225,6 @@ class TestLibraryLogSinks:
         assert len(messages) == 1
         assert "\x1b" not in messages[0]
         assert "\\x1b" in messages[0]
-
-    async def test_notification_state_log_is_sanitized(self, mock_client, caplog):
-        """A hostile sensorState (sent as a JSON \\u escape) is logged escaped."""
-        client, _, _ = mock_client
-        with caplog.at_level(logging.DEBUG, logger="powerpetdoor.client"):
-            before = set(client._tasks)
-            client.data_received(rb'{"SENSOR_INDOOR": "", "sensorState": "on\u001b[2J"}')
-            # Only what this frame spawned. `_tasks` is connection-scoped and
-            # so also holds the keepalive loop, whose first sleep is the
-            # fixture's 30 s: gathering all of it made this single test 30 s
-            # of the suite's 39 s wall time, and left it one slow runner away
-            # from tripping the 60 s per-test timeout.
-            await asyncio.gather(*(set(client._tasks) - before))
-
-        messages = [
-            r.getMessage() for r in caplog.records if "Notification event" in r.getMessage()
-        ]
-        assert len(messages) == 1
-        assert "\x1b" not in messages[0]
-        assert "on\\x1b[2J" in messages[0]
 
     def test_posix_tz_parse_failure_log_is_sanitized(self, caplog):
         """tz_utils logs a device-supplied POSIX TZ string escaped."""

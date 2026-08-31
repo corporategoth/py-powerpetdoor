@@ -14,11 +14,11 @@ This module provides a command dispatcher that can be used by:
 The command handler is split into category-specific mixins for maintainability:
 - DoorCommandsMixin: Door operations (inside, outside, close, hold, cycle)
 - SimulationCommandsMixin: Simulation events (obstruction)
-- ButtonCommandsMixin: Physical button toggles (power, auto, inside_enable, etc.)
 - SettingsCommandsMixin: Settings management (safety, lockout, battery, etc.)
 - NotifyCommandsMixin: Notification settings
 - ScheduleCommandsMixin: Schedule management
 - ScriptsCommandsMixin: Script running
+- StateCommandsMixin: State documents (reset, statedoc)
 - InfoCommandsMixin: Status and help
 - ControlCommandsMixin: Simulator control (exit)
 """

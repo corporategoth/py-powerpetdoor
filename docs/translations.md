@@ -6,8 +6,9 @@ messages and log messages — goes through `powerpetdoor.i18n.t()`:
 ```python
 from .i18n import t
 
-return CommandResult(True, t("simulator.commands.control.debug_logging_enabled",
-                             "Debug logging enabled"))
+return CommandResult(
+    True, t("simulator.commands.control.debug_logging_enabled", "Debug logging enabled")
+)
 ```
 
 The English text is the second argument, so **English lives in the source**.
@@ -55,8 +56,8 @@ where a translation must be a string.
 From code, the header is available without loading a translation:
 
 ```python
-i18n.get_locale_name("de_de")      # 'Deutsch'
-i18n.get_translators("de_de")      # ['Alex Müller <alex@example.de>', ...]
+i18n.get_locale_name("de_de")  # 'Deutsch'
+i18n.get_translators("de_de")  # ['Alex Müller <alex@example.de>', ...]
 i18n.get_locale_metadata("de_de")  # the whole header
 ```
 
@@ -154,7 +155,7 @@ Or explicitly, from code:
 from powerpetdoor import i18n
 
 i18n.set_locale("de_de")
-print(i18n.get_available_locales())   # ['de_de', 'en_us']
+print(i18n.get_available_locales())  # ['de_de', 'en_us']
 print(i18n.get_locale_name("de_de"))  # 'Deutsch'
 ```
 

@@ -4,12 +4,14 @@ steps:
   - action: set
     name: hold_time
     value: "1"
-  - action: trigger_sensor
+  - action: trigger
     sensor: inside
   - action: wait_for
-    condition: door_holding
+    condition: door_status
+    equals: DOOR_HOLDING
     timeout: 5
-  - action: pet_presence
+  - action: inside
+    duration: 0
   - action: log
     message: "Pet detected - door must stay open"
   # Genuine time passage: wait past the 1s hold time to prove the pet
@@ -19,7 +21,8 @@ steps:
   - action: assert
     condition: door_status
     equals: DOOR_HOLDING
-  - action: pet_off
+  - action: inside
+    state: off
   - action: log
     message: "Pet left - door should close after hold time"
   - action: wait_for

@@ -80,7 +80,14 @@ def mock_client(simulator):
 
 
 STUB_TIMEZONES = ["America/New_York", "Europe/London", "UTC"]
-STUB_POSIX = {"America/New_York": "EST5EDT,M3.2.0,M11.1.0"}
+#: Real rules for the stub zones. The simulator stores POSIX, so an IANA
+#: name that cannot be converted has nowhere to go - "known but
+#: unconvertible" is not a state the door can be left in any more.
+STUB_POSIX = {
+    "America/New_York": "EST5EDT,M3.2.0,M11.1.0",
+    "Europe/London": "GMT0BST,M3.5.0/1,M10.5.0",
+    "UTC": "UTC0",
+}
 
 
 @pytest.fixture
@@ -287,7 +294,8 @@ class TestHoldtimeCommand:
         result = command_handler.holdtime(float("nan"))
 
         assert result.success is False
-        assert result.message == "Hold time must be a finite number, got nan"
+        # The shared coercion refuses it, and names the value it refused.
+        assert result.message == "hold_time must be a finite number, got nan"
         assert command_handler.simulator.state.hold_time == before
 
 
@@ -411,78 +419,104 @@ class TestAcCommand:
 
 
 class TestTimezoneCommand:
-    async def test_show_without_cache(self, command_handler, tz_cache_empty):
+    """The prompt takes either spelling; the door stores POSIX.
+
+    An IANA name is an ordinary thing to type, so the command accepts one
+    - but the wire carries POSIX and nothing else, so that is what is
+    stored. A connected client therefore sees the same string whichever
+    spelling was typed here.
+    """
+
+    async def test_show_reports_the_stored_posix_rule(self, command_handler, tz_cache_empty):
         result = await command_handler.execute("timezone")
         assert result.success is True
-        assert result.message == "Timezone: America/New_York"
+        assert result.message == "Timezone: EST5EDT,M3.2.0,M11.1.0"
 
-    async def test_show_with_posix(self, command_handler, tz_cache_ready):
+    async def test_show_names_the_zone_when_the_cache_can(self, command_handler, monkeypatch):
+        """The rule is what is stored; the name is the readable part."""
+        monkeypatch.setattr(tz_utils, "is_cache_initialized", lambda: True)
+        monkeypatch.setattr(tz_utils, "find_iana_for_posix", lambda posix: "America/New_York")
+
         result = await command_handler.execute("timezone")
-        assert result.success is True
-        assert result.message == "Timezone: America/New_York (EST5EDT,M3.2.0,M11.1.0)"
 
-    async def test_show_with_cache_but_no_posix_mapping(self, command_handler, tz_cache_ready):
-        command_handler.simulator.state.timezone = "Europe/London"
-        result = await command_handler.execute("timezone")
-        assert result.message == "Timezone: Europe/London"
+        assert result.message == "Timezone: EST5EDT,M3.2.0,M11.1.0 (America/New_York)"
 
-    async def test_set_iana_with_posix(self, command_handler, tz_cache_ready, mock_client):
-        command_handler.simulator.state.timezone = "UTC"
+    async def test_an_iana_name_is_stored_as_posix(
+        self, command_handler, tz_cache_ready, mock_client
+    ):
         result = await command_handler.execute("timezone America/New_York")
+
         assert result.success is True
         assert result.message == "Timezone set to America/New_York (EST5EDT,M3.2.0,M11.1.0)"
-        assert command_handler.simulator.state.timezone == "America/New_York"
+        assert command_handler.simulator.state.timezone == "EST5EDT,M3.2.0,M11.1.0"
         assert CMD_SET_TIMEZONE in _sent_cmds(mock_client)
 
-    async def test_set_iana_without_posix(self, command_handler, tz_cache_ready):
+    async def test_another_zone_stores_its_own_rule(self, command_handler, tz_cache_ready):
         result = await command_handler.execute("timezone Europe/London")
-        assert result.success is True
-        assert result.message == "Timezone set to Europe/London"
-        assert command_handler.simulator.state.timezone == "Europe/London"
 
-    async def test_set_utc_special_case(self, command_handler, tz_cache_ready):
+        assert result.success is True
+        assert command_handler.simulator.state.timezone == "GMT0BST,M3.5.0/1,M10.5.0"
+
+    async def test_utc_stores_its_rule_not_its_name(self, command_handler, tz_cache_ready):
         result = await command_handler.execute("timezone UTC")
+
         assert result.success is True
-        assert result.message == "Timezone set to UTC"
-        assert command_handler.simulator.state.timezone == "UTC"
+        assert result.message == "Timezone set to UTC (UTC0)"
+        assert command_handler.simulator.state.timezone == "UTC0"
 
-    async def test_unknown_iana_rejected(self, command_handler, tz_cache_ready):
-        result = await command_handler.execute("timezone Bogus/Zone")
-        assert result.success is False
-        assert result.message == "Unknown timezone: Bogus/Zone"
-        assert command_handler.simulator.state.timezone == "America/New_York"
-
-    async def test_iana_accepted_when_cache_uninitialized(self, command_handler, tz_cache_empty):
-        """Without a cache there is no validation list; IANA names are trusted."""
-        result = await command_handler.execute("timezone Europe/London")
-        assert result.success is True
-        assert result.message == "Timezone set to Europe/London"
-
-    async def test_set_posix_string(self, command_handler, tz_cache_empty, mock_client):
+    async def test_a_posix_string_is_stored_as_typed(
+        self, command_handler, tz_cache_empty, mock_client
+    ):
+        """Already the stored form, so the reply does not repeat it."""
         result = await command_handler.execute("timezone EST5EDT,M3.2.0,M11.1.0")
+
         assert result.success is True
         assert result.message == "Timezone set to EST5EDT,M3.2.0,M11.1.0"
         assert command_handler.simulator.state.timezone == "EST5EDT,M3.2.0,M11.1.0"
         assert CMD_SET_TIMEZONE in _sent_cmds(mock_client)
 
-    async def test_set_posix_angle_bracket_form(self, command_handler, tz_cache_empty):
+    async def test_the_angle_bracket_posix_form_is_accepted(self, command_handler, tz_cache_empty):
+        """`<+05>-5` is legal POSIX and must not be mistaken for a name."""
         result = await command_handler.execute("timezone <+05>-5")
-        assert result.success is True
-        assert result.message == "Timezone set to <+05>-5"
 
-    async def test_invalid_timezone_rejected(self, command_handler, tz_cache_empty):
-        result = await command_handler.execute("timezone NotATimezone")
+        assert result.success is True
+        assert command_handler.simulator.state.timezone == "<+05>-5"
+
+    async def test_an_unknown_zone_is_refused(self, command_handler, tz_cache_ready):
+        before = command_handler.simulator.state.timezone
+
+        result = await command_handler.execute("timezone Bogus/Zone")
+
         assert result.success is False
-        assert result.message == (
-            "Invalid timezone: NotATimezone. Use IANA name (e.g., 'America/New_York') "
-            "or POSIX string (e.g., 'EST5EDT,M3.2.0,M11.1.0')"
-        )
-        assert command_handler.simulator.state.timezone == "America/New_York"
+        assert "neither a POSIX TZ string" in result.message
+        assert command_handler.simulator.state.timezone == before
+
+    async def test_a_string_that_is_neither_is_refused(self, command_handler, tz_cache_empty):
+        before = command_handler.simulator.state.timezone
+
+        result = await command_handler.execute("timezone NotATimezone")
+
+        assert result.success is False
+        assert "neither a POSIX TZ string" in result.message
+        assert command_handler.simulator.state.timezone == before
+
+    async def test_posix_still_works_with_no_usable_cache(self, command_handler, tz_cache_empty):
+        """A POSIX string needs no lookup, so it is accepted regardless."""
+        result = await command_handler.execute("timezone UTC0")
+
+        assert result.success is True
+        assert command_handler.simulator.state.timezone == "UTC0"
+
+    async def test_an_iana_name_needs_the_cache(self, command_handler, tz_cache_empty):
+        """With nothing to convert *with*, there is no POSIX form to store."""
+        result = await command_handler.execute("timezone Europe/London")
+
+        assert result.success is False
 
     async def test_tz_alias(self, command_handler, tz_cache_empty):
         result = await command_handler.execute("tz")
         assert result.success is True
-        assert result.message == "Timezone: America/New_York"
+        assert result.message.startswith("Timezone: ")
 
 
 class TestTimezoneCompleter:

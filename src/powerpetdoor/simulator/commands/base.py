@@ -15,7 +15,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TypeVar, cast
 
+from ...const import FIELD_HOUR, FIELD_MINUTE
 from ...i18n import t
+from ...schedule import coerce_schedule_time
 
 #: Preserves the decorated function's exact signature through @command/@subcommand
 F = TypeVar("F", bound=Callable[..., Any])
@@ -28,58 +30,6 @@ class CommandResult:
     success: bool
     message: str
     data: dict | None = None
-
-
-class BoolToggleCommandMixin:
-    """Shared toggle-or-set helper for boolean state commands.
-
-    Inherited by both ButtonCommandsMixin and SettingsCommandsMixin so the
-    toggle/set/broadcast behavior is implemented exactly once (DRY).
-    """
-
-    simulator: Any  # DoorSimulator (loose annotation avoids a circular import)
-
-    def _toggle_bool(
-        self,
-        attr: str,
-        name: str,
-        value: bool | None,
-        fmt: str = "ON|OFF",
-        broadcast_func: str | None = None,
-    ) -> "CommandResult":
-        """Toggle or set a boolean state attribute.
-
-        Args:
-            attr: The attribute name on the state object
-            name: Display name for the setting
-            value: True/False to set, None to toggle
-            fmt: Format string for display ("ON|OFF" or "enabled|disabled")
-            broadcast_func: Name of specific broadcast method to call on simulator
-                           (e.g., "broadcast_safety_lock"). If None, no broadcast.
-        """
-        s = self.simulator.state
-        if value is None:
-            current = getattr(s, attr)
-            setattr(s, attr, not current)
-            new_val = not current
-        else:
-            setattr(s, attr, value)
-            new_val = value
-
-        if fmt == "enabled|disabled":
-            state = "enabled" if new_val else "disabled"
-        else:
-            state = "ON" if new_val else "OFF"
-
-        # Broadcast specific setting change to connected PPD clients
-        if broadcast_func:
-            func = getattr(self.simulator, broadcast_func, None)
-            if func:
-                func(new_val)
-
-        return CommandResult(
-            True, t("simulator.commands.base.text", "{name}: {state}", name=name, state=state)
-        )
 
 
 @dataclass
@@ -243,15 +193,25 @@ def parse_arg(value: str, spec: ArgSpec) -> tuple[Any, str | None]:
 
 
 def _parse_time_str(time_str: str) -> tuple[int, int]:
-    """Parse time string like '6:00' or '22:30' into (hour, minute)."""
+    """Parse a time like ``6:00``, ``22:30`` or ``24:00`` into (hour, minute).
+
+    The bounds are deliberately not this layer's to invent.
+    :func:`~powerpetdoor.schedule.coerce_schedule_time` owns them, so an
+    operator can type exactly the times the wire accepts - including
+    ``24:00``, which is the device's own spelling for the end of the day
+    and which this parser used to refuse while the wire path allowed it.
+    """
     parts = time_str.strip().replace(".", ":").split(":")
     hour = int(parts[0])
     minute = int(parts[1]) if len(parts) > 1 else 0
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+    try:
+        return coerce_schedule_time({FIELD_HOUR: hour, FIELD_MINUTE: minute}, time_str)
+    except ValueError:
+        # The shared validator's message names a schedule field, which is
+        # not what the operator typed. Report what they did type.
         raise ValueError(
             t("simulator.commands.base.invalid_time", "Invalid time: {time_str}", time_str=time_str)
-        )
-    return hour, minute
+        ) from None
 
 
 # Day parsing constants. Booleans, not 1/0: this is the operator-facing

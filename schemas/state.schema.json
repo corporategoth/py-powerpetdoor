@@ -1,0 +1,609 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://git.neuromancy.net/pypi/powerpetdoor/raw/branch/main/schemas/state.schema.json",
+  "title": "Power Pet Door simulator state document",
+  "description": "A state document for --initial-state, or for `reset <name>`. Every section is optional; what it omits keeps its default.",
+  "type": "object",
+  "properties": {
+    "settings": {
+      "type": "object",
+      "properties": {
+        "auto": {
+          "description": "Schedules enabled",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "autoretract": {
+          "description": "Auto-retract on obstruction",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "cmd_lockout": {
+          "description": "Door ignores pet proximity and closes on its timer",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "hold_time": {
+          "description": "Seconds the door stays open",
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 900.0
+        },
+        "inside": {
+          "description": "Inside sensor enabled",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "obstruction": {
+          "description": "Whether a physical obstruction is in the doorway",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "outside": {
+          "description": "Outside sensor enabled",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "power": {
+          "description": "Main power",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "safety_lock": {
+          "description": "Outside sensor overrides the schedule",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "sensor_trigger_voltage": {
+          "description": "Collar detection threshold (mV)",
+          "type": "integer",
+          "minimum": 0.0,
+          "maximum": 2147483647
+        },
+        "sleep_sensor_trigger_voltage": {
+          "description": "Sleep-mode threshold (mV)",
+          "type": "integer",
+          "minimum": 0.0,
+          "maximum": 2147483647
+        },
+        "timezone": {
+          "description": "IANA name or POSIX TZ string; stored as POSIX",
+          "type": "string"
+        },
+        "total_auto_retracts": {
+          "description": "Auto-retracts so far",
+          "type": "integer",
+          "minimum": 0.0,
+          "maximum": 2147483647
+        },
+        "total_open_cycles": {
+          "description": "Completed open/close cycles",
+          "type": "integer",
+          "minimum": 0.0,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "battery": {
+      "type": "object",
+      "properties": {
+        "ac_present": {
+          "description": "Whether mains power is connected",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "battery": {
+          "description": "Battery charge (%)",
+          "type": "integer",
+          "minimum": 0.0,
+          "maximum": 100
+        },
+        "battery_present": {
+          "description": "Whether a battery is fitted",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "charge_rate": {
+          "description": "Battery charge rate (%/min)",
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 100.0
+        },
+        "discharge_rate": {
+          "description": "Battery drain rate (%/min)",
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 100.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "hardware": {
+      "type": "object",
+      "properties": {
+        "firmware_version": {
+          "description": "Reported firmware version",
+          "type": "string"
+        },
+        "hardware_version": {
+          "description": "Reported hardware version",
+          "type": "string"
+        },
+        "has_remote_id": {
+          "description": "Whether a remote ID is paired",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "has_remote_key": {
+          "description": "Whether a remote key is paired",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "timing": {
+      "type": "object",
+      "properties": {
+        "closing_mid_time": {
+          "description": "Simulated closing mid time (seconds)",
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 60.0
+        },
+        "closing_start_time": {
+          "description": "Simulated closing start time (seconds)",
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 60.0
+        },
+        "closing_top_time": {
+          "description": "Simulated closing top time (seconds)",
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 60.0
+        },
+        "rise_time": {
+          "description": "Simulated rise time (seconds)",
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 60.0
+        },
+        "sensor_retrigger_window": {
+          "description": "Simulated sensor retrigger window (seconds)",
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 60.0
+        },
+        "slowing_time": {
+          "description": "Simulated slowing time (seconds)",
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 60.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "notifications": {
+      "type": "object",
+      "properties": {
+        "notify_inside_off": {
+          "description": "Whether the inside_off notification is switched on",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "notify_inside_on": {
+          "description": "Whether the inside_on notification is switched on",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "notify_low_battery": {
+          "description": "Whether the low_battery notification is switched on",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "notify_outside_off": {
+          "description": "Whether the outside_off notification is switched on",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "notify_outside_on": {
+          "description": "Whether the outside_on notification is switched on",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "schedules": {
+      "type": "array",
+      "description": "Replaces the whole schedule table.",
+      "items": {
+        "$ref": "#/$defs/schedule"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "schedule": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "enabled": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "inside": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "outside": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "on",
+                "off",
+                "yes",
+                "no",
+                "true",
+                "false",
+                "enabled",
+                "disabled",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        },
+        "days_of_week": {
+          "type": "array",
+          "items": {
+            "type": "boolean"
+          },
+          "minItems": 7,
+          "maxItems": 7
+        },
+        "start": {
+          "type": "string",
+          "pattern": "^\\d{1,2}:\\d{2}$"
+        },
+        "end": {
+          "type": "string",
+          "pattern": "^\\d{1,2}:\\d{2}$"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

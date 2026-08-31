@@ -571,86 +571,60 @@ class TestInteractiveOnlyCommands:
 # ============================================================================
 
 
-class TestPetCommand:
-    """Tests for the pet presence command (drives set_pet_in_doorway)."""
+class TestPetPresenceIsJustTheSensor:
+    """There is no `pet` command. It was `inside on` by another name.
 
-    async def test_pet_bare_toggles_on(self, command_handler):
-        """pet with no args toggles pet presence on when off."""
-        state = command_handler.simulator.state
-        state.inside_sensor_active = False
+    A sensor held active *is* pet presence - a collar sitting in range -
+    and the two differed in exactly one way: `pet on` never opened a
+    closed door, which a real collar at the sensor does. The redundant one
+    that was also wrong is the one that went.
+    """
 
+    async def test_pet_is_gone(self, command_handler):
         result = await command_handler.execute("pet")
-        assert result.success is True
-        assert "Pet in doorway" in result.message
-        assert state.inside_sensor_active is True
 
-    async def test_pet_bare_toggles_off(self, command_handler):
-        """pet with no args toggles pet presence off when on."""
-        state = command_handler.simulator.state
-        state.inside_sensor_active = True
-
-        result = await command_handler.execute("pet")
-        assert result.success is True
-        assert "Pet left doorway" in result.message
-        assert state.inside_sensor_active is False
-
-    async def test_pet_on(self, command_handler):
-        state = command_handler.simulator.state
-        state.inside_sensor_active = False
-
-        result = await command_handler.execute("pet on")
-        assert result.success is True
-        assert state.inside_sensor_active is True
-
-    async def test_pet_on_clears_outside_sensor(self, command_handler):
-        """Pet presence uses the inside sensor; sensors are mutually exclusive."""
-        state = command_handler.simulator.state
-        state.outside_sensor_active = True
-
-        result = await command_handler.execute("pet on")
-        assert result.success is True
-        assert state.inside_sensor_active is True
-        assert state.outside_sensor_active is False
-
-    async def test_pet_off(self, command_handler):
-        state = command_handler.simulator.state
-        state.inside_sensor_active = True
-
-        result = await command_handler.execute("pet off")
-        assert result.success is True
-        assert state.inside_sensor_active is False
-
-    async def test_pet_alias_d(self, command_handler):
-        """'d' alias (the key documented in docs/simulator.md) works."""
-        state = command_handler.simulator.state
-        state.inside_sensor_active = False
-
-        result = await command_handler.execute("d")
-        assert result.success is True
-        assert state.inside_sensor_active is True
-
-    async def test_pet_toggle_subcommand(self, command_handler):
-        state = command_handler.simulator.state
-        state.inside_sensor_active = False
-
-        result = await command_handler.execute("pet toggle")
-        assert result.success is True
-        assert state.inside_sensor_active is True
-
-    async def test_pet_invalid_value(self, command_handler):
-        result = await command_handler.execute("pet maybe")
         assert result.success is False
-        assert "not valid" in result.message
+        assert "Unknown command" in result.message
 
-    async def test_pet_in_help(self, command_handler):
+    async def test_pet_is_not_advertised_in_help(self, command_handler):
+        """No `pet` *entry*. The word still appears in the sensor
+        descriptions, which is the point: a sensor is where a pet is."""
+        command_handler.set_interactive_mode(True)
+
         result = await command_handler.execute("help")
+
+        entries = [line.strip().split()[0] for line in result.message.splitlines() if "  " in line]
+        assert "pet" not in entries
+        assert "inside" in entries
+
+    async def test_holding_a_sensor_is_how_a_pet_loiters(self, command_handler):
+        state = command_handler.simulator.state
+        state.power = False
+
+        result = await command_handler.execute("inside on")
+
         assert result.success is True
-        assert "pet (d)" in result.message
+        assert state.pet_present("inside") is True
 
+    async def test_it_clears_the_other_sensor(self, command_handler):
+        """A pet cannot be on both sides of the flap at once."""
+        state = command_handler.simulator.state
+        state.power = False
+        await command_handler.execute("inside on")
 
-# ============================================================================
-# No-Argument Show Semantics Tests (battery / holdtime)
-# ============================================================================
+        await command_handler.execute("outside on")
+
+        assert state.pet_present("outside") is True
+        assert state.pet_present("inside") is False
+
+    async def test_off_releases_it(self, command_handler):
+        state = command_handler.simulator.state
+        state.power = False
+        await command_handler.execute("inside on")
+
+        await command_handler.execute("inside off")
+
+        assert state.pet_present("inside") is False
 
 
 class TestNoArgShowSemantics:

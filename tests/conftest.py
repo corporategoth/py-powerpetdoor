@@ -402,7 +402,7 @@ def nested_frame() -> bytes:
 #: that difference is deliberate. **These two emitters are opposite
 #: directions, not twins**: the library's is client->device (what we send
 #: to firmware that has accepted JSON booleans since v0.1.0) and the
-#: simulator's is device->client (**verified against firmware 1.7.18**: a
+#: simulator's is device->client (A
 #: GET_SCHEDULE reply carries those three as ints). These two payloads must
 #: not be "unified". Every other field is identical and pinned on both
 #: sides, so a divergence anywhere else still fails immediately.
@@ -447,7 +447,7 @@ def assert_schedule_wire_types(payload: dict, *, flag_type: type) -> None:
         payload: The emitted schedule dict.
         flag_type: ``bool`` for the library's client->device emitter,
             ``int`` for the simulator's device->client emitter (**verified
-            against firmware 1.7.18**). The two directions are not required
+            against the door**). The two directions are not required
             to agree (see :data:`GOLDEN_SCHEDULE_WIRE_TO_DEVICE`), so the
             expected spelling is passed in rather than assumed. It governs
             exactly the three flag fields.

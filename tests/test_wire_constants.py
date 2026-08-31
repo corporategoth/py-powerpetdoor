@@ -17,11 +17,9 @@ The perimeter is **derived**, not hand-listed: it is every constant in
 ``docs/protocol.md``. That is checked here too, so a newly documented
 constant has to be added below rather than silently escaping the pin.
 
-``docs/protocol.md`` marks each claim **[V]** (verified against firmware
-1.7.18) or **[R]** (reverse-engineered, unverified), and the **[R]** half is
-*not* authority over what the firmware accepts. This module does not assert
-that these values are right - only that they are what has actually been
-running. Changing one must be a deliberate, visible line in a diff.
+This module does not assert that these values are *right* - only that
+they are what has actually been running. Changing one must be a
+deliberate, visible line in a diff.
 """
 
 from __future__ import annotations
@@ -37,30 +35,28 @@ PROTOCOL_MD = Path(__file__).resolve().parent.parent / "docs" / "protocol.md"
 
 #: name -> the exact value that goes on the wire.
 DOCUMENTED_WIRE_CONSTANTS = {
-    "CMD_CHECK_RESET_REASON": "CHECK_RESET_REASON",
     "CMD_CLOSE": "CLOSE",
     "CMD_DELETE_SCHEDULE": "DELETE_SCHEDULE",
     "CMD_DISABLE_AUTORETRACT": "DISABLE_AUTORETRACT",
     "CMD_DISABLE_CMD_LOCKOUT": "DISABLE_CMD_LOCKOUT",
+    "CMD_DISABLE_AUTO": "DISABLE_TIMERS",
     "CMD_DISABLE_INSIDE": "DISABLE_INSIDE",
     "CMD_DISABLE_OUTSIDE": "DISABLE_OUTSIDE",
     "CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK": "DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK",
     "CMD_ENABLE_AUTORETRACT": "ENABLE_AUTORETRACT",
     "CMD_ENABLE_CMD_LOCKOUT": "ENABLE_CMD_LOCKOUT",
+    "CMD_ENABLE_AUTO": "ENABLE_TIMERS",
     "CMD_ENABLE_INSIDE": "ENABLE_INSIDE",
     "CMD_ENABLE_OUTSIDE": "ENABLE_OUTSIDE",
     "CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK": "ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK",
-    "CMD_GET_AUTO": "GET_TIMERS_ENABLED",
-    "CMD_GET_AUTORETRACT": "GET_AUTORETRACT",
-    "CMD_GET_CMD_LOCKOUT": "GET_CMD_LOCKOUT",
     "CMD_GET_DOOR_BATTERY": "GET_DOOR_BATTERY",
     "CMD_GET_DOOR_OPEN_STATS": "GET_DOOR_OPEN_STATS",
     "CMD_GET_DOOR_STATUS": "GET_DOOR_STATUS",
     "CMD_GET_HOLD_TIME": "GET_HOLD_TIME",
     "CMD_GET_HW_INFO": "GET_HW_INFO",
     "CMD_GET_NOTIFICATIONS": "GET_NOTIFICATIONS",
-    "CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK": "GET_OUTSIDE_SENSOR_SAFETY_LOCK",
     "CMD_GET_POWER": "GET_POWER",
+    "CMD_GET_TIMERS_ENABLED": "GET_TIMERS_ENABLED",
     "CMD_GET_SCHEDULE": "GET_SCHEDULE",
     "CMD_GET_SCHEDULE_LIST": "GET_SCHEDULE_LIST",
     "CMD_GET_SENSORS": "GET_SENSORS",
@@ -78,10 +74,8 @@ DOCUMENTED_WIRE_CONSTANTS = {
     "CMD_SET_HOLD_TIME": "SET_HOLD_TIME",
     "CMD_SET_NOTIFICATIONS": "SET_NOTIFICATIONS",
     "CMD_SET_SCHEDULE": "SET_SCHEDULE",
-    "CMD_SET_SCHEDULE_LIST": "SET_SCHEDULE_LIST",
     "CMD_SET_SENSOR_TRIGGER_VOLTAGE": "SET_SENSOR_TRIGGER_VOLTAGE",
     "CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE": "SET_SLEEP_SENSOR_TRIGGER_VOLTAGE",
-    "CMD_SET_TIME": "SET_TIME",
     "CMD_SET_TIMEZONE": "SET_TIMEZONE",
     "COMMAND": "cmd",
     "CONFIG": "config",
@@ -129,14 +123,12 @@ DOCUMENTED_WIRE_CONSTANTS = {
     "FIELD_OUTSIDE_SENSOR_SAFETY_LOCK": "outsideSensorSafetyLock",
     "FIELD_POWER": "power_state",
     "FIELD_REASON": "reason",
-    "FIELD_RESET_REASON": "resetReason",
     "FIELD_SCHEDULE": "schedule",
     "FIELD_SCHEDULES": "schedules",
     "FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS": "sensorOffIndoorNotificationsEnabled",
     "FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS": "sensorOffOutdoorNotificationsEnabled",
     "FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS": "sensorOnIndoorNotificationsEnabled",
     "FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS": "sensorOnOutdoorNotificationsEnabled",
-    "FIELD_SENSOR_STATE": "sensorState",
     "FIELD_SENSOR_TRIGGER_VOLTAGE": "sensorTriggerVoltage",
     "FIELD_SETTINGS": "settings",
     "FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE": "sleepSensorTriggerVoltage",
@@ -146,14 +138,9 @@ DOCUMENTED_WIRE_CONSTANTS = {
     "FIELD_TOTAL_OPEN_CYCLES": "totalOpenCycles",
     "FIELD_TZ": "tz",
     "FIELD_VOLTAGE": "voltage",
-    "NOTIFY_LOW_BATTERY": "LOW_BATTERY",
-    "NOTIFY_SENSOR_INDOOR": "SENSOR_INDOOR",
-    "NOTIFY_SENSOR_OUTDOOR": "SENSOR_OUTDOOR",
     "PHONE_TO_DOOR": "p2d",
     "PING": "PING",
     "PONG": "PONG",
-    "SENSOR_STATE_OFF": "off",
-    "SENSOR_STATE_ON": "on",
     "SUCCESS_FALSE": "false",
     "SUCCESS_TRUE": "true",
     "TIME_FORMAT": "%a %b %d %H:%M:%S %Y",

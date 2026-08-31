@@ -7,7 +7,7 @@ steps:
     name: power
     value: "off"
   # An ignored trigger leaves the door closed immediately (no wait needed)
-  - action: trigger_sensor
+  - action: trigger
     sensor: inside
   - action: assert
     condition: door_status
@@ -22,7 +22,7 @@ steps:
   - action: set
     name: cmd_lockout
     value: "on"
-  - action: trigger_sensor
+  - action: trigger
     sensor: inside
   - action: assert
     condition: door_status

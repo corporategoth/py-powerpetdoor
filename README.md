@@ -48,6 +48,7 @@ A high-level, Pythonic interface with cached state and simple methods:
 import asyncio
 from powerpetdoor import PowerPetDoor
 
+
 async def main():
     door = PowerPetDoor("192.168.1.100")
     await door.connect()
@@ -68,6 +69,7 @@ async def main():
 
     await door.disconnect()
 
+
 asyncio.run(main())
 ```
 
@@ -81,16 +83,12 @@ For advanced use cases requiring direct protocol access:
 import asyncio
 from powerpetdoor import PowerPetDoorClient, CONFIG, CMD_GET_SETTINGS
 
+
 async def main():
     loop = asyncio.get_running_loop()
 
     client = PowerPetDoorClient(
-        host="192.168.1.100",
-        port=3000,
-        keepalive=30.0,
-        timeout=10.0,
-        reconnect=5.0,
-        loop=loop
+        host="192.168.1.100", port=3000, keepalive=30.0, timeout=10.0, reconnect=5.0, loop=loop
     )
 
     await client.connect()
@@ -99,6 +97,7 @@ async def main():
     print(f"Settings: {settings}")
 
     client.stop()
+
 
 asyncio.run(main())
 ```
@@ -112,6 +111,9 @@ See [docs/client.md](docs/client.md) for complete documentation.
 | [docs/door.md](docs/door.md) | PowerPetDoor high-level interface |
 | [docs/client.md](docs/client.md) | PowerPetDoorClient low-level interface |
 | [docs/simulator.md](docs/simulator.md) | Door simulator for testing |
+| [docs/scripting.md](docs/scripting.md) | The simulator's YAML scripting language |
+| [docs/development.md](docs/development.md) | How the codebase is put together, and where to add things |
+| [schemas/](schemas/) | Generated specs: JSON Schema for the script DSL and state documents, AsyncAPI 3.0 for the wire protocol |
 
 ## Door Simulator
 

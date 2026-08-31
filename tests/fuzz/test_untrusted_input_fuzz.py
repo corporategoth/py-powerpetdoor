@@ -316,7 +316,7 @@ class TestScheduleParserTotality:
         ``enabled``, ``inside`` and ``outside`` are excluded deliberately
         and asserted separately below: the two emitters are opposite
         protocol directions (the library sends, the simulator replies), and
-        firmware 1.7.18 spells those three as ints on the way back where we
+        the door spells those three as ints on the way back where we
         send JSON booleans.
 
         The selected sensor's END TIME is excluded for the same reason. The

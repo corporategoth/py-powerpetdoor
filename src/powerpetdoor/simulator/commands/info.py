@@ -9,6 +9,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ...i18n import t
+from ..values import read_value
 from .base import (
     ArgSpec,
     CommandInfo,
@@ -259,7 +260,7 @@ class InfoCommandsMixin:
             t(
                 "simulator.commands.info.broadcast_status",
                 "Broadcast status: {door_status}",
-                door_status=self.simulator.state.door_status,
+                door_status=read_value(self.simulator.state, "door_status"),
             ),
         )
 
@@ -279,8 +280,8 @@ class InfoCommandsMixin:
         if err := self._require_clients():
             return err
         self.simulator._broadcast_battery_status()
-        pct = self.simulator.state.battery_percent
-        ac = "AC" if self.simulator.state.ac_present else "no AC"
+        pct = read_value(self.simulator.state, "battery")
+        ac = "AC" if read_value(self.simulator.state, "ac_present") else "no AC"
         return CommandResult(
             True,
             t(
@@ -334,7 +335,7 @@ class InfoCommandsMixin:
         if err := self._require_clients():
             return err
         self.simulator.broadcast_schedules()
-        count = len(self.simulator.state.schedules)
+        count = len(self.simulator.get_schedules())
         return CommandResult(
             True,
             t(

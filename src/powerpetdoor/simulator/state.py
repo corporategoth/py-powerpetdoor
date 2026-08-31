@@ -14,31 +14,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from ..const import (
-    DOOR_OPTION_AUTORETRACT,
     DOOR_STATE_CLOSED,
-    FIELD_AUTO,
-    FIELD_AUTORETRACT,
-    FIELD_CMD_LOCKOUT,
     FIELD_DAYSOFWEEK,
     FIELD_ENABLED,
     FIELD_END_TIME_SUFFIX,
-    FIELD_HOLD_OPEN_TIME,
     FIELD_INDEX,
     FIELD_INSIDE,
     FIELD_INSIDE_PREFIX,
-    FIELD_LOW_BATTERY_NOTIFICATIONS,
     FIELD_OUTSIDE,
     FIELD_OUTSIDE_PREFIX,
-    FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
-    FIELD_POWER,
-    FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_TRIGGER_VOLTAGE,
-    FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     FIELD_START_TIME_SUFFIX,
-    FIELD_TZ,
 )
 from ..i18n import t
 from ..schedule import (
@@ -50,9 +35,9 @@ from ..schedule import (
     coerce_schedule_int,
     coerce_schedule_time,
     require_schedule_field,
-    wire_bool_string,
 )
-from ..tz_utils import find_iana_for_posix, get_posix_tz_string, is_cache_initialized
+from ..tz_utils import resolve_tzinfo
+from .notifications import NOTIFICATION_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +55,9 @@ logger = logging.getLogger(__name__)
 # powerpetdoor.door.Schedule parser share one implementation: hardening
 # either one hardens both.
 
-#: The last real minute of the day, and how a probed unit's FACTORY schedule
+#: The last real minute of the day, and how the FACTORY schedule
 #: happens to spell the end of its full-day windows (``in 00:00-23:59``,
-#: ``out 00:00-23:59`` on firmware 1.7.18).
+#: ``out 00:00-23:59``).
 #:
 #: It is a spelling, not a special case. The schedule engine is measured to
 #: be strictly ``start <= now < end``, so a window ending here really does
@@ -81,8 +66,7 @@ logger = logging.getLogger(__name__)
 END_OF_DAY_HOUR = 23
 END_OF_DAY_MINUTE = 59
 
-#: The end of the day, unambiguously. **Measured against firmware 1.7.18**:
-#: the device honours hour 24 (``20:00-24:00`` reports the sensor enabled at
+#: The end of the day, unambiguously. The device honours hour 24 (``20:00-24:00`` reports the sensor enabled at
 #: 21:07) and preserves it (write ``00:00-24:00``, read back
 #: ``00:00-24:00``), so this is what a whole-day window should be written as.
 WHOLE_DAY_END_HOUR = 24
@@ -101,9 +85,8 @@ class DoorTimingConfig:
 
     # Time for each phase of closing
     slowing_time: float = 0.3
-    #: The brief first closing state, before the flap has moved. Measured on
-    #: firmware 1.7.18 at roughly 180ms between DOOR_CLOSING and
-    #: DOOR_CLOSING_TOP_OPEN.
+    #: The brief first closing state, before the flap has moved. Roughly
+    #: 180ms between DOOR_CLOSING and DOOR_CLOSING_TOP_OPEN.
     closing_start_time: float = 0.2
     closing_top_time: float = 0.4
     closing_mid_time: float = 0.4
@@ -166,8 +149,8 @@ class Schedule:
 
         The simulator plays the *device*, so this emits what a real door
         replies with — spelled by
-        :data:`~powerpetdoor.schedule.SCHEDULE_WIRE_FROM_DEVICE`. **Verified
-        against firmware 1.7.18**: ``enabled``, ``inside`` and ``outside``
+        :data:`~powerpetdoor.schedule.SCHEDULE_WIRE_FROM_DEVICE`.
+        ``enabled``, ``inside`` and ``outside``
         come back as the integers ``1``/``0``, where the library SENDS them
         as JSON booleans. That is deliberate: opposite directions are not
         twins. Do not unify them.
@@ -304,7 +287,7 @@ class Schedule:
         # literally, so an entry that really does end at 23:59 really does
         # leave the sensor off for that final minute.
 
-        # Everything below IS measured, against firmware 1.7.18 with
+        # Everything below IS measured, with
         # timersEnabled on, by reading the sensor flags the engine writes
         # through to (GET_SETTINGS reports the door's own verdict):
         #
@@ -350,12 +333,18 @@ class DoorSimulatorState:
     battery_config: BatteryConfig = field(default_factory=BatteryConfig)
 
     # Settings
-    # timezone holds either an IANA name (set locally) or a POSIX TZ string
-    # (as received on the wire via SET_TIMEZONE); get_tzinfo() resolves both.
-    timezone: str = "America/New_York"
+    # POSIX, always. The door speaks POSIX and nothing else, so that is
+    # what is stored: an operator surface may be given an IANA name, but
+    # it converts before it gets here (see the `timezone` value in
+    # values.py). Storing the IANA name and converting on the way out
+    # meant the stored value and the wire value were different things.
+    timezone: str = "EST5EDT,M3.2.0,M11.1.0"
     hold_time: float = 2.0
-    sensor_trigger_voltage: int = 100
-    sleep_sensor_trigger_voltage: int = 50
+    #: A real door reports 2000 for
+    #: both, in millivolts. 100 and 50 were invented, and no real door has
+    #: ever reported them.
+    sensor_trigger_voltage: int = 2000
+    sleep_sensor_trigger_voltage: int = 2000
 
     # Stats (default to 0 for fresh simulator)
     total_open_cycles: int = 0
@@ -365,16 +354,15 @@ class DoorSimulatorState:
     fw_major: int = 1
     fw_minor: int = 2
     fw_patch: int = 3
-    # Verified against firmware 1.7.18: GET_HW_INFO's `fwInfo` object is
+    # GET_HW_INFO's `fwInfo` object is
     # all integers - `ver=1 rev=1 fw_maj=1 fw_min=7 fw_pat=18` - so these
     # are ints, not the version-like strings docs/protocol.md once showed.
     hw_ver: int = 1  # Hardware version
     hw_rev: int = 1  # Hardware revision
 
-    # Remote/reset info
+    # Remote info
     has_remote_id: bool = True
     has_remote_key: bool = True
-    reset_reason: str = "POWER_ON"  # Could be: POWER_ON, WATCHDOG, SOFT_RESET, etc.
 
     # Notifications
     sensor_on_indoor: bool = False
@@ -394,9 +382,39 @@ class DoorSimulatorState:
     inside_sensor_active: bool = False
     outside_sensor_active: bool = False
 
+    #: A physical blockage in the doorway - a pet without a collar, a boot,
+    #: a block of wood. **Not a sensor.** The proximity sensors detect a
+    #: collar and hold the door open before it ever moves; an obstruction is
+    #: only discovered when the flap travels into it, which is why it is
+    #: checked in the closing sequence rather than in
+    #: :meth:`is_sensor_blocking_close`. Both can end in an auto-retract,
+    #: from opposite directions.
+    obstruction_active: bool = False
+    #: How many times each notification has been raised. Counts rather
+    #: than a flag so a script can wait for the *third* one, and so an
+    #: operator can see that something fired while they were not looking.
+    #: A notification whose switch is off never gets here.
+    notifications: dict[str, int] = field(
+        default_factory=lambda: dict.fromkeys(NOTIFICATION_NAMES, 0)
+    )
+
+    #: Whether this obstruction is cleared by the auto-retract it causes.
+    #: With autoretract off there is no retract to clear it, so the door
+    #: rests on it until it is cleared explicitly - see
+    #: :meth:`~powerpetdoor.simulator.engine.DoorMotionEngine.simulate_obstruction`.
+    obstruction_oneshot: bool = False
+
     # Internal: remembers which timezone value already produced a UTC-fallback
     # warning, so the warning is logged once per value.
     _tz_warned_for: str | None = field(default=None, repr=False, compare=False)
+
+    def pet_present(self, sensor: str) -> bool:
+        """Whether a pet is loitering at ``sensor``.
+
+        Pet presence *is* a sensor being held active - a collar sitting in
+        range - which is exactly what distinguishes it from an obstruction.
+        """
+        return self.inside_sensor_active if sensor == "inside" else self.outside_sensor_active
 
     @property
     def sensor_active(self) -> bool:
@@ -419,70 +437,16 @@ class DoorSimulatorState:
         # Inside sensor blocks if: active AND sensor enabled
         if self.inside_sensor_active and self.inside:
             return True
-        # Outside sensor blocks if: active AND sensor enabled AND NOT safety-locked
-        if self.outside_sensor_active and self.outside and not self.safety_lock:
+        # Outside sensor blocks if: active AND sensor enabled.
+        #
+        # `safety_lock` used to appear here too, on the reading that it
+        # disables the outside sensor. It does not: it is the app's "always
+        # allow pet entry inside override timers", which grants *entry*
+        # past the schedule and says nothing about whether a detected pet
+        # holds the door open. That is `cmd_lockout`'s job, checked above.
+        if self.outside_sensor_active and self.outside:
             return True
         return False
-
-    def wire_timezone(self) -> str:
-        """The timezone as the device puts it on the wire: **POSIX**.
-
-        **Verified against firmware 1.7.18**: the door answers
-        ``EST5EDT,M3.2.0,M11.1.0``, never an IANA name. The simulator
-        stores whichever form it was given (``get_tzinfo`` reads both) and
-        converts here, so ``GET_SETTINGS``, ``GET_TIMEZONE`` and the
-        timezone broadcast cannot disagree.
-
-        Falls back to the stored value when the timezone cache has not been
-        initialized, or when the zone has no POSIX rule to convert to.
-        :meth:`~powerpetdoor.simulator.server.DoorSimulator.start` warms
-        the cache, so a running simulator emits POSIX.
-        """
-        if is_cache_initialized():
-            posix_tz = get_posix_tz_string(self.timezone)
-            if posix_tz:
-                return posix_tz
-        return self.timezone
-
-    def get_settings(self) -> dict:
-        """Get full settings dict."""
-        # Field-by-field spellings verified against firmware 1.7.18: the six
-        # flags are "true"/"false" STRINGS, doorOptions/holdOpenTime/the two
-        # voltages are INTS, and tz is a POSIX string. Same key set the real
-        # unit returned, in the same spellings.
-        return {
-            FIELD_POWER: wire_bool_string(self.power),
-            FIELD_INSIDE: wire_bool_string(self.inside),
-            FIELD_OUTSIDE: wire_bool_string(self.outside),
-            FIELD_AUTO: wire_bool_string(self.auto),
-            FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: wire_bool_string(self.safety_lock),
-            FIELD_CMD_LOCKOUT: wire_bool_string(self.cmd_lockout),
-            # A BITFIELD, not a flag: verified against firmware 1.7.18,
-            # DISABLE_AUTORETRACT leaves this 0 and ENABLE_AUTORETRACT
-            # leaves it 2. Other bits exist but are unidentified, so the
-            # simulator sets only the one it knows.
-            FIELD_AUTORETRACT: DOOR_OPTION_AUTORETRACT if self.autoretract else 0,
-            FIELD_TZ: self.wire_timezone(),
-            FIELD_HOLD_OPEN_TIME: int(self.hold_time * 100),  # Convert to centiseconds
-            FIELD_SENSOR_TRIGGER_VOLTAGE: self.sensor_trigger_voltage,
-            FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE: self.sleep_sensor_trigger_voltage,
-        }
-
-    def get_notifications(self) -> dict:
-        """Get notifications settings.
-
-        All five flags are ``"true"``/``"false"`` **strings**, verified
-        against firmware 1.7.18. Note the asymmetry with the write path:
-        ``SET_NOTIFICATIONS`` demands JSON *booleans* and silently ignores
-        strings.
-        """
-        return {
-            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: wire_bool_string(self.sensor_on_indoor),
-            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: wire_bool_string(self.sensor_off_indoor),
-            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: wire_bool_string(self.sensor_on_outdoor),
-            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: wire_bool_string(self.sensor_off_outdoor),
-            FIELD_LOW_BATTERY_NOTIFICATIONS: wire_bool_string(self.low_battery),
-        }
 
     def get_schedule_list(self) -> list[int]:
         """Get list of schedule indices (matches real device behavior).
@@ -503,25 +467,11 @@ class DoorSimulatorState:
         timezone cache to be initialized). Falls back to UTC - with a
         warning logged once per value - when neither resolves.
         """
-        # TypeError is caught too (defence in depth): SET_TIMEZONE validates
-        # its input now, but schedule evaluation runs on every sensor trigger
-        # and must never be the thing that raises. A non-string reaching here
-        # (constructed directly, not off the wire) falls through to UTC
-        # instead of propagating out of is_sensor_allowed_by_schedule.
-        try:
-            return zoneinfo.ZoneInfo(self.timezone)
-        except (zoneinfo.ZoneInfoNotFoundError, TypeError, ValueError):
-            pass
-
-        try:
-            iana = find_iana_for_posix(self.timezone)
-        except TypeError:
-            iana = None
-        if iana:
-            try:
-                return zoneinfo.ZoneInfo(iana)
-            except (zoneinfo.ZoneInfoNotFoundError, ValueError):
-                pass
+        # Never raises: schedule evaluation runs on every sensor trigger
+        # and must not be the thing that fails.
+        resolved = resolve_tzinfo(self.timezone)
+        if resolved is not None:
+            return resolved
 
         if self._tz_warned_for != self.timezone:
             logger.warning(

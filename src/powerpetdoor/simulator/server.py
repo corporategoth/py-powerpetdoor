@@ -16,72 +16,55 @@ either way.
 
 import asyncio
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from types import MappingProxyType
 
 from ..const import (
     CMD_DELETE_SCHEDULE,
-    CMD_DISABLE_AUTO,
-    CMD_DISABLE_AUTORETRACT,
-    CMD_DISABLE_CMD_LOCKOUT,
-    CMD_DISABLE_INSIDE,
-    CMD_DISABLE_OUTSIDE,
-    CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
-    CMD_ENABLE_AUTO,
-    CMD_ENABLE_AUTORETRACT,
-    CMD_ENABLE_CMD_LOCKOUT,
-    CMD_ENABLE_INSIDE,
-    CMD_ENABLE_OUTSIDE,
-    CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
     CMD_GET_DOOR_BATTERY,
     CMD_GET_DOOR_OPEN_STATS,
     CMD_GET_HW_INFO,
     CMD_GET_NOTIFICATIONS,
     CMD_GET_SCHEDULE_LIST,
     CMD_GET_SETTINGS,
-    CMD_POWER_OFF,
-    CMD_POWER_ON,
-    CMD_SET_HOLD_TIME,
     CMD_SET_NOTIFICATIONS,
     CMD_SET_SCHEDULE,
-    CMD_SET_TIMEZONE,
+    DOOR_STATES_CLOSED,
+    DOOR_STATES_FULLY_OPEN,
     DOOR_TO_PHONE,
     FIELD_AC_PRESENT,
-    FIELD_AUTO,
     FIELD_BATTERY_PERCENT,
     FIELD_BATTERY_PRESENT,
     FIELD_CMD,
-    FIELD_CMD_LOCKOUT,
     FIELD_DIRECTION,
     FIELD_FW_MAJOR,
     FIELD_FW_MINOR,
     FIELD_FW_PATCH,
     FIELD_FWINFO,
-    FIELD_HOLD_TIME,
     FIELD_HW_REVISION,
     FIELD_HW_VERSION,
     FIELD_INDEX,
-    FIELD_INSIDE,
     FIELD_NOTIFICATIONS,
-    FIELD_OUTSIDE,
-    FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
-    FIELD_POWER,
     FIELD_SCHEDULE,
     FIELD_SCHEDULES,
     FIELD_SETTINGS,
     FIELD_SUCCESS,
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
-    FIELD_TZ,
-    NOTIFY_LOW_BATTERY,
-    SENSOR_STATE_ON,
     SUCCESS_TRUE,
 )
 from ..i18n import t
-from ..schedule import wire_bool_string, wire_int_flag
 from ..tz_utils import async_init_timezone_cache
 from .engine import DoorMotionEngine
-from .protocol import DoorSimulatorProtocol, make_sensor_notification
+from .notifications import (
+    NOTIFICATION_SETTINGS,
+    NOTIFY_LOW_BATTERY,
+    sensor_notification,
+)
+from .protocol import DoorSimulatorProtocol
 from .state import DoorSimulatorState, Schedule
+from .values import VALUES
+from .wire_values import WIRE_VALUES, notifications_payload, settings_payload
 
 logger = logging.getLogger(__name__)
 
@@ -124,11 +107,12 @@ class DoorSimulator:
         self.port = port
         self.state = state or DoorSimulatorState()
         self.server: asyncio.Server | None = None
+        self._notification_listeners: list[Callable[[str], None]] = []
         self.protocols: list[DoorSimulatorProtocol] = []
         self.engine = DoorMotionEngine(
             self.state,
             broadcast_status=self._broadcast_door_status,
-            notify_sensor=self._broadcast_sensor_notification,
+            notify_sensor=self._notify_sensor_reached,
         )
         self._battery_task: asyncio.Task | None = None
         # Fractional battery percent accumulated between integer steps, so
@@ -160,6 +144,7 @@ class DoorSimulator:
                 broadcast_status=self._broadcast_door_status,
                 on_disconnect=handle_disconnect,
                 engine=self.engine,
+                simulator=self,
             )
             self.protocols.append(protocol)
             if self._on_connect:
@@ -205,6 +190,40 @@ class DoorSimulator:
             self.server.close()
             await self.server.wait_closed()
             logger.info(t("simulator.server.door_simulator_stopped", "Door simulator stopped"))
+
+    async def reset_state(self, document: dict | None = None) -> None:
+        """Return the door to a known state, and tell every client.
+
+        Stops whatever the door was doing, parks it closed, clears the
+        sensors and any obstruction, applies ``document`` over fresh
+        defaults, then broadcasts everything. A reset that left connected
+        clients believing the old world would be worse than no reset: the
+        vendor app's stale-cache bug (see docs/protocol.md) is what that
+        failure mode looks like from the outside.
+
+        Statistics reset too. They are state, not configuration, and a
+        reset that left ``totalOpenCycles`` behind would make test
+        isolation quietly wrong.
+
+        Args:
+            document: A state document to apply over the defaults. ``None``
+                and ``{}`` both mean "the defaults".
+        """
+        from .state_io import apply_document
+
+        await self.engine.stop()
+
+        fresh = DoorSimulatorState()
+        apply_document(fresh, document or {})
+        # Replace field by field: the engine, the protocols and this
+        # object all hold the same state instance, and rebinding here
+        # would leave them driving the old one.
+        state = self.state
+        for slot, value in vars(fresh).items():
+            setattr(state, slot, value)
+
+        self.engine.reset()
+        self.broadcast_all()
 
     # =========================================================================
     # Deterministic status hooks (delegated to the engine)
@@ -320,275 +339,166 @@ class DoorSimulator:
             )
 
     def _send_low_battery_notification(self):
-        """Send low battery notification to connected clients.
+        """Raise the low-battery notification."""
+        self.notify(NOTIFY_LOW_BATTERY)
 
-        Uses the bare notification envelope from docs/protocol.md
-        ("Notification Events"): ``{"LOW_BATTERY": ""}``.
+    def add_notification_listener(self, callback: "Callable[[str], None]") -> "Callable[[], None]":
+        """Subscribe to notifications. Returns an unsubscribe function.
+
+        The callback receives the notification name - one of
+        :data:`~powerpetdoor.simulator.notifications.NOTIFICATION_NAMES`.
+        Exceptions are logged and isolated, so one bad listener cannot
+        stop the door.
         """
-        if self.state.low_battery:
-            for protocol in self.protocols:
-                protocol._send({NOTIFY_LOW_BATTERY: ""})
-            logger.info(
-                t(
-                    "simulator.server.simulator_low_battery_notification",
-                    "Simulator: Low battery notification (%s%%)",
-                ),
-                self.state.battery_percent,
-            )
+        self._notification_listeners.append(callback)
 
-    def _broadcast_sensor_notification(self, sensor: str, sensor_state: str = SENSOR_STATE_ON):
-        """Send a sensor notification event to all connected clients.
+        def unsubscribe() -> None:
+            try:
+                self._notification_listeners.remove(callback)
+            except ValueError:
+                pass
 
-        Uses the bare notification envelope from docs/protocol.md; respects
-        the per-event notification enable settings.
+        return unsubscribe
+
+    def notify(self, name: str) -> bool:
+        """Raise a notification, if its switch is on.
+
+        **Nothing is sent to a connected client.** The door's notifications
+        reach their owner through the vendor's service, not over TCP 3000;
+        what the simulator offers instead is a record that one would have
+        been raised - counted, logged, and delivered to listeners.
+
+        Returns True if it was raised, False if its switch is off.
         """
-        notification = make_sensor_notification(self.state, sensor, sensor_state)
-        if notification is None:
-            return
-        for protocol in self.protocols:
-            protocol._send(notification)
-        logger.debug(
+        setting = NOTIFICATION_SETTINGS.get(name)
+        if setting is None or not getattr(self.state, setting):
+            return False
+
+        self.state.notifications[name] = self.state.notifications.get(name, 0) + 1
+        logger.info(
             t(
-                "simulator.server.simulator_sent_sensor_notification",
-                "Simulator: Sent %s sensor %s notification",
+                "simulator.server.simulator_notification",
+                "Simulator: Notification: %s",
             ),
-            sensor,
-            sensor_state,
+            name,
+        )
+        for callback in list(self._notification_listeners):
+            try:
+                callback(name)
+            except Exception:
+                logger.exception(
+                    t(
+                        "simulator.server.simulator_notification_callback_failed",
+                        "Simulator: notification callback failed",
+                    )
+                )
+        return True
+
+    def _notify_sensor_reached(self, sensor: str) -> None:
+        """A pet reached ``sensor``; raise the matching notification.
+
+        Which of the pair fires depends on whether that sensor was
+        switched **on** at the time - `inside_off` is "a pet tried to get
+        out and the sensor was off", which is the notification's point.
+        """
+        enabled = self.state.inside if sensor == "inside" else self.state.outside
+        self.notify(sensor_notification(sensor, enabled))
+
+    def send_to_clients(self, cmd: str, payload: dict) -> None:
+        """Push one door-to-phone message to every connected client.
+
+        The single output primitive. Every broadcast is this envelope
+        around a different payload, and writing the envelope out per
+        broadcast was eighteen chances to forget `dir` or `success`.
+        """
+        message = {
+            FIELD_CMD: cmd,
+            **payload,
+            FIELD_SUCCESS: SUCCESS_TRUE,
+            FIELD_DIRECTION: DOOR_TO_PHONE,
+        }
+        for protocol in self.protocols:
+            protocol._send(message)
+
+    def announce_value(self, name: str) -> None:
+        """Tell connected clients the named value changed.
+
+        The simulator decides *how* a change is announced, which is what
+        keeps the value registry from having to know the wire exists: a
+        value with a wire spelling goes out under its own command, and one
+        without - the simulation's own knobs, a paired remote - is not a
+        thing a real door announces at all.
+        """
+        if name in WIRE_VALUES:
+            self.broadcast_value(name)
+
+    def broadcast_value(self, name: str) -> None:
+        """Announce a change to the named value.
+
+        Reads :data:`~powerpetdoor.simulator.wire_values.WIRE_VALUES` for
+        the command and payload, which is the same table the protocol
+        answers its own commands from - so what a client is told
+        spontaneously and what it is told on request cannot disagree.
+        """
+        wire = WIRE_VALUES[name]
+        self.send_to_clients(
+            wire.command_for(VALUES[name].get(self.state)), wire.payload(self.state)
         )
 
     def broadcast_settings(self):
         """Broadcast settings to all connected clients."""
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: CMD_GET_SETTINGS,
-                    FIELD_SETTINGS: self.state.get_settings(),
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
-
-    def broadcast_safety_lock(self, enabled: bool):
-        """Broadcast safety lock setting change to all connected clients."""
-        cmd = (
-            CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK
-            if enabled
-            else CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK
-        )
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: cmd,
-                    FIELD_SETTINGS: {FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: wire_bool_string(enabled)},
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
-        self.engine.notify_sensors_changed()
-
-    def broadcast_cmd_lockout(self, enabled: bool):
-        """Broadcast command lockout setting change to all connected clients."""
-        cmd = CMD_ENABLE_CMD_LOCKOUT if enabled else CMD_DISABLE_CMD_LOCKOUT
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: cmd,
-                    FIELD_SETTINGS: {FIELD_CMD_LOCKOUT: wire_bool_string(enabled)},
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
-        self.engine.notify_sensors_changed()
-
-    def broadcast_autoretract(self, enabled: bool):
-        """Broadcast autoretract setting change to all connected clients.
-
-        Carries the whole settings object, and `doorOptions` as the
-        bitfield it is - the same shape ENABLE_/DISABLE_AUTORETRACT answers
-        with (verified against firmware 1.7.18).
-        """
-        cmd = CMD_ENABLE_AUTORETRACT if enabled else CMD_DISABLE_AUTORETRACT
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: cmd,
-                    FIELD_SETTINGS: self.state.get_settings(),
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
-
-    def broadcast_hold_time(self):
-        """Broadcast hold time setting change to all connected clients."""
-        # Convert seconds to centiseconds for protocol
-        hold_time_cs = int(self.state.hold_time * 100)
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: CMD_SET_HOLD_TIME,
-                    FIELD_HOLD_TIME: hold_time_cs,
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
-
-    def broadcast_timezone(self):
-        """Broadcast timezone setting change to all connected clients."""
-        tz_value = self.state.wire_timezone()
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: CMD_SET_TIMEZONE,
-                    FIELD_TZ: tz_value,
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
+        self.send_to_clients(CMD_GET_SETTINGS, {FIELD_SETTINGS: settings_payload(self.state)})
 
     def broadcast_notification_settings(self):
         """Broadcast notification settings change to all connected clients."""
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: CMD_SET_NOTIFICATIONS,
-                    FIELD_NOTIFICATIONS: self.state.get_notifications(),
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
-
-    def broadcast_power(self, enabled: bool):
-        """Broadcast power setting change to all connected clients."""
-        cmd = CMD_POWER_ON if enabled else CMD_POWER_OFF
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: cmd,
-                    FIELD_POWER: wire_int_flag(enabled),
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
-
-    def broadcast_auto(self, enabled: bool):
-        """Broadcast auto/timers setting change to all connected clients."""
-        cmd = CMD_ENABLE_AUTO if enabled else CMD_DISABLE_AUTO
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: cmd,
-                    FIELD_AUTO: wire_int_flag(enabled),
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
-
-    def broadcast_inside_sensor(self, enabled: bool):
-        """Broadcast inside sensor enable/disable to all connected clients."""
-        cmd = CMD_ENABLE_INSIDE if enabled else CMD_DISABLE_INSIDE
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: cmd,
-                    FIELD_INSIDE: wire_int_flag(enabled),
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
-        self.engine.notify_sensors_changed()
-
-    def broadcast_outside_sensor(self, enabled: bool):
-        """Broadcast outside sensor enable/disable to all connected clients."""
-        cmd = CMD_ENABLE_OUTSIDE if enabled else CMD_DISABLE_OUTSIDE
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: cmd,
-                    FIELD_OUTSIDE: wire_int_flag(enabled),
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
-        self.engine.notify_sensors_changed()
+        self.send_to_clients(
+            CMD_SET_NOTIFICATIONS, {FIELD_NOTIFICATIONS: notifications_payload(self.state)}
+        )
 
     def broadcast_hardware_info(self):
         """Broadcast hardware/firmware info to all connected clients."""
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: CMD_GET_HW_INFO,
-                    FIELD_FWINFO: {
-                        FIELD_FW_MAJOR: self.state.fw_major,
-                        FIELD_FW_MINOR: self.state.fw_minor,
-                        FIELD_FW_PATCH: self.state.fw_patch,
-                        FIELD_HW_VERSION: self.state.hw_ver,
-                        FIELD_HW_REVISION: self.state.hw_rev,
-                    },
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
+        self.send_to_clients(
+            CMD_GET_HW_INFO,
+            {
+                FIELD_FWINFO: {
+                    FIELD_FW_MAJOR: self.state.fw_major,
+                    FIELD_FW_MINOR: self.state.fw_minor,
+                    FIELD_FW_PATCH: self.state.fw_patch,
+                    FIELD_HW_VERSION: self.state.hw_ver,
+                    FIELD_HW_REVISION: self.state.hw_rev,
                 }
-            )
+            },
+        )
 
     def broadcast_stats(self):
         """Broadcast door open statistics to all connected clients."""
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: CMD_GET_DOOR_OPEN_STATS,
-                    FIELD_TOTAL_OPEN_CYCLES: self.state.total_open_cycles,
-                    FIELD_TOTAL_AUTO_RETRACTS: self.state.total_auto_retracts,
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
+        self.send_to_clients(
+            CMD_GET_DOOR_OPEN_STATS,
+            {
+                FIELD_TOTAL_OPEN_CYCLES: self.state.total_open_cycles,
+                FIELD_TOTAL_AUTO_RETRACTS: self.state.total_auto_retracts,
+            },
+        )
 
     def broadcast_schedules(self):
         """Broadcast schedule list to all connected clients."""
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: CMD_GET_SCHEDULE_LIST,
-                    FIELD_SCHEDULES: self.state.get_schedule_list(),
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
+        self.send_to_clients(
+            CMD_GET_SCHEDULE_LIST, {FIELD_SCHEDULES: self.state.get_schedule_list()}
+        )
 
     def broadcast_schedule(self, schedule: Schedule):
         """Broadcast a single schedule add/update to all connected clients."""
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: CMD_SET_SCHEDULE,
-                    FIELD_SCHEDULE: schedule.to_dict(),
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
+        self.send_to_clients(CMD_SET_SCHEDULE, {FIELD_SCHEDULE: schedule.to_dict()})
 
     def broadcast_schedule_delete(self, index: int):
         """Broadcast a schedule deletion to all connected clients."""
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: CMD_DELETE_SCHEDULE,
-                    FIELD_INDEX: index,
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
+        self.send_to_clients(CMD_DELETE_SCHEDULE, {FIELD_INDEX: index})
 
     def broadcast_notifications(self):
         """Broadcast notification settings to all connected clients."""
-        for protocol in self.protocols:
-            protocol._send(
-                {
-                    FIELD_CMD: CMD_GET_NOTIFICATIONS,
-                    FIELD_NOTIFICATIONS: self.state.get_notifications(),
-                    FIELD_SUCCESS: SUCCESS_TRUE,
-                    FIELD_DIRECTION: DOOR_TO_PHONE,
-                }
-            )
+        self.send_to_clients(
+            CMD_GET_NOTIFICATIONS, {FIELD_NOTIFICATIONS: notifications_payload(self.state)}
+        )
 
     def broadcast_all(self):
         """Broadcast all state information to all connected clients."""
@@ -620,15 +530,22 @@ class DoorSimulator:
         for protocol in self.protocols:
             protocol._send_door_status()
 
-    def simulate_obstruction(self):
-        """Simulate obstruction detection (inside sensor active indefinitely).
+    def simulate_obstruction(self, duration: float | None = None):
+        """Place (or clear) a physical obstruction in the doorway.
 
-        Works in any door state:
-        - Closed/opening: Will prevent closing once door reaches HOLDING
-        - Holding: Prevents closing
-        - Closing: Triggers auto-retract if enabled
+        Unlike a sensor, an obstruction does not stop a close from
+        starting - the door travels into it. See
+        :meth:`~powerpetdoor.simulator.engine.DoorMotionEngine.simulate_obstruction`.
+
+        Args:
+            duration: ``None`` toggles, ``0`` stays until cleared, a
+                positive value clears itself after that many seconds.
         """
-        self.engine.simulate_obstruction()
+        self.engine.simulate_obstruction(duration)
+
+    def clear_obstruction(self):
+        """Remove the obstruction, freeing a door resting on it."""
+        self.engine.clear_obstruction()
 
     def activate_sensor(self, sensor: str, duration: float = 0.5):
         """Activate sensor detection with optional duration.
@@ -644,20 +561,41 @@ class DoorSimulator:
         """
         self.engine.activate_sensor(sensor, duration)
 
-    def set_pet_in_doorway(self, present: bool = True):
-        """Simulate pet presence in doorway (keeps door open longer).
+    def notify_settings_changed(self):
+        """Re-run the sensor decision after a settings change.
 
-        This is an alias for activate_sensor("inside", 0) for backwards compatibility.
+        Power, the sensor enables, the safety lock, command lockout and the
+        schedule all gate whether a held sensor may open the door. Changing
+        one has to re-ask the question, or a pet shut out by a disabled
+        sensor stays shut out after it is re-enabled.
         """
-        if present:
-            self.state.inside_sensor_active = True
-            self.state.outside_sensor_active = False
-        else:
-            self.state.inside_sensor_active = False
-        self.engine.notify_sensors_changed()
+        self.engine.reevaluate_sensors()
+
+    def hold_sensor(self, sensor: str, present: bool | None = None):
+        """Hold a sensor active, release it, or flip it.
+
+        A held sensor *is* pet presence - a collar sitting in range - so
+        this is what ``inside on`` / ``outside toggle`` reach.
+        """
+        self.engine.hold_sensor(sensor, present)
+
+    def set_pet_in_doorway(self, present: bool = True, sensor: str = "inside"):
+        """Hold a sensor active, as a pet loitering in range would.
+
+        Which sensor matters: an **outside** sensor is ignored while the
+        safety lock is on, an inside one is not, so outside presence is the
+        only way to exercise that interaction. Both are ignored entirely
+        while command lockout is on, which is that setting's whole point.
+
+        Args:
+            present: Whether the pet is there.
+            sensor: ``"inside"`` (the default) or ``"outside"``.
+        """
+        self.hold_sensor(sensor, present)
         logger.info(
-            t("simulator.server.simulator_pet_doorway", "Simulator: Pet %s doorway"),
+            t("simulator.server.simulator_pet_doorway", "Simulator: Pet %s %s doorway"),
             "in" if present else "left",
+            sensor,
         )
 
     # =========================================================================
@@ -677,6 +615,33 @@ class DoorSimulator:
         Works with or without connected clients.
         """
         self.engine.close()
+
+    async def toggle_door(self) -> str | None:
+        """Open the door if it is closed, close it if it is open.
+
+        The one place the toggle decision is made. The prompt, a script
+        and a programmatic caller all reach it here, so "what does toggle
+        do from here" has a single answer.
+
+        Opening holds, so a toggled-open door stays open until it is
+        toggled back. Mid-travel in either direction this does nothing:
+        nothing but an obstruction is known to interrupt a real door in
+        motion, so there is no honest behaviour to simulate. The wire
+        protocol has no toggle at all - a client that wants one reads the
+        status and picks.
+
+        Returns:
+            ``"open"`` or ``"close"`` for what it started, ``None`` if the
+            door was in travel and it did nothing.
+        """
+        status = self.state.door_status
+        if status in DOOR_STATES_CLOSED:
+            await self.open_door(hold=True)
+            return "open"
+        if status in DOOR_STATES_FULLY_OPEN:
+            await self.close_door()
+            return "close"
+        return None
 
     # =========================================================================
     # State Management
@@ -770,21 +735,63 @@ class DoorSimulator:
     # Schedule Management
     # =========================================================================
 
-    def add_schedule(self, schedule: Schedule):
-        """Add or update a schedule."""
+    def add_schedule(self, schedule: Schedule, *, announce: bool = True):
+        """Add or update a schedule.
+
+        The one path every source takes - the prompt, a script, and
+        `SET_SCHEDULE` off the wire - so a stored schedule is logged and
+        announced the same way whoever wrote it.
+
+        ``announce=False`` for the wire, which answers in its own response
+        rather than also broadcasting to the client that asked.
+        """
         self.state.schedules[schedule.index] = schedule
         logger.info(
             t("simulator.server.simulator_added_schedule", "Simulator: Added schedule %s"),
             schedule.index,
         )
-        self.broadcast_schedule(schedule)
+        if announce:
+            self.broadcast_schedule(schedule)
 
-    def remove_schedule(self, index: int):
-        """Remove a schedule by index."""
+    def remove_schedule(self, index: int, *, announce: bool = True):
+        """Remove a schedule by index. See :meth:`add_schedule`."""
         if index in self.state.schedules:
             del self.state.schedules[index]
             logger.info(
                 t("simulator.server.simulator_removed_schedule", "Simulator: Removed schedule %s"),
                 index,
             )
-            self.broadcast_schedule_delete(index)
+            if announce:
+                self.broadcast_schedule_delete(index)
+
+    def get_schedules(self) -> "Mapping[int, Schedule]":
+        """Every stored schedule, by index.
+
+        A read-only view, and the counterpart to :meth:`add_schedule` and
+        :meth:`remove_schedule`. Reading the dict off the state works
+        today and would keep working right up until schedules moved
+        somewhere else, at which point every surface that reached past
+        this would need finding.
+        """
+        return MappingProxyType(self.state.schedules)
+
+    def get_schedule(self, index: int) -> "Schedule | None":
+        """One schedule, or ``None`` if that slot is empty."""
+        return self.state.schedules.get(index)
+
+    def set_schedules(self, schedules: "Iterable[Schedule]", *, announce: bool = True):
+        """Replace the whole table, one schedule at a time.
+
+        The prompt's `schedule clear` is a wholesale operation, and used
+        to reach past
+        :meth:`add_schedule`/:meth:`remove_schedule` into the dict. Going
+        through them means a wholesale replacement is logged and announced
+        as the individual changes it actually is - a client watching the
+        table sees every index that left and every index that arrived,
+        rather than a silent swap.
+        """
+        incoming = {schedule.index: schedule for schedule in schedules}
+        for index in [i for i in self.state.schedules if i not in incoming]:
+            self.remove_schedule(index, announce=announce)
+        for schedule in incoming.values():
+            self.add_schedule(schedule, announce=announce)

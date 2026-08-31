@@ -373,9 +373,21 @@ class TestOperationMdSensorGating:
         state.inside_sensor_active = False
         state.outside_sensor_active = True
         state.outside = True
+        # The safety lock does NOT enter into this. It is the app's "always
+        # allow pet entry inside override timers" - measured, see
+        # docs/protocol.md - so it grants *entry* past the schedule and has
+        # nothing to say about whether a detected pet holds the door open.
+        # That is command lockout's job, checked above. This used to assert
+        # the opposite, on the reading the field name invites.
         state.safety_lock = False
         assert state.is_sensor_blocking_close() is True
         state.safety_lock = True
+        assert state.is_sensor_blocking_close() is True
+
+        # ...and a disabled sensor still does not block, which is the
+        # second operand of that guard and the one a lock-shaped reading
+        # would have masked.
+        state.outside = False
         assert state.is_sensor_blocking_close() is False
 
 
@@ -438,3 +450,83 @@ class TestReadmeLibraryTreeMatchesTheSource:
             f"README.md's Library Structure tree still lists: {', '.join(stale)}, "
             "which no longer exist in src/powerpetdoor/."
         )
+
+
+# ============================================================================
+# The reference docs are complete
+# ============================================================================
+
+
+class TestEveryOperatorSurfaceIsDocumented:
+    """Adding a command and forgetting to document it should fail.
+
+    These tables are deliberately *not* generated. The `inside` row
+    explains pulse-versus-hold and that a held sensor is pet presence;
+    the `obstruction` row explains why it toggles where the sensors
+    pulse. The code's one-line description carries none of that, so
+    generating the tables would delete the teaching, and moving
+    paragraphs of markdown into Python string literals to avoid that
+    would be worse than the duplication.
+
+    What is worth enforcing is completeness in both directions - which
+    is the mistake actually made: `trigger` existed in the script DSL
+    and the control socket for a while before the prompt had it, and
+    nothing said so.
+    """
+
+    #: Prompt words that are the session itself. Documented under their own
+    #: headings rather than in a command table.
+    SESSION_WORDS = frozenset({"exit", "help", "clear", "debug", "history"})
+
+    @staticmethod
+    def _cli_words() -> set[str]:
+        import powerpetdoor.simulator.commands.handler  # noqa: F401
+        from powerpetdoor.simulator.commands.base import get_command_registry
+
+        return {info.name for info in get_command_registry().values()}
+
+    def test_every_prompt_command_appears_in_simulator_md(self):
+        doc = (REPO_ROOT / "docs" / "simulator.md").read_text(encoding="utf-8")
+        missing = sorted(
+            word
+            for word in self._cli_words()
+            if word not in self.SESSION_WORDS and f"`{word}" not in doc
+        )
+        assert missing == [], (
+            f"docs/simulator.md does not mention: {', '.join(missing)}. "
+            "A reader looking for these would conclude they do not exist."
+        )
+
+    def test_every_script_action_appears_in_scripting_md(self):
+        from powerpetdoor.simulator.scripting import _ACTION_PARAMS
+
+        doc = (REPO_ROOT / "docs" / "scripting.md").read_text(encoding="utf-8")
+        missing = sorted(action for action in _ACTION_PARAMS if f"**{action}**" not in doc)
+        assert missing == [], f"docs/scripting.md has no section for: {', '.join(missing)}"
+
+    def test_scripting_md_documents_nothing_that_was_removed(self):
+        """The other direction: a deleted action still documented.
+
+        The DSL's own module docstring carried a list that named
+        `pet_presence` long after it was gone, which is how a reader
+        ends up writing a script against an action that does not exist.
+        """
+        import re
+
+        from powerpetdoor.simulator.scripting import _ACTION_PARAMS
+
+        doc = (REPO_ROOT / "docs" / "scripting.md").read_text(encoding="utf-8")
+        documented = set(re.findall(r"^\*\*([a-z_]+)\*\*", doc, re.M))
+        assert documented <= set(_ACTION_PARAMS), sorted(documented - set(_ACTION_PARAMS))
+
+    def test_every_writable_value_is_reachable_from_the_documented_set_command(self):
+        """`set` documents the registry generically, so the list must be there."""
+        from powerpetdoor.simulator.values import WRITABLE
+
+        doc = (REPO_ROOT / "docs" / "scripting.md").read_text(encoding="utf-8")
+        assert "**set**" in doc
+        # A spot-check across the kinds, not all 34 - the schema carries the
+        # exhaustive list, and `get`/`set` reach the registry by name.
+        for name in ("power", "hold_time", "timezone", "rise_time"):
+            assert name in WRITABLE
+            assert name in doc, name

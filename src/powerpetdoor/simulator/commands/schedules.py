@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from ...i18n import t
 from ...schedule import MAX_SCHEDULE_INDEX
+from ..values import read_value
 from .base import DAY_NAMES, DAY_PRESETS, ArgSpec, CommandResult, command, subcommand
 
 if TYPE_CHECKING:
@@ -71,10 +72,10 @@ class ScheduleCommandsMixin:
     @subcommand("schedule", "list", [], "Show all schedules")
     def schedule_list(self) -> CommandResult:
         """List all schedules, showing implicit schedule if none configured."""
-        schedules = self.simulator.state.schedules
+        schedules = self.simulator.get_schedules()
         if not schedules:
             # Show implicit schedule when none configured
-            auto_status = "ON" if self.simulator.state.auto else "OFF"
+            auto_status = "ON" if read_value(self.simulator.state, "auto") else "OFF"
             return CommandResult(
                 True,
                 t(
@@ -85,7 +86,7 @@ class ScheduleCommandsMixin:
                 ),
             )
 
-        auto_status = "ON" if self.simulator.state.auto else "OFF"
+        auto_status = "ON" if read_value(self.simulator.state, "auto") else "OFF"
         lines = [f"Schedules (auto mode {auto_status}):"]
         for idx in sorted(schedules.keys()):
             lines.append(self._format_schedule(schedules[idx]))
@@ -138,7 +139,7 @@ class ScheduleCommandsMixin:
         # enforces: an uncapped search silently created index 256, which
         # to_dict() then put on the wire and the simulator would itself
         # reject if a client sent it.
-        existing = set(self.simulator.state.schedules.keys())
+        existing = set(self.simulator.get_schedules())
         idx = 0
         while idx in existing:
             idx += 1
@@ -177,7 +178,7 @@ class ScheduleCommandsMixin:
 
     def _get_schedule(self, idx: int) -> "Schedule | CommandResult":
         """Get a schedule by index, or a failure CommandResult if not found."""
-        if idx not in self.simulator.state.schedules:
+        if self.simulator.get_schedule(idx) is None:
             return CommandResult(
                 False,
                 t(
@@ -186,7 +187,7 @@ class ScheduleCommandsMixin:
                     idx=idx,
                 ),
             )
-        return self.simulator.state.schedules[idx]
+        return self.simulator.get_schedules()[idx]
 
     @subcommand(
         "schedule",
@@ -196,16 +197,14 @@ class ScheduleCommandsMixin:
     )
     def schedule_clear(self) -> CommandResult:
         """Delete all schedules."""
-        schedules = self.simulator.state.schedules
+        schedules = self.simulator.get_schedules()
         if not schedules:
             return CommandResult(
                 True, t("simulator.commands.schedules.schedules_clear", "No schedules to clear")
             )
 
         count = len(schedules)
-        # Remove all schedules
-        for idx in list(schedules.keys()):
-            self.simulator.remove_schedule(idx)
+        self.simulator.set_schedules([])
 
         return CommandResult(
             True,

@@ -45,7 +45,6 @@ from ..const import (
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
-    SENSOR_STATE_ON,
 )
 from ..i18n import t
 from ..sanitize import MAX_LOGGED_LENGTH, sanitize_text
@@ -89,16 +88,16 @@ class DoorMotionEngine:
         state: The simulator state the engine operates on.
         broadcast_status: Called after every door-status change to push the
             new status to connected clients (may be None).
-        notify_sensor: Called as ``notify_sensor(sensor, sensor_state)``
-            when a sensor trigger should emit a notification event to
-            connected clients (may be None).
+        notify_sensor: Called as ``notify_sensor(sensor)`` when a pet
+            reaches that sensor, so the simulator can raise the matching
+            notification (may be None).
     """
 
     def __init__(
         self,
         state: DoorSimulatorState,
         broadcast_status: Callable[[], None] | None = None,
-        notify_sensor: Callable[[str, str], None] | None = None,
+        notify_sensor: Callable[[str], None] | None = None,
     ):
         self.state = state
         self.broadcast_status = broadcast_status
@@ -107,6 +106,7 @@ class DoorMotionEngine:
         self._retired: set[asyncio.Task] = set()
         self._aux_tasks: set[asyncio.Task] = set()
         self._sensor_timers: dict[str, asyncio.Task] = {}
+        self._obstruction_timer: asyncio.Task | None = None
         #: Non-zero while status callbacks are running inside the owner
         #: task; sequence starts requested from there are deferred.
         self._dispatch_depth = 0
@@ -486,10 +486,47 @@ class DoorMotionEngine:
             if not state.outside:
                 return "disabled"
             if state.safety_lock:
-                return "safety lock"
+                # **The name is a trap.** `outsideSensorSafetyLock` reads
+                # as an interlock *on* the outside sensor, and this code
+                # implemented it that way - refusing the sensor outright.
+                # The vendor app calls the same switch "always allow pet
+                # entry inside override timers", and the mapping is
+                # direct: ON means the pet gets in *regardless of the
+                # schedule*. It grants entry, it does not deny it.
+                #
+                # Confirmed against a live pairing: the app switch and
+                # Home Assistant's `outside_safety_lock` read the same way
+                # round, so there is no inversion hiding the polarity.
+                return None
         if not state.is_sensor_allowed_by_schedule(sensor):
             return "outside schedule"
         return None
+
+    def _set_pet_present(self, sensor: str) -> bool:
+        """Record a pet at ``sensor``, clearing the other side.
+
+        The one place presence begins. Mutual exclusion is a property of
+        the door - a pet cannot be on both sides of the flap at once - so
+        it is expressed here rather than at each of the verbs that put a
+        pet somewhere.
+
+        Returns:
+            True if the pet just *arrived* - it was not there a moment
+            ago. That is the event a notification reports, and it is why
+            re-examining an existing pet (a settings change re-running the
+            sensor decision) raises nothing.
+        """
+        arrived = not self.state.pet_present(sensor)
+        self.state.inside_sensor_active = sensor == "inside"
+        self.state.outside_sensor_active = sensor == "outside"
+        return arrived
+
+    def _clear_pet_present(self, sensor: str) -> None:
+        """The pet at ``sensor`` has gone. The other side is left alone."""
+        if sensor == "inside":
+            self.state.inside_sensor_active = False
+        else:
+            self.state.outside_sensor_active = False
 
     def trigger_sensor(self, sensor: str) -> None:
         """Simulate a sensor trigger (pet walking through).
@@ -502,6 +539,11 @@ class DoorMotionEngine:
 
         now = time.monotonic()
         state = self.state
+
+        # A pet reached the sensor. That is true whatever the settings say,
+        # and a *disabled* sensor is precisely what one of the two
+        # notifications reports - so this comes before the gate, not after.
+        self._notify_sensor(sensor)
 
         blocked = self.sensor_open_block_reason(sensor)
         if blocked is not None:
@@ -524,7 +566,6 @@ class DoorMotionEngine:
                 )
                 self.extend_hold()
                 self._last_sensor_trigger = now
-                self._notify_sensor(sensor, SENSOR_STATE_ON)
             return
 
         # If door is closing, activate the sensor to trigger auto-retract.
@@ -543,16 +584,11 @@ class DoorMotionEngine:
                 ),
                 sensor.capitalize(),
             )
-            # Activate the appropriate sensor (mutually exclusive)
-            if sensor == "inside":
-                state.inside_sensor_active = True
-                state.outside_sensor_active = False
-            else:
-                state.outside_sensor_active = True
-                state.inside_sensor_active = False
+            # The notification already went out above: a pass-through is
+            # an arrival whether or not presence was already recorded.
+            self._set_pet_present(sensor)
             self.notify_sensors_changed()
             self._last_sensor_trigger = now
-            self._notify_sensor(sensor, SENSOR_STATE_ON)
             return
 
         # Door is closed, trigger open
@@ -564,7 +600,6 @@ class DoorMotionEngine:
             sensor.capitalize(),
         )
         self._last_sensor_trigger = now
-        self._notify_sensor(sensor, SENSOR_STATE_ON)
         self.open(hold=False)
 
     def activate_sensor(self, sensor: str, duration: float = 0.5) -> None:
@@ -590,59 +625,48 @@ class DoorMotionEngine:
         # short.
         self._cancel_sensor_timer(sensor)
 
-        # Mutually exclusive - clear the other sensor
-        if sensor == "inside":
-            state.outside_sensor_active = False
-            if duration == 0:
-                state.inside_sensor_active = not state.inside_sensor_active
-                logger.info(
-                    t(
-                        "simulator.engine.simulator_inside_sensor_toggle",
-                        "Simulator: Inside sensor %s (toggle)",
-                    ),
-                    "activated" if state.inside_sensor_active else "deactivated",
-                )
-            else:
-                state.inside_sensor_active = True
-                logger.info(
-                    t(
-                        "simulator.engine.simulator_inside_sensor_activated_s",
-                        "Simulator: Inside sensor activated for %ss",
-                    ),
-                    duration,
-                )
-                self._arm_sensor_timer(sensor, duration)
+        # `duration == 0` means toggle, so what happens depends on whether
+        # a pet is there already; any other duration means it arrives.
+        present = not state.pet_present(sensor) if duration == 0 else True
+        if present:
+            if self._set_pet_present(sensor):
+                self._notify_sensor(sensor)
         else:
-            # `else`, not `elif sensor == "outside"`: the guard above has
-            # already established that the name is one of SENSOR_NAMES, so
-            # an `elif` would leave a destination nothing can reach.
-            state.inside_sensor_active = False
-            if duration == 0:
-                state.outside_sensor_active = not state.outside_sensor_active
-                logger.info(
-                    t(
-                        "simulator.engine.simulator_outside_sensor_toggle",
-                        "Simulator: Outside sensor %s (toggle)",
-                    ),
-                    "activated" if state.outside_sensor_active else "deactivated",
-                )
-            else:
-                state.outside_sensor_active = True
-                logger.info(
-                    t(
-                        "simulator.engine.simulator_outside_sensor_activated_s",
-                        "Simulator: Outside sensor activated for %ss",
-                    ),
-                    duration,
-                )
-                self._arm_sensor_timer(sensor, duration)
+            self._clear_pet_present(sensor)
+
+        if duration == 0:
+            logger.info(
+                t("simulator.engine.simulator_sensor_toggle", "Simulator: %s sensor %s (toggle)"),
+                sensor.capitalize(),
+                "activated" if present else "deactivated",
+            )
+        else:
+            logger.info(
+                t(
+                    "simulator.engine.simulator_sensor_activated_s",
+                    "Simulator: %s sensor activated for %ss",
+                ),
+                sensor.capitalize(),
+                duration,
+            )
+            self._arm_sensor_timer(sensor, duration)
         self.notify_sensors_changed()
 
-        # If door is closed and sensor should trigger, open the door.
         # `active` is the second operand and it is decisive: toggling a
         # sensor *off* (duration 0) must not open the door.
-        active = state.inside_sensor_active if sensor == "inside" else state.outside_sensor_active
-        if state.door_status == DOOR_STATE_CLOSED and active:
+        if state.pet_present(sensor):
+            self._open_if_sensor_permits(sensor)
+
+    def _open_if_sensor_permits(self, sensor: str) -> None:
+        """Open a closed door for an active sensor, if nothing forbids it.
+
+        The same gate ``trigger_sensor`` applies - one predicate, so no
+        entry point can disagree about power, command lockout, the sensor
+        enables, the safety lock or the schedule window. A pet standing at
+        a *disabled* sensor is still recorded; it just does not get in.
+        """
+        state = self.state
+        if state.door_status == DOOR_STATE_CLOSED:
             # The same gate `trigger_sensor` applies - one predicate, so the
             # two entry points cannot disagree about power, command lockout,
             # the sensor enables or the schedule window.
@@ -702,60 +726,125 @@ class DoorMotionEngine:
             )
             self.notify_sensors_changed()
 
-    def simulate_obstruction(self) -> None:
-        """Simulate obstruction detection (inside sensor active indefinitely).
+    def hold_sensor(self, sensor: str, present: bool | None = None) -> None:
+        """Hold a sensor active, release it, or flip it.
 
-        Works in any door state:
-        - Closed/opening: Will prevent closing once door reaches HOLDING
-        - Holding: Prevents closing
-        - Closing: Triggers auto-retract if enabled
+        The explicit half of :meth:`activate_sensor`. ``present=None``
+        toggles, which is what ``duration=0`` has always meant - but a
+        script is read out of order, so ``state: off`` says what a bare
+        toggle only implies.
+
+        Mutually exclusive, as everywhere else: a pet cannot be on both
+        sides of the flap at once.
+        """
+        if not self._known_sensor(sensor):
+            return
+        if present is None:
+            present = not self.state.pet_present(sensor)
+        self._cancel_sensor_timer(sensor)
+        if present:
+            if self._set_pet_present(sensor):
+                self._notify_sensor(sensor)
+        else:
+            self._clear_pet_present(sensor)
+        self.notify_sensors_changed()
+        if present:
+            self._open_if_sensor_permits(sensor)
+
+    def simulate_obstruction(self, duration: float | None = None) -> None:
+        """Place (or clear) a physical obstruction in the doorway.
+
+        An obstruction is **not** a sensor. The proximity sensors detect a
+        collar and hold the door open before it ever moves; an obstruction
+        is something the flap travels *into* - a pet with no collar, a boot,
+        a block of wood - so it is discovered only at the moment the door
+        tries to finish closing. It therefore does not feed
+        :meth:`DoorSimulatorState.is_sensor_blocking_close`, and a door with
+        an obstruction under it still starts its close normally.
+
+        Both routes can end in an auto-retract, which is why
+        ``totalAutoRetracts`` counts either.
+
+        Args:
+            duration: ``None`` toggles - placing a one-shot obstruction if
+                there is none, clearing whatever is there if there is. ``0``
+                places one that stays until it is cleared explicitly. A
+                positive value places one that clears itself after that many
+                seconds.
+
+        A *one-shot* obstruction is cleared by the auto-retract it causes.
+        With autoretract disabled there is no retract to clear it, so the
+        door rests on it (see
+        :meth:`_obstruction_blocks_close`) until something clears it - which
+        is what makes that resting state observable at all.
         """
         state = self.state
-        # Set inside sensor active (obstruction = something in the doorway)
-        state.inside_sensor_active = True
-        state.outside_sensor_active = False
-        self.notify_sensors_changed()
+        self._cancel_obstruction_timer()
 
-        if state.door_status == DOOR_STATE_CLOSED:
+        if duration is None and state.obstruction_active:
+            self.clear_obstruction()
+            return
+
+        state.obstruction_active = True
+        state.obstruction_oneshot = duration is None
+        self._wake.set()
+
+        if duration is None:
             logger.info(
                 t(
-                    "simulator.engine.simulator_obstruction_set_will_block",
-                    "Simulator: Obstruction set (will block close when door opens)",
+                    "simulator.engine.simulator_obstruction_placed_oneshot",
+                    "Simulator: Obstruction placed (cleared by the retract it causes)",
                 )
             )
-        elif state.door_status in (DOOR_STATE_RISING, DOOR_STATE_SLOWING):
+        elif duration == 0:
             logger.info(
                 t(
-                    "simulator.engine.simulator_obstruction_set_will_block_1",
-                    "Simulator: Obstruction set (will block close when door reaches top)",
-                )
-            )
-        elif state.door_status in (DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP):
-            logger.info(
-                t(
-                    "simulator.engine.simulator_obstruction_set_blocking_close",
-                    "Simulator: Obstruction set (blocking close)",
-                )
-            )
-        elif state.door_status in (
-            DOOR_STATE_CLOSING,
-            DOOR_STATE_CLOSING_TOP_OPEN,
-            DOOR_STATE_CLOSING_MID_OPEN,
-        ):
-            logger.info(
-                t(
-                    "simulator.engine.simulator_obstruction_during_close_will",
-                    "Simulator: Obstruction during close (will trigger retract)",
+                    "simulator.engine.simulator_obstruction_placed_until_cleared",
+                    "Simulator: Obstruction placed (until cleared)",
                 )
             )
         else:
+            self._obstruction_timer = self._track_aux(self._clear_obstruction_after(duration))
             logger.info(
                 t(
-                    "simulator.engine.simulator_obstruction_set_door_status",
-                    "Simulator: Obstruction set (door status: %s)",
-                ),
-                state.door_status,
+                    "simulator.engine.simulator_obstruction_placed_for_s",
+                    "Simulator: Obstruction placed for {duration}s",
+                    duration=duration,
+                )
             )
+
+    def clear_obstruction(self) -> None:
+        """Remove the obstruction and wake a door resting on it."""
+        state = self.state
+        self._cancel_obstruction_timer()
+        state.obstruction_active = False
+        state.obstruction_oneshot = False
+        logger.info(
+            t("simulator.engine.simulator_obstruction_cleared", "Simulator: Obstruction cleared")
+        )
+        # A door parked on the obstruction is waiting on exactly this.
+        self._wake.set()
+
+    def _cancel_obstruction_timer(self) -> None:
+        """Cancel a pending obstruction expiry, if one is armed."""
+        task, self._obstruction_timer = self._obstruction_timer, None
+        if task is not None:
+            task.cancel()
+
+    async def _clear_obstruction_after(self, duration: float) -> None:
+        """Clear a timed obstruction once its window elapses."""
+        await asyncio.sleep(duration)
+        self._obstruction_timer = None
+        if self.state.obstruction_active:
+            logger.info(
+                t(
+                    "simulator.engine.simulator_obstruction_cleared_duration",
+                    "Simulator: Obstruction cleared (duration expired)",
+                )
+            )
+            self.state.obstruction_active = False
+            self.state.obstruction_oneshot = False
+            self._wake.set()
 
     def extend_hold(self) -> None:
         """Reset the hold-open timer to a full hold_time from now."""
@@ -770,11 +859,38 @@ class DoorMotionEngine:
         """
         self._wake.set()
 
-    def _notify_sensor(self, sensor: str, sensor_state: str) -> None:
-        """Emit a sensor notification event via the configured callback."""
+    def reevaluate_sensors(self) -> None:
+        """Let a waiting pet in when the setting that shut it out changes.
+
+        A sensor held active while it was disabled - or while power, the
+        safety lock, command lockout or the schedule refused it - records
+        the pet but leaves the door shut. Nothing re-ran that decision
+        afterwards, so re-enabling the sensor left the pet standing there:
+        the door only opened if it *retriggered*, which a pet that never
+        moved does not do.
+
+        Called after any settings change. Cheap and idempotent: it does
+        nothing unless the door is closed and a sensor is genuinely held.
+        """
+        self._wake.set()
+        if self.state.door_status != DOOR_STATE_CLOSED:
+            return
+        for sensor in SENSOR_NAMES:
+            if self.state.pet_present(sensor):
+                self._open_if_sensor_permits(sensor)
+                return
+
+    def _notify_sensor(self, sensor: str) -> None:
+        """A pet reached ``sensor``; tell whoever is listening.
+
+        Raised on *detection*, whatever the sensor's enable flag says -
+        which of the two notifications that becomes is the simulator's
+        decision, not the engine's, since a pet reaching a switched-off
+        sensor is exactly what one of them reports.
+        """
         if self.notify_sensor:
             try:
-                self.notify_sensor(sensor, sensor_state)
+                self.notify_sensor(sensor)
             except Exception:
                 logger.exception(
                     t(
@@ -812,7 +928,7 @@ class DoorMotionEngine:
                 self._set_status(DOOR_STATE_CLOSING)
             elif status == DOOR_STATE_CLOSING:
                 # The motor has started but the flap has not moved yet.
-                # Measured on a real door: HOLDING -> DOOR_CLOSING ->
+                # HOLDING -> DOOR_CLOSING ->
                 # DOOR_CLOSING_TOP_OPEN, about 180ms apart. Omitting it here
                 # meant no test could catch the library not knowing the
                 # state, which is exactly what happened.
@@ -831,6 +947,11 @@ class DoorMotionEngine:
             elif status == DOOR_STATE_CLOSING_MID_OPEN:
                 await asyncio.sleep(timing.closing_mid_time)
                 if self._auto_retract_if_blocked(DOOR_STATE_RISING):
+                    continue
+                # The last transition before the flap is down, and so the
+                # moment a physical obstruction is discovered: the door
+                # cannot close the whole way.
+                if await self._obstruction_blocks_close(DOOR_STATE_RISING):
                     continue
                 self._set_status(DOOR_STATE_CLOSED)
                 state.total_open_cycles += 1
@@ -902,6 +1023,71 @@ class DoorMotionEngine:
             return True
         return False
 
+    async def _obstruction_blocks_close(self, reopen_state: str) -> bool:
+        """Meet a physical obstruction at the end of the close.
+
+        Returns True if the door did **not** reach ``DOOR_CLOSED``, so the
+        sequence loop continues rather than finishing.
+
+        Two outcomes, per ``docs/operation.md``:
+
+        - **Autoretract enabled**: the door reverses into ``reopen_state``
+          and the retract is counted, exactly as a sensor-detected pet
+          would. A one-shot obstruction is cleared by that retract.
+        - **Autoretract disabled**: "the door doesn't actively try to
+          retract - it simply stops motor control". The motor stops and the
+          door rests where it is, in ``DOOR_CLOSING_MID_OPEN``, until the
+          obstruction is cleared or autoretract is turned on. A real door's
+          flap might also slide down under gravity; the simulator has to
+          pick one outcome, and resting is the observable one.
+        """
+        state = self.state
+        if not state.obstruction_active:
+            return False
+
+        if state.autoretract:
+            logger.info(
+                t(
+                    "simulator.engine.simulator_obstruction_auto_retracting",
+                    "Simulator: Obstruction met on close! Auto-retracting...",
+                )
+            )
+            if state.obstruction_oneshot:
+                self._cancel_obstruction_timer()
+                state.obstruction_active = False
+                state.obstruction_oneshot = False
+            state.total_auto_retracts += 1
+            self._hold_mode = False
+            self._set_status(reopen_state)
+            return True
+
+        logger.info(
+            t(
+                "simulator.engine.simulator_obstruction_resting",
+                "Simulator: Obstruction met on close, autoretract off - motor stopped, "
+                "door resting on the obstruction",
+            )
+        )
+        # Two other things end the wait. Enabling autoretract leaves the
+        # loop so the re-entered branch takes the retract path above; and a
+        # pet arriving at the door raises it regardless, because a door
+        # resting on a boot is still a door a collar can open. Without that
+        # second exit a pet could stand at an obstructed door indefinitely
+        # with nothing happening.
+        while state.obstruction_active and not state.autoretract:
+            if state.is_sensor_blocking_close():
+                logger.info(
+                    t(
+                        "simulator.engine.simulator_sensor_raises_obstructed",
+                        "Simulator: Sensor detected at an obstructed door - raising",
+                    )
+                )
+                self._hold_mode = False
+                self._set_status(reopen_state)
+                return True
+            await self._wait_for_wake(max(float(state.hold_time), MIN_BLOCKED_RECHECK))
+        return True
+
     # =========================================================================
     # Lifecycle
     # =========================================================================
@@ -937,6 +1123,27 @@ class DoorMotionEngine:
         self._cancel_deferred_restart()
         for task in self._pending_tasks():
             task.cancel()
+
+    def reset(self) -> None:
+        """Drop every timer and latch so the engine matches a fresh state.
+
+        Called after :meth:`stop` by
+        :meth:`~powerpetdoor.simulator.server.DoorSimulator.reset_state`,
+        which replaces the state's fields in place. The engine's own
+        bookkeeping - pending sensor windows, an obstruction expiry, the
+        hold deadline, a deferred sequence - survives that replacement and
+        would otherwise fire against the new state.
+        """
+        for sensor in list(self._sensor_timers):
+            self._cancel_sensor_timer(sensor)
+        self._cancel_obstruction_timer()
+        self._cancel_deferred_restart()
+        self._task = None
+        self._hold_mode = False
+        self._hold_deadline = 0.0
+        self._last_sensor_trigger = 0.0
+        self._pending_sequence = (_INTENT_CLOSE, False)
+        self._wake.clear()
 
     async def stop(self) -> None:
         """Cancel and await all engine tasks and fail pending waiters."""

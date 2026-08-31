@@ -240,6 +240,43 @@ def _version_key(tag: str) -> tuple[int, ...]:
     return tuple(int(part) if part.isdigit() else 0 for part in re.findall(r"\d+|\w+", tag))
 
 
+def check_ruff_hook_pin() -> list[str]:
+    """The ruff pre-commit hook is the ruff the lock resolves.
+
+    `.pre-commit-config.yaml` pins ruff-pre-commit by tag, and `uv.lock`
+    pins the ruff CI runs. Nothing couples them, so a lock refresh moves
+    one and leaves the other - and a hook that formats differently from
+    `ruff format --check` turns every commit into a fight with the lint
+    job. Caught by hand once; that is once too often.
+    """
+    config = Path(".pre-commit-config.yaml")
+    lock = Path("uv.lock")
+    if not config.exists() or not lock.exists():
+        print("  no ruff hook or lockfile to compare")
+        return []
+
+    hook = re.search(
+        r"repo:\s*https://github\.com/astral-sh/ruff-pre-commit\s*\n(?:\s*#.*\n)*\s*rev:\s*v?([\d.]+)",
+        config.read_text(encoding="utf-8"),
+    )
+    locked = re.search(
+        r'\[\[package\]\]\nname = "ruff"\nversion = "([^"]+)"', lock.read_text(encoding="utf-8")
+    )
+    if not hook or not locked:
+        print("  could not read one of the two ruff pins")
+        return []
+
+    if hook.group(1) != locked.group(1):
+        message = (
+            f"ruff-pre-commit v{hook.group(1)} -> v{locked.group(1)} "
+            "(.pre-commit-config.yaml, to match uv.lock)"
+        )
+        print(f"  MISMATCH: {message}")
+        return [message]
+    print(f"  ruff hook and lock agree on v{hook.group(1)}")
+    return []
+
+
 def check_action_pins() -> list[str]:
     """Action pins that are behind their upstream's latest release."""
     pins = iter_action_pins()
@@ -255,6 +292,7 @@ def check_action_pins() -> list[str]:
         entry[2].add(path)
 
     stale: list[str] = []
+    unresolved: list[str] = []
     for repo, (sha, comment, paths) in sorted(by_repo.items()):
         if repo.split("/")[0] in NON_GITHUB_OWNERS:
             where = ", ".join(sorted(str(p) for p in paths))
@@ -262,7 +300,17 @@ def check_action_pins() -> list[str]:
             continue
         latest = latest_release_sha(repo)
         if latest is None:
+            # Not "current" - *unknown*. Said out loud, because an API rate
+            # limit reading as an all-clear is the silent staleness this
+            # script exists to prevent.
+            #
+            # It does not fail, even under `--strict`: Dependabot covers
+            # the github-actions ecosystem natively (.github/dependabot.yml),
+            # so a pin that goes stale here still gets a PR. Blocking a push
+            # on a network round trip that has a working backstop trades a
+            # real outage for a duplicate one.
             print(f"  {repo}: could not resolve a latest release or tag")
+            unresolved.append(repo)
             continue
         tag, latest_sha = latest
         if latest_sha != sha:
@@ -270,8 +318,14 @@ def check_action_pins() -> list[str]:
         elif tag.startswith("HEAD"):
             print(f"  {repo}: at branch head; upstream publishes no tags")
 
+    if unresolved:
+        print(
+            f"  {len(unresolved)} pin(s) could not be checked "
+            "- set GITHUB_TOKEN if this is the API rate limit"
+        )
     if not stale:
-        print("  every action pin is at its upstream's latest release")
+        if not unresolved:
+            print("  every action pin is at its upstream's latest release")
         return []
     print(f"  {len(stale)} action pin(s) behind:")
     for entry in sorted(set(stale)):
@@ -299,6 +353,9 @@ def main() -> int:
     print("\nAvailable upgrades:")
     moves = check_upgrades_available(args.fix)
 
+    print("\nRuff hook pin:")
+    stale_hook = check_ruff_hook_pin()
+
     print("\nCI action pins:")
     stale_actions = check_action_pins()
 
@@ -312,7 +369,7 @@ def main() -> int:
     if vulns:
         print(f"FAIL: {len(vulns)} known advisor{'y' if len(vulns) == 1 else 'ies'}")
         return 1
-    pending = len(moves) + len(stale_actions)
+    pending = len(moves) + len(stale_actions) + len(stale_hook)
     if pending and args.strict:
         print(f"FAIL (--strict): {pending} dependency/action update(s) available")
         return 1

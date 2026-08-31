@@ -19,6 +19,7 @@ import asyncio
 import logging
 import re
 import threading
+import zoneinfo
 
 from .i18n import t
 from .sanitize import sanitize_field
@@ -251,3 +252,71 @@ def parse_posix_tz_string(posix_tz: str) -> dict | None:
     result["dst_offset"] = match.group(4)
 
     return result
+
+
+def to_posix_tz(tz: str) -> str:
+    """The POSIX spelling of ``tz``, converting an IANA name if that is what it is.
+
+    The door speaks POSIX and nothing else - ``EST5EDT,M3.2.0,M11.1.0``,
+    never ``America/New_York``. An IANA name is what a caller actually
+    holds, though, so everything above the wire takes either and converts
+    here, once.
+
+    Args:
+        tz: A POSIX TZ string, or an IANA name to convert.
+
+    Returns:
+        The POSIX form. A value that is already POSIX is returned as-is.
+
+    Raises:
+        ValueError: If it is neither, or is an IANA zone with no POSIX
+            rule to convert to.
+    """
+    if parse_posix_tz_string(tz):
+        return tz
+    # Not POSIX, so treat it as IANA. The cache holds the rules; a caller
+    # that has not warmed it yet warms it now.
+    if not is_cache_initialized():
+        init_timezone_cache_sync()
+    posix = get_posix_tz_string(tz)
+    if not posix:
+        raise ValueError(
+            t(
+                "tz_utils.not_posix_or_iana",
+                "{tz!r} is neither a POSIX TZ string (e.g. EST5EDT,M3.2.0,M11.1.0) "
+                "nor a convertible IANA name",
+                tz=tz,
+            )
+        )
+    return posix
+
+
+def resolve_tzinfo(timezone: object) -> zoneinfo.ZoneInfo | None:
+    """Resolve a stored timezone to a tzinfo, or None if it will not.
+
+    The value may be an IANA name (``America/New_York``) or the POSIX TZ
+    string the wire carries (``EST5EDT,M3.2.0,M11.1.0``); POSIX is mapped
+    back through :func:`find_iana_for_posix`, which needs the timezone
+    cache. Shared by the simulator's schedule evaluation and the facade's
+    clock reading so the two cannot disagree about what a stored timezone
+    means.
+
+    Never raises. A non-string (constructed directly rather than read off
+    the wire) resolves to None rather than propagating out of a caller
+    that must not fail, such as schedule evaluation on every trigger.
+    """
+    try:
+        return zoneinfo.ZoneInfo(timezone)  # type: ignore[arg-type]
+    except (zoneinfo.ZoneInfoNotFoundError, TypeError, ValueError):
+        pass
+
+    try:
+        iana = find_iana_for_posix(timezone)  # type: ignore[arg-type]
+    except TypeError:
+        return None
+    if not iana:
+        return None
+    try:
+        return zoneinfo.ZoneInfo(iana)
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+        return None

@@ -9,8 +9,20 @@ This module contains constants used in the Power Pet Door network protocol.
 These are independent of any home automation framework.
 """
 
-# Minimum time between messages to avoid overwhelming the device
-MINIMUM_TIME_BETWEEN_MSGS = 0.200
+#: Quiet time to leave after the door has spoken, before sending again.
+#:
+#: Measured **from the door's reply**, not from our previous send. That
+#: distinction is the whole point: the client sends one message at a time
+#: and waits for the answer, so a send-relative floor is already satisfied
+#: by any round trip longer than itself - and stops adding any gap at all
+#: exactly when the door is slowest, which is when it is struggling.
+#:
+#: With the send-relative floor removed, 24 rotating commands per trial,
+#: three interleaved rounds:
+#:
+#:     reply->send gap:   0ms    5ms   10ms   20ms   25ms   50ms
+#:     dropped of 72:      11      7      7      1      0      0
+MINIMUM_TIME_BETWEEN_MSGS = 0.050
 
 # Message type identifiers
 COMMAND = "cmd"
@@ -66,8 +78,8 @@ FIELD_START_TIME_SUFFIX = "_start_time"
 FIELD_END_TIME_SUFFIX = "_end_time"
 FIELD_HOUR = "hour"
 FIELD_MINUTE = "min"
-#: The field a sensor-trigger-voltage **setter** takes. **Verified against
-#: firmware 1.7.18**: `SET_SENSOR_TRIGGER_VOLTAGE` and
+#: The field a sensor-trigger-voltage **setter** takes.
+#: `SET_SENSOR_TRIGGER_VOLTAGE` and
 #: `SET_SLEEP_SENSOR_TRIGGER_VOLTAGE` require `voltage` and reject the
 #: getter's field name; the reply then echoes the *getter's* field.
 FIELD_VOLTAGE = "voltage"
@@ -87,7 +99,7 @@ FIELD_FW_MAJOR = "fw_maj"
 FIELD_FW_MINOR = "fw_min"
 FIELD_FW_PATCH = "fw_pat"
 #: Bit 1 of the ``doorOptions`` bitfield: auto-retract on obstruction.
-#: **Verified against firmware 1.7.18**: ``DISABLE_AUTORETRACT`` leaves
+#: ``DISABLE_AUTORETRACT`` leaves
 #: ``doorOptions`` at the integer ``0`` and ``ENABLE_AUTORETRACT`` leaves it
 #: at the integer ``2``. The other bits are unidentified, so ``2`` must not
 #: be read as "auto-retract and nothing else", and the field must never be
@@ -107,8 +119,7 @@ DOOR_STATE_HOLDING = "DOOR_HOLDING"
 DOOR_STATE_KEEPUP = "DOOR_KEEPUP"
 DOOR_STATE_RISING = "DOOR_RISING"
 DOOR_STATE_SLOWING = "DOOR_SLOWING"
-#: The FIRST of the three closing states. **Measured against firmware
-#: 1.7.18** by cycling a real door: the full sequence is
+#: The FIRST of the three closing states. The full sequence is
 #: ``DOOR_IDLE -> DOOR_RISING -> DOOR_SLOWING -> DOOR_HOLDING ->
 #: DOOR_CLOSING -> DOOR_CLOSING_TOP_OPEN -> DOOR_CLOSING_MID_OPEN ->
 #: DOOR_CLOSED -> DOOR_IDLE``. It was missing here, so every close spent a
@@ -118,17 +129,65 @@ DOOR_STATE_CLOSING = "DOOR_CLOSING"
 DOOR_STATE_CLOSING_TOP_OPEN = "DOOR_CLOSING_TOP_OPEN"
 DOOR_STATE_CLOSING_MID_OPEN = "DOOR_CLOSING_MID_OPEN"
 
+#: The door is down. ``DOOR_IDLE`` is the resting state a real door settles
+#: into after ``DOOR_CLOSED``, so both mean "closed" to a caller.
+DOOR_STATES_CLOSED = frozenset({DOOR_STATE_CLOSED, DOOR_STATE_IDLE})
+#: The door is up and has stopped travelling - the only states in which
+#: "open" is a settled fact rather than a prediction. ``DOOR_HOLDING`` is a
+#: timed open, ``DOOR_KEEPUP`` an indefinite one.
+DOOR_STATES_FULLY_OPEN = frozenset({DOOR_STATE_HOLDING, DOOR_STATE_KEEPUP})
+#: The door is travelling up.
+DOOR_STATES_OPENING = frozenset({DOOR_STATE_RISING, DOOR_STATE_SLOWING})
+#: The door is travelling down. All three, including the brief
+#: ``DOOR_CLOSING`` in which the motor has started but the flap has not
+#: moved.
+DOOR_STATES_CLOSING = frozenset(
+    {DOOR_STATE_CLOSING, DOOR_STATE_CLOSING_TOP_OPEN, DOOR_STATE_CLOSING_MID_OPEN}
+)
+#: Open *or* opening - what :attr:`~powerpetdoor.door.PowerPetDoor.is_open`
+#: reports. Deliberately wider than :data:`DOOR_STATES_FULLY_OPEN`: a rising
+#: door is not closed, so a consumer rendering a cover entity needs it to
+#: read as open. Anything that acts on the door rather than describing it
+#: wants :data:`DOOR_STATES_FULLY_OPEN` instead.
+DOOR_STATES_OPEN = DOOR_STATES_FULLY_OPEN | DOOR_STATES_OPENING
+#: How far open the door is, as a percentage, per status. Shared by
+#: :attr:`~powerpetdoor.door.PowerPetDoor.position` and the simulator's
+#: ``position`` script condition so the two cannot disagree about where a
+#: door in a given state is.
+#:
+#: **Not** an ordering of the statuses: the sequence is a cycle, not a
+#: line. ``DOOR_CLOSING`` is 100 because the motor has started but the flap
+#: has not moved, so it shares a height with ``DOOR_HOLDING`` while coming
+#: after it in time; ``DOOR_RISING`` and ``DOOR_CLOSING_MID_OPEN`` share
+#: one too, going opposite ways.
+DOOR_POSITIONS: dict[str, int] = {
+    DOOR_STATE_IDLE: 0,
+    DOOR_STATE_CLOSED: 0,
+    DOOR_STATE_RISING: 33,
+    DOOR_STATE_SLOWING: 66,
+    DOOR_STATE_HOLDING: 100,
+    DOOR_STATE_KEEPUP: 100,
+    DOOR_STATE_CLOSING: 100,
+    DOOR_STATE_CLOSING_TOP_OPEN: 66,
+    DOOR_STATE_CLOSING_MID_OPEN: 33,
+}
+
 # Command strings
 CMD_OPEN = "OPEN"
 CMD_OPEN_AND_HOLD = "OPEN_AND_HOLD"
 CMD_CLOSE = "CLOSE"
 CMD_GET_SETTINGS = "GET_SETTINGS"
+#: Whether each sensor is **armed**. Answers with the ints ``1``/``0``,
+#: unlike the two switches below, which answer with strings.
 CMD_GET_SENSORS = "GET_SENSORS"
+#: Whether the unit as a whole is powered - in practice, whether the motor
+#: is live. With it off, every open command is refused. Answers
+#: ``power_state`` as the STRING ``"true"``/``"false"``.
 CMD_GET_POWER = "GET_POWER"
-CMD_GET_AUTO = "GET_TIMERS_ENABLED"
-CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK = "GET_OUTSIDE_SENSOR_SAFETY_LOCK"
-CMD_GET_CMD_LOCKOUT = "GET_CMD_LOCKOUT"
-CMD_GET_AUTORETRACT = "GET_AUTORETRACT"
+#: Whether **scheduling** is in force, the read side of
+#: :data:`CMD_ENABLE_AUTO`/:data:`CMD_DISABLE_AUTO`. Answers
+#: ``timersEnabled`` as the STRING ``"true"``/``"false"``.
+CMD_GET_TIMERS_ENABLED = "GET_TIMERS_ENABLED"
 CMD_GET_DOOR_STATUS = "GET_DOOR_STATUS"
 CMD_GET_DOOR_OPEN_STATS = "GET_DOOR_OPEN_STATS"
 CMD_DISABLE_INSIDE = "DISABLE_INSIDE"
@@ -149,7 +208,6 @@ CMD_GET_HW_INFO = "GET_HW_INFO"
 CMD_GET_DOOR_BATTERY = "GET_DOOR_BATTERY"
 CMD_HAS_REMOTE_ID = "HAS_REMOTE_ID"
 CMD_HAS_REMOTE_KEY = "HAS_REMOTE_KEY"
-CMD_CHECK_RESET_REASON = "CHECK_RESET_REASON"
 
 CMD_GET_NOTIFICATIONS = "GET_NOTIFICATIONS"
 CMD_SET_NOTIFICATIONS = "SET_NOTIFICATIONS"
@@ -162,51 +220,28 @@ CMD_SET_SENSOR_TRIGGER_VOLTAGE = "SET_SENSOR_TRIGGER_VOLTAGE"
 CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE = "GET_SLEEP_SENSOR_TRIGGER_VOLTAGE"
 CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE = "SET_SLEEP_SENSOR_TRIGGER_VOLTAGE"
 
-#: Read the door's own wall clock. **Verified against firmware 1.7.18**;
-#: undocumented by the vendor. The reply carries :data:`FIELD_TIME`.
+#: Read the door's own wall clock. Undocumented by the vendor. The reply
+#: carries :data:`FIELD_TIME`. The clock is read-only.
 CMD_GET_TIME = "GET_TIME"
-#: **Verified against firmware 1.7.18: the clock is READ-ONLY.** This name
-#: is defined only so the simulator can reproduce the door's strangest
-#: observed behaviour - ``SET_TIME`` is answered with *silence*, not a
-#: failure envelope, where every other rejected shape answers
-#: ``success: "false"``. Never send it.
-CMD_SET_TIME = "SET_TIME"
 
 CMD_GET_SCHEDULE_LIST = "GET_SCHEDULE_LIST"
-CMD_SET_SCHEDULE_LIST = "SET_SCHEDULE_LIST"
 CMD_GET_SCHEDULE = "GET_SCHEDULE"
 CMD_SET_SCHEDULE = "SET_SCHEDULE"
 CMD_DELETE_SCHEDULE = "DELETE_SCHEDULE"
 
 #: The only commands a real door accepts under the ``cmd`` envelope key.
-#: **Verified against firmware 1.7.18**: ``{"cmd": "ENABLE_INSIDE"}`` is
+#: ``{"cmd": "ENABLE_INSIDE"}`` is
 #: answered ``success: "false"`` while ``{"config": "ENABLE_INSIDE"}``
 #: succeeds, so every command that is not door motion - including the
 #: individual setting commands - has to be sent as ``config``.
 COMMAND_ENVELOPE_COMMANDS = frozenset({CMD_OPEN, CMD_OPEN_AND_HOLD, CMD_CLOSE})
 
-# Notification event types (sent by device when events occur)
-NOTIFY_SENSOR_INDOOR = "SENSOR_INDOOR"
-NOTIFY_SENSOR_OUTDOOR = "SENSOR_OUTDOOR"
-NOTIFY_LOW_BATTERY = "LOW_BATTERY"
-
-# Field for notification events
-FIELD_SENSOR_STATE = "sensorState"  # "on" or "off"
-
-# Sensor state values in notification events
-SENSOR_STATE_ON = "on"
-SENSOR_STATE_OFF = "off"
-
 # Response field names for remote/reset commands.
-# `has_id`/`has_key` are **verified against firmware 1.7.18** - the door does
-# NOT use the camelCase `hasRemoteId`/`hasRemoteKey` this project guessed at
+# The door uses `has_id`/`has_key`, NOT the camelCase
+# `hasRemoteId`/`hasRemoteKey` this project guessed at
 # for its first five years, which is why those readers never fired.
 FIELD_HAS_REMOTE_ID = "has_id"
 FIELD_HAS_REMOTE_KEY = "has_key"
-#: Reverse-engineered and **unverified**: firmware 1.7.18 has no
-#: CHECK_RESET_REASON command at all, so no reply carrying this field was
-#: ever observed. Kept because a different firmware revision may have one.
-FIELD_RESET_REASON = "resetReason"
 
 # Message priorities (lower = higher priority)
 PRIORITY_CRITICAL = 0  # Keepalive (PING/PONG)
@@ -247,10 +282,7 @@ COMMAND_PRIORITIES = {
     CMD_GET_SETTINGS: PRIORITY_LOW,
     CMD_GET_SENSORS: PRIORITY_LOW,
     CMD_GET_POWER: PRIORITY_LOW,
-    CMD_GET_AUTO: PRIORITY_LOW,
-    CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK: PRIORITY_LOW,
-    CMD_GET_CMD_LOCKOUT: PRIORITY_LOW,
-    CMD_GET_AUTORETRACT: PRIORITY_LOW,
+    CMD_GET_TIMERS_ENABLED: PRIORITY_LOW,
     CMD_GET_DOOR_OPEN_STATS: PRIORITY_LOW,
     CMD_GET_HW_INFO: PRIORITY_LOW,
     CMD_GET_DOOR_BATTERY: PRIORITY_LOW,
@@ -262,9 +294,7 @@ COMMAND_PRIORITIES = {
     CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE: PRIORITY_LOW,
     CMD_HAS_REMOTE_ID: PRIORITY_LOW,
     CMD_HAS_REMOTE_KEY: PRIORITY_LOW,
-    CMD_CHECK_RESET_REASON: PRIORITY_LOW,
     CMD_GET_SCHEDULE_LIST: PRIORITY_LOW,
-    CMD_SET_SCHEDULE_LIST: PRIORITY_LOW,
     CMD_GET_SCHEDULE: PRIORITY_LOW,
     CMD_SET_SCHEDULE: PRIORITY_LOW,
     CMD_DELETE_SCHEDULE: PRIORITY_LOW,

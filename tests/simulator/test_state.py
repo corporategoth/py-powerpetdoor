@@ -29,6 +29,10 @@ from powerpetdoor.simulator import (
     Schedule,
 )
 from powerpetdoor.simulator.state import END_OF_DAY_HOUR, END_OF_DAY_MINUTE
+from powerpetdoor.simulator.wire_values import (
+    notifications_payload,
+    settings_payload,
+)
 from tests.conftest import GOLDEN_SCHEDULE_WIRE_FROM_DEVICE, assert_schedule_wire_types
 
 # ============================================================================
@@ -143,7 +147,7 @@ class TestSchedule:
     def test_to_dict(self):
         """Should convert to protocol dict format.
 
-        Verified against firmware 1.7.18: a GET_SCHEDULE reply spells the
+        A GET_SCHEDULE reply spells the
         three flag fields as the integers 1/0, not booleans and not
         strings.
         """
@@ -397,7 +401,7 @@ class TestSchedule:
 
         This test previously asserted the opposite, on the reasoning that an
         exclusive end makes coinciding ends the only spelling of a true 24h
-        window. **Measured against firmware 1.7.18 and that is not what the
+        window. and that is not what the
         device does**: with timersEnabled on, entries of ``16:01-16:01`` and
         ``21:01-21:01`` both leave the sensor DISABLED. The engine is simply
         ``start <= now < end``, so a window whose end does not exceed its
@@ -552,7 +556,7 @@ class TestSchedule:
 
         This test used to assert the opposite - that such an entry covered
         23:00 and 02:00 and wrapped past midnight. **Measured against
-        firmware 1.7.18 and the device does not do that.** With timersEnabled
+        the door and the device does not do that.** With timersEnabled
         on, a ``23:00-21:30`` entry leaves the sensor disabled BOTH on the day
         it names and on the following day, so it is neither a same-day wrap
         nor a spill into tomorrow.
@@ -833,8 +837,8 @@ class TestDoorSimulatorState:
     def test_get_settings(self):
         """get_settings should return protocol format."""
         state = DoorSimulatorState(power=True, inside=False, auto=True)
-        settings = state.get_settings()
-        # Verified against firmware 1.7.18: these six are "true"/"false"
+        settings = settings_payload(state)
+        # These six are "true"/"false"
         # STRINGS inside the settings object - the same `inside` that
         # GET_SENSORS answers as the int 1.
         assert settings[FIELD_POWER] == "true"
@@ -846,49 +850,42 @@ class TestDoorSimulatorState:
     def test_get_settings_spells_door_options_as_a_bitfield(self, autoretract, expected):
         """doorOptions is an int bitfield; auto-retract is bit 1.
 
-        Verified against firmware 1.7.18: DISABLE_AUTORETRACT leaves it 0
+        DISABLE_AUTORETRACT leaves it 0
         and ENABLE_AUTORETRACT leaves it 2. Not a "0"/"1" string, and not
         a bool - which JSON would render as `true`.
         """
-        settings = DoorSimulatorState(autoretract=autoretract).get_settings()
+        settings = settings_payload(DoorSimulatorState(autoretract=autoretract))
 
         assert settings[FIELD_AUTORETRACT] == expected
         assert not isinstance(settings[FIELD_AUTORETRACT], bool)
 
     def test_get_settings_spells_the_numeric_fields_as_ints(self):
         """holdOpenTime and both voltages are ints, never strings."""
-        settings = DoorSimulatorState(
-            hold_time=2.0, sensor_trigger_voltage=2000, sleep_sensor_trigger_voltage=2000
-        ).get_settings()
+        settings = settings_payload(
+            DoorSimulatorState(
+                hold_time=2.0, sensor_trigger_voltage=2000, sleep_sensor_trigger_voltage=2000
+            )
+        )
 
         assert settings[FIELD_HOLD_OPEN_TIME] == 200
         assert settings[FIELD_SENSOR_TRIGGER_VOLTAGE] == 2000
         assert settings[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE] == 2000
 
-    def test_get_settings_converts_timezone_to_posix(self):
-        """With the tz cache ready, settings carry the POSIX rule."""
-        from powerpetdoor import tz_utils
+    def test_get_settings_reports_the_stored_timezone(self):
+        """`settings.tz` is the stored POSIX rule, unconverted.
 
-        tz_utils.init_timezone_cache_sync()
-        state = DoorSimulatorState(timezone="America/New_York")
-        assert state.get_settings()[FIELD_TZ] == "EST5EDT,M3.2.0,M11.1.0"
+        The conversion moved to the one setter that writes the value, so
+        the state holds POSIX and every reader - this, GET_TIMEZONE, the
+        broadcast - reports the same string without touching the cache.
+        """
+        state = DoorSimulatorState(timezone="EST5EDT,M3.2.0,M11.1.0")
+        assert settings_payload(state)[FIELD_TZ] == "EST5EDT,M3.2.0,M11.1.0"
 
-    def test_get_settings_keeps_raw_timezone_when_cache_uninitialized(self, monkeypatch):
-        """Without the tz cache, the raw stored value is reported."""
-        from powerpetdoor.simulator import state as state_module
+    def test_the_default_timezone_is_a_posix_rule(self):
+        """Not an IANA name: the door has no way to store one."""
+        from powerpetdoor.tz_utils import parse_posix_tz_string
 
-        monkeypatch.setattr(state_module, "is_cache_initialized", lambda: False)
-        state = DoorSimulatorState(timezone="America/New_York")
-        assert state.get_settings()[FIELD_TZ] == "America/New_York"
-
-    def test_get_settings_keeps_raw_timezone_when_unconvertible(self, monkeypatch):
-        """An unconvertible zone keeps the raw stored value."""
-        from powerpetdoor.simulator import state as state_module
-
-        monkeypatch.setattr(state_module, "is_cache_initialized", lambda: True)
-        monkeypatch.setattr(state_module, "get_posix_tz_string", lambda tz: None)
-        state = DoorSimulatorState(timezone="America/New_York")
-        assert state.get_settings()[FIELD_TZ] == "America/New_York"
+        assert parse_posix_tz_string(DoorSimulatorState().timezone)
 
     def test_get_notifications(self):
         """get_notifications should return notification settings."""
@@ -897,8 +894,8 @@ class TestDoorSimulatorState:
             sensor_off_indoor=False,
             low_battery=True,
         )
-        notifications = state.get_notifications()
-        # Verified against firmware 1.7.18: all five READ back as
+        notifications = notifications_payload(state)
+        # All five READ back as
         # "true"/"false" strings - even though the write path demands JSON
         # booleans and silently ignores strings.
         assert notifications["sensorOnIndoorNotificationsEnabled"] == "true"
@@ -1013,10 +1010,20 @@ class TestIsSensorBlockingClose:
         state = DoorSimulatorState(outside_sensor_active=True, outside=False, safety_lock=False)
         assert state.is_sensor_blocking_close() is False
 
-    def test_outside_sensor_active_but_safety_locked(self):
-        """Outside sensor should NOT block close when safety-locked."""
+    def test_the_safety_lock_does_not_affect_close_blocking(self):
+        """It grants *entry*; it says nothing about holding a door open.
+
+        This asserted the opposite, on the reading the wire name invites.
+        Measured on hardware (docs/protocol.md), the switch is the app's
+        "always allow pet entry inside override timers" - a schedule
+        override. Keeping the door open for a nearby pet is command
+        lockout's job, which is checked first.
+        """
         state = DoorSimulatorState(outside_sensor_active=True, outside=True, safety_lock=True)
-        assert state.is_sensor_blocking_close() is False
+        assert state.is_sensor_blocking_close() is True
+
+        state.safety_lock = False
+        assert state.is_sensor_blocking_close() is True
 
     def test_inside_blocks_even_with_safety_lock(self):
         """Inside sensor should block close even when safety_lock is on."""
@@ -1106,10 +1113,12 @@ class TestGetTzinfo:
         """A POSIX value mapping to a nonexistent IANA zone falls back to UTC."""
         import logging
 
-        from powerpetdoor.simulator import state as state_module
+        from powerpetdoor import tz_utils
 
-        # The cache maps the POSIX rule to a zone tzdata cannot resolve
-        monkeypatch.setattr(state_module, "find_iana_for_posix", lambda posix: "Not/A_Zone")
+        # The cache maps the POSIX rule to a zone tzdata cannot resolve.
+        # Patched on tz_utils, which is where the resolution now lives -
+        # shared with the facade's clock reading so the two agree.
+        monkeypatch.setattr(tz_utils, "find_iana_for_posix", lambda posix: "Not/A_Zone")
         state = DoorSimulatorState(timezone="XXX-1YYY,M3.2.0,M11.1.0")
         with caplog.at_level(logging.WARNING, logger="powerpetdoor.simulator.state"):
             assert state.get_tzinfo().key == "UTC"

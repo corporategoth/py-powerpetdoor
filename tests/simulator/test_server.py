@@ -80,9 +80,7 @@ from powerpetdoor.const import (
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
     FIELD_TZ,
-    NOTIFY_LOW_BATTERY,
-    NOTIFY_SENSOR_INDOOR,
-    SENSOR_STATE_ON,
+    SUCCESS_FALSE,
     SUCCESS_TRUE,
 )
 from powerpetdoor.simulator import (
@@ -93,11 +91,13 @@ from powerpetdoor.simulator import (
     DoorTimingConfig,
     Schedule,
 )
-from powerpetdoor.simulator import state as state_module
+from powerpetdoor.simulator.wire_values import (
+    notifications_payload,
+    settings_payload,
+)
 
 #: The exact status sequence a REAL door reports across one open/close
-#: cycle. **Measured against firmware 1.7.18** by cycling a physical unit:
-#:
+#: cycle. #:
 #:     DOOR_IDLE -> DOOR_RISING -> DOOR_SLOWING -> DOOR_HOLDING
 #:               -> DOOR_CLOSING -> DOOR_CLOSING_TOP_OPEN
 #:               -> DOOR_CLOSING_MID_OPEN -> DOOR_CLOSED -> DOOR_IDLE
@@ -152,6 +152,13 @@ async def simulator(timing_config):
 def recorder(simulator):
     """Attach a recording client protocol; returns its sent-message list."""
     return attach_recorder(simulator)
+
+
+#: The bare-envelope key this project used to emit for a low battery.
+#: The door delivers notifications through the vendor's phone service, so
+#: nothing may put this on TCP 3000 - asserted by literal, because there
+#: is deliberately no constant for it any more.
+_WIRE_LOW_BATTERY = "LOW_BATTERY"
 
 
 def attach_recorder(sim: DoorSimulator) -> list[dict]:
@@ -294,14 +301,34 @@ class TestDoorSimulator:
         simulator.trigger_sensor("inside")
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
-    async def test_outside_sensor_ignored_with_safety_lock(self, simulator):
-        """Outside sensor should be ignored when safety lock is enabled."""
-        simulator.state.safety_lock = True
+    async def test_safety_lock_lets_the_outside_sensor_past_the_schedule(self, simulator):
+        """Measured on hardware: the lock grants entry, it does not deny it.
+
+        This asserted that an enabled lock made the outside sensor
+        ignored - the reading the wire name invites, and the one
+        docs/operation.md gave in one paragraph while contradicting it in
+        the one above.
+        """
+        from powerpetdoor.simulator.state import Schedule
+
+        # A window that is closed right now, for the outside sensor.
+        simulator.state.schedules = {
+            0: Schedule(
+                index=0,
+                enabled=True,
+                days_of_week=[True] * 7,
+                outside=True,
+                start_hour=0,
+                start_min=0,
+                end_hour=0,
+                end_min=1,
+            )
+        }
         simulator.trigger_sensor("outside")
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
-        # Inside sensor should still work
-        simulator.trigger_sensor("inside")
+        simulator.state.safety_lock = True
+        simulator.trigger_sensor("outside")
         assert simulator.state.door_status == DOOR_STATE_RISING
 
     def test_set_battery(self, simulator):
@@ -376,12 +403,25 @@ class TestDoorSimulator:
         assert recorder == []
 
     def test_simulate_obstruction_delegates_to_engine(self, simulator):
-        """simulate_obstruction activates the inside sensor indefinitely."""
+        """simulate_obstruction places an obstruction, arming no sensor."""
         simulator.simulate_obstruction()
-        assert simulator.state.inside_sensor_active is True
+        assert simulator.state.obstruction_active is True
+        assert simulator.state.inside_sensor_active is False
         assert simulator.state.outside_sensor_active is False
 
-    def test_set_pet_in_doorway(self, simulator):
+    def test_simulate_obstruction_passes_the_duration_through(self, simulator):
+        """The mode reaches the engine, not just the fact of an obstruction."""
+        simulator.simulate_obstruction(0)
+        assert simulator.state.obstruction_active is True
+        assert simulator.state.obstruction_oneshot is False
+
+    def test_clear_obstruction_delegates_to_engine(self, simulator):
+        """The explicit clear frees a door resting on it."""
+        simulator.simulate_obstruction(0)
+        simulator.clear_obstruction()
+        assert simulator.state.obstruction_active is False
+
+    async def test_set_pet_in_doorway(self, simulator):
         """set_pet_in_doorway should update inside_sensor_active state."""
         simulator.set_pet_in_doorway(True)
         assert simulator.state.inside_sensor_active is True
@@ -389,12 +429,35 @@ class TestDoorSimulator:
         simulator.set_pet_in_doorway(False)
         assert simulator.state.inside_sensor_active is False
 
-    def test_set_pet_in_doorway_clears_outside_sensor(self, simulator):
+    async def test_set_pet_in_doorway_clears_outside_sensor(self, simulator):
         """Pet presence is mutually exclusive with the outside sensor."""
         simulator.state.outside_sensor_active = True
         simulator.set_pet_in_doorway(True)
         assert simulator.state.inside_sensor_active is True
         assert simulator.state.outside_sensor_active is False
+
+    async def test_set_pet_in_doorway_admits_the_pet(self, simulator):
+        """A pet in the doorway opens the door, as every presence verb does.
+
+        This wrote the two flags itself and stopped there, so a pet placed
+        this way stood at an open sensor and the door never moved - while
+        the same pet placed with `hold_sensor` walked straight in.
+        """
+        assert simulator.state.door_status == DOOR_STATE_CLOSED
+
+        simulator.set_pet_in_doorway(True)
+
+        assert simulator.state.door_status == DOOR_STATE_RISING
+
+    async def test_set_pet_in_doorway_raises_the_notification(self, simulator):
+        """And raises the arrival notification the other verbs raise."""
+        simulator.state.sensor_on_indoor = True
+        seen: list[str] = []
+        simulator.add_notification_listener(seen.append)
+
+        simulator.set_pet_in_doorway(True)
+
+        assert seen == ["inside_on"]
 
 
 # ============================================================================
@@ -728,19 +791,6 @@ class TestBatteryTick:
             }
         ]
 
-    def test_discharge_across_threshold_sends_one_notification(self, sim):
-        """Discharging 21% -> 20% emits exactly one LOW_BATTERY event."""
-        sim.state.battery_percent = 21
-        sim.state.ac_present = False
-        sim.state.low_battery = True
-        messages = attach_recorder(sim)
-
-        sim._battery_tick()
-
-        assert sim.state.battery_percent == 20
-        low_battery = [m for m in messages if NOTIFY_LOW_BATTERY in m]
-        assert low_battery == [{NOTIFY_LOW_BATTERY: ""}]
-
     def test_discharge_below_threshold_does_not_renotify(self, sim):
         """Ticks already below the threshold do not repeat the notification."""
         sim.state.battery_percent = 20
@@ -751,7 +801,7 @@ class TestBatteryTick:
         sim._battery_tick()
 
         assert sim.state.battery_percent == 19
-        assert all(NOTIFY_LOW_BATTERY not in m for m in messages)
+        assert all(_WIRE_LOW_BATTERY not in m for m in messages)
 
     def test_threshold_crossing_disabled_notification(self, sim):
         """No LOW_BATTERY event when the notification setting is off."""
@@ -763,7 +813,7 @@ class TestBatteryTick:
         sim._battery_tick()
 
         assert sim.state.battery_percent == 20
-        assert all(NOTIFY_LOW_BATTERY not in m for m in messages)
+        assert all(_WIRE_LOW_BATTERY not in m for m in messages)
 
 
 class TestBatteryLoop:
@@ -929,7 +979,7 @@ class TestBroadcastPayloads:
         """broadcast_settings sends the full settings dict."""
         simulator.broadcast_settings()
         assert recorder == [
-            {FIELD_CMD: CMD_GET_SETTINGS, FIELD_SETTINGS: simulator.state.get_settings(), **OK}
+            {FIELD_CMD: CMD_GET_SETTINGS, FIELD_SETTINGS: settings_payload(simulator.state), **OK}
         ]
 
     @pytest.mark.parametrize(
@@ -940,20 +990,30 @@ class TestBroadcastPayloads:
         ],
     )
     def test_broadcast_safety_lock(self, simulator, recorder, enabled, cmd, value):
-        """broadcast_safety_lock sends the enable/disable command envelope."""
-        simulator.broadcast_safety_lock(enabled)
+        """The safety lock goes out with the WHOLE settings object.
+
+        As the door does - it answers these three with every setting, not
+        the one that changed.
+        """
+        simulator.state.safety_lock = enabled
+        simulator.broadcast_value("safety_lock")
         assert recorder == [
-            {FIELD_CMD: cmd, FIELD_SETTINGS: {FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: value}, **OK}
+            {FIELD_CMD: cmd, FIELD_SETTINGS: settings_payload(simulator.state), **OK}
         ]
+        assert recorder[0][FIELD_SETTINGS][FIELD_OUTSIDE_SENSOR_SAFETY_LOCK] == value
 
     @pytest.mark.parametrize(
         ("enabled", "cmd", "value"),
         [(True, CMD_ENABLE_CMD_LOCKOUT, "true"), (False, CMD_DISABLE_CMD_LOCKOUT, "false")],
     )
     def test_broadcast_cmd_lockout(self, simulator, recorder, enabled, cmd, value):
-        """broadcast_cmd_lockout sends the enable/disable command envelope."""
-        simulator.broadcast_cmd_lockout(enabled)
-        assert recorder == [{FIELD_CMD: cmd, FIELD_SETTINGS: {FIELD_CMD_LOCKOUT: value}, **OK}]
+        """Command lockout goes out with the WHOLE settings object."""
+        simulator.state.cmd_lockout = enabled
+        simulator.broadcast_value("cmd_lockout")
+        assert recorder == [
+            {FIELD_CMD: cmd, FIELD_SETTINGS: settings_payload(simulator.state), **OK}
+        ]
+        assert recorder[0][FIELD_SETTINGS][FIELD_CMD_LOCKOUT] == value
 
     @pytest.mark.parametrize(
         ("enabled", "cmd", "door_options"),
@@ -965,49 +1025,39 @@ class TestBroadcastPayloads:
     def test_broadcast_autoretract(self, simulator, recorder, enabled, cmd, door_options):
         """broadcast_autoretract mirrors the handler: whole settings object.
 
-        Verified against firmware 1.7.18 - and `doorOptions` is the int
-        bitfield, so bit 1 is what changes.
+        `doorOptions` is the int bitfield, so bit 1 is what changes.
         """
         simulator.state.autoretract = enabled
 
-        simulator.broadcast_autoretract(enabled)
+        simulator.broadcast_value("autoretract")
 
-        assert recorder == [{FIELD_CMD: cmd, FIELD_SETTINGS: simulator.state.get_settings(), **OK}]
+        assert recorder == [
+            {FIELD_CMD: cmd, FIELD_SETTINGS: settings_payload(simulator.state), **OK}
+        ]
         assert recorder[0][FIELD_SETTINGS][FIELD_AUTORETRACT] == door_options
 
     def test_broadcast_hold_time_sends_centiseconds(self, simulator, recorder):
         """broadcast_hold_time converts seconds to centiseconds."""
         simulator.state.hold_time = 5.0
-        simulator.broadcast_hold_time()
+        simulator.broadcast_value("hold_time")
         assert recorder == [{FIELD_CMD: CMD_SET_HOLD_TIME, FIELD_HOLD_TIME: 500, **OK}]
 
-    def test_broadcast_timezone_posix(self, simulator, recorder, monkeypatch):
-        """broadcast_timezone sends the POSIX form a real door sends.
+    def test_broadcast_timezone_sends_the_stored_rule(self, simulator, recorder):
+        """The broadcast reads the same stored POSIX every getter reads.
 
-        The conversion lives on the state, so this cannot answer
-        differently from GET_SETTINGS or GET_TIMEZONE.
+        It used to convert on the way out, in its own copy of the
+        conversion, so it was a third chance to disagree with
+        GET_TIMEZONE and GET_SETTINGS.
         """
-        monkeypatch.setattr(state_module, "is_cache_initialized", lambda: True)
-        monkeypatch.setattr(
-            state_module, "get_posix_tz_string", lambda tz: "EST5EDT,M3.2.0,M11.1.0"
-        )
-        simulator.broadcast_timezone()
+        simulator.state.timezone = "EST5EDT,M3.2.0,M11.1.0"
+        simulator.broadcast_value("timezone")
         assert recorder == [{FIELD_CMD: CMD_SET_TIMEZONE, FIELD_TZ: "EST5EDT,M3.2.0,M11.1.0", **OK}]
 
-    def test_broadcast_timezone_raw_when_cache_uninitialized(
-        self, simulator, recorder, monkeypatch
-    ):
-        """Without the tz cache, the stored value is sent as-is."""
-        monkeypatch.setattr(state_module, "is_cache_initialized", lambda: False)
-        simulator.broadcast_timezone()
-        assert recorder == [{FIELD_CMD: CMD_SET_TIMEZONE, FIELD_TZ: simulator.state.timezone, **OK}]
-
-    def test_broadcast_timezone_raw_when_unconvertible(self, simulator, recorder, monkeypatch):
-        """An unconvertible zone falls back to the stored value."""
-        monkeypatch.setattr(state_module, "is_cache_initialized", lambda: True)
-        monkeypatch.setattr(state_module, "get_posix_tz_string", lambda tz: None)
-        simulator.broadcast_timezone()
-        assert recorder == [{FIELD_CMD: CMD_SET_TIMEZONE, FIELD_TZ: simulator.state.timezone, **OK}]
+    def test_broadcast_timezone_needs_no_cache(self, simulator, recorder):
+        """No lookup happens, so an uninitialised cache cannot change it."""
+        simulator.state.timezone = "UTC0"
+        simulator.broadcast_value("timezone")
+        assert recorder == [{FIELD_CMD: CMD_SET_TIMEZONE, FIELD_TZ: "UTC0", **OK}]
 
     def test_broadcast_notification_settings(self, simulator, recorder):
         """broadcast_notification_settings sends the SET envelope."""
@@ -1015,25 +1065,36 @@ class TestBroadcastPayloads:
         assert recorder == [
             {
                 FIELD_CMD: CMD_SET_NOTIFICATIONS,
-                FIELD_NOTIFICATIONS: simulator.state.get_notifications(),
+                FIELD_NOTIFICATIONS: notifications_payload(simulator.state),
                 **OK,
             }
         ]
 
     @pytest.mark.parametrize(
-        ("enabled", "cmd", "value"), [(True, CMD_POWER_ON, 1), (False, CMD_POWER_OFF, 0)]
+        ("enabled", "cmd", "value"),
+        [(True, CMD_POWER_ON, SUCCESS_TRUE), (False, CMD_POWER_OFF, SUCCESS_FALSE)],
     )
     def test_broadcast_power(self, simulator, recorder, enabled, cmd, value):
-        """broadcast_power sends the power command envelope."""
-        simulator.broadcast_power(enabled)
+        """Power goes out under its own on/off command, as a STRING.
+
+        Unlike the sensor enables below, which are ints. The spelling is
+        the field's, not the shape's.
+        """
+        simulator.state.power = enabled
+        simulator.broadcast_value("power")
         assert recorder == [{FIELD_CMD: cmd, FIELD_POWER: value, **OK}]
 
     @pytest.mark.parametrize(
-        ("enabled", "cmd", "value"), [(True, CMD_ENABLE_AUTO, 1), (False, CMD_DISABLE_AUTO, 0)]
+        ("enabled", "cmd", "value"),
+        [(True, CMD_ENABLE_AUTO, SUCCESS_TRUE), (False, CMD_DISABLE_AUTO, SUCCESS_FALSE)],
     )
     def test_broadcast_auto(self, simulator, recorder, enabled, cmd, value):
-        """broadcast_auto sends the timers command envelope."""
-        simulator.broadcast_auto(enabled)
+        """Scheduling goes out under its own enable/disable command.
+
+        A string, like power and unlike the sensor enables.
+        """
+        simulator.state.auto = enabled
+        simulator.broadcast_value("auto")
         assert recorder == [{FIELD_CMD: cmd, FIELD_AUTO: value, **OK}]
 
     @pytest.mark.parametrize(
@@ -1041,8 +1102,9 @@ class TestBroadcastPayloads:
         [(True, CMD_ENABLE_INSIDE, 1), (False, CMD_DISABLE_INSIDE, 0)],
     )
     def test_broadcast_inside_sensor(self, simulator, recorder, enabled, cmd, value):
-        """broadcast_inside_sensor sends the sensor command envelope."""
-        simulator.broadcast_inside_sensor(enabled)
+        """The inside sensor enable goes out under its own command."""
+        simulator.state.inside = enabled
+        simulator.broadcast_value("inside")
         assert recorder == [{FIELD_CMD: cmd, FIELD_INSIDE: value, **OK}]
 
     @pytest.mark.parametrize(
@@ -1050,8 +1112,9 @@ class TestBroadcastPayloads:
         [(True, CMD_ENABLE_OUTSIDE, 1), (False, CMD_DISABLE_OUTSIDE, 0)],
     )
     def test_broadcast_outside_sensor(self, simulator, recorder, enabled, cmd, value):
-        """broadcast_outside_sensor sends the sensor command envelope."""
-        simulator.broadcast_outside_sensor(enabled)
+        """The outside sensor enable goes out under its own command."""
+        simulator.state.outside = enabled
+        simulator.broadcast_value("outside")
         assert recorder == [{FIELD_CMD: cmd, FIELD_OUTSIDE: value, **OK}]
 
     def test_broadcast_hardware_info(self, simulator, recorder):
@@ -1108,7 +1171,7 @@ class TestBroadcastPayloads:
         assert recorder == [
             {
                 FIELD_CMD: CMD_GET_NOTIFICATIONS,
-                FIELD_NOTIFICATIONS: simulator.state.get_notifications(),
+                FIELD_NOTIFICATIONS: notifications_payload(simulator.state),
                 **OK,
             }
         ]
@@ -1125,16 +1188,6 @@ class TestBroadcastPayloads:
             CMD_GET_SCHEDULE_LIST,
             CMD_GET_NOTIFICATIONS,
         ]
-
-    async def test_sensor_trigger_broadcasts_bare_notification(self, simulator, recorder):
-        """An enabled sensor event broadcasts the bare notification envelope."""
-        from powerpetdoor.const import FIELD_SENSOR_STATE
-
-        simulator.state.sensor_on_indoor = True
-        simulator.trigger_sensor("inside")
-
-        notifications = [m for m in recorder if NOTIFY_SENSOR_INDOOR in m]
-        assert notifications == [{NOTIFY_SENSOR_INDOOR: "", FIELD_SENSOR_STATE: SENSOR_STATE_ON}]
 
     def test_broadcast_battery_reports_zero_when_absent(self, simulator, recorder):
         """With no battery installed, the broadcast reports 0%."""
@@ -1177,22 +1230,6 @@ class TestBroadcastPayloads:
 class TestLowBatteryNotification:
     """Low battery notifications use the bare envelope from protocol.md."""
 
-    async def test_set_battery_crossing_threshold_sends_bare_envelope(self, simulator):
-        """Crossing the threshold emits exactly {"LOW_BATTERY": ""}."""
-        reader, writer = await connect_client(simulator)
-        try:
-            simulator.state.low_battery = True
-            simulator.set_battery(15)  # 100 -> 15 crosses the 20% threshold
-
-            messages = await read_messages_until(
-                reader, lambda msgs: any(NOTIFY_LOW_BATTERY in m for m in msgs)
-            )
-            low_battery = [m for m in messages if NOTIFY_LOW_BATTERY in m]
-            assert low_battery == [{NOTIFY_LOW_BATTERY: ""}]
-        finally:
-            writer.close()
-            await writer.wait_closed()
-
     async def test_no_notification_when_disabled(self, simulator):
         """No LOW_BATTERY event when the notification setting is off."""
         reader, writer = await connect_client(simulator)
@@ -1204,7 +1241,7 @@ class TestLowBatteryNotification:
             messages = await read_messages_until(
                 reader, lambda msgs: any(FIELD_BATTERY_PERCENT in m for m in msgs)
             )
-            assert all(NOTIFY_LOW_BATTERY not in m for m in messages)
+            assert all(_WIRE_LOW_BATTERY not in m for m in messages)
         finally:
             writer.close()
             await writer.wait_closed()
@@ -1264,3 +1301,141 @@ class TestShutdownCleanliness:
             assert sim.protocols == []
         finally:
             writer.close()
+
+
+class TestPetPresenceAtEitherSensor:
+    """Which sensor a pet loiters at decides which settings apply."""
+
+    async def test_outside_presence_can_be_released(self, simulator):
+        simulator.set_pet_in_doorway(True, "outside")
+        assert simulator.state.pet_present("outside") is True
+
+        simulator.set_pet_in_doorway(False, "outside")
+
+        assert simulator.state.pet_present("outside") is False
+
+    async def test_releasing_outside_leaves_inside_alone(self, simulator):
+        simulator.state.inside_sensor_active = True
+
+        simulator.set_pet_in_doorway(False, "outside")
+
+        assert simulator.state.pet_present("inside") is True
+
+
+class TestNotifications:
+    """The five notifications, raised rather than sent.
+
+    A real door's notifications reach their owner through the vendor's
+    service, not over TCP 3000, so nothing here goes to a connected
+    client. What the simulator offers is a record that one *would* have
+    been raised: counted, logged, and delivered to listeners.
+    """
+
+    async def test_a_switched_off_notification_is_not_raised(self, simulator):
+        """Not counted, not delivered - that is what the switch means."""
+        seen: list[str] = []
+        simulator.add_notification_listener(seen.append)
+        simulator.state.sensor_on_indoor = False
+
+        assert simulator.notify("inside_on") is False
+        assert seen == []
+        assert simulator.state.notifications["inside_on"] == 0
+
+    async def test_a_switched_on_notification_is_counted_and_delivered(self, simulator):
+        seen: list[str] = []
+        simulator.add_notification_listener(seen.append)
+        simulator.state.sensor_on_indoor = True
+
+        assert simulator.notify("inside_on") is True
+
+        assert seen == ["inside_on"]
+        assert simulator.state.notifications["inside_on"] == 1
+
+    async def test_an_unknown_name_is_refused(self, simulator):
+        assert simulator.notify("nonsense") is False
+
+    async def test_unsubscribing_stops_delivery(self, simulator):
+        seen: list[str] = []
+        unsubscribe = simulator.add_notification_listener(seen.append)
+        simulator.state.sensor_on_indoor = True
+
+        unsubscribe()
+        simulator.notify("inside_on")
+
+        assert seen == []
+        unsubscribe()  # idempotent
+
+    async def test_a_raising_listener_does_not_stop_the_door(self, simulator, caplog):
+        """One bad subscriber must not take the simulator with it."""
+        import logging
+
+        seen: list[str] = []
+        simulator.add_notification_listener(lambda name: (_ for _ in ()).throw(RuntimeError("x")))
+        simulator.add_notification_listener(seen.append)
+        simulator.state.sensor_on_indoor = True
+
+        with caplog.at_level(logging.ERROR, logger="powerpetdoor.simulator.server"):
+            assert simulator.notify("inside_on") is True
+
+        assert seen == ["inside_on"]
+        assert "notification callback failed" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("sensor", "enabled", "expected"),
+        [
+            ("inside", True, "inside_on"),
+            ("inside", False, "inside_off"),
+            ("outside", True, "outside_on"),
+            ("outside", False, "outside_off"),
+        ],
+    )
+    async def test_which_one_a_pet_raises(self, simulator, sensor, enabled, expected):
+        """The on/off half names whether the **sensor** was enabled.
+
+        `inside_off` is "a pet tried to get out and the sensor was off",
+        which is the notification's whole point.
+        """
+        seen: list[str] = []
+        simulator.add_notification_listener(seen.append)
+        state = simulator.state
+        for attr in (
+            "sensor_on_indoor",
+            "sensor_off_indoor",
+            "sensor_on_outdoor",
+            "sensor_off_outdoor",
+        ):
+            setattr(state, attr, True)
+        setattr(state, sensor, enabled)
+
+        simulator.trigger_sensor(sensor)
+
+        assert seen == [expected]
+
+    async def test_a_low_battery_crossing_raises_it_once(self, simulator):
+        seen: list[str] = []
+        simulator.add_notification_listener(seen.append)
+        simulator.state.low_battery = True
+        simulator.state.battery_percent = 100
+
+        simulator.set_battery(5)
+        simulator.set_battery(4)
+
+        assert seen == ["low_battery"]
+
+    async def test_nothing_reaches_a_connected_client(self, simulator):
+        """The point of the change: these are not wire messages."""
+        from unittest.mock import MagicMock
+
+        protocol = MagicMock()
+        protocol._door_task = None
+        simulator.protocols.append(protocol)
+        try:
+            simulator.state.sensor_on_indoor = True
+            simulator.state.low_battery = True
+
+            simulator.notify("inside_on")
+            simulator.notify("low_battery")
+
+            assert protocol._send.call_count == 0
+        finally:
+            simulator.protocols.clear()

@@ -68,20 +68,26 @@ class TestFullTestSuite:
         assert simulator.state.power is True
         assert simulator.state.safety_lock is False
         assert simulator.state.door_status == DOOR_STATE_CLOSED
-        # Tests 1, 2 and 5 each complete a full close (3 counted cycles);
-        # tests 3 and 4 must not move the door.
-        assert simulator.state.total_open_cycles == 3
+        # Tests 1, 2, 4 and 5 each complete a full close. Test 4 counts
+        # now: the safety lock *grants* entry past a closed schedule
+        # window rather than refusing the outside sensor, so it opens the
+        # door. Test 3 (power off) still must not move it.
+        assert simulator.state.total_open_cycles == 4
 
 
 @requires_yaml
 class TestFullTestSuiteMessages:
     """Broadcasts observed by a connected client during full_test_suite."""
 
-    async def test_broadcasts_exact_three_cycles(self, runner, simulator, message_capture):
-        """The client sees two sensor cycles, then the keepup cycle - nothing else."""
+    async def test_broadcasts_exact_four_cycles(self, runner, simulator, message_capture):
+        """Two sensor cycles, the safety-lock cycle, then the keepup one.
+
+        The third is new: the lock grants entry past a closed window, so
+        test 4 moves the door where it used to be a no-op.
+        """
         result = await runner.run(get_builtin_script("full_test_suite"), verbose=False)
         assert result is True
 
-        expected = FULL_CYCLE + FULL_CYCLE + KEEPUP_CYCLE
+        expected = FULL_CYCLE + FULL_CYCLE + FULL_CYCLE + KEEPUP_CYCLE
         sequence = await message_capture.wait_for_status_sequence(expected)
         assert sequence == expected

@@ -166,8 +166,11 @@ class TestTheStaticAnalysisGates:
     @pytest.mark.parametrize(
         ("name", "command"),
         [
-            ("Check linting", ["ruff", "check", "src", "tests"]),
-            ("Check formatting", ["ruff", "format", "--check", "src", "tests"]),
+            # `scripts` too: the pre-commit hook formats the whole repo, so
+            # a CI scope narrower than the hook's lets a script pass CI and
+            # then get reformatted on the next commit.
+            ("Check linting", ["ruff", "check", "src", "tests", "scripts"]),
+            ("Check formatting", ["ruff", "format", "--check", "src", "tests", "scripts"]),
             ("Check types", ["mypy", "src"]),
         ],
     )

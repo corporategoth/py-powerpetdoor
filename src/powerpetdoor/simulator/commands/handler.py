@@ -19,7 +19,6 @@ from .base import (
     get_command_registry,
     parse_args,
 )
-from .buttons import ButtonCommandsMixin
 from .control import ControlCommandsMixin
 from .door import DoorCommandsMixin
 from .history import History
@@ -29,6 +28,8 @@ from .schedules import ScheduleCommandsMixin
 from .scripts import ScriptQueue, ScriptsCommandsMixin
 from .settings import SettingsCommandsMixin
 from .simulation import SimulationCommandsMixin
+from .state import StateCommandsMixin
+from .values import ValueCommandsMixin
 
 if TYPE_CHECKING:
     from ..scripting import ScriptRunner
@@ -44,11 +45,12 @@ _saved_exit_info: CommandInfo | None = None
 class CommandHandler(
     DoorCommandsMixin,
     SimulationCommandsMixin,
-    ButtonCommandsMixin,
     SettingsCommandsMixin,
     NotifyCommandsMixin,
     ScheduleCommandsMixin,
     ScriptsCommandsMixin,
+    StateCommandsMixin,
+    ValueCommandsMixin,
     InfoCommandsMixin,
     ControlCommandsMixin,
 ):
@@ -70,6 +72,8 @@ class CommandHandler(
         script_queue: ScriptQueue | None = None,
         scripts_dir: str | None = None,
         allow_script_paths: bool = True,
+        states_dir: str | None = None,
+        initial_state_document: dict | None = None,
     ):
         """Initialize the command handler.
 
@@ -81,7 +85,12 @@ class CommandHandler(
             scripts_dir: Optional directory of extra scripts resolvable by bare name
             allow_script_paths: If False, the run command only accepts bare
                 script names (no path separators or traversal). Set False when
-                the handler serves an unauthenticated control channel.
+                the handler serves an unauthenticated control channel. The
+                same policy governs `reset`'s state-file argument.
+            states_dir: Optional directory of state documents resolvable by
+                bare name.
+            initial_state_document: The document `--initial-state` supplied,
+                which a bare `reset` restores.
         """
         self.simulator = simulator
         self.script_runner = script_runner
@@ -89,6 +98,8 @@ class CommandHandler(
         self.script_queue = script_queue
         self._scripts_dir = scripts_dir
         self._allow_script_paths = allow_script_paths
+        self._states_dir = states_dir
+        self._initial_state_document = initial_state_document
         self._history_obj: History | None = None  # Set by cli.py when using prompt_toolkit
         self._history = None  # prompt_toolkit history for InfoCommandsMixin compatibility
         self._interactive_mode = False  # Set by cli.py for interactive sessions

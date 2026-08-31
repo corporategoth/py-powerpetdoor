@@ -14,6 +14,7 @@ from dataclasses import replace
 import pytest
 
 from powerpetdoor import (
+    END_OF_DAY,
     Schedule,
     compress_schedule,
     compute_schedule_diff,
@@ -37,6 +38,11 @@ from powerpetdoor.const import (
     FIELD_OUTSIDE_PREFIX,
     FIELD_SCHEDULE,
     FIELD_START_TIME_SUFFIX,
+)
+from powerpetdoor.schedule import (
+    MAX_SCHEDULE_HOUR,
+    MAX_SCHEDULE_MINUTE,
+    coerce_schedule_time,
 )
 from tests.conftest import assert_schedule_wire_types
 
@@ -1193,9 +1199,7 @@ class TestScheduleWireFormat:
     """
 
     def test_the_two_directions_differ_in_exactly_the_three_flag_fields(self):
-        """Verified against firmware 1.7.18.
-
-        A GET_SCHEDULE reply spells ``enabled``, ``inside`` and ``outside``
+        """A GET_SCHEDULE reply spells ``enabled``, ``inside`` and ``outside``
         as the integers 1/0; what the library SENDS is unchanged (JSON
         booleans). ``index``, ``daysOfWeek`` and the ``{hour, min}`` blocks
         are ints in both directions.
@@ -1217,7 +1221,7 @@ class TestScheduleWireFormat:
 
     @pytest.mark.parametrize("field_name", ["enabled", "inside", "outside"])
     def test_the_device_to_client_flag_spelling_is_the_wire_int(self, field_name):
-        """What firmware 1.7.18 replies, and therefore what the simulator emits.
+        """What the door replies, and therefore what the simulator emits.
 
         Ints, not the ``"1"``/``"0"`` strings this project assumed for
         years - and not bools, which JSON would render as ``true``.
@@ -1330,7 +1334,7 @@ class TestScheduleWireFormat:
 
 
 class TestBuildSetScheduleMessage:
-    """Verified against firmware 1.7.18: `index` must be a sibling.
+    """`index` must be a sibling.
 
     A SET_SCHEDULE carrying only `schedule` is answered `success: "false"`
     and writes nothing, however the entry itself is spelled - which is why
@@ -1359,3 +1363,56 @@ class TestBuildSetScheduleMessage:
 
         with pytest.raises(ValueError, match="missing required field 'index'"):
             schedule.build_set_schedule_message(payload)
+
+
+class TestTheEndOfTheDayIsHour24:
+    """`24:00` is a real time on this device, and `24:30` is not.
+
+    a window of `20:00-24:00`
+    reports the sensor enabled at 21:07 and `00:00-24:00` enables it
+    outright, so hour 24 is honoured by the schedule engine rather than
+    merely tolerated on input. That makes 24 the inclusive maximum - a
+    validator capping the hour at 23 would refuse the device's own
+    spelling of the end of the day.
+
+    One past the last real hour is only a time when the minute is zero,
+    which is the boundary these pin on both sides.
+    """
+
+    def test_the_end_of_the_day_is_accepted(self):
+        assert coerce_schedule_time({"hour": 24, "min": 0}, "t") == (24, 0)
+
+    def test_the_last_real_minute_is_accepted(self):
+        assert coerce_schedule_time({"hour": 23, "min": 59}, "t") == (23, 59)
+
+    def test_past_the_end_of_the_day_is_refused(self):
+        """24:30 is half an hour past the end of the day."""
+        with pytest.raises(ValueError, match="may only be 24:00"):
+            coerce_schedule_time({"hour": 24, "min": 30}, "t")
+
+    def test_one_minute_past_the_end_of_the_day_is_refused(self):
+        """The boundary is the minute, not how large the minute is."""
+        with pytest.raises(ValueError, match="may only be 24:00"):
+            coerce_schedule_time({"hour": 24, "min": 1}, "t")
+
+    def test_a_25th_hour_is_refused(self):
+        with pytest.raises(ValueError, match="between 0 and 24"):
+            coerce_schedule_time({"hour": 25, "min": 0}, "t")
+
+    def test_a_device_reporting_2430_is_read_as_the_end_of_the_day(self):
+        """Refusing here would discard a schedule the door really has.
+
+        The lenient path exists because dropping a device-reported entry
+        hides a schedule that is genuinely in force - the same reason a
+        missing hour becomes midnight rather than an error.
+        """
+        assert coerce_schedule_time({"hour": 24, "min": 30}, "t", require_hour=False) == (24, 0)
+
+    def test_a_device_reporting_the_end_of_the_day_is_unchanged(self):
+        assert coerce_schedule_time({"hour": 24, "min": 0}, "t", require_hour=False) == (24, 0)
+
+    def test_the_bound_is_named_rather_than_spelled_23(self):
+        """A literal 23 is how the spec came to claim the wrong maximum."""
+        assert MAX_SCHEDULE_HOUR == 24
+        assert MAX_SCHEDULE_MINUTE == 59
+        assert END_OF_DAY == (MAX_SCHEDULE_HOUR, 0)

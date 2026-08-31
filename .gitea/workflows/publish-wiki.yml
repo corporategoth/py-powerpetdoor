@@ -1,0 +1,78 @@
+# Render the wiki from the repository's docs and push it, on release.
+#
+# The chain, and why every link is on this side:
+#
+#   release cut on Gitea
+#     -> this job renders docs/ + the Sphinx API reference to wiki pages
+#     -> pushes them to the Gitea wiki
+#     -> sync-wiki.yml (on: wiki) carries them to the GitHub mirror
+#
+# Nothing here writes to GitHub. The wiki is written on Gitea, exactly as
+# the release is, and reaches the mirror the same way - see the "Gitea is
+# the source of truth" section of .claude/CLAUDE.md.
+#
+# On release only, not on every push to main: the wiki documents a
+# released version, so somebody reading it is not reading about behaviour
+# that is not out yet.
+name: Publish Wiki
+
+on:
+  release:
+    types: [published]
+  # Run it by hand from the Actions tab. The wiki is a rendering of files
+  # already in the repository, so publishing it off-cycle changes nothing
+  # a reader could not already see by browsing docs/ - and being able to
+  # prove the job works without cutting a release is worth more than
+  # keeping the wiki strictly release-shaped.
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Render and push the wiki
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v7.1.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras
+
+      # The generator is deterministic and reads only committed files, so
+      # what it writes here is what `python scripts/generate_wiki.py` shows
+      # locally.
+      - name: Render the wiki
+        run: uv run python scripts/generate_wiki.py --out build/wiki
+
+      - name: Push to the Gitea wiki
+        env:
+          # A token with write access to this repository's wiki. Gitea
+          # exposes the run's own token as GITEA_TOKEN; a PAT works too if
+          # the built-in one is scoped without wiki write.
+          WIKI_TOKEN: ${{ secrets.WIKI_TOKEN || secrets.GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WIKI_TOKEN}" ]; then
+            echo "No wiki token available - set WIKI_TOKEN in the repository secrets." >&2
+            exit 1
+          fi
+          host="${GITHUB_SERVER_URL#https://}"
+          git clone "https://x-access-token:${WIKI_TOKEN}@${host}/${GITHUB_REPOSITORY}.wiki.git" wiki
+          # Replace rather than merge: the wiki is a rendering, so a page
+          # that is no longer generated should stop existing.
+          find wiki -maxdepth 1 -name '*.md' -delete
+          cp build/wiki/*.md wiki/
+          cd wiki
+          git config user.name "gitea-actions"
+          git config user.email "gitea-actions@noreply.local"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "wiki already matches the release"
+            exit 0
+          fi
+          git commit -m "Wiki for ${GITHUB_REF_NAME}"
+          git push

@@ -3012,3 +3012,92 @@ class TestStartupBindFailuresPrintOneSentence:
 
         assert exc_info.value.code == 1
         assert "Traceback" in capsys.readouterr().err
+
+
+class TestStateDocumentArguments:
+    """`--initial-state` and `--states-dir` fail the command line, not a
+    daemon several seconds later - the same rule `--scripts-dir` follows."""
+
+    def test_initial_state_is_applied_to_the_starting_state(self, tmp_path):
+        from powerpetdoor.simulator.cli import _build_state
+
+        state = _build_state(None, None, {"settings": {"hold_time": 44}})
+
+        assert state is not None
+        assert state.hold_time == 44
+
+    def test_an_explicit_firmware_flag_beats_the_document(self):
+        """A file silently overriding the flag just typed is the
+        surprising precedence; the command line wins."""
+        from powerpetdoor.simulator.cli import _build_state
+
+        state = _build_state((9, 8, 7), None, {"hardware": {"fw_major": 1}})
+
+        assert state is not None
+        assert state.fw_major == 9
+
+    def test_no_overrides_at_all_leaves_the_default_state(self):
+        from powerpetdoor.simulator.cli import _build_state
+
+        assert _build_state(None, None, None) is None
+
+    def test_a_missing_initial_state_file_exits_two(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys, "argv", ["ppd-simulator", "--initial-state", "/nonexistent/s.json"]
+        )
+
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main()
+
+        assert exit_info.value.code == 2
+        assert "--initial-state" in capsys.readouterr().err
+
+    def test_a_malformed_initial_state_file_exits_two(self, tmp_path, monkeypatch, capsys):
+        bad = tmp_path / "bad.json"
+        bad.write_text("{nope")
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--initial-state", str(bad)])
+
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main()
+
+        assert exit_info.value.code == 2
+        assert "not valid" in capsys.readouterr().err
+
+    def test_a_states_dir_that_is_not_a_directory_exits_two(self, tmp_path, monkeypatch, capsys):
+        """A typo'd directory used to be found only by a ctl user much
+        later, which is why --scripts-dir checks this too."""
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--states-dir", str(tmp_path / "nope")])
+
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main()
+
+        assert exit_info.value.code == 2
+        assert "--states-dir" in capsys.readouterr().err
+
+
+class TestListStatesFlag:
+    """`--list-states` is the pre-flight surface for `reset`.
+
+    It needs no daemon, exactly as `--list-scripts` is for `run`, and
+    shares its renderer with the `list states` command so the two cannot
+    disagree about what will load.
+    """
+
+    def test_it_lists_the_directory_and_exits(self, tmp_path, monkeypatch, capsys):
+        (tmp_path / "quiet_night.json").write_text("{}")
+        monkeypatch.setattr(
+            sys, "argv", ["ppd-simulator", "--list-states", "--states-dir", str(tmp_path)]
+        )
+
+        cli.main()
+
+        out = capsys.readouterr().out
+        assert str(tmp_path) in out
+        assert "quiet_night" in out
+
+    def test_without_a_directory_it_names_the_missing_flag(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--list-states"])
+
+        cli.main()
+
+        assert "--states-dir" in capsys.readouterr().out

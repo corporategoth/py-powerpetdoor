@@ -52,10 +52,13 @@ jobs:
       # dependency set from PyPI.
       - name: Install dependencies
         run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+      # `scripts/` too: the pre-commit hook formats the whole repo, so a
+      # scope narrower than the hook's means a script can pass CI and then
+      # be reformatted on someone's next commit. Found exactly that way.
       - name: Check linting
-        run: ruff check src tests
+        run: ruff check src tests scripts
       - name: Check formatting
-        run: ruff format --check src tests
+        run: ruff format --check src tests scripts
       - name: Check types
         run: mypy src
       # Orphaned translations and unwrapped user-facing text both fail here.
@@ -63,6 +66,18 @@ jobs:
       # between a string landing and a translator reaching it.
       - name: Check translations
         run: python scripts/check_translations.py --untranslated --strict
+      # `--strict`, matching the pre-push hook: a dependency with a newer
+      # release fails here rather than becoming a Dependabot ticket on the
+      # mirror. The hook is the first line, this is the backstop for a
+      # push that skipped it.
+      - name: Check dependencies
+        run: python scripts/check_dependencies.py --strict
+        env:
+          # Action-pin checks query api.github.com. Unauthenticated is 60
+          # requests/hour shared by the whole runner, which this exhausts
+          # and then only warns about; the token makes the check actually
+          # verify rather than skip.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # A breaking change with no CHANGELOG entry leaves a user whose scripts
   # started exiting 1 with nothing to tell them it was coming.

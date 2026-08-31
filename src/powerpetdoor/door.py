@@ -8,7 +8,8 @@
 This module provides a Pythonic facade over the low-level PowerPetDoorClient,
 offering cached state, type-safe enums, and simple async methods.
 
-Example usage:
+Example usage::
+
     from powerpetdoor import PowerPetDoor, DoorStatus
 
     async def main():
@@ -84,6 +85,7 @@ from .const import (
     CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     CMD_SET_TIMEZONE,
     CONFIG,
+    DOOR_POSITIONS,
     # Door states
     DOOR_STATE_CLOSED,
     DOOR_STATE_CLOSING,
@@ -94,6 +96,10 @@ from .const import (
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
+    DOOR_STATES_CLOSED,
+    DOOR_STATES_CLOSING,
+    DOOR_STATES_FULLY_OPEN,
+    DOOR_STATES_OPEN,
     # Fields
     FIELD_AC_PRESENT,
     FIELD_AUTO,
@@ -149,43 +155,14 @@ from .schedule import (
     schedule_window_is_empty,
     window_minutes,
 )
+from .tz_utils import (
+    resolve_tzinfo,
+    to_posix_tz,
+)
 
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Facade cache guards (layer 1)
-# =============================================================================
-#
-# `PowerPetDoor` is the strict-typed layer: every property here is annotated
-# with a concrete Python type and consumers (the Home Assistant integration
-# publishes these as sensor states) are entitled to rely on it. The client is
-# layer 3 and is deliberately liberal - it hands the facade whatever the
-# device said, and `make_bool` is *documented* to return None for a string it
-# does not recognize - so the coercion has to happen here, on the way into the
-# cache.
-#
-# The rule these helpers enforce, and the one to apply to any listener added
-# later: **nothing enters the facade cache without a type check, and a value
-# that fails it leaves the cache untouched.** (`batteryPercent: "55"` used to
-# make the documented `door.battery.charging` property raise TypeError with
-# nothing logged.)
-#
-# Rejections log at DEBUG, not WARNING: these listeners fire once per device
-# frame. The client already logs every received frame at DEBUG, so an
-# operator diagnosing a firmware variant has both halves in the same place.
-
-
-#: The largest magnitude an ``int`` can have and still survive conversion
-#: to ``float``. Python ints are unbounded; ``float`` is not, so
-#: ``huge_int / 100.0`` raises ``OverflowError`` rather than returning
-#: ``inf``.
-#:
-#: This is a **representability** limit, deliberately not a protocol one.
-#: ``docs/protocol.md`` is reverse-engineered and is not authority over
-#: what real firmware sends, so the facade must not refuse a device value
-#: for being larger than a bound this project invented - it refuses it only
-#: for being a value the arithmetic downstream physically cannot perform.
 _FLOAT_REPRESENTABLE_MAX = sys.float_info.max
 
 
@@ -435,8 +412,8 @@ class Schedule:
             start=(self.start.hour, self.start.minute),
             # A window end of 00:00 goes out as 24:00. Midnight is the first
             # minute of a day, so as an end it says the opposite of what it
-            # means, and the device does NOT reinterpret it: measured on
-            # firmware 1.7.18, 20:00-00:00 is stored faithfully and never
+            # means, and the device does NOT reinterpret it:
+            # 20:00-00:00 is stored faithfully and never
             # fires. Only the SELECTED sensor's window is translated - the
             # other sensor's block stays the all-zero filler the protocol
             # asks for, which must not become a whole-day window.
@@ -477,8 +454,8 @@ class Schedule:
         caller has to spell it as two entries.
 
         ``<=``, not ``<``: a window whose end EQUALS its start is empty too -
-        measured on firmware 1.7.18, ``09:00-09:00`` leaves the sensor
-        disabled - and it is the worst of the three to let through, because
+        ``09:00-09:00`` leaves the sensor disabled - and it is the worst
+        of the three to let through, because
         the door takes it and simply stops permitting the sensor with nothing
         anywhere to say why.
 
@@ -898,44 +875,28 @@ class PowerPetDoor:
     @property
     def is_open(self) -> bool:
         """Whether the door is open or opening."""
-        return self._status in (
-            DoorStatus.RISING,
-            DoorStatus.SLOWING,
-            DoorStatus.HOLDING,
-            DoorStatus.KEEPUP,
-        )
+        return self._status.value in DOOR_STATES_OPEN
 
     @property
     def is_closed(self) -> bool:
         """Whether the door is fully closed."""
-        return self._status in (DoorStatus.CLOSED, DoorStatus.IDLE)
+        return self._status.value in DOOR_STATES_CLOSED
 
     @property
     def is_closing(self) -> bool:
         """Whether the door is currently closing."""
-        return self._status in (
-            DoorStatus.CLOSING,
-            DoorStatus.CLOSING_TOP_OPEN,
-            DoorStatus.CLOSING_MID_OPEN,
-        )
+        return self._status.value in DOOR_STATES_CLOSING
 
     @property
     def position(self) -> int:
-        """Door position as percentage (0=closed, 100=fully open)."""
-        position_map = {
-            DoorStatus.IDLE: 0,
-            DoorStatus.CLOSED: 0,
-            DoorStatus.RISING: 33,
-            DoorStatus.SLOWING: 66,
-            DoorStatus.HOLDING: 100,
-            DoorStatus.KEEPUP: 100,
-            # CLOSING is the moment the motor starts: the flap has not moved
-            # yet, so the door is still fully open.
-            DoorStatus.CLOSING: 100,
-            DoorStatus.CLOSING_TOP_OPEN: 66,
-            DoorStatus.CLOSING_MID_OPEN: 33,
-        }
-        return position_map.get(self._status, 0)
+        """Door position as percentage (0=closed, 100=fully open).
+
+        The table lives in :data:`~powerpetdoor.const.DOOR_POSITIONS`,
+        shared with the simulator's ``position`` script condition. Note
+        that ``DOOR_CLOSING`` is 100: the motor has started but the flap
+        has not moved, so the door is still fully open.
+        """
+        return DOOR_POSITIONS.get(self._status.value, 0)
 
     async def open(self) -> None:
         """Open the door and keep it open until :meth:`close` is called.
@@ -956,13 +917,21 @@ class PowerPetDoor:
         """Toggle the door - open if closed, close if open.
 
         Opening goes through :meth:`open`, so a toggled-open door stays
-        open until it is toggled back. Does nothing mid-travel.
+        open until it is toggled back.
+
+        **Does nothing mid-travel**, in either direction. This used to test
+        :attr:`is_open`, which is deliberately wider than "open" - it covers
+        ``RISING`` and ``SLOWING`` too, so that a consumer rendering a cover
+        entity sees a door that is on its way up as open rather than closed.
+        Toggling read that as "open, so close it" and reversed a door that
+        was still rising. Nothing but an obstruction is known to interrupt a
+        real door in motion, so a toggle mid-travel is a no-op.
         """
         if self.is_closed:
             await self.open()
-        elif self.is_open:
+        elif self._status.value in DOOR_STATES_FULLY_OPEN:
             await self.close()
-        # If closing, do nothing
+        # Mid-travel (rising, slowing, or any of the closing states): nothing
 
     async def cycle(self) -> None:
         """Run a full door cycle: open, hold for ``hold_time``, close.
@@ -1154,15 +1123,28 @@ class PowerPetDoor:
         return self._timezone
 
     async def set_timezone(self, tz: str, *, timeout: float | None = None) -> None:
-        """Set the door's timezone.
+        """Set the door's timezone, from either spelling.
+
+        The wire carries **POSIX only** - ``EST5EDT,M3.2.0,M11.1.0`` - in
+        both directions, and the door refuses anything else. An IANA name
+        is what a caller actually has, though: Home Assistant holds
+        ``America/New_York``, not a DST rule. Converting is this layer's
+        job, so a caller passing either gets the same result and neither
+        has to know what the wire wants.
 
         Args:
-            tz: Timezone in POSIX format (e.g., 'EST5EDT,M3.2.0,M11.1.0').
+            tz: A POSIX TZ string, or an IANA name to convert.
             timeout: Seconds to wait for response. Defaults to default_timeout.
+
+        Raises:
+            ValueError: If ``tz`` is neither a POSIX TZ string nor an IANA
+                name that can be converted to one. Raised here rather than
+                letting the door refuse it, so the caller learns which of
+                the two it got wrong.
         """
         await self._await_response(
             CMD_SET_TIMEZONE,
-            self._client.send_message(CONFIG, CMD_SET_TIMEZONE, notify=True, tz=tz),
+            self._client.send_message(CONFIG, CMD_SET_TIMEZONE, notify=True, tz=to_posix_tz(tz)),
             timeout,
         )
 
@@ -1170,7 +1152,7 @@ class PowerPetDoor:
     def sensor_trigger_voltage(self) -> int:
         """Capacitive sensor trigger threshold, in millivolts.
 
-        Read out of ``GET_SETTINGS``; the probed unit reported 2000.
+        Read out of ``GET_SETTINGS``; a typical unit reports 2000.
         """
         return self._sensor_trigger_voltage
 
@@ -1180,8 +1162,8 @@ class PowerPetDoor:
         """Set the sensor trigger threshold.
 
         Args:
-            millivolts: The new threshold. Verified settable on firmware
-                1.7.18 (2000 -> 1500 -> 2000).
+            millivolts: The new threshold. Settable and read back
+                (2000 -> 1500 -> 2000).
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
         # `build_set_voltage_message` owns the wire shape - the setter's
@@ -1209,8 +1191,8 @@ class PowerPetDoor:
         """Set the sleep-state sensor trigger threshold.
 
         Args:
-            millivolts: The new threshold. Verified settable on firmware
-                1.7.18 (2000 -> 1800 -> 2000).
+            millivolts: The new threshold. Settable and read back
+                (2000 -> 1800 -> 2000).
             timeout: Seconds to wait for response. Defaults to default_timeout.
         """
         await self._await_response(
@@ -1289,10 +1271,25 @@ class PowerPetDoor:
                 default_timeout.
 
         Returns:
-            The reported time as a **naive** :class:`~datetime.datetime`
-            (the device sends no offset; it is local to
-            :attr:`timezone`), or None if the string was unparseable -
-            in which case :attr:`device_time` still holds it verbatim.
+            The reported time as an **aware**
+            :class:`~datetime.datetime`, converted to this machine's local
+            timezone, or None if the string was unparseable - in which
+            case :attr:`device_time` still holds it verbatim.
+
+            The device sends a bare ``asctime()`` string with no offset,
+            so the reading is interpreted in :attr:`timezone` - the
+            door's own - and then converted. Being aware is what makes it
+            usable: comparing a naive value against ``datetime.now(tz)``
+            raises, and against ``datetime.now()`` it is silently wrong
+            unless the caller happens to share the door's timezone.
+
+            To see the face value the door reported, either read
+            :attr:`device_time`, which is untouched, or convert back with
+            ``result.astimezone(ZoneInfo(door.timezone))``.
+
+            Falls back to a naive value only when :attr:`timezone` has not
+            been read yet (call :meth:`refresh_settings` first) or does
+            not resolve.
         """
         await self._await_response(
             CMD_GET_TIME,
@@ -1302,7 +1299,7 @@ class PowerPetDoor:
             timeout,
         )
         try:
-            return datetime.strptime(self._device_time, TIME_FORMAT)
+            reading = datetime.strptime(self._device_time, TIME_FORMAT)
         except ValueError:
             logger.debug(
                 t(
@@ -1312,6 +1309,15 @@ class PowerPetDoor:
                 sanitize_text(self._device_time),
             )
             return None
+
+        # The door's timezone makes the reading absolute; converting then
+        # gives the caller an instant they can compare and render either
+        # way round. Without the timezone there is nothing to anchor it
+        # to, so the naive reading is all there is.
+        door_tz = resolve_tzinfo(self._timezone) if self._timezone else None
+        if door_tz is None:
+            return reading
+        return reading.replace(tzinfo=door_tz).astimezone()
 
     # =========================================================================
     # Battery
@@ -1467,7 +1473,7 @@ class PowerPetDoor:
         """
         schedule.validate_for_send()
         # `build_set_schedule_message` owns the wire shape - the slot index
-        # as a sibling of the schedule object, which firmware 1.7.18
+        # as a sibling of the schedule object, which the door
         # requires - and is equally reachable from a message-level caller.
         await self._await_response(
             CMD_SET_SCHEDULE,

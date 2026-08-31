@@ -280,3 +280,6 @@ data/
 
 # AI review process residue - not product
 .claude/analysis/
+
+# Generated API docs (built by scripts/build-docs.sh, published from CI)
+docs/api/_build/

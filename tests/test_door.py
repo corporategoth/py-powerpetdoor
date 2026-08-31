@@ -12,6 +12,7 @@ import copy
 import logging
 import sys
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -63,6 +64,9 @@ from powerpetdoor.simulator import (
     DoorSimulator,
     DoorSimulatorState,
     DoorTimingConfig,
+)
+from powerpetdoor.simulator.wire_values import (
+    settings_payload,
 )
 from tests.conftest import GOLDEN_SCHEDULE_WIRE_TO_DEVICE, assert_schedule_wire_types
 
@@ -370,7 +374,7 @@ class TestSchedule:
     def test_a_window_ending_at_midnight_goes_out_as_hour_24(self):
         """Midnight as an END is rewritten to the device's end-of-day.
 
-        Measured against firmware 1.7.18: the door does NOT reinterpret it.
+        the door does NOT reinterpret it.
         A stored `20:00-00:00` leaves the sensor disabled, because the engine
         is `start <= now < end` and an end of 0 never exceeds a start of
         1200. So "22:00 until midnight" has to leave here as 22:00-24:00 or
@@ -465,7 +469,7 @@ class TestSchedule:
     def test_window_is_empty_matches_the_device(self, start, end, empty):
         """Which windows a real door stores and then never acts on.
 
-        Every row measured on firmware 1.7.18 by reading the sensor flags the
+        Every row measured on the door by reading the sensor flags the
         schedule engine writes through to.
         """
         schedule = Schedule(
@@ -508,8 +512,8 @@ class TestSchedule:
         """Coinciding ends are refused as well, and that changed.
 
         This used to assert the opposite, reasoning that such an entry is not
-        malformed and the caller may have meant it. Measured on firmware
-        1.7.18, `09:00-09:00` is an EMPTY window: the door accepts it and
+        malformed and the caller may have meant it. But `09:00-09:00` is an
+        EMPTY window: the door accepts it and
         then simply stops permitting the sensor, with nothing anywhere to say
         why. `enabled=False` says the same thing and says it visibly, so
         there is no reason to let the silent spelling through.
@@ -1541,7 +1545,7 @@ class TestDoorSchedules:
     async def test_set_schedule_refuses_a_window_that_ends_before_it_starts(self, door, simulator):
         """Nothing reaches the door, so nothing is stored to be ignored later.
 
-        Measured on firmware 1.7.18: the device accepts such an entry, echoes
+        Measured on the door: the device accepts such an entry, echoes
         it back unchanged and never acts on it. Asserting the simulator's
         slot is still empty is the point - a rejection that still wrote would
         leave the user a schedule that reads correctly and does nothing.
@@ -1631,9 +1635,9 @@ class TestSetNotifications:
 
         await door.set_notifications(low_battery=True)
 
-        # A NESTED object of JSON booleans. Verified against firmware
-        # 1.7.18: flat top-level fields are rejected outright, and a nested
-        # object of strings is accepted and silently not applied.
+        # A NESTED object of JSON booleans: flat top-level fields are
+        # rejected outright, and a nested object of strings is accepted
+        # and silently not applied.
         assert sent == {
             FIELD_NOTIFICATIONS: {
                 FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: True,  # Preserved from cache
@@ -1750,14 +1754,32 @@ class TestVersionFormatting:
         assert door.hardware_version == ""
 
 
-class TestToggleWhileClosing:
-    """toggle() is a no-op while the door is closing."""
+class TestToggleMidTravel:
+    """toggle() is a no-op while the door is moving, in either direction.
 
-    async def test_toggle_noop_while_closing(self):
+    ``is_open`` is deliberately wider than "open" - it covers RISING and
+    SLOWING so a consumer rendering a cover entity sees a door on its way
+    up as open rather than closed. Toggling used to test it, read a rising
+    door as "open, so close it", and reverse a door mid-travel. Nothing but
+    an obstruction is known to interrupt a real door in motion.
+    """
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            DoorStatus.RISING,
+            DoorStatus.SLOWING,
+            DoorStatus.CLOSING,
+            DoorStatus.CLOSING_TOP_OPEN,
+            DoorStatus.CLOSING_MID_OPEN,
+        ],
+        ids=lambda s: s.name.lower(),
+    )
+    async def test_toggle_noop_mid_travel(self, status):
         from unittest.mock import AsyncMock, patch
 
         door = PowerPetDoor("127.0.0.1")
-        door._status = DoorStatus.CLOSING_TOP_OPEN
+        door._status = status
 
         with (
             patch.object(door, "open", new_callable=AsyncMock) as mock_open,
@@ -1767,6 +1789,40 @@ class TestToggleWhileClosing:
 
         assert mock_open.await_count == 0
         assert mock_close.await_count == 0
+
+    @pytest.mark.parametrize(
+        ("status", "opens", "closes"),
+        [
+            (DoorStatus.CLOSED, 1, 0),
+            (DoorStatus.IDLE, 1, 0),
+            (DoorStatus.HOLDING, 0, 1),
+            (DoorStatus.KEEPUP, 0, 1),
+        ],
+        ids=lambda v: getattr(v, "name", v),
+    )
+    async def test_toggle_acts_only_when_the_door_is_settled(self, status, opens, closes):
+        """The other side of the boundary: settled states still toggle."""
+        from unittest.mock import AsyncMock, patch
+
+        door = PowerPetDoor("127.0.0.1")
+        door._status = status
+
+        with (
+            patch.object(door, "open", new_callable=AsyncMock) as mock_open,
+            patch.object(door, "close", new_callable=AsyncMock) as mock_close,
+        ):
+            await door.toggle()
+
+        assert mock_open.await_count == opens
+        assert mock_close.await_count == closes
+
+    async def test_a_rising_door_still_reads_as_open(self):
+        """toggle changed; is_open did not - it is a different question."""
+        door = PowerPetDoor("127.0.0.1")
+        door._status = DoorStatus.RISING
+
+        assert door.is_open is True
+        assert door.is_closed is False
 
 
 class TestStatusCallbackIsolation:
@@ -2803,7 +2859,7 @@ class TestSensorTriggerVoltageFacade:
     async def test_the_setters_send_the_voltage_field_not_the_getters(self, door):
         """The whole point of `build_set_voltage_message`, pinned end to end.
 
-        Verified against firmware 1.7.18: a real door rejects the getter's
+        A real door rejects the getter's
         field name, so a facade that sent `sensorTriggerVoltage` would
         silently do nothing.
         """
@@ -2918,6 +2974,35 @@ class TestDoorClockFacade:
 
         assert parsed is None or isinstance(parsed, datetime)
 
+    async def test_refresh_time_is_aware_and_local_once_the_zone_is_known(self, door):
+        """The reading is an instant, not a wall clock.
+
+        The device sends a bare asctime with no offset. Anchoring it to
+        the door's zone and converting to local gives the caller one
+        instant they can compare against `datetime.now()` directly;
+        naive, it is silently wrong unless the caller shares the zone.
+        """
+        door._timezone = "America/New_York"
+
+        when = await door.refresh_time()
+
+        assert when is not None
+        assert when.tzinfo is not None
+        assert when.utcoffset() == datetime.now().astimezone().utcoffset()
+        # Read back in the door's own zone, it is exactly what the door said.
+        face = when.astimezone(ZoneInfo("America/New_York")).strftime(TIME_FORMAT)
+        assert face == door.device_time
+
+    async def test_refresh_time_stays_naive_without_a_zone(self, door):
+        """With no timezone there is nothing to anchor the reading to."""
+        door._timezone = ""
+
+        when = await door.refresh_time()
+
+        assert when is not None
+        assert when.tzinfo is None
+        assert when.strftime(TIME_FORMAT) == door.device_time
+
     def test_a_non_string_time_keeps_the_cached_one(self):
         door = PowerPetDoor("127.0.0.1")
         door._on_time_update("Sat Aug 22 23:13:48 2026")
@@ -2928,7 +3013,7 @@ class TestDoorClockFacade:
 
 
 class TestTheFacadeSendsEveryCommandUnderTheRightEnvelopeKey:
-    """Verified against firmware 1.7.18: `{"cmd": "ENABLE_INSIDE"}` fails.
+    """`{"cmd": "ENABLE_INSIDE"}` fails.
 
     Every released version before this one sent the individual setting
     commands under `cmd`, so none of them worked against a real door. Each
@@ -3081,11 +3166,11 @@ class TestTheAppSettingPolarities:
     async def test_autoretract_is_bit_one_of_door_options(self, door, simulator):
         """App *"Auto Retract"* ⇒ `doorOptions` bit 1: on ⇒ 2, off ⇒ 0."""
         await door.set_autoretract(True)
-        assert simulator.state.get_settings()[FIELD_AUTORETRACT] == DOOR_OPTION_AUTORETRACT
+        assert settings_payload(simulator.state)[FIELD_AUTORETRACT] == DOOR_OPTION_AUTORETRACT
         assert door.autoretract is True
 
         await door.set_autoretract(False)
-        assert simulator.state.get_settings()[FIELD_AUTORETRACT] == 0
+        assert settings_payload(simulator.state)[FIELD_AUTORETRACT] == 0
         assert door.autoretract is False
 
     def test_an_unrelated_door_options_bit_does_not_read_as_autoretract(self):

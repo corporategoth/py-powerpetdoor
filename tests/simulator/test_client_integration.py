@@ -48,9 +48,6 @@ from powerpetdoor.const import (
     FIELD_OUTSIDE,
     FIELD_POWER,
     FIELD_SUCCESS,
-    NOTIFY_LOW_BATTERY,
-    NOTIFY_SENSOR_INDOOR,
-    SENSOR_STATE_ON,
     SUCCESS_FALSE,
 )
 from powerpetdoor.simulator import (
@@ -66,7 +63,7 @@ from powerpetdoor.simulator import (
 #: registered for GET_DOOR_STATUS and DOOR_STATUS only).
 OPENING_SEQUENCE = [DOOR_STATE_RISING, DOOR_STATE_SLOWING, DOOR_STATE_HOLDING]
 CLOSING_SEQUENCE = [
-    # DOOR_CLOSING first: measured on a real door (firmware 1.7.18), the
+    # DOOR_CLOSING first: the
     # motor starts before the flap moves and the device reports it.
     DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_TOP_OPEN,
@@ -484,7 +481,8 @@ class TestClientCallbacks:
         client.add_listener("test", sensor_update={"*": callback})
 
         # Change power state from simulator side (broadcast)
-        simulator.broadcast_power(False)
+        simulator.state.power = False
+        simulator.broadcast_value("power")
 
         await tracker.wait_for("sensor", timeout=2.0)
 
@@ -501,7 +499,8 @@ class TestClientCallbacks:
         client.add_listener("test", sensor_update={"*": callback})
 
         # Broadcast inside sensor change from simulator
-        simulator.broadcast_inside_sensor(False)
+        simulator.state.inside = False
+        simulator.broadcast_value("inside")
 
         await tracker.wait_for("sensor", timeout=2.0)
 
@@ -579,56 +578,6 @@ class TestSettingsRoundTrips:
 
 # ============================================================================
 # Notification Event Round-Trip Tests (bare envelope)
-# ============================================================================
-
-
-class TestNotificationEvents:
-    """Simulator emits bare notification envelopes; client dispatches them."""
-
-    async def test_sensor_notification_round_trip(self, client, simulator, tracker):
-        """Simulator sensor event -> client notification_event listener."""
-        callback = tracker.make_callback("notify")
-        client.add_listener("test", notification_event=callback)
-
-        # Enable the notification and trigger the (closed) door's sensor
-        simulator.state.sensor_on_indoor = True
-        simulator.trigger_sensor("inside")
-
-        assert await tracker.wait_for("notify", timeout=2.0)
-        calls = tracker.get_calls("notify")
-        assert calls[0] == (NOTIFY_SENSOR_INDOOR, SENSOR_STATE_ON)
-
-    async def test_low_battery_notification_round_trip(self, client, simulator, tracker):
-        """Simulator low-battery event -> client notification_event listener."""
-        callback = tracker.make_callback("notify")
-        client.add_listener("test", notification_event=callback)
-
-        simulator.state.low_battery = True
-        simulator.set_battery(15)  # crosses the 20% threshold
-
-        assert await tracker.wait_for("notify", timeout=2.0)
-        calls = tracker.get_calls("notify")
-        # LOW_BATTERY carries no sensorState
-        assert calls[0] == (NOTIFY_LOW_BATTERY, None)
-
-    async def test_disabled_sensor_notification_not_emitted(self, client, simulator, tracker):
-        """No notification event reaches the client when the setting is off."""
-        callback = tracker.make_callback("notify")
-        client.add_listener("test", notification_event=callback)
-
-        # sensor_on_indoor defaults to disabled
-        simulator.trigger_sensor("inside")
-
-        # Sentinel round-trip: the simulator writes messages in order, so by
-        # the time this reply arrives, any (unexpected) earlier notification
-        # would already have been dispatched to the listener.
-        future = client.send_message(CONFIG, CMD_GET_POWER, notify=True)
-        await asyncio.wait_for(future, timeout=2.0)
-        assert tracker.get_calls("notify") == []
-
-
-# ============================================================================
-# Full Door Cycle Tests
 # ============================================================================
 
 
@@ -739,7 +688,7 @@ class TestScheduleCallbacks:
         calls = tracker.get_calls("schedule")
         assert len(calls) > 0
         # Callback receives the schedule dict exactly as the device sends
-        # it: the flag fields are ints (verified against firmware 1.7.18).
+        # it: the flag fields are ints.
         schedule_data = calls[0][0]
         assert schedule_data["index"] == 0
         assert schedule_data["enabled"] == 1
@@ -792,7 +741,7 @@ class TestScheduleCallbacks:
 class TestAFailureWithNoMsgIdStillFailsTheCaller:
     """The end-to-end consequence of the device's failure envelope.
 
-    Verified against firmware 1.7.18: a failure carries **no** `msgID`, so
+    A failure carries **no** `msgID`, so
     a client that pairs replies to requests by id has nothing to pair it
     with. Before the fix the retry timer was cancelled by the reply and the
     future was left pending, so `await` hung until the caller's own timeout

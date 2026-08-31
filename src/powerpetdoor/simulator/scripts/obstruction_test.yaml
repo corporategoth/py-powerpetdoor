@@ -1,5 +1,5 @@
 name: "Obstruction Auto-Retract Test"
-description: "Tests that door auto-retracts when obstruction detected"
+description: "Tests that door auto-retracts when it closes onto an obstruction"
 steps:
   - action: set
     name: autoretract
@@ -7,21 +7,31 @@ steps:
   - action: set
     name: hold_time
     value: "1"
-  - action: trigger_sensor
+  - action: trigger
     sensor: inside
   - action: wait_for
-    condition: door_holding
+    condition: door_status
+    equals: DOOR_HOLDING
     timeout: 5
+  # Placed while the door is up, the way a real obstruction gets there. An
+  # obstruction is not a sensor, so this does not stop the close from
+  # starting - the door travels down and meets it at the bottom. Arming it
+  # here rather than mid-close also removes a race against closing_mid_time.
+  - action: obstruction
   - action: log
-    message: "Door is holding, waiting for close to start..."
+    message: "Obstruction placed, waiting for the door to close onto it..."
   - action: wait_for
     condition: door_closing
     timeout: 10
-  - action: obstruction
-  - action: log
-    message: "Obstruction triggered, door should auto-retract"
   - action: wait_for
     condition: door_open
     timeout: 5
+  # A one-shot obstruction is cleared by the retract it causes.
+  - action: assert
+    condition: obstruction
+    equals: "off"
+  - action: assert
+    condition: total_auto_retracts
+    equals: "1"
   - action: log
     message: "Auto-retract successful!"

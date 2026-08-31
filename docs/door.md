@@ -33,6 +33,7 @@ The `PowerPetDoor` class provides a high-level, Pythonic interface to your Power
 import asyncio
 from powerpetdoor import PowerPetDoor, DoorStatus
 
+
 async def main():
     # Create and connect
     door = PowerPetDoor("192.168.1.100")
@@ -56,6 +57,7 @@ async def main():
     # Disconnect when done
     await door.disconnect()
 
+
 asyncio.run(main())
 ```
 
@@ -72,19 +74,19 @@ pip install pypowerpetdoor
 ```python
 door = PowerPetDoor(
     host="192.168.1.100",  # Required: IP address or hostname
-    port=3000,              # Optional: TCP port (default 3000)
-    keepalive=30.0,         # Optional: Seconds between keepalive pings
-    timeout=10.0,           # Optional: Response timeout in seconds
-    reconnect=5.0,          # Optional: Reconnect delay in seconds
-    loop=None,              # Optional: Event loop (uses current if None)
+    port=3000,  # Optional: TCP port (default 3000)
+    keepalive=30.0,  # Optional: Seconds between keepalive pings
+    timeout=10.0,  # Optional: Response timeout in seconds
+    reconnect=5.0,  # Optional: Reconnect delay in seconds
+    loop=None,  # Optional: Event loop (uses current if None)
 )
 ```
 
 ### Connection Methods
 
 ```python
-await door.connect()      # Connect and fetch initial state
-await door.disconnect()   # Disconnect from the door
+await door.connect()  # Connect and fetch initial state
+await door.disconnect()  # Disconnect from the door
 ```
 
 `connect()` waits (event-driven, no polling) for the connection and
@@ -178,10 +180,10 @@ to clear the queue and fail every outstanding future with
 ### Control Methods
 
 ```python
-await door.open()    # Open and keep open until closed (OPEN_AND_HOLD)
-await door.close()   # Close the door (CLOSE)
+await door.open()  # Open and keep open until closed (OPEN_AND_HOLD)
+await door.close()  # Close the door (CLOSE)
 await door.toggle()  # Open if closed, close if open; nothing mid-travel
-await door.cycle()   # Timed open: rise, hold for hold_time, close (OPEN)
+await door.cycle()  # Timed open: rise, hold for hold_time, close (OPEN)
 ```
 
 The method names describe what the door *does*, which is not the spelling
@@ -216,20 +218,19 @@ not be an open, which is why the plain word is bound to `OPEN_AND_HOLD`.
 from powerpetdoor import DoorStatus
 
 # Available states:
-DoorStatus.IDLE            # Door idle
-DoorStatus.CLOSED          # Door fully closed
-DoorStatus.RISING          # Door opening
-DoorStatus.SLOWING         # Door slowing near top
-DoorStatus.HOLDING         # Door open, holding before auto-close
-DoorStatus.KEEPUP          # Door locked open (open)
-DoorStatus.CLOSING            # Closing has begun, flap has not moved yet
-DoorStatus.CLOSING_TOP_OPEN   # Door closing from top
-DoorStatus.CLOSING_MID_OPEN   # Door closing from middle
-DoorStatus.UNKNOWN         # Unrecognized status string from the device
+DoorStatus.IDLE  # Door idle
+DoorStatus.CLOSED  # Door fully closed
+DoorStatus.RISING  # Door opening
+DoorStatus.SLOWING  # Door slowing near top
+DoorStatus.HOLDING  # Door open, holding before auto-close
+DoorStatus.KEEPUP  # Door locked open (open)
+DoorStatus.CLOSING  # Closing has begun, flap has not moved yet
+DoorStatus.CLOSING_TOP_OPEN  # Door closing from top
+DoorStatus.CLOSING_MID_OPEN  # Door closing from middle
+DoorStatus.UNKNOWN  # Unrecognized status string from the device
 ```
 
-Closing has **three** states, not two. Measured on firmware 1.7.18 by
-cycling a real door:
+Closing has **three** states, not two:
 
 ```
 IDLE -> RISING -> SLOWING -> HOLDING
@@ -263,10 +264,10 @@ The door has inside and outside sensors that detect pet proximity.
 ### Sensor Methods
 
 ```python
-await door.set_inside_sensor(True)   # Enable inside sensor
+await door.set_inside_sensor(True)  # Enable inside sensor
 await door.set_inside_sensor(False)  # Disable inside sensor
 await door.set_outside_sensor(True)  # Enable outside sensor
-await door.set_outside_sensor(False) # Disable outside sensor
+await door.set_outside_sensor(False)  # Disable outside sensor
 ```
 
 ## Power Control
@@ -280,7 +281,7 @@ await door.set_outside_sensor(False) # Disable outside sensor
 ### Power Methods
 
 ```python
-await door.set_power(True)   # Turn door power on
+await door.set_power(True)  # Turn door power on
 await door.set_power(False)  # Turn door power off
 ```
 
@@ -295,7 +296,7 @@ await door.set_power(False)  # Turn door power off
 ### Auto Mode Methods
 
 ```python
-await door.set_auto(True)   # Enable automatic scheduling
+await door.set_auto(True)  # Enable automatic scheduling
 await door.set_auto(False)  # Disable automatic scheduling
 ```
 
@@ -357,7 +358,7 @@ The capacitive sensor thresholds, in millivolts. The probed door sat at
 2000 for both.
 
 ```python
-print(door.sensor_trigger_voltage)        # e.g. 2000
+print(door.sensor_trigger_voltage)  # e.g. 2000
 print(door.sleep_sensor_trigger_voltage)  # applies in the door's sleep state
 
 await door.set_sensor_trigger_voltage(1500)
@@ -375,8 +376,8 @@ Schedules are evaluated against the door's own clock, so this is the only
 way to check that a door will fire a schedule when you expect it to:
 
 ```python
-when = await door.refresh_time()   # naive datetime, local to door.timezone
-print(door.device_time)            # the raw asctime string it sent
+when = await door.refresh_time()  # naive datetime, local to door.timezone
+print(door.device_time)  # the raw asctime string it sent
 ```
 
 `refresh_time()` returns `None` if the string was unparseable;
@@ -425,17 +426,17 @@ from powerpetdoor import (
 await async_init_timezone_cache()
 assert is_cache_initialized()
 
-posix = get_posix_tz_string("America/New_York")   # 'EST5EDT,M3.2.0,M11.1.0'
+posix = get_posix_tz_string("America/New_York")  # 'EST5EDT,M3.2.0,M11.1.0'
 await door.set_timezone(posix)
 
 # ... and back again, for display. The reverse map is keyed by POSIX rule,
 # so the name you get back is *a* zone with those rules, not necessarily
 # the one you started from - but it always round-trips to the same string.
-find_iana_for_posix(posix)                        # e.g. 'America/Detroit'
+find_iana_for_posix(posix)  # e.g. 'America/Detroit'
 get_posix_tz_string(find_iana_for_posix(posix)) == posix
 
-get_available_timezones()[:3]                     # every IANA name, sorted
-parse_posix_tz_string(posix)["std_abbrev"]        # 'EST'
+get_available_timezones()[:3]  # every IANA name, sorted
+parse_posix_tz_string(posix)["std_abbrev"]  # 'EST'
 ```
 
 | Helper | Purpose |
@@ -466,8 +467,8 @@ The `BatteryInfo` object also provides computed properties:
 
 ```python
 info = door.battery
-print(f"Charging: {info.charging}")      # AC present and not full
-print(f"Discharging: {info.discharging}") # No AC and battery present
+print(f"Charging: {info.charging}")  # AC present and not full
+print(f"Discharging: {info.discharging}")  # No AC and battery present
 ```
 
 ### Hardware Properties
@@ -547,7 +548,7 @@ schedule = Schedule(
     index=0,
     enabled=True,
     days_of_week=[True, True, True, True, True, True, True],  # All days
-    inside=True,       # This schedule controls inside sensor
+    inside=True,  # This schedule controls inside sensor
     outside=False,
     start=ScheduleTime(hour=6, minute=0),
     end=ScheduleTime(hour=22, minute=0),
@@ -567,11 +568,14 @@ Register callbacks to be notified of changes:
 def on_status(status: DoorStatus):
     print(f"Door is now: {status.name}")
 
+
 door.on_status_change(on_status)
+
 
 # Settings changes
 def on_settings(settings: dict):
     print(f"Settings updated: {settings}")
+
 
 door.on_settings_change(on_settings)
 
@@ -579,10 +583,12 @@ door.on_settings_change(on_settings)
 door.on_connect(lambda: print("Connected!"))
 door.on_disconnect(lambda: print("Disconnected!"))
 
+
 # Schedule changes (receives the updated list of Schedule objects whenever
 # a schedule is added, updated, or deleted)
 def on_schedules(schedules: list[Schedule]):
     print(f"Schedules updated: {len(schedules)} entries")
+
 
 door.on_schedule_change(on_schedules)
 ```
@@ -622,9 +628,9 @@ Enum representing door operational states. See [Door Status](#door-status) secti
 ```python
 @dataclass
 class NotificationSettings:
-    inside_on: bool = False    # Notify when inside sensor triggers
-    inside_off: bool = False   # Notify when inside sensor deactivates
-    outside_on: bool = False   # Notify when outside sensor triggers
+    inside_on: bool = False  # Notify when inside sensor triggers
+    inside_off: bool = False  # Notify when inside sensor deactivates
+    outside_on: bool = False  # Notify when outside sensor triggers
     outside_off: bool = False  # Notify when outside sensor deactivates
     low_battery: bool = False  # Notify on low battery
 ```
@@ -634,12 +640,12 @@ class NotificationSettings:
 ```python
 @dataclass
 class BatteryInfo:
-    percent: int = 100      # Battery percentage (0-100)
-    present: bool = True    # Whether battery is installed
-    ac_present: bool = True # Whether AC power is connected
+    percent: int = 100  # Battery percentage (0-100)
+    present: bool = True  # Whether battery is installed
+    ac_present: bool = True  # Whether AC power is connected
 
     @property
-    def charging(self) -> bool: ...     # AC present and not full
+    def charging(self) -> bool: ...  # AC present and not full
 
     @property
     def discharging(self) -> bool: ...  # No AC and battery present
@@ -650,19 +656,20 @@ class BatteryInfo:
 ```python
 @dataclass
 class ScheduleTime:
-    hour: int = 0    # Hour (0-23)
+    hour: int = 0  # Hour (0-23)
     minute: int = 0  # Minute (0-59)
+
 
 @dataclass
 class Schedule:
-    index: int = 0                       # Schedule slot (0-based)
-    enabled: bool = True                 # Whether schedule is active
+    index: int = 0  # Schedule slot (0-based)
+    enabled: bool = True  # Whether schedule is active
     # [Sun, Mon, Tue, Wed, Thu, Fri, Sat], defaults to all days
     days_of_week: list[bool] = [True] * 7
-    inside: bool = False                 # Controls inside sensor
-    outside: bool = False                # Controls outside sensor
-    start: ScheduleTime = ScheduleTime(6, 0)   # Start time for sensor
-    end: ScheduleTime = ScheduleTime(22, 0)    # End time for sensor
+    inside: bool = False  # Controls inside sensor
+    outside: bool = False  # Controls outside sensor
+    start: ScheduleTime = ScheduleTime(6, 0)  # Start time for sensor
+    end: ScheduleTime = ScheduleTime(22, 0)  # End time for sensor
 ```
 
 ### Days of Week List
@@ -674,9 +681,9 @@ Each schedule entry controls ONE sensor (inside or outside) for specific days an
 # True = active, False = inactive
 # (the wire protocol uses 1/0; Schedule converts automatically)
 
-ALL_DAYS  = [True, True, True, True, True, True, True]     # Every day
-WEEKDAYS  = [False, True, True, True, True, True, False]   # Monday-Friday
-WEEKENDS  = [True, False, False, False, False, False, True]  # Saturday-Sunday
+ALL_DAYS = [True, True, True, True, True, True, True]  # Every day
+WEEKDAYS = [False, True, True, True, True, True, False]  # Monday-Friday
+WEEKENDS = [True, False, False, False, False, False, True]  # Saturday-Sunday
 ```
 
 The list is indexed **Sunday-first**, while `datetime.weekday()` is
@@ -689,7 +696,7 @@ from datetime import date
 from powerpetdoor import week_0_mon_to_sun, week_0_sun_to_mon
 
 index = week_0_mon_to_sun(date.today().weekday())  # Monday=0 -> Sunday=0
-schedule.days_of_week[index]                        # active today?
+schedule.days_of_week[index]  # active today?
 
 week_0_sun_to_mon(index) == date.today().weekday()  # and back
 ```
@@ -713,7 +720,7 @@ from powerpetdoor import (
     validate_schedule_entry,
 )
 
-wanted = compress_schedule([...])            # entries built from schedule_template
+wanted = compress_schedule([...])  # entries built from schedule_template
 current = [s.to_dict() for s in await door.refresh_schedules()]
 to_delete, to_set = compute_schedule_diff(current, wanted)
 
@@ -730,8 +737,8 @@ entry for the required fields without raising.
 
 ### What the device does with a window — and what it refuses to do
 
-Measured against firmware 1.7.18 (see `docs/protocol.md` for the probe
-table), the schedule engine is exactly:
+The schedule engine is exactly (see `docs/protocol.md` for the probe
+table):
 
 ```
 active  iff  start <= now < end        # 24:00 is a legal end, meaning 1440
@@ -763,9 +770,9 @@ from powerpetdoor import (
     window_minutes,
 )
 
-normalise_window_end(MIDNIGHT) == END_OF_DAY      # 00:00 end -> 24:00
+normalise_window_end(MIDNIGHT) == END_OF_DAY  # 00:00 end -> 24:00
 window_minutes((22, 0), END_OF_DAY) == (1320, 1440)
-schedule_window_is_empty((9, 0), (9, 0))          # True - stored, never fires
+schedule_window_is_empty((9, 0), (9, 0))  # True - stored, never fires
 ```
 
 `set_schedule` refuses a window that covers no time — one whose end does not
@@ -773,9 +780,7 @@ EXCEED its start — because the door would accept it, echo it back unchanged
 and silently never act on it:
 
 ```python
-await door.set_schedule(Schedule(inside=True,
-                                 start=ScheduleTime(23, 0),
-                                 end=ScheduleTime(1, 0)))
+await door.set_schedule(Schedule(inside=True, start=ScheduleTime(23, 0), end=ScheduleTime(1, 0)))
 # ValueError: ...ends before it starts...
 ```
 

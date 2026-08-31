@@ -31,18 +31,11 @@ from powerpetdoor import PowerPetDoorClient, COMMAND, CMD_OPEN, CMD_CLOSE
 
 # Create client
 client = PowerPetDoorClient(
-    host="192.168.1.100",
-    port=3000,
-    keepalive=30.0,
-    timeout=10.0,
-    reconnect=5.0
+    host="192.168.1.100", port=3000, keepalive=30.0, timeout=10.0, reconnect=5.0
 )
 
 # Add listeners
-client.add_listener(
-    name="my_app",
-    door_status_update=lambda status: print(f"Door: {status}")
-)
+client.add_listener(name="my_app", door_status_update=lambda status: print(f"Door: {status}"))
 
 # Start - this blocks until stop() is called
 client.start()
@@ -56,6 +49,7 @@ onto the running loop automatically - passing `loop` is optional):
 ```python
 import asyncio
 from powerpetdoor import PowerPetDoorClient, CONFIG, CMD_GET_SETTINGS
+
 
 async def main():
     client = PowerPetDoorClient(
@@ -79,6 +73,7 @@ async def main():
     # Cleanup: stops reconnection and closes the connection
     client.shutdown()
 
+
 asyncio.run(main())
 ```
 
@@ -94,11 +89,11 @@ class provides defaults for them):
 ```python
 client = PowerPetDoorClient(
     host="192.168.1.100",  # IP address or hostname
-    port=3000,              # TCP port (the door listens on 3000)
-    keepalive=30.0,         # Seconds between keepalive pings (0 to disable)
-    timeout=10.0,           # Response timeout in seconds
-    reconnect=5.0,          # Reconnect delay in seconds
-    loop=None,              # Optional: existing asyncio event loop
+    port=3000,  # TCP port (the door listens on 3000)
+    keepalive=30.0,  # Seconds between keepalive pings (0 to disable)
+    timeout=10.0,  # Response timeout in seconds
+    reconnect=5.0,  # Reconnect delay in seconds
+    loop=None,  # Optional: existing asyncio event loop
 )
 ```
 
@@ -197,7 +192,7 @@ client.send_message(CONFIG, CMD_SET_HOLD_TIME, notify=True, **build_set_hold_tim
 ### Which envelope key? Use `envelope_for_command()`
 
 `COMMAND` (`"cmd"`) and `CONFIG` (`"config"`) are **not** interchangeable.
-Verified against firmware 1.7.18: only `OPEN`, `OPEN_AND_HOLD` and `CLOSE`
+Only `OPEN`, `OPEN_AND_HOLD` and `CLOSE`
 are accepted as a `cmd`; every other command — including `ENABLE_INSIDE`,
 `POWER_ON` and the rest of the individual setting commands — is answered
 `success: "false"` under `cmd` and works under `config`. See
@@ -242,20 +237,29 @@ from powerpetdoor import (
 )
 
 await client.send_message(
-    CONFIG, CMD_SET_NOTIFICATIONS, notify=True,
+    CONFIG,
+    CMD_SET_NOTIFICATIONS,
+    notify=True,
     **build_set_notifications_message(
-        inside_on=True, inside_off=False,
-        outside_on=True, outside_off=False, low_battery=True,
+        inside_on=True,
+        inside_off=False,
+        outside_on=True,
+        outside_off=False,
+        low_battery=True,
     ),
 )
 
 await client.send_message(
-    CONFIG, CMD_SET_SCHEDULE, notify=True,
+    CONFIG,
+    CMD_SET_SCHEDULE,
+    notify=True,
     **build_set_schedule_message(Schedule(index=0, inside=True).to_dict()),
 )
 
 await client.send_message(
-    CONFIG, CMD_SET_SENSOR_TRIGGER_VOLTAGE, notify=True,
+    CONFIG,
+    CMD_SET_SENSOR_TRIGGER_VOLTAGE,
+    notify=True,
     **build_set_voltage_message(1500),
 )
 ```
@@ -314,35 +318,30 @@ Import constants from the package:
 ```python
 from powerpetdoor import (
     # Message types
-    COMMAND,    # For actions (open, close, enable/disable)
-    CONFIG,     # For configuration queries and updates
-    PING,       # For keepalive (used internally)
-
+    COMMAND,  # For actions (open, close, enable/disable)
+    CONFIG,  # For configuration queries and updates
+    PING,  # For keepalive (used internally)
     # Door control - the ONLY commands accepted with COMMAND
     CMD_OPEN,
     CMD_OPEN_AND_HOLD,
     CMD_CLOSE,
-
     # Sensor commands (use with CONFIG)
     CMD_ENABLE_INSIDE,
     CMD_DISABLE_INSIDE,
     CMD_ENABLE_OUTSIDE,
     CMD_DISABLE_OUTSIDE,
-
     # Power commands (use with CONFIG)
     CMD_POWER_ON,
     CMD_POWER_OFF,
-
     # Auto/timer commands (use with CONFIG)
     CMD_ENABLE_AUTO,
     CMD_DISABLE_AUTO,
-
     # Query commands (use with CONFIG)
     CMD_GET_SETTINGS,
     CMD_GET_DOOR_STATUS,
     CMD_GET_SENSORS,
     CMD_GET_POWER,
-    CMD_GET_AUTO,                        # NOT implemented by firmware
+    CMD_GET_TIMERS_ENABLED,
     CMD_GET_DOOR_BATTERY,
     CMD_GET_HW_INFO,
     CMD_GET_DOOR_OPEN_STATS,
@@ -353,25 +352,18 @@ from powerpetdoor import (
     CMD_GET_SCHEDULE,
     CMD_GET_SENSOR_TRIGGER_VOLTAGE,
     CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
-    CMD_GET_TIME,                        # the door's own wall clock
-    CMD_GET_AUTORETRACT,                 # NOT implemented by firmware
-    CMD_GET_CMD_LOCKOUT,                 # NOT implemented by firmware
-    CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,  # NOT implemented by firmware
-
+    CMD_GET_TIME,  # the door's own wall clock
     # Diagnostic queries (use with CONFIG)
     CMD_HAS_REMOTE_ID,
     CMD_HAS_REMOTE_KEY,
-    CMD_CHECK_RESET_REASON,              # NOT implemented by firmware
-
     # Configuration commands (use with CONFIG)
     CMD_SET_HOLD_TIME,
     CMD_SET_TIMEZONE,
     CMD_SET_NOTIFICATIONS,
     CMD_SET_SCHEDULE,
     CMD_DELETE_SCHEDULE,
-    CMD_SET_SENSOR_TRIGGER_VOLTAGE,      # both take the `voltage` field
+    CMD_SET_SENSOR_TRIGGER_VOLTAGE,  # both take the `voltage` field
     CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
-
     # Safety commands (use with CONFIG)
     CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
     CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
@@ -397,8 +389,11 @@ client.send_message(COMMAND, CMD_CLOSE)
 # Get current door status
 status = await client.send_message(CONFIG, CMD_GET_DOOR_STATUS, notify=True)
 
-# Get all settings - the one query that carries every setting whose own
-# GET_* command the firmware does not implement
+# Get all settings. Four settings have no getter of their own - the names
+# that would read them are rejected by the firmware and are not defined by
+# this library (see docs/protocol.md, "Commands that do not exist") - so
+# this is where timersEnabled, doorOptions, allowCmdLockout and
+# outsideSensorSafetyLock are read from
 settings = await client.send_message(CONFIG, CMD_GET_SETTINGS, notify=True)
 
 # Set hold time (the builder converts seconds to the wire's centiseconds)
@@ -431,10 +426,9 @@ and semantics are documented in
 | Direction | `DOOR_TO_PHONE`, `PHONE_TO_DOOR` | [Message Envelope](protocol.md#message-format) |
 | Door state values | `DOOR_STATE_IDLE`, `DOOR_STATE_CLOSED`, `DOOR_STATE_RISING`, `DOOR_STATE_SLOWING`, `DOOR_STATE_HOLDING`, `DOOR_STATE_KEEPUP`, `DOOR_STATE_CLOSING`, `DOOR_STATE_CLOSING_TOP_OPEN`, `DOOR_STATE_CLOSING_MID_OPEN` | [Door Status Values](protocol.md#door-status-values) |
 | Status payload | `FIELD_DOOR_STATUS` (`"door_status"`) | [Unsolicited Door Status](protocol.md#unsolicited-door-status) |
-| Notification payload | `FIELD_SENSOR_STATE` (`"sensorState"`, `"on"`/`"off"`) | [Notification Messages](protocol.md#notification-messages-door-to-client) |
 | Notification flags | `FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS`, `FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS`, `FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS`, `FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS`, `FIELD_LOW_BATTERY_NOTIFICATIONS` | [Notification Settings Fields](protocol.md#notification-settings-fields) |
 | Hardware / firmware | `FIELD_FW_MAJOR` (`"fw_maj"`), `FIELD_FW_MINOR` (`"fw_min"`), `FIELD_FW_PATCH` (`"fw_pat"`), `FIELD_HW_VERSION` (`"ver"`), `FIELD_HW_REVISION` (`"rev"`) | [Query Commands](protocol.md#query-commands) (the `GET_HW_INFO` `fwInfo` object) |
-| Diagnostics | `FIELD_HAS_REMOTE_ID` (`"has_id"`), `FIELD_HAS_REMOTE_KEY` (`"has_key"`), `FIELD_RESET_REASON` | [Diagnostic Commands](protocol.md#diagnostic-commands) |
+| Diagnostics | `FIELD_HAS_REMOTE_ID` (`"has_id"`), `FIELD_HAS_REMOTE_KEY` (`"has_key"`) | [Diagnostic Commands](protocol.md#diagnostic-commands) |
 | Door clock | `FIELD_TIME` (`"time"`), `TIME_FORMAT` (the `asctime` pattern it is spelled in) | [The door clock](protocol.md#the-door-clock) |
 | Setter-only field | `FIELD_VOLTAGE` (`"voltage"`) — what both trigger-voltage setters take | [Configuration](protocol.md#configuration) |
 | Bitfield | `DOOR_OPTION_AUTORETRACT` (`2`) — the auto-retract bit of `doorOptions` | [`doorOptions` is a bitfield](protocol.md#dooroptions-is-a-bitfield) |
@@ -467,13 +461,10 @@ from powerpetdoor import (
 
 client.add_listener(
     name="my_app",  # Unique identifier for this listener set
-
     # Door status updates
     door_status_update=lambda status: print(f"Door: {status}"),
-
     # Full settings dict
     settings_update=lambda settings: print(f"Settings: {settings}"),
-
     # Individual sensor updates (by field or "*" for all)
     sensor_update={
         FIELD_POWER: lambda field, val: print(f"Power: {val}"),
@@ -483,19 +474,16 @@ client.add_listener(
     },
     # Or use "*" for all sensor fields:
     # sensor_update={"*": lambda field, val: print(f"{field}: {val}")},
-
     # Notification settings updates
     notifications_update={
         FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: lambda field, val: print(f"Inside on: {val}"),
         FIELD_LOW_BATTERY_NOTIFICATIONS: lambda field, val: print(f"Low battery: {val}"),
     },
-
     # Statistics updates
     stats_update={
         FIELD_TOTAL_OPEN_CYCLES: lambda field, val: print(f"Cycles: {val}"),
         FIELD_TOTAL_AUTO_RETRACTS: lambda field, val: print(f"Retracts: {val}"),
     },
-
     # Other updates
     hw_info_update=lambda info: print(f"HW Info: {info}"),
     battery_update=lambda data: print(f"Battery: {data}"),
@@ -507,40 +495,6 @@ client.add_listener(
 The `sensor_update` fields are `FIELD_POWER`, `FIELD_INSIDE`, `FIELD_OUTSIDE`,
 `FIELD_AUTO`, `FIELD_OUTSIDE_SENSOR_SAFETY_LOCK`, `FIELD_CMD_LOCKOUT`, and
 `FIELD_AUTORETRACT` (all exported from the package root).
-
-### Notification Events
-
-The device announces sensor and battery events on its own initiative
-(outside the command/response flow). Register a `notification_event`
-listener to receive them:
-
-```python
-from powerpetdoor import (
-    NOTIFY_LOW_BATTERY,
-    NOTIFY_SENSOR_INDOOR,
-    NOTIFY_SENSOR_OUTDOOR,
-    SENSOR_STATE_ON,
-)
-
-def on_event(event: str, state: str | None) -> None:
-    if event == NOTIFY_SENSOR_INDOOR and state == SENSOR_STATE_ON:
-        print("Pet detected at the indoor sensor!")
-    elif event == NOTIFY_LOW_BATTERY:
-        print("Battery is low")
-
-client.add_listener("my_app", notification_event=on_event)
-```
-
-The callback receives `(event, state)`:
-
-- `event` is one of `NOTIFY_SENSOR_INDOOR`, `NOTIFY_SENSOR_OUTDOOR`, or
-  `NOTIFY_LOW_BATTERY`.
-- `state` is the reported `sensorState` (`SENSOR_STATE_ON`/`SENSOR_STATE_OFF`,
-  i.e. `"on"`/`"off"`), or `None` when the event carries no state
-  (`NOTIFY_LOW_BATTERY`).
-
-Both the documented bare envelope (`{"SENSOR_INDOOR": "", "sensorState":
-"on"}`) and CMD-style variants are dispatched to the same listeners.
 
 ### Removing Listeners
 
@@ -566,10 +520,8 @@ client.del_listener("my_app")
 | `sleep_sensor_trigger_voltage_update` | `(voltage: int)` | Sleep sensor voltage |
 | `remote_id_update` | `(has_id: bool)` | Remote ID presence |
 | `remote_key_update` | `(has_key: bool)` | Remote key presence |
-| `reset_reason_update` | `(reason: str)` | Last reset reason |
 | `schedule_update` | `(schedule: dict)` | Schedule created or updated |
 | `schedule_delete` | `(index: int)` | Schedule deleted |
-| `notification_event` | `(event: str, state: str \| None)` | Device-initiated sensor/battery event |
 
 `val` is `None` when the device sent a value `make_bool()` does not
 recognize. Test for it explicitly — writing `if val:` maps "we could not
@@ -619,14 +571,14 @@ Convert various types to boolean:
 ```python
 from powerpetdoor import make_bool
 
-make_bool("1")      # True
-make_bool("true")   # True
-make_bool("yes")    # True
-make_bool("on")     # True
-make_bool("0")      # False
+make_bool("1")  # True
+make_bool("true")  # True
+make_bool("yes")  # True
+make_bool("on")  # True
+make_bool("0")  # False
 make_bool("false")  # False
-make_bool(1)        # True
-make_bool(0)        # False
+make_bool(1)  # True
+make_bool(0)  # False
 ```
 
 ### autoretract_from_door_options
@@ -638,14 +590,14 @@ through it:
 ```python
 from powerpetdoor import autoretract_from_door_options
 
-autoretract_from_door_options(2)       # True  - bit 1 set
-autoretract_from_door_options(0)       # False
-autoretract_from_door_options(3)       # True  - bit 0 is something else
+autoretract_from_door_options(2)  # True  - bit 1 set
+autoretract_from_door_options(0)  # False
+autoretract_from_door_options(3)  # True  - bit 0 is something else
 autoretract_from_door_options("true")  # True  - liberal, like make_bool
-autoretract_from_door_options([])      # None  - unreadable
+autoretract_from_door_options([])  # None  - unreadable
 ```
 
-Verified against firmware 1.7.18: `DISABLE_AUTORETRACT` leaves `doorOptions`
+`DISABLE_AUTORETRACT` leaves `doorOptions`
 at `0` and `ENABLE_AUTORETRACT` leaves it at `2`. The remaining bits are
 unidentified, so do not read `doorOptions == 2` as "auto-retract only".
 
@@ -657,9 +609,9 @@ For advanced queue manipulation (rarely needed):
 from powerpetdoor import PRIORITY_HIGH, PrioritizedMessage
 
 msg = PrioritizedMessage(
-    priority=PRIORITY_HIGH,    # Lower value = higher priority
-    sequence=0,                # For FIFO ordering within same priority
-    data={"cmd": "OPEN"}
+    priority=PRIORITY_HIGH,  # Lower value = higher priority
+    sequence=0,  # For FIFO ordering within same priority
+    data={"cmd": "OPEN"},
 )
 ```
 
@@ -677,7 +629,7 @@ from powerpetdoor import PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_LOW, PRIORIT
 | `PRIORITY_CRITICAL` | 0 | PING/PONG keepalives |
 | `PRIORITY_HIGH` | 1 | Door control (OPEN, OPEN_AND_HOLD, CLOSE) |
 | `PRIORITY_MEDIUM` | 2 | Sensor/power enable-disable, and `SET_NOTIFICATIONS` / `SET_HOLD_TIME` / `SET_TIMEZONE` / `SET_SENSOR_TRIGGER_VOLTAGE` / `SET_SLEEP_SENSOR_TRIGGER_VOLTAGE` |
-| `PRIORITY_LOW` | 3 | Status queries (`GET_*`) and **all** schedule commands, including `SET_SCHEDULE`, `SET_SCHEDULE_LIST` and `DELETE_SCHEDULE` |
+| `PRIORITY_LOW` | 3 | Status queries (`GET_*`) and **all** schedule commands, including `SET_SCHEDULE` and `DELETE_SCHEDULE` |
 
 This ensures keepalives and urgent door commands are processed before routine queries.
 

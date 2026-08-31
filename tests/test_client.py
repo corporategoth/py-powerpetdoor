@@ -31,21 +31,19 @@ from powerpetdoor import (
 )
 from powerpetdoor.client import MAX_FAILED_MSG, MAX_FAILED_PINGS, CommandError
 from powerpetdoor.const import (
-    CMD_CHECK_RESET_REASON,
     CMD_CLOSE,
     CMD_DELETE_SCHEDULE,
     CMD_DISABLE_INSIDE,
+    CMD_ENABLE_AUTO,
     CMD_ENABLE_AUTORETRACT,
+    CMD_ENABLE_CMD_LOCKOUT,
     CMD_ENABLE_INSIDE,
-    CMD_GET_AUTO,
-    CMD_GET_AUTORETRACT,
-    CMD_GET_CMD_LOCKOUT,
+    CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
     CMD_GET_DOOR_OPEN_STATS,
     CMD_GET_DOOR_STATUS,
     CMD_GET_HOLD_TIME,
     CMD_GET_HW_INFO,
     CMD_GET_NOTIFICATIONS,
-    CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
     CMD_GET_SCHEDULE,
     CMD_GET_SCHEDULE_LIST,
     CMD_GET_SENSOR_TRIGGER_VOLTAGE,
@@ -88,6 +86,7 @@ from powerpetdoor.const import (
     FIELD_TOTAL_OPEN_CYCLES,
     FIELD_TZ,
     FIELD_VOLTAGE,
+    MINIMUM_TIME_BETWEEN_MSGS,
     PING,
     PONG,
     PRIORITY_CRITICAL,
@@ -618,10 +617,8 @@ class TestListenerSystem:
             sleep_sensor_trigger_voltage_update=callback,
             remote_id_update=callback,
             remote_key_update=callback,
-            reset_reason_update=callback,
             schedule_update=callback,
             schedule_delete=callback,
-            notification_event=callback,
         )
 
         client.del_listener("test_listener")
@@ -640,10 +637,8 @@ class TestListenerSystem:
             client.sleep_sensor_trigger_voltage_listeners,
             client.remote_id_listeners,
             client.remote_key_listeners,
-            client.reset_reason_listeners,
             client.schedule_update_listeners,
             client.schedule_delete_listeners,
-            client.notification_event_listeners,
         ]
         for registry in registries:
             assert "test_listener" not in registry
@@ -1238,6 +1233,46 @@ class TestCheckReceipt:
 
         assert client._transport is None
 
+    async def test_the_quiet_period_is_measured_from_the_reply(self, mock_client):
+        """Not from our previous send.
+
+        The client sends one message at a time and waits for the answer,
+        so a send-relative floor is already satisfied by any round trip
+        longer than itself. a loaded
+        door answers in ~300ms - so a 200ms send-relative floor added
+        *nothing* exactly when the door was dropping requests.
+        """
+        client, transport, _ = mock_client
+        client._last_command = None
+
+        # A reply that arrived just now must delay the next send...
+        client._last_reply = time.monotonic()
+        task = asyncio.ensure_future(client._send_data(b'{"config": "X"}'))
+        await asyncio.sleep(0)
+        assert transport.written_data == [], "sent without leaving the quiet period"
+        await task
+        assert transport.written_data != []
+
+    async def test_a_slow_round_trip_does_not_skip_the_quiet_period(self, mock_client):
+        """The regression this whole change exists for.
+
+        With a send-relative floor, a round trip longer than the floor
+        meant no wait at all - the client fired the instant the reply
+        landed, which measured as the droppiest behaviour of all.
+        """
+        client, transport, _ = mock_client
+        client._last_command = None
+
+        # Pretend we sent long ago (slow round trip) but were answered now.
+        client._last_reply = time.monotonic()
+        started = time.monotonic()
+        await client._send_data(b'{"config": "X"}')
+
+        waited = time.monotonic() - started
+        assert waited >= MINIMUM_TIME_BETWEEN_MSGS * 0.5, (
+            f"sent after only {waited * 1000:.0f}ms of quiet"
+        )
+
     async def test_send_data_transport_gone_after_sleep(self, mock_client, caplog):
         """disconnect() during the rate-limit sleep is not fatal.
 
@@ -1246,7 +1281,7 @@ class TestCheckReceipt:
         """
         client, transport, _ = mock_client
         client._last_command = None
-        client._last_send = time.monotonic()  # Forces the rate-limit sleep
+        client._last_reply = time.monotonic()  # Forces the quiet-period sleep
 
         with caplog.at_level(logging.WARNING, logger="powerpetdoor.client"):
             send_task = asyncio.ensure_future(client._send_data(b'{"config": "X"}'))
@@ -1672,9 +1707,9 @@ class TestProcessMessageDefensive:
     @pytest.mark.parametrize(
         "cmd",
         [
-            CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
-            CMD_GET_CMD_LOCKOUT,
-            CMD_GET_AUTORETRACT,
+            CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
+            CMD_ENABLE_CMD_LOCKOUT,
+            CMD_ENABLE_AUTORETRACT,
         ],
         ids=repr,
     )
@@ -1841,95 +1876,6 @@ class TestProcessMessageDefensive:
 
 # ============================================================================
 # Notification Event Tests
-# ============================================================================
-
-
-class TestNotificationEvents:
-    """Device-initiated notification events (bare and CMD-style envelopes)."""
-
-    async def test_bare_sensor_indoor_on(self, mock_client):
-        """The documented bare envelope dispatches (event, state)."""
-        from powerpetdoor.const import NOTIFY_SENSOR_INDOOR
-
-        client, _, _ = mock_client
-        events = []
-        client.add_listener("test", notification_event=lambda ev, st: events.append((ev, st)))
-
-        await client.process_message({"SENSOR_INDOOR": "", "sensorState": "on"})
-
-        assert events == [(NOTIFY_SENSOR_INDOOR, "on")]
-
-    async def test_bare_sensor_outdoor_off(self, mock_client):
-        """Outdoor sensor-off bare envelope dispatches correctly."""
-        from powerpetdoor.const import NOTIFY_SENSOR_OUTDOOR
-
-        client, _, _ = mock_client
-        events = []
-        client.add_listener("test", notification_event=lambda ev, st: events.append((ev, st)))
-
-        await client.process_message({"SENSOR_OUTDOOR": "", "sensorState": "off"})
-
-        assert events == [(NOTIFY_SENSOR_OUTDOOR, "off")]
-
-    async def test_bare_low_battery(self, mock_client):
-        """LOW_BATTERY has no sensorState; state is None."""
-        from powerpetdoor.const import NOTIFY_LOW_BATTERY
-
-        client, _, _ = mock_client
-        events = []
-        client.add_listener("test", notification_event=lambda ev, st: events.append((ev, st)))
-
-        await client.process_message({"LOW_BATTERY": ""})
-
-        assert events == [(NOTIFY_LOW_BATTERY, None)]
-
-    async def test_cmd_style_notification_tolerated(self, mock_client):
-        """CMD-style notification envelopes are tolerated and also dispatch."""
-        from powerpetdoor.const import NOTIFY_SENSOR_INDOOR
-
-        client, _, _ = mock_client
-        events = []
-        client.add_listener("test", notification_event=lambda ev, st: events.append((ev, st)))
-
-        await client.process_message(
-            {"success": "true", "CMD": "SENSOR_INDOOR", "sensorState": "on"}
-        )
-
-        assert events == [(NOTIFY_SENSOR_INDOOR, "on")]
-
-    async def test_bare_notification_without_listeners(self, mock_client):
-        """A bare notification with no listeners registered is harmless."""
-        client, _, _ = mock_client
-
-        await client.process_message({"SENSOR_INDOOR": "", "sensorState": "on"})
-
-    async def test_bare_notification_via_data_received(self, mock_client):
-        """The full receive path handles a bare notification envelope."""
-        from powerpetdoor.const import NOTIFY_SENSOR_INDOOR
-
-        client, _, device = mock_client
-        events = []
-        client.add_listener("test", notification_event=lambda ev, st: events.append((ev, st)))
-
-        device.send_response_sync({"SENSOR_INDOOR": "", "sensorState": "on"})
-        await asyncio.sleep(0)
-
-        assert events == [(NOTIFY_SENSOR_INDOOR, "on")]
-
-    async def test_del_listener_removes_notification_event(self, mock_client):
-        """del_listener also clears notification_event listeners."""
-        client, _, _ = mock_client
-        events = []
-        client.add_listener("test", notification_event=lambda ev, st: events.append((ev, st)))
-        client.del_listener("test")
-
-        await client.process_message({"LOW_BATTERY": ""})
-
-        assert events == []
-
-
-# ============================================================================
-# Timing Source Tests
 # ============================================================================
 
 
@@ -2234,12 +2180,12 @@ class TestResponseHandlerPayloads:
         client.add_listener(
             "t", sensor_update={FIELD_CMD_LOCKOUT: lambda f, v: calls.append((f, v))}
         )
-        msg_id, future = self._pending(client, CMD_GET_CMD_LOCKOUT)
+        msg_id, future = self._pending(client, CMD_ENABLE_CMD_LOCKOUT)
 
         await client.process_message(
             {
                 "success": "true",
-                "CMD": CMD_GET_CMD_LOCKOUT,
+                "CMD": CMD_ENABLE_CMD_LOCKOUT,
                 "msgID": msg_id,
                 "settings": {FIELD_CMD_LOCKOUT: "1"},
             }
@@ -2273,24 +2219,6 @@ class TestResponseHandlerPayloads:
 
         assert values == [False]
         assert future.result() is False
-
-    async def test_reset_reason_response(self, mock_client):
-        client, _, _ = mock_client
-        values: list = []
-        client.add_listener("t", reset_reason_update=values.append)
-        msg_id, future = self._pending(client, CMD_CHECK_RESET_REASON)
-
-        await client.process_message(
-            {
-                "success": "true",
-                "CMD": CMD_CHECK_RESET_REASON,
-                "msgID": msg_id,
-                "resetReason": "WATCHDOG",
-            }
-        )
-
-        assert values == ["WATCHDOG"]
-        assert future.result() == "WATCHDOG"
 
     async def test_delete_schedule_without_echoed_index(self, mock_client):
         """Firmware that omits the deleted index still resolves the future."""
@@ -2358,10 +2286,10 @@ class TestResponseHandlerPayloads:
     @pytest.mark.parametrize(
         "cmd",
         [
-            CMD_GET_AUTO,
-            CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
-            CMD_GET_CMD_LOCKOUT,
-            CMD_GET_AUTORETRACT,
+            CMD_ENABLE_AUTO,
+            CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
+            CMD_ENABLE_CMD_LOCKOUT,
+            CMD_ENABLE_AUTORETRACT,
             CMD_GET_HW_INFO,
             CMD_GET_TIMEZONE,
             CMD_GET_HOLD_TIME,
@@ -2370,7 +2298,6 @@ class TestResponseHandlerPayloads:
             CMD_GET_SCHEDULE,
             CMD_HAS_REMOTE_ID,
             CMD_HAS_REMOTE_KEY,
-            CMD_CHECK_RESET_REASON,
         ],
     )
     async def test_success_response_missing_payload_fails_future(self, mock_client, cmd):
@@ -3685,7 +3612,7 @@ class TestAbsentSettingsFieldsAreGuarded:
 
 
 class TestEnvelopeForCommand:
-    """Verified against firmware 1.7.18: the two envelope keys are not
+    """The two envelope keys are not
     interchangeable, and only door motion is a `cmd`."""
 
     @pytest.mark.parametrize("cmd", [CMD_OPEN, CMD_OPEN_AND_HOLD, CMD_CLOSE])
@@ -3723,7 +3650,7 @@ class TestEnvelopeForCommand:
 class TestAutoretractFromDoorOptions:
     """`doorOptions` is an int BITFIELD; auto-retract is bit 1.
 
-    Verified against firmware 1.7.18: DISABLE_AUTORETRACT leaves it 0 and
+    DISABLE_AUTORETRACT leaves it 0 and
     ENABLE_AUTORETRACT leaves it 2. Truthiness gives the right answer on
     those two values by luck and the wrong one as soon as another bit is
     set, which is the whole reason this reader exists.
@@ -3774,7 +3701,7 @@ class TestAutoretractFromDoorOptions:
 
 
 class TestBuildSetVoltageMessage:
-    """Verified against firmware 1.7.18: the setters take `voltage`."""
+    """The setters take `voltage`."""
 
     def test_it_uses_the_setters_field_not_the_getters(self):
         message = build_set_voltage_message(1500)
@@ -3883,7 +3810,7 @@ class TestTheDoorClockResponse:
 
 
 class TestAnUnmatchedFailureDoesNotHangTheCaller:
-    """Verified against firmware 1.7.18: failures carry no `msgID`.
+    """Failures carry no `msgID`.
 
     `process_message` therefore has to fall back to "this reply
     acknowledges the in-flight command", and the guard that does it is a

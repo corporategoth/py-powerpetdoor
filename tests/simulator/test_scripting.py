@@ -20,10 +20,12 @@ import pytest
 from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
     DOOR_STATE_CLOSING,
+    DOOR_STATE_CLOSING_MID_OPEN,
     DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
+    DOOR_STATE_SLOWING,
     FIELD_HOLD_OPEN_TIME,
 )
 from powerpetdoor.simulator import (
@@ -32,6 +34,7 @@ from powerpetdoor.simulator import (
     DoorTimingConfig,
     scripting,
 )
+from powerpetdoor.simulator.engine import SENSOR_NAMES
 from powerpetdoor.simulator.scripting import (
     YAML_AVAILABLE,
     AssertionFailed,
@@ -45,6 +48,9 @@ from powerpetdoor.simulator.scripting import (
     script_completer,
 )
 from powerpetdoor.simulator.state import WHOLE_DAY_END_HOUR, WHOLE_DAY_END_MINUTE
+from powerpetdoor.simulator.wire_values import (
+    settings_payload,
+)
 
 # Skip marker for tests that require PyYAML
 requires_yaml = pytest.mark.skipif(not YAML_AVAILABLE, reason="PyYAML not installed")
@@ -111,8 +117,8 @@ class TestScriptStep:
 
     def test_basic_step(self):
         """Create a basic step."""
-        step = ScriptStep(action="trigger_sensor", params={"sensor": "inside"})
-        assert step.action == "trigger_sensor"
+        step = ScriptStep(action="trigger", params={"sensor": "inside"})
+        assert step.action == "trigger"
         assert step.params["sensor"] == "inside"
 
     def test_step_str_with_params(self):
@@ -141,7 +147,7 @@ class TestScript:
 name: "Test Script"
 description: "A test"
 steps:
-  - action: trigger_sensor
+  - action: trigger
     sensor: inside
   - action: wait
     seconds: 1
@@ -150,7 +156,7 @@ steps:
         assert script.name == "Test Script"
         assert script.description == "A test"
         assert len(script.steps) == 2
-        assert script.steps[0].action == "trigger_sensor"
+        assert script.steps[0].action == "trigger"
         assert script.steps[1].action == "wait"
 
     @requires_yaml
@@ -271,6 +277,39 @@ steps:
         assert script.steps[2].params["condition"] == "door_status"
         assert script.steps[3].params["value"] == "50"
 
+    def test_from_simple_commands_enable_schedule(self):
+        script = Script.from_simple_commands(["enable_schedule 3 off"])
+        assert script.steps[0].params == {"index": "3", "state": "off"}
+
+    def test_from_simple_commands_enable_schedule_defaults_to_on(self):
+        """Omitting the state means enable, as `schedule enable` does."""
+        script = Script.from_simple_commands(["enable_schedule 3"])
+        assert script.steps[0].params == {"index": "3"}
+
+    def test_from_simple_commands_enable_schedule_defaults_the_index(self):
+        script = Script.from_simple_commands(["enable_schedule"])
+        assert script.steps[0].params == {"index": "1"}
+
+    def test_from_simple_commands_clear_schedules(self):
+        script = Script.from_simple_commands(["clear_schedules"])
+        assert script.steps[0].action == "clear_schedules"
+        assert script.steps[0].params == {}
+
+    def test_from_simple_commands_notify(self):
+        """`notify <name> [on|off]` - the name is a parameter, not a suffix."""
+        script = Script.from_simple_commands(["notify inside_on off"])
+        assert script.steps[0].params == {"name": "inside_on", "state": "off"}
+
+    def test_from_simple_commands_notify_without_a_state(self):
+        """Omitting the state toggles, so the parameter is left off."""
+        script = Script.from_simple_commands(["notify low_battery"])
+        assert script.steps[0].params == {"name": "low_battery"}
+
+    def test_from_simple_commands_notify_without_a_name(self):
+        """A bare `notify` parses; the runner is what refuses the empty name."""
+        script = Script.from_simple_commands(["notify"])
+        assert script.steps[0].params == {"name": ""}
+
     def test_from_simple_commands_defaults_and_blank_lines(self):
         """Blank commands are skipped; omitted arguments use defaults."""
         script = Script.from_simple_commands(
@@ -282,8 +321,12 @@ steps:
         assert actions["wait"] == {"seconds": 1.0}
         assert actions["wait_for"] == {"condition": "door_closed", "timeout": 30.0}
         assert actions["set"] == {"name": "", "value": ""}
-        assert actions["toggle"] == {"name": ""}
-        assert actions["assert"] == {"condition": "", "equals": ""}
+        # `toggle` is the door and takes nothing; a setting inverts
+        # through `set <name> toggle`.
+        assert actions["toggle"] == {}
+        # `assert x` with no expected value no longer invents an empty
+        # one: a bare boolean condition means "is true".
+        assert actions["assert"] == {"condition": ""}
         assert actions["log"] == {"message": "a b"}
 
     def test_from_simple_commands_unlisted_action_gets_no_params(self):
@@ -294,15 +337,14 @@ steps:
         assert script.steps[0].params == {}
 
     def test_from_simple_commands_remaining_forms(self):
-        """open/cycle/close/schedule/pet commands parse to the expected params."""
+        """open/cycle/close/obstruction/sensor/schedule shorthands."""
         script = Script.from_simple_commands(
             [
                 "open",
                 "cycle",
                 "close",
                 "obstruction",
-                "pet_on",
-                "pet_off",
+                "inside on",
                 "add_schedule 4",
                 "add_schedule",
                 "remove_schedule 2",
@@ -315,8 +357,7 @@ steps:
             {},
             {},
             {},
-            {},
-            {},
+            {"state": "on"},
             {"index": 4},
             {"index": 1},
             {"index": 2},
@@ -379,8 +420,8 @@ class TestScriptRunner:
         # No indented description line was logged before the first step
         assert messages[messages.index("Running script: Bare") + 1] == "  Step 1: log(message=x)"
 
-    async def test_trigger_sensor_action(self, runner, simulator):
-        """trigger_sensor opens the door; wait_for observes it deterministically."""
+    async def test_trigger_action(self, runner, simulator):
+        """trigger opens the door; wait_for observes it deterministically."""
         script = Script.from_simple_commands(
             [
                 "trigger inside",
@@ -404,10 +445,11 @@ class TestScriptRunner:
         assert simulator.state.battery_percent == 42
         assert simulator.state.hold_time == 15
 
-    async def test_toggle_action(self, runner, simulator):
-        """toggle action should flip boolean state."""
+    async def test_set_toggle_inverts_a_setting(self, runner, simulator):
+        """`toggle` is the *door* now, matching the CLI; a setting inverts
+        through `set <name> toggle`, matching `power toggle` there."""
         assert simulator.state.power is True
-        script = Script.from_simple_commands(["toggle power"])
+        script = Script.from_simple_commands(["set power toggle"])
         await runner.run(script, verbose=False)
         assert simulator.state.power is False
 
@@ -425,7 +467,9 @@ class TestScriptRunner:
         with caplog.at_level(logging.ERROR, logger=SCRIPT_LOGGER):
             result = await runner.run(script, verbose=False)
         assert result is False
-        assert "Assertion failed at step 1: battery: expected '50', got '75'" in caplog.text
+        assert (
+            "Assertion failed at step 1: battery: expected equals '50', got '75'"
+        ) in caplog.text
 
     async def test_wait_for_condition(self, runner, simulator):
         """wait_for should wait until condition is true."""
@@ -445,7 +489,7 @@ class TestScriptRunner:
         script = Script.from_simple_commands(
             [
                 "trigger inside",
-                "wait_for door_holding 5",
+                "wait_for door_open 5",
                 "wait_for door_closing 5",
                 # The FIRST closing state, which a real door reports as the
                 # motor starts and before the flap moves.
@@ -469,27 +513,38 @@ class TestScriptRunner:
 
     async def test_wait_for_non_status_condition_already_true(self, runner, simulator):
         """wait_for on a non-status condition returns when already true."""
-        simulator.state.power = False
-        script = Script.from_simple_commands(["wait_for power_off 5"])
+        simulator.state.power = True
+        script = Script.from_simple_commands(["wait_for power 5"])
         result = await runner.run(script, verbose=False)
         assert result is True
 
     async def test_wait_for_non_status_condition_timeout(self, runner, simulator):
         """wait_for on a non-status condition times out when never true."""
-        script = Script.from_simple_commands(["wait_for power_off 0.3"])
+        script = Script.from_yaml(
+            "name: t\n"
+            "steps:\n"
+            "  - action: wait_for\n"
+            "    condition: power\n"
+            "    equals: off\n"
+            "    timeout: 0.3\n"
+        )
         result = await runner.run(script, verbose=False)
         assert result is False
 
     async def test_wait_for_non_status_condition_becomes_true(self, runner, simulator):
         """The poll loop returns once the condition flips to true."""
-        task = asyncio.create_task(runner._wait_for_condition("power_off", 5))
+        task = asyncio.create_task(
+            runner._wait_for_condition({"condition": "power", "equals": "off"}, 5, "fail")
+        )
         await asyncio.sleep(0)  # enter the poll loop
         simulator.state.power = False
         await asyncio.wait_for(task, timeout=2.0)
 
     async def test_stop_interrupts_non_status_poll(self, runner, simulator):
         """stop() aborts a non-status poll with the exact error."""
-        task = asyncio.create_task(runner._wait_for_condition("power_off", 5))
+        task = asyncio.create_task(
+            runner._wait_for_condition({"condition": "power", "equals": "off"}, 5, "fail")
+        )
         await asyncio.sleep(0)  # enter the poll loop
         runner.stop()
         with pytest.raises(ScriptError, match="Script stopped while waiting"):
@@ -499,7 +554,7 @@ class TestScriptRunner:
         """A wait_for started after stop() fails without waiting."""
         runner._stop_requested = True
         with pytest.raises(ScriptError, match="Script stopped while waiting"):
-            await runner._wait_for_condition("door_closed", 1)
+            await runner._wait_for_condition({"condition": "door_closed"}, 1, "fail")
 
     async def test_wait_for_unknown_condition_fails(self, runner, simulator, caplog):
         """wait_for on an unknown condition fails the script."""
@@ -512,7 +567,7 @@ class TestScriptRunner:
     async def test_stop_script_interrupts_wait_for(self, runner, simulator):
         """stop() must interrupt a wait_for immediately (no wall-clock wait)."""
         # The door never reaches KEEPUP, so only stop() can end this wait
-        script = Script.from_simple_commands(["wait_for door_keepup 30"])
+        script = Script.from_simple_commands(["wait_for door_open 30"])
 
         task = asyncio.create_task(runner.run(script, verbose=False))
         # Let the runner enter the wait_for step
@@ -525,12 +580,16 @@ class TestScriptRunner:
 
     async def test_engine_stop_fails_status_wait(self, runner, simulator):
         """Stopping the engine cancels the status waiter; the wait errors out."""
-        task = asyncio.create_task(runner._wait_for_condition("door_keepup", 5))
+        task = asyncio.create_task(
+            runner._wait_for_condition(
+                {"condition": "door_status", "equals": "DOOR_KEEPUP"}, 5, "fail"
+            )
+        )
         await asyncio.sleep(0)
         await asyncio.sleep(0)  # enter the status wait
 
         await simulator.engine.stop()
-        with pytest.raises(ScriptError, match="Timeout waiting for condition: door_keepup"):
+        with pytest.raises(ScriptError, match="Timeout waiting for condition"):
             await asyncio.wait_for(task, timeout=2.0)
 
     async def test_stop_during_a_status_wait_says_stopped_not_timeout(self, runner, simulator):
@@ -542,7 +601,11 @@ class TestScriptRunner:
         "Timeout waiting for condition: door_open" - a misleading diagnosis
         with a generous timeout still running.
         """
-        task = asyncio.create_task(runner._wait_for_condition("door_keepup", 30))
+        task = asyncio.create_task(
+            runner._wait_for_condition(
+                {"condition": "door_status", "equals": "DOOR_KEEPUP"}, 30, "fail"
+            )
+        )
         await asyncio.sleep(0)
         await asyncio.sleep(0)  # enter the status wait
 
@@ -779,7 +842,7 @@ class TestAssertConditionsSurviveTheYamlLoader:
         with caplog.at_level(logging.ERROR, logger=SCRIPT_LOGGER):
             assert await runner.run(script, verbose=False) is False
 
-        assert "power: expected 'off', got 'on'" in caplog.text
+        assert "power: expected equals 'off', got 'on'" in caplog.text
 
     async def test_the_failure_message_reports_the_normalized_values(
         self, runner, simulator, caplog
@@ -793,37 +856,66 @@ class TestAssertConditionsSurviveTheYamlLoader:
         with caplog.at_level(logging.ERROR, logger=SCRIPT_LOGGER):
             assert await runner.run(script, verbose=False) is False
 
-        assert "hold_time: expected '3', got '2'" in caplog.text
+        assert "hold_time: expected equals '3', got '2'" in caplog.text
 
 
 class TestScriptActions:
     """Per-action behavior of the step dispatcher."""
 
     async def test_obstruction_action(self, runner, simulator):
-        """obstruction activates the inside sensor indefinitely."""
+        """obstruction places a physical obstruction, arming no sensor."""
         result = await runner.run(Script.from_simple_commands(["obstruction"]), verbose=False)
         assert result is True
-        assert simulator.state.inside_sensor_active is True
+        assert simulator.state.obstruction_active is True
+        assert simulator.state.obstruction_oneshot is True
+        assert simulator.state.inside_sensor_active is False
         assert simulator.state.outside_sensor_active is False
 
-    async def test_pet_on_activates_inside_sensor(self, runner, simulator):
-        """pet_on turns the inside sensor on; the closed door starts opening."""
-        result = await runner.run(Script.from_simple_commands(["pet_on"]), verbose=False)
+    async def test_obstruction_duration_zero_stays_until_cleared(self, runner, simulator):
+        """0 is the boundary against the omitted-argument one-shot."""
+        script = Script.from_yaml("name: t\nsteps:\n  - action: obstruction\n    duration: 0\n")
+        assert await runner.run(script, verbose=False) is True
+        assert simulator.state.obstruction_active is True
+        assert simulator.state.obstruction_oneshot is False
+
+    async def test_obstruction_duration_expires(self, runner, simulator):
+        """The other side of the boundary: a positive window clears itself."""
+        script = Script.from_yaml("name: t\nsteps:\n  - action: obstruction\n    duration: 0.05\n")
+        assert await runner.run(script, verbose=False) is True
+        assert simulator.state.obstruction_active is True
+
+        await asyncio.sleep(0.15)
+        assert simulator.state.obstruction_active is False
+
+    async def test_obstruction_rejects_a_non_numeric_duration(self, runner, simulator):
+        """Same loud failure every other mistyped script value gets."""
+        script = Script.from_yaml("name: t\nsteps:\n  - action: obstruction\n    duration: soon\n")
+        assert await runner.run(script, verbose=False) is False
+        assert simulator.state.obstruction_active is False
+
+    async def test_holding_the_inside_sensor_is_pet_presence(self, runner, simulator):
+        """There is no `pet` action: `inside on` is the same thing, and
+        unlike `pet on` it opens a closed door, which a collar does."""
+        result = await runner.run(Script.from_simple_commands(["inside on"]), verbose=False)
         assert result is True
         assert simulator.state.inside_sensor_active is True
         assert simulator.state.door_status == DOOR_STATE_RISING
 
-    async def test_pet_on_when_already_active_is_noop(self, runner, simulator):
-        """A second pet_on must not toggle the sensor back off."""
+    async def test_a_second_on_is_not_a_toggle(self, runner, simulator):
+        """`on` says which way it means; only `toggle`/`0` flips."""
         simulator.state.power = False  # keep the door still; only flags matter
-        result = await runner.run(Script.from_simple_commands(["pet_on", "pet_on"]), verbose=False)
+        result = await runner.run(
+            Script.from_simple_commands(["inside on", "inside on"]), verbose=False
+        )
         assert result is True
         assert simulator.state.inside_sensor_active is True
 
-    async def test_pet_off_clears_inside_sensor(self, runner, simulator):
-        """pet_off clears the inside sensor."""
+    async def test_off_clears_the_sensor(self, runner, simulator):
+        """`inside off` clears the sensor a pet was holding."""
         simulator.state.power = False
-        result = await runner.run(Script.from_simple_commands(["pet_on", "pet_off"]), verbose=False)
+        result = await runner.run(
+            Script.from_simple_commands(["inside on", "inside off"]), verbose=False
+        )
         assert result is True
         assert simulator.state.inside_sensor_active is False
 
@@ -859,7 +951,7 @@ class TestScriptActions:
         script = Script.from_simple_commands(
             [
                 "open hold",
-                "wait_for door_keepup 5",
+                "wait_for door_open 5",
                 f"assert door_status {DOOR_STATE_KEEPUP}",
                 "close",
                 "wait_for door_closed 5",
@@ -899,7 +991,7 @@ class TestScriptActions:
         assert schedule.outside is True
         assert (schedule.start_hour, schedule.start_min) == (0, 0)
         # 00:00-23:59, spelled the way the device itself spells a full day
-        # (verified against firmware 1.7.18). Its final minute is inside
+        # . Its final minute is inside
         # the window, so the schedule really does allow both sensors at
         # every minute of every day - which is what the sum below pins.
         # 24:00: a script's "always" window has to be active at 23:59 too.
@@ -936,11 +1028,12 @@ class TestScriptActions:
         """Hyphenated/uppercase action names are normalized."""
         script = Script(
             name="Norm",
-            steps=[ScriptStep(action="Pet-Presence", line_number=1)],
+            steps=[
+                ScriptStep(action="Wait-For", params={"condition": "door_closed"}, line_number=1)
+            ],
         )
         result = await runner.run(script, verbose=False)
         assert result is True
-        assert simulator.state.inside_sensor_active is True
 
 
 # ============================================================================
@@ -949,7 +1042,7 @@ class TestScriptActions:
 
 
 class TestCheckConditionMatrix:
-    """_check_condition supports every documented condition token."""
+    """Every condition name, in both the bare and compared forms."""
 
     @pytest.mark.parametrize(
         ("condition", "state_kwargs", "expected"),
@@ -959,50 +1052,75 @@ class TestCheckConditionMatrix:
             ("door_open", {"door_status": DOOR_STATE_HOLDING}, True),
             ("door_open", {"door_status": DOOR_STATE_KEEPUP}, True),
             ("door_open", {}, False),
-            ("door_rising", {"door_status": DOOR_STATE_RISING}, True),
-            ("door_rising", {}, False),
-            ("door_holding", {"door_status": DOOR_STATE_HOLDING}, True),
-            ("door_holding", {"door_status": DOOR_STATE_KEEPUP}, False),
-            ("door_keepup", {"door_status": DOOR_STATE_KEEPUP}, True),
-            ("door_keepup", {"door_status": DOOR_STATE_HOLDING}, False),
+            (
+                {"condition": "door_status", "equals": "DOOR_RISING"},
+                {"door_status": DOOR_STATE_RISING},
+                True,
+            ),
+            ({"condition": "door_status", "equals": "DOOR_RISING"}, {}, False),
+            (
+                {"condition": "door_status", "equals": "DOOR_HOLDING"},
+                {"door_status": DOOR_STATE_HOLDING},
+                True,
+            ),
+            (
+                {"condition": "door_status", "equals": "DOOR_HOLDING"},
+                {"door_status": DOOR_STATE_KEEPUP},
+                False,
+            ),
+            (
+                {"condition": "door_status", "equals": "DOOR_KEEPUP"},
+                {"door_status": DOOR_STATE_KEEPUP},
+                True,
+            ),
+            (
+                {"condition": "door_status", "equals": "DOOR_KEEPUP"},
+                {"door_status": DOOR_STATE_HOLDING},
+                False,
+            ),
             ("door_closing", {"door_status": DOOR_STATE_CLOSING_TOP_OPEN}, True),
             ("door_closing", {}, False),
-            ("power_on", {}, True),
-            ("power_on", {"power": False}, False),
-            ("power_off", {"power": False}, True),
-            ("power_off", {}, False),
-            ("inside_enabled", {}, True),
-            ("inside_enabled", {"inside": False}, False),
-            ("inside_disabled", {"inside": False}, True),
-            ("outside_enabled", {}, True),
-            ("outside_disabled", {"outside": False}, True),
-            ("outside_disabled", {}, False),
-            ("autoretract_on", {}, True),
-            ("autoretract_off", {"autoretract": False}, True),
-            ("autoretract_off", {}, False),
-            ("auto_on", {}, True),
-            ("auto_off", {"auto": False}, True),
-            ("auto_off", {}, False),
-            ("safety_lock_on", {"safety_lock": True}, True),
-            ("safety_lock_off", {}, True),
-            ("safety_lock_off", {"safety_lock": True}, False),
-            ("cmd_lockout_on", {"cmd_lockout": True}, True),
-            ("cmd_lockout_off", {}, True),
-            ("cmd_lockout_off", {"cmd_lockout": True}, False),
+            ({"condition": "power", "equals": "on"}, {}, True),
+            ({"condition": "power", "equals": "on"}, {"power": False}, False),
+            ({"condition": "power", "equals": "off"}, {"power": False}, True),
+            ({"condition": "power", "equals": "off"}, {}, False),
+            ({"condition": "inside", "equals": "on"}, {}, True),
+            ({"condition": "inside", "equals": "on"}, {"inside": False}, False),
+            ({"condition": "inside", "equals": "off"}, {"inside": False}, True),
+            ({"condition": "outside", "equals": "on"}, {}, True),
+            ({"condition": "outside", "equals": "off"}, {"outside": False}, True),
+            ({"condition": "outside", "equals": "off"}, {}, False),
+            ({"condition": "autoretract", "equals": "on"}, {}, True),
+            ({"condition": "autoretract", "equals": "off"}, {"autoretract": False}, True),
+            ({"condition": "autoretract", "equals": "off"}, {}, False),
+            ({"condition": "auto", "equals": "on"}, {}, True),
+            ({"condition": "auto", "equals": "off"}, {"auto": False}, True),
+            ({"condition": "auto", "equals": "off"}, {}, False),
+            ({"condition": "safety_lock", "equals": "on"}, {"safety_lock": True}, True),
+            ({"condition": "safety_lock", "equals": "off"}, {}, True),
+            ({"condition": "safety_lock", "equals": "off"}, {"safety_lock": True}, False),
+            ({"condition": "cmd_lockout", "equals": "on"}, {"cmd_lockout": True}, True),
+            ({"condition": "cmd_lockout", "equals": "off"}, {}, True),
+            ({"condition": "cmd_lockout", "equals": "off"}, {"cmd_lockout": True}, False),
             # Hyphens normalize to underscores
             ("door-closed", {}, True),
         ],
     )
     def test_condition_matrix(self, condition, state_kwargs, expected):
-        """Each condition evaluates to its single correct value."""
+        """Each condition evaluates to its single correct value.
+
+        A bare name is a yes/no condition asked directly; a mapping is the
+        `condition` + comparison form.
+        """
         runner = make_runner(**state_kwargs)
-        assert runner._check_condition(condition) is expected
+        params = {"condition": condition} if isinstance(condition, str) else condition
+        assert runner._if_holds(params) is expected
 
     def test_unknown_condition_raises(self):
         """Unknown conditions raise the exact error."""
         runner = make_runner()
         with pytest.raises(ScriptError, match="Unknown condition: bogus"):
-            runner._check_condition("bogus")
+            runner._if_holds({"condition": "bogus"})
 
 
 class TestSetValueMatrix:
@@ -1043,6 +1161,22 @@ class TestSetValueMatrix:
         with pytest.raises(ScriptError, match="Unknown setting: bogus"):
             runner._set_value("bogus", "1")
 
+    def test_set_read_only_raises(self):
+        """A value the door computes is refused, not silently ignored.
+
+        `door_status` is in the registry so a script can assert on it;
+        being there must not make it writable.
+        """
+        runner = make_runner()
+        with pytest.raises(ScriptError, match="door_status is read-only"):
+            runner._set_value("door_status", "DOOR_IDLE")
+
+    def test_set_read_only_is_refused_before_coercion(self):
+        """The refusal names read-only, not the value's shape."""
+        runner = make_runner()
+        with pytest.raises(ScriptError, match="read-only"):
+            runner._set_value("position", "50")
+
 
 class TestScriptWriterIsBoundedLikeTheWire:
     """The YAML script channel is the third writer of these fields.
@@ -1061,8 +1195,8 @@ class TestScriptWriterIsBoundedLikeTheWire:
             ("-inf", "hold_time must be a finite number"),
             ("nan", "hold_time must be a finite number"),
             ("1e400", "hold_time must be a finite number"),
-            ("-1", "hold_time must be between 0 and 900.0"),
-            ("901", "hold_time must be between 0 and 900.0"),
+            ("-1", "hold_time must be between 0.0 and 900.0"),
+            ("901", "hold_time must be between 0.0 and 900.0"),
             ("later", "hold_time must be a number"),
         ],
         ids=["inf", "-inf", "nan", "1e400", "negative", "too-large", "non-numeric"],
@@ -1089,13 +1223,13 @@ class TestScriptWriterIsBoundedLikeTheWire:
             runner._set_value("hold_time", "inf")
 
         # int(inf * 100) raises OverflowError; this must still answer.
-        assert runner.simulator.state.get_settings()[FIELD_HOLD_OPEN_TIME] == 200
+        assert settings_payload(runner.simulator.state)[FIELD_HOLD_OPEN_TIME] == 200
 
     @pytest.mark.parametrize(
         ("value", "message"),
         [
-            ("99999999999", "battery must be between 0 and 100"),
-            ("-5", "battery must be between 0 and 100"),
+            ("99999999999", "battery must be between 0.0 and 100.0"),
+            ("-5", "battery must be between 0.0 and 100.0"),
             ("inf", "battery must be a finite number"),
             ("full", "battery must be a number"),
         ],
@@ -1204,7 +1338,7 @@ class TestScriptPathsAllowedFlag:
 
 
 class TestToggleValueMatrix:
-    """_toggle_value flips every supported boolean."""
+    """`set <name> toggle` flips every supported boolean."""
 
     @pytest.mark.parametrize(
         "name",
@@ -1214,16 +1348,28 @@ class TestToggleValueMatrix:
         """Each toggle flips the attribute and flips it back."""
         runner = make_runner()
         original = getattr(runner.simulator.state, name)
-        runner._toggle_value(name)
+        runner._set_value(name, "toggle")
         assert getattr(runner.simulator.state, name) is (not original)
-        runner._toggle_value(name)
+        runner._set_value(name, "toggle")
         assert getattr(runner.simulator.state, name) is original
 
     def test_toggle_unknown_raises(self):
         """Unknown toggles raise the exact error."""
         runner = make_runner()
         with pytest.raises(ScriptError, match="Unknown setting to toggle: bogus"):
-            runner._toggle_value("bogus")
+            runner._set_value("bogus", "toggle")
+
+    def test_toggle_a_value_that_is_not_a_state_raises(self):
+        """A number has nothing to invert, and says so rather than coercing."""
+        runner = make_runner()
+        with pytest.raises(ScriptError, match="Cannot toggle hold_time"):
+            runner._set_value("hold_time", "toggle")
+
+    def test_toggle_a_read_only_value_raises(self):
+        """Read-only rows are refused by the toggle path too."""
+        runner = make_runner()
+        with pytest.raises(ScriptError, match="Unknown setting to toggle: door_status"):
+            runner._set_value("door_status", "toggle")
 
 
 class TestAssertConditionMatrix:
@@ -1253,20 +1399,20 @@ class TestAssertConditionMatrix:
     def test_assert_matrix_passes(self, condition, state_kwargs, expected):
         """A matching expectation does not raise."""
         runner = make_runner(**state_kwargs)
-        runner._assert_condition(condition, expected)
+        runner._assert_condition({"condition": condition, "equals": expected})
 
     def test_assert_failure_message_contains_expected_and_actual(self):
         """The failure message names the condition and both values."""
         runner = make_runner(battery_percent=75)
         with pytest.raises(ScriptAssertionError) as exc_info:
-            runner._assert_condition("battery", "50")
-        assert str(exc_info.value) == "battery: expected '50', got '75'"
+            runner._assert_condition({"condition": "battery", "equals": "50"})
+        assert str(exc_info.value) == "battery: expected equals '50', got '75'"
 
     def test_assert_unknown_condition_raises(self):
         """Unknown assertion conditions raise the exact error."""
         runner = make_runner()
-        with pytest.raises(ScriptError, match="Unknown assertion condition: bogus"):
-            runner._assert_condition("bogus", "1")
+        with pytest.raises(ScriptError, match="Unknown condition: bogus"):
+            runner._assert_condition({"condition": "bogus", "equals": "1"})
 
 
 # ============================================================================
@@ -1798,7 +1944,14 @@ class TestScriptSerialization:
 
 
 class TestScriptBooleanCoercion:
-    """Script booleans go through one coercer, and fail closed."""
+    """Script booleans go through one coercer, and **raise** on nonsense.
+
+    They used to fail closed, inheriting that from the wire parser. On the
+    wire it is right - an unreadable flag must never *grant* access, and a
+    schedule the device already stores must stay loadable. For a value
+    someone typed it is a bug: `set power maybe` silently turned the power
+    *off* and reported PASSED.
+    """
 
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -1807,23 +1960,41 @@ class TestScriptBooleanCoercion:
             (False, False),
             ("true", True),
             ("1", True),
+            (1, True),
             ("on", True),
             ("yes", True),
             ("enabled", True),
             ("false", False),
             ("0", False),
+            (0, False),
             ("off", False),
             ("no", False),
             ("disabled", False),
-            # Unrecognizable spellings fail closed, like every wire flag.
-            ("banana", False),
-            (None, False),
-            ([1], False),
         ],
         ids=repr,
     )
     def test_script_bool_matrix(self, value, expected):
         assert ScriptRunner._script_bool(value) is expected
+
+    @pytest.mark.parametrize(
+        "value",
+        ["banana", None, [1], "", 2, -1],
+        ids=repr,
+    )
+    def test_an_unrecognized_spelling_raises(self, value):
+        """Not "false" - a mistake. Numbers other than 0/1 included:
+        truthiness is not the question a boolean field is asking."""
+        with pytest.raises(ScriptError, match="must be true or false"):
+            ScriptRunner._script_bool(value)
+
+    async def test_a_misspelled_setting_value_fails_the_script(self, runner, simulator):
+        """The whole point: it must not quietly mean "off"."""
+        simulator.state.power = True
+
+        result = await runner.run(Script.from_simple_commands(["set power maybe"]), verbose=False)
+
+        assert result is False
+        assert simulator.state.power is True
 
     async def test_a_quoted_false_no_longer_enables_a_schedule(self, runner, simulator):
         """`enabled: "0"` produced an *enabled* schedule.
@@ -1865,11 +2036,38 @@ class TestScriptBooleanCoercion:
         assert held == [True, False]
 
 
+#: The one condition vocabulary, spelled out. `assert`, `wait_for` and
+#: `if` all name it, so all three errors quote the same list - which is the
+#: visible half of them sharing one reader.
+#: The tail every "Unknown condition" message carries. Derived, because
+#: three actions quote the same list and pinning it as a literal only
+#: proved they had been edited together. The *set* is pinned separately,
+#: below, so a vocabulary change is still a visible line in a diff.
+CONDITION_VOCABULARY = "Use: " + ", ".join(scripting.CONDITION_NAMES)
+
+
 def _chain_names(function_name: str, variable: str) -> set[str]:
     """The names one of `scripting`'s `x == "..."` dispatch chains accepts."""
     source = Path(scripting.__file__).read_text()
     body = source.split(f"def {function_name}", 1)[1].split("\n    def ", 1)[0]
     return set(re.findall(rf'{variable} == "([a-z_]+)"', body))
+
+
+def _reader_names(function_name: str) -> set[str]:
+    """The keys of a `{"name": lambda ...}` dispatch table.
+
+    Some keys are built by comprehension - one counter per notification -
+    so an f-string prefix over a module constant is resolved rather than
+    skipped. Skipping would hide a whole family of condition from the
+    guard, which is the opposite of what it is for.
+    """
+    source = Path(scripting.__file__).read_text()
+    body = source.split(f"def {function_name}", 1)[1].split("\n    def ", 1)[0]
+    names = set(re.findall(r'"([a-z_]+)": lambda', body))
+    for prefix, var in re.findall(r'f"([a-z_]+)\{(\w+)\}"\s*:', body):
+        for const in re.findall(rf"for {var} in ([A-Z][A-Z_]+)", body):
+            names |= {f"{prefix}{v}" for v in getattr(scripting, const, ())}
+    return names
 
 
 class TestUnknownNameErrorsNameTheAlternatives:
@@ -1890,19 +2088,42 @@ class TestUnknownNameErrorsNameTheAlternatives:
     @pytest.mark.parametrize(
         ("published", "function_name", "variable"),
         [
-            (scripting.ASSERT_CONDITIONS, "_assert_condition", "condition"),
-            (scripting.SET_SETTINGS, "_set_value", "name"),
-            (scripting.TOGGLE_SETTINGS, "_toggle_value", "name"),
+            (scripting.SET_SETTINGS, "writable", None),
+            (scripting.TOGGLE_SETTINGS, "boolean", None),
         ],
-        ids=["assert", "set", "toggle"],
+        ids=["set", "toggle"],
     )
-    def test_the_published_set_matches_the_chain(self, published, function_name, variable):
-        assert set(published) == _chain_names(function_name, variable)
+    def test_the_published_set_matches_the_registry(self, published, function_name, variable):
+        """Both derive from the value table rather than a dispatch chain,
+        so a value added there is settable without touching this file."""
+        from powerpetdoor.simulator.values import VALUES
 
-    def test_the_published_wait_for_set_matches_both_of_its_halves(self):
-        """`wait_for` dispatches through a status table *and* a polled chain."""
-        assert set(scripting.WAIT_FOR_CONDITIONS) == (
-            set(scripting._STATUS_WAIT_CONDITIONS) | _chain_names("_check_condition", "condition")
+        expected = {n for n, v in VALUES.items() if v.writable}
+        if function_name == "boolean":
+            expected = {n for n in expected if VALUES[n].kind == "bool"}
+        assert set(published) == expected
+
+    def test_the_published_assert_set_matches_the_reader_table(self):
+        """`assert`, `wait_for` and `if` all read through one table.
+
+        Every named value is a condition, plus the computed ones a value
+        table cannot hold.
+        """
+        from powerpetdoor.simulator.values import VALUE_NAMES
+
+        assert set(scripting.ASSERT_CONDITIONS) == (
+            set(VALUE_NAMES) | set(scripting._COMPUTED_CONDITIONS)
+        )
+
+    def test_wait_for_and_assert_take_the_same_vocabulary(self):
+        """There used to be two disjoint sets plus 22 "fused" names that
+        baked a value into the name. One vocabulary now."""
+        assert scripting.WAIT_FOR_CONDITIONS == scripting.ASSERT_CONDITIONS
+        assert scripting.CONDITION_NAMES == scripting.ASSERT_CONDITIONS
+
+    def test_the_condition_vocabulary_is_the_union_of_both(self):
+        assert set(scripting.CONDITION_NAMES) == (
+            set(scripting.ASSERT_CONDITIONS) | set(scripting.WAIT_FOR_CONDITIONS)
         )
 
     def test_every_published_set_is_sorted_and_unique(self):
@@ -1916,49 +2137,53 @@ class TestUnknownNameErrorsNameTheAlternatives:
             assert list(published) == sorted(set(published))
 
     def test_toggle_accepts_exactly_the_boolean_settings(self):
-        """The two `set`-only rows are the two non-boolean ones."""
+        """`toggle` takes the yes/no values; the rest hold a number or a
+        string and have nothing to invert."""
+        from powerpetdoor.simulator.values import VALUES
+
+        assert set(scripting.TOGGLE_SETTINGS) == {
+            name for name in scripting.SET_SETTINGS if VALUES[name].kind == "bool"
+        }
         assert set(scripting.SET_SETTINGS) - set(scripting.TOGGLE_SETTINGS) == {
-            "battery",
-            "hold_time",
+            name for name in scripting.SET_SETTINGS if VALUES[name].kind != "bool"
         }
 
-    def test_the_two_condition_vocabularies_are_disjoint(self):
-        """Which is what makes the cross-action hint unambiguous."""
-        assert set(scripting.WAIT_FOR_CONDITIONS) & set(scripting.ASSERT_CONDITIONS) == set()
+    def test_the_two_condition_vocabularies_are_no_longer_disjoint(self):
+        """They used to be, and that was the wart.
+
+        `assert door_closed` is the most natural assertion in a door
+        simulator and was rejected, purely because `wait_for` owned the
+        name. One vocabulary now: every fused shorthand works in `assert`
+        and every plain condition works in `wait_for`.
+        """
+        assert set(scripting.WAIT_FOR_CONDITIONS) - set(scripting.CONDITION_NAMES) == set()
+        assert set(scripting.ASSERT_CONDITIONS) - set(scripting.CONDITION_NAMES) == set()
 
     @pytest.mark.parametrize(
         ("step", "expected"),
         [
             (
                 ScriptStep(action="frobnicate"),
-                "Unknown action: frobnicate. Use: add_schedule, assert, battery, close, "
-                "cycle, inside, log, obstruction, open, outside, pet_off, pet_on, "
-                "pet_presence, remove_schedule, set, toggle, trigger, trigger_sensor, "
-                "wait, wait_for",
+                "Unknown action: frobnicate. Use: add_schedule, assert, battery, "
+                "clear_schedules, close, cycle, enable_schedule, if, inside, log, notify, "
+                "obstruction, open, outside, remove_schedule, repeat, reset, set, toggle, "
+                "trigger, wait, wait_for",
             ),
             (
                 ScriptStep(action="set", params={"name": "powr", "value": "1"}),
-                "Unknown setting: powr. Use: auto, autoretract, battery, cmd_lockout, "
-                "hold_time, inside, outside, power, safety_lock",
+                "Unknown setting: powr. Use: ac_present, auto, autoretract, battery, battery_present, charge_rate, closing_mid_time, closing_start_time, closing_top_time, cmd_lockout, discharge_rate, firmware_version, hardware_version, has_remote_id, has_remote_key, hold_time, inside, notify_inside_off, notify_inside_on, notify_low_battery, notify_outside_off, notify_outside_on, obstruction, outside, power, rise_time, safety_lock, sensor_retrigger_window, sensor_trigger_voltage, sleep_sensor_trigger_voltage, slowing_time, timezone, total_auto_retracts, total_open_cycles",
             ),
             (
-                ScriptStep(action="toggle", params={"name": "powr"}),
-                "Unknown setting to toggle: powr. Use: auto, autoretract, cmd_lockout, "
-                "inside, outside, power, safety_lock",
+                ScriptStep(action="set", params={"name": "powr", "value": "toggle"}),
+                "Unknown setting to toggle: powr. Use: ac_present, auto, autoretract, battery_present, cmd_lockout, has_remote_id, has_remote_key, inside, notify_inside_off, notify_inside_on, notify_low_battery, notify_outside_off, notify_outside_on, obstruction, outside, power, safety_lock",
             ),
             (
                 ScriptStep(action="assert", params={"condition": "bogus", "equals": "x"}),
-                "Unknown assertion condition: bogus. Use: auto, autoretract, battery, "
-                "cmd_lockout, door_status, hold_time, inside, outside, power, safety_lock, "
-                "total_auto_retracts, total_open_cycles",
+                "Unknown condition: bogus. " + CONDITION_VOCABULARY,
             ),
             (
                 ScriptStep(action="wait_for", params={"condition": "door_stat", "timeout": 0.01}),
-                "Unknown condition: door_stat. Use: auto_off, auto_on, autoretract_off, "
-                "autoretract_on, cmd_lockout_off, cmd_lockout_on, door_closed, door_closing, "
-                "door_holding, door_keepup, door_open, door_rising, inside_disabled, "
-                "inside_enabled, outside_disabled, outside_enabled, power_off, power_on, "
-                "safety_lock_off, safety_lock_on",
+                "Unknown condition: door_stat. " + CONDITION_VOCABULARY,
             ),
         ],
         ids=["action", "setting", "toggle", "assert", "condition"],
@@ -1969,44 +2194,35 @@ class TestUnknownNameErrorsNameTheAlternatives:
 
         assert str(error.value) == expected
 
-    @pytest.mark.parametrize(
-        ("step", "hint"),
-        [
-            (
-                ScriptStep(action="assert", params={"condition": "door_closed", "equals": "x"}),
-                "Unknown assertion condition: door_closed "
-                "(that name belongs to the 'wait_for' action).",
-            ),
-            (
-                ScriptStep(action="wait_for", params={"condition": "battery", "timeout": 0.01}),
-                "Unknown condition: battery (that name belongs to the 'assert' action).",
-            ),
-            (
-                ScriptStep(action="toggle", params={"name": "hold_time"}),
-                "Unknown setting to toggle: hold_time (that name belongs to the 'set' action).",
-            ),
-        ],
-        ids=[
-            "assert-gets-a-wait_for-name",
-            "wait_for-gets-an-assert-name",
-            "toggle-gets-a-set-name",
-        ],
-    )
-    async def test_a_name_valid_for_the_other_action_says_so(self, runner, simulator, step, hint):
-        """The trap that used to be addressed in the documentation only."""
-        with pytest.raises(ScriptError) as error:
-            await runner._execute_step(step)
+    async def test_a_value_setting_cannot_be_toggled(self, runner, simulator):
+        """`hold_time` has no state to invert, and the message says why.
 
-        assert str(error.value).startswith(hint)
-
-    async def test_a_name_valid_nowhere_gets_no_cross_action_hint(self, runner, simulator):
-        """The control: the hint must be specific, not decoration."""
+        It used to point at the `set` action, which made sense when
+        `toggle` was its own action. It is reached through
+        `set hold_time toggle` now, so pointing at `set` would be telling
+        the author to use what they are already using.
+        """
         with pytest.raises(ScriptError) as error:
             await runner._execute_step(
-                ScriptStep(action="assert", params={"condition": "bogus", "equals": "x"})
+                ScriptStep(action="set", params={"name": "hold_time", "value": "toggle"})
             )
 
-        assert "belongs to the" not in str(error.value)
+        assert "Cannot toggle hold_time: it holds a value, not a state" in str(error.value)
+
+    async def test_a_name_valid_nowhere_says_it_is_unknown(self, runner, simulator):
+        """The control: a name that is no setting at all reads differently
+        from one that is a setting but holds a value."""
+        with pytest.raises(ScriptError) as error:
+            await runner._execute_step(
+                ScriptStep(action="set", params={"name": "bogus", "value": "toggle"})
+            )
+
+        assert "Unknown setting to toggle: bogus" in str(error.value)
+
+
+def _action_chain_names() -> set[str]:
+    """Every action name `_execute_step` dispatches on."""
+    return set(_parameters_read_per_action())
 
 
 def _execute_step_body() -> str:
@@ -2015,20 +2231,84 @@ def _execute_step_body() -> str:
     return source.split("async def _execute_step", 1)[1].split("\n    async def ", 1)[0]
 
 
+#: Both ways a step parameter is read: `params.get("x")` and `params["x"]`.
+_PARAM_READ = r'params(?:\.get\(\s*|\[)"([a-z_]+)"'
+
+#: A call handed the whole `params` dict, whatever else it is given -
+#: `self._presence(params, default=0.5)` counts as much as
+#: `self._if_holds(params)`. Matching only the bare form let the
+#: comparison operators and `duration` read as declared-but-unused.
+_DELEGATES_PARAMS = r"self\.(_[a-z_]+)\([^)]*\bparams\b"
+
+
+def _method_body(name: str) -> str:
+    """The source of one `ScriptRunner` method.
+
+    Signature-agnostic: some of these are `@staticmethod` and take no
+    `self`, and some are `async`.
+    """
+    source = Path(scripting.__file__).read_text()
+    body = source.split(f"def {name}(", 1)[1]
+    return re.split(r"\n    (?:async )?def ", body, maxsplit=1)[0]
+
+
+def _constant_driven_reads(body: str) -> set[str]:
+    """Parameter names a body reads by *iterating a constant*.
+
+    `_condition_holds` asks `for key in COMPARISONS if key in params`, so
+    `equals`, `above` and the rest never appear as a literal subscript and
+    a regex over the source cannot see them. Exempting them would blind
+    the guard to a whole class of parameter; resolving the constant keeps
+    it honest.
+    """
+    names: set[str] = set()
+    if "in params" not in body:
+        return names
+    for const in re.findall(r"for \w+ in ([A-Z][A-Z_]+)", body):
+        value = getattr(scripting, const, None)
+        if isinstance(value, tuple) and all(isinstance(v, str) for v in value):
+            names |= set(value)
+    return names
+
+
 def _parameters_read_per_action() -> dict[str, set[str]]:
-    """Map action -> the `params.get("...")` names inside *its* branch.
+    """Map action -> the parameter names read inside *its* branch.
 
     Splits `_execute_step` on its own `if/elif action == "..."` chain, the
     same extraction `test_every_executed_action_declares_its_parameters`
     performs, so the two guards read the source the same way.
+
+    A branch that hands the whole `params` dict to a helper - as `if` does
+    to `_if_holds` - has its reads counted too. Without that the guard
+    would report every delegated parameter as declared-but-unread, and the
+    obvious way to silence it would be to stop declaring them, which is
+    exactly the validation this DSL exists to keep.
     """
-    blocks = re.split(r'\n        (?:el)?if action == (?=")', _execute_step_body())
+    blocks = re.split(r"\n        (?:el)?if action (?:==|in) ", _execute_step_body())
     per_action: dict[str, set[str]] = {}
     for block in blocks[1:]:
         header, _, body = block.partition(":\n")
-        names = re.findall(r'"([a-z_]+)"', header)
+        # `inside`/`outside` share one branch, spelled `action in
+        # SENSOR_NAMES`, because a sensor is a sensor. The guard has to
+        # follow that or it reports both as undeclared.
+        names = (
+            list(SENSOR_NAMES) if "SENSOR_NAMES" in header else re.findall(r'"([a-z_]+)"', header)
+        )
         assert names, f"could not read an action name from {header!r}"
-        read = set(re.findall(r'params\.get\(\s*"([a-z_]+)"', body))
+        read = set(re.findall(_PARAM_READ, body))
+        pending = list(re.findall(_DELEGATES_PARAMS, body))
+        seen: set[str] = set()
+        while pending:
+            helper = pending.pop()
+            if helper in seen:
+                continue
+            seen.add(helper)
+            helper_body = _method_body(helper)
+            read |= set(re.findall(_PARAM_READ, helper_body))
+            read |= _constant_driven_reads(helper_body)
+            # Transitively: `repeat` delegates to `_execute_repeat`, which
+            # delegates again to `_if_holds`.
+            pending += re.findall(_DELEGATES_PARAMS, helper_body)
         for name in names:
             per_action[name] = read
     return per_action
@@ -2050,7 +2330,7 @@ class TestUnknownNamesInStepsFailLoudly:
     async def test_an_unknown_sensor_fails_the_script(self, runner, simulator, caplog):
         script = Script(
             name="Typo",
-            steps=[ScriptStep(action="trigger_sensor", params={"sensor": "insde"}, line_number=1)],
+            steps=[ScriptStep(action="trigger", params={"sensor": "insde"}, line_number=1)],
         )
 
         with caplog.at_level(logging.ERROR, logger=SCRIPT_LOGGER):
@@ -2071,7 +2351,7 @@ class TestUnknownNamesInStepsFailLoudly:
 
         typo = Script(
             name="Typo",
-            steps=[ScriptStep(action="trigger_sensor", params={"sensor": "insde"}, line_number=1)],
+            steps=[ScriptStep(action="trigger", params={"sensor": "insde"}, line_number=1)],
         )
         assert await runner.run(typo, verbose=False) is False
         assert simulator.state.door_status == DOOR_STATE_CLOSED
@@ -2098,9 +2378,9 @@ class TestUnknownNamesInStepsFailLoudly:
                 "(plus the annotations comment, description, note)",
             ),
             (
-                "trigger_sensor",
+                "trigger",
                 {"sensr": "inside"},
-                "Unknown parameter(s) for trigger_sensor: sensr. Use: sensor "
+                "Unknown parameter(s) for trigger: sensr. Use: sensor "
                 "(plus the annotations comment, description, note)",
             ),
             # "Use: none" read as an instruction to pass the literal token
@@ -2123,7 +2403,7 @@ class TestUnknownNamesInStepsFailLoudly:
             (
                 "wait_for",
                 {"condition": "door_closed", "timout": 1, "zzz": 2},
-                "Unknown parameter(s) for wait_for: timout, zzz. Use: condition, timeout "
+                "Unknown parameter(s) for wait_for: timout, zzz. Use: above, any, at_least, at_most, below, condition, conditions, equals, not_equals, on_timeout, timeout "
                 "(plus the annotations comment, description, note)",
             ),
         ],
@@ -2234,11 +2514,10 @@ class TestUnknownNamesInStepsFailLoudly:
         parameters silently stop being validated, which is exactly the
         state this fix found the DSL in.
         """
-        source = Path(scripting.__file__).read_text()
-        body = source.split("async def _execute_step", 1)[1].split("\n    async def ", 1)[0]
-        dispatched = set(re.findall(r'action == "([a-z_]+)"', body))
-
-        assert dispatched == set(scripting._ACTION_PARAMS)
+        # `inside`/`outside` share one branch (`action in SENSOR_NAMES`),
+        # so read the chain through the helper that understands both
+        # spellings rather than a bare `==` regex.
+        assert _action_chain_names() == set(scripting._ACTION_PARAMS)
 
     def test_every_declared_parameter_is_actually_read_by_that_action(self):
         """...and the table must not grow parameters nothing consumes.
@@ -2273,8 +2552,9 @@ class TestUnknownNamesInStepsFailLoudly:
         untested. Demonstrated exhaustively rather than asserted.
         """
         table = scripting._ACTION_PARAMS
-        body = _execute_step_body()
-        read = set(re.findall(r'params\.get\(\s*"([a-z_]+)"', body))
+        # The same reads the real guard sees, only flattened - which is
+        # precisely the difference that made the old check blind.
+        read = set().union(*_parameters_read_per_action().values())
         declared = set().union(*table.values())
         assert declared - read == set(), "the old check passes on the real table"
 
@@ -2286,16 +2566,16 @@ class TestUnknownNamesInStepsFailLoudly:
             and (declared | {name}) - read == set()  # what the old check would compute
         ]
 
-        assert len(undetected) == 20 * len(declared) - sum(len(p) for p in table.values())
-        assert len(table) == 20
-        assert len(declared) == 12
+        assert len(undetected) == len(table) * len(declared) - sum(len(p) for p in table.values())
+        assert len(table) == 22
+        assert len(declared) == 26
         # ...and the per-action check sees every one of them.
         per_action = _parameters_read_per_action()
         for action, name in undetected:
             grown = {**{a: set(p) for a, p in table.items()}, action: set(table[action]) | {name}}
             assert grown != per_action
 
-    def test_eleven_of_nineteen_actions_share_a_parameter_name(self):
+    def test_most_actions_share_a_parameter_name(self):
         """Why the blindness is a *present-day* hole, not a hypothetical."""
         table = scripting._ACTION_PARAMS
         shared = {
@@ -2304,8 +2584,23 @@ class TestUnknownNamesInStepsFailLoudly:
             if sum(name in params for params in table.values()) > 1
         }
 
-        assert shared == {"condition", "duration", "index", "name", "sensor", "value"}
-        assert sum(1 for params in table.values() if params & shared) == 11
+        assert shared == {
+            "above",
+            "any",
+            "at_least",
+            "at_most",
+            "below",
+            "condition",
+            "conditions",
+            "duration",
+            "equals",
+            "index",
+            "name",
+            "not_equals",
+            "state",
+            "value",
+        }
+        assert sum(1 for params in table.values() if params & shared) == 13
 
     def test_annotation_keys_never_collide_with_a_real_parameter(self):
         """`note:` must stay a no-op, not shadow something an action reads."""
@@ -2337,7 +2632,7 @@ class TestSimpleCommandShorthandDefaults:
     def test_assert_defaults_to_an_empty_expectation(self):
         script = Script.from_simple_commands(["assert door_status"])
 
-        assert script.steps[0].params == {"condition": "door_status", "equals": ""}
+        assert script.steps[0].params == {"condition": "door_status"}
 
     def test_the_three_word_forms_still_carry_their_third_word(self):
         """The control: the branch that was exercised must keep working."""
@@ -2359,7 +2654,7 @@ class TestTheAnnotationKeysAreDocumented:
     """A closed set is only usable if it is written down."""
 
     def test_the_docs_name_every_annotation_key(self):
-        doc = (Path(scripting.__file__).parents[3] / "docs" / "simulator.md").read_text()
+        doc = (Path(scripting.__file__).parents[3] / "docs" / "scripting.md").read_text()
         section = " ".join(doc.split())
 
         for key in scripting.STEP_ANNOTATION_KEYS:
@@ -2433,3 +2728,944 @@ class TestUnknownTopLevelKeysAreRefused:
         assert any(
             "broken: (Error loading: Unknown top-level key(s): stpes." in line for line in lines
         )
+
+
+class TestOneConditionVocabulary:
+    """`assert`, `wait_for` and `if` read through one table.
+
+    They used to take disjoint vocabularies: `assert door_closed` - the
+    most natural assertion in a door simulator - was rejected purely
+    because `wait_for` owned the name, and `_other_table_hint` existed to
+    apologise for it.
+    """
+
+    async def test_assert_accepts_a_fused_wait_for_name(self, runner, simulator):
+        assert simulator.state.door_status == DOOR_STATE_CLOSED
+
+        await runner._execute_step(ScriptStep(action="assert", params={"condition": "door_closed"}))
+
+    async def test_assert_fails_on_a_fused_name_that_does_not_hold(self, runner, simulator):
+        with pytest.raises(ScriptAssertionError):
+            await runner._execute_step(
+                ScriptStep(action="assert", params={"condition": "door_open"})
+            )
+
+    async def test_wait_for_accepts_a_plain_assert_name_and_a_value(self, runner, simulator):
+        """The user-facing point of the merge: wait for 3 auto retracts."""
+        simulator.state.total_auto_retracts = 3
+
+        await runner._execute_step(
+            ScriptStep(
+                action="wait_for",
+                params={"condition": "total_auto_retracts", "equals": 3, "timeout": 1},
+            )
+        )
+
+    async def test_wait_for_a_door_status_by_value(self, runner, simulator):
+        await runner._execute_step(
+            ScriptStep(
+                action="wait_for",
+                params={"condition": "door_status", "equals": DOOR_STATE_CLOSED, "timeout": 1},
+            )
+        )
+
+    async def test_an_unknown_condition_names_the_whole_vocabulary(self, runner, simulator):
+        with pytest.raises(ScriptError) as error:
+            await runner._execute_step(ScriptStep(action="assert", params={"condition": "bogus"}))
+
+        assert "door_closed" in str(error.value)
+        assert "total_auto_retracts" in str(error.value)
+
+
+class TestWaitForOnTimeout:
+    async def test_the_default_still_fails(self, runner, simulator):
+        with pytest.raises(ScriptError, match="Timeout waiting for condition"):
+            await runner._execute_step(
+                ScriptStep(action="wait_for", params={"condition": "door_open", "timeout": 0.05})
+            )
+
+    async def test_continue_carries_on(self, runner, simulator):
+        await runner._execute_step(
+            ScriptStep(
+                action="wait_for",
+                params={"condition": "door_open", "timeout": 0.05, "on_timeout": "continue"},
+            )
+        )
+
+        assert simulator.state.door_status == DOOR_STATE_CLOSED
+
+    async def test_a_misspelled_on_timeout_fails_loudly(self, runner, simulator):
+        """Silently ignoring it would turn a guarded wait back into a
+        failing one with no sign in the log."""
+        with pytest.raises(ScriptError, match="Unknown on_timeout: contineu"):
+            await runner._execute_step(
+                ScriptStep(
+                    action="wait_for",
+                    params={"condition": "door_open", "timeout": 0.05, "on_timeout": "contineu"},
+                )
+            )
+
+
+class TestIfElse:
+    async def test_the_then_branch_runs_when_it_holds(self, runner, simulator):
+        simulator.simulate_obstruction(0)
+
+        await runner._execute_step(
+            ScriptStep(
+                action="if",
+                params={
+                    "condition": "obstruction",
+                    "equals": "on",
+                    "then": [ScriptStep(action="obstruction")],
+                    "else": [ScriptStep(action="open")],
+                },
+            )
+        )
+
+        assert simulator.state.obstruction_active is False
+
+    async def test_the_else_branch_runs_when_it_does_not(self, runner, simulator):
+        """Which is why `if` needs an `else`: writing the inverted guard a
+        second time is what this replaces."""
+        await runner._execute_step(
+            ScriptStep(
+                action="if",
+                params={
+                    "condition": "obstruction",
+                    "equals": "on",
+                    "then": [ScriptStep(action="open")],
+                    "else": [ScriptStep(action="obstruction")],
+                },
+            )
+        )
+
+        assert simulator.state.obstruction_active is True
+
+    async def test_a_missing_branch_is_simply_skipped(self, runner, simulator):
+        await runner._execute_step(
+            ScriptStep(action="if", params={"condition": "door_open", "then": []})
+        )
+
+    async def test_an_unknown_condition_in_an_if_fails(self, runner, simulator):
+        with pytest.raises(ScriptError, match="Unknown condition"):
+            await runner._execute_step(
+                ScriptStep(action="if", params={"condition": "bogus", "then": []})
+            )
+
+    async def test_a_branch_that_is_not_a_list_is_refused(self, runner, simulator):
+        with pytest.raises(ScriptError, match="must be a list of steps"):
+            await runner._execute_step(
+                ScriptStep(action="if", params={"condition": "door_closed", "then": "open"})
+            )
+
+
+class TestRepeat:
+    async def test_it_runs_the_block_that_many_times(self, runner, simulator):
+        await runner._execute_step(
+            ScriptStep(
+                action="repeat",
+                params={
+                    "times": 3,
+                    "steps": [ScriptStep(action="obstruction", params={"duration": 0})],
+                },
+            )
+        )
+
+        assert simulator.state.obstruction_active is True
+
+    async def test_zero_times_runs_nothing(self, runner, simulator):
+        """The boundary: 0 is a legal count, not a synonym for 1."""
+        await runner._execute_step(
+            ScriptStep(
+                action="repeat",
+                params={"times": 0, "steps": [ScriptStep(action="obstruction")]},
+            )
+        )
+
+        assert simulator.state.obstruction_active is False
+
+    async def test_one_time_runs_it_once(self, runner, simulator):
+        """The other side of the boundary."""
+        await runner._execute_step(
+            ScriptStep(
+                action="repeat",
+                params={"times": 1, "steps": [ScriptStep(action="obstruction")]},
+            )
+        )
+
+        assert simulator.state.obstruction_active is True
+
+    async def test_a_condition_makes_it_a_while_loop(self, runner, simulator):
+        """Re-tested before each pass, so the body can end it."""
+        simulator.simulate_obstruction(0)
+
+        await runner._execute_step(
+            ScriptStep(
+                action="repeat",
+                params={
+                    "condition": "obstruction",
+                    "equals": "on",
+                    "steps": [ScriptStep(action="obstruction")],
+                },
+            )
+        )
+
+        assert simulator.state.obstruction_active is False
+
+    async def test_a_condition_already_false_runs_nothing(self, runner, simulator):
+        """The test is before the body, not after: this is `while`, not
+        `do-while`."""
+        await runner._execute_step(
+            ScriptStep(
+                action="repeat",
+                params={
+                    "condition": "obstruction",
+                    "equals": "on",
+                    "steps": [ScriptStep(action="open")],
+                },
+            )
+        )
+
+        assert simulator.state.door_status == DOOR_STATE_CLOSED
+
+    async def test_the_condition_list_forms_work_here_too(self, runner, simulator):
+        """Same three spellings as `if`, so there is nothing new to learn."""
+        simulator.simulate_obstruction(0)
+
+        await runner._execute_step(
+            ScriptStep(
+                action="repeat",
+                params={
+                    "conditions": [{"condition": "obstruction", "equals": "on"}, "door_closed"],
+                    "steps": [ScriptStep(action="obstruction")],
+                },
+            )
+        )
+
+        assert simulator.state.obstruction_active is False
+
+    async def test_times_and_a_condition_stop_at_whichever_comes_first(self, runner, simulator):
+        """`times` wins here: the condition would never end the loop."""
+        logged: list[str] = []
+        simulator.simulate_obstruction(0)
+
+        await runner._execute_step(
+            ScriptStep(
+                action="repeat",
+                params={
+                    "times": 3,
+                    "condition": "obstruction",
+                    "equals": "on",
+                    "steps": [ScriptStep(action="battery", params={"percent": 50})],
+                },
+            )
+        )
+        del logged
+
+        assert simulator.state.obstruction_active is True
+
+    async def test_the_condition_wins_when_it_ends_first(self, runner, simulator):
+        simulator.simulate_obstruction(0)
+
+        await runner._execute_step(
+            ScriptStep(
+                action="repeat",
+                params={
+                    "times": 99,
+                    "condition": "obstruction",
+                    "equals": "on",
+                    "steps": [ScriptStep(action="obstruction")],
+                },
+            )
+        )
+
+        assert simulator.state.obstruction_active is False
+
+    async def test_neither_times_nor_a_condition_is_refused(self, runner, simulator):
+        """A `repeat` with no bound at all says nothing about what it does."""
+        with pytest.raises(ScriptError, match="needs 'times', a condition, or both"):
+            await runner._execute_step(
+                ScriptStep(action="repeat", params={"steps": [ScriptStep(action="close")]})
+            )
+
+    async def test_a_condition_that_never_ends_is_an_error(self, runner, simulator, monkeypatch):
+        """A hung build that reported PASSED would be worse than one that
+        merely hangs, so hitting the backstop fails the run."""
+        monkeypatch.setattr(scripting, "MAX_SCRIPT_REPEAT", 5)
+
+        with pytest.raises(ScriptError, match="without its condition going false"):
+            await runner._execute_step(
+                ScriptStep(
+                    action="repeat",
+                    params={
+                        "condition": "door_closed",
+                        "steps": [ScriptStep(action="log", params={"message": "x"})],
+                    },
+                )
+            )
+
+    async def test_an_unbounded_count_is_refused(self, runner, simulator):
+        """A runner that took `times: 1e9` would hand an unattended CI job
+        a hang - the same damage `set hold_time inf` used to do."""
+        with pytest.raises(ScriptError, match="between"):
+            await runner._execute_step(
+                ScriptStep(
+                    action="repeat",
+                    params={"times": 1e9, "steps": [ScriptStep(action="close")]},
+                )
+            )
+
+    async def test_a_stop_request_breaks_out(self, runner, simulator):
+        runner.stop()
+
+        await runner._execute_step(
+            ScriptStep(
+                action="repeat",
+                params={"times": 5, "steps": [ScriptStep(action="obstruction")]},
+            )
+        )
+
+        assert simulator.state.obstruction_active is False
+
+
+class TestNestedBlocksAreParsedAtLoadTime:
+    """A bad action inside an untaken branch must still fail the load.
+
+    Parsing lazily would mean a script passed CI for months and then broke
+    the first time its `else` was reached.
+    """
+
+    def test_a_nested_block_becomes_script_steps(self):
+        script = Script.from_yaml(
+            "name: t\n"
+            "steps:\n"
+            "  - action: if\n"
+            "    condition: door_closed\n"
+            "    then:\n"
+            "      - action: close\n"
+        )
+
+        assert isinstance(script.steps[0].params["then"][0], ScriptStep)
+        assert script.steps[0].params["then"][0].action == "close"
+
+    def test_a_step_without_an_action_inside_a_block_is_refused(self):
+        with pytest.raises(ScriptError, match="missing 'action'"):
+            Script.from_yaml(
+                "name: t\nsteps:\n  - action: repeat\n    times: 1\n    steps:\n      - times: 2\n"
+            )
+
+    def test_a_block_that_is_not_a_list_is_refused_at_load(self):
+        with pytest.raises(ScriptError, match="'steps' must be a list"):
+            Script.from_yaml("name: t\nsteps:\n  - action: repeat\n    steps: nope\n")
+
+    def test_the_progress_log_summarises_a_block(self):
+        """The log is what a script author reads; dumping every nested
+        dataclass repr buried the run in one unreadable line."""
+        step = ScriptStep(
+            action="repeat",
+            params={"times": 2, "steps": [ScriptStep(action="close"), ScriptStep(action="open")]},
+        )
+
+        assert str(step) == "repeat(times=2, steps=[2 steps])"
+
+    def test_a_single_step_block_is_not_pluralised(self):
+        step = ScriptStep(action="if", params={"then": [ScriptStep(action="close")]})
+
+        assert str(step) == "if(then=[1 step])"
+
+
+class TestResetAction:
+    async def test_a_bare_reset_restores_the_runners_initial_document(self, simulator):
+        runner = ScriptRunner(simulator, initial_state_document={"settings": {"hold_time": 33}})
+        simulator.state.hold_time = 1
+
+        await runner._execute_step(ScriptStep(action="reset"))
+
+        assert simulator.state.hold_time == 33
+
+    async def test_without_an_initial_document_it_restores_the_defaults(self, runner, simulator):
+        simulator.state.hold_time = 99
+
+        await runner._execute_step(ScriptStep(action="reset"))
+
+        assert simulator.state.hold_time == DoorSimulatorState().hold_time
+
+    async def test_a_named_document_goes_through_the_handlers_loader(self, simulator):
+        """The loader owns the path policy, so a script cannot reach a file
+        the control channel would refuse."""
+        runner = ScriptRunner(
+            simulator, load_state_document=lambda name: {"settings": {"hold_time": 21}}
+        )
+
+        await runner._execute_step(ScriptStep(action="reset", params={"initial_state": "fixture"}))
+
+        assert simulator.state.hold_time == 21
+
+    async def test_a_loader_refusal_fails_the_step(self, simulator):
+        def refuse(name):
+            raise ValueError("nope")
+
+        runner = ScriptRunner(simulator, load_state_document=refuse)
+
+        with pytest.raises(ScriptError, match="nope"):
+            await runner._execute_step(ScriptStep(action="reset", params={"initial_state": "x"}))
+
+    async def test_a_runner_with_no_loader_says_so(self, runner, simulator):
+        with pytest.raises(ScriptError, match="cannot load state documents"):
+            await runner._execute_step(ScriptStep(action="reset", params={"initial_state": "x"}))
+
+
+class TestStopInterruptsANestedBlock:
+    """A stop between steps must reach inside a block too.
+
+    The runner checks between steps; a nested block that ignored the
+    request would run to completion after a `stop`, and `stop` would look
+    like it had not registered.
+    """
+
+    async def test_a_stop_between_steps_inside_a_block_ends_it(self, runner, simulator):
+        """The check is *between* the steps of one block.
+
+        `repeat` also checks before each iteration, so only a multi-step
+        block whose stop lands part-way through reaches this one - and a
+        block that ran its remaining steps after a stop would make `stop`
+        look like it had not registered.
+        """
+        runner.stop()
+
+        with pytest.raises(ScriptError, match="Script stopped"):
+            await runner._execute_block([ScriptStep(action="log", params={"message": "one"})])
+
+    async def test_a_stop_ends_a_running_block(self, runner, simulator):
+        async def stop_soon():
+            await asyncio.sleep(0.02)
+            runner.stop()
+
+        script = Script.from_yaml(
+            "name: t\n"
+            "steps:\n"
+            "  - action: repeat\n"
+            "    times: 50\n"
+            "    steps:\n"
+            "      - action: wait\n"
+            "        seconds: 0.01\n"
+        )
+        asyncio.get_running_loop().create_task(stop_soon())
+
+        assert await runner.run(script, verbose=False) is False
+
+
+class TestIfConditionForms:
+    """`if` states its condition one of three ways, and only one at a time."""
+
+    async def test_conditions_requires_all_of_them(self, runner, simulator):
+        simulator.simulate_obstruction(0)
+
+        await runner._execute_step(
+            ScriptStep(
+                action="if",
+                params={
+                    "conditions": [
+                        {"condition": "obstruction", "equals": "on"},
+                        {"condition": "door_closed"},
+                        {"condition": "hold_time", "equals": simulator.state.hold_time},
+                    ],
+                    "then": [ScriptStep(action="obstruction")],
+                },
+            )
+        )
+
+        assert simulator.state.obstruction_active is False
+
+    async def test_conditions_is_false_when_one_fails(self, runner, simulator):
+        """The decisive operand is the *second*: a chain that only ever ran
+        with every entry true would never exercise the short-circuit."""
+        await runner._execute_step(
+            ScriptStep(
+                action="if",
+                params={
+                    "conditions": ["door_closed", {"condition": "obstruction", "equals": "on"}],
+                    "then": [ScriptStep(action="open")],
+                    "else": [ScriptStep(action="obstruction")],
+                },
+            )
+        )
+
+        assert simulator.state.obstruction_active is True
+
+    async def test_any_needs_only_one(self, runner, simulator):
+        await runner._execute_step(
+            ScriptStep(
+                action="if",
+                params={
+                    "any": ["door_open", "door_closed"],
+                    "then": [ScriptStep(action="obstruction")],
+                },
+            )
+        )
+
+        assert simulator.state.obstruction_active is True
+
+    async def test_any_is_false_when_none_hold(self, runner, simulator):
+        await runner._execute_step(
+            ScriptStep(
+                action="if",
+                params={
+                    "any": ["door_open", {"condition": "power", "equals": "off"}],
+                    "then": [ScriptStep(action="obstruction")],
+                    "else": [ScriptStep(action="log", params={"message": "none"})],
+                },
+            )
+        )
+
+        assert simulator.state.obstruction_active is False
+
+    async def test_a_bare_string_entry_is_a_fused_shorthand(self, runner, simulator):
+        """Same courtesy the step list already gives: `- close` is a step,
+        so `- door_closed` is a condition."""
+        assert runner._entry_holds("door_closed", "conditions") is True
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {},
+            {"condition": "door_closed", "conditions": ["door_closed"]},
+            {"conditions": ["door_closed"], "any": ["door_closed"]},
+            {"condition": "door_closed", "any": ["door_closed"]},
+        ],
+        ids=["none", "condition+conditions", "conditions+any", "condition+any"],
+    )
+    async def test_exactly_one_form_is_required(self, runner, simulator, params):
+        """Two forms is two answers to one question - a typo, not a
+        refinement - and none at all is a step that says nothing."""
+        with pytest.raises(ScriptError, match="exactly one of"):
+            await runner._execute_step(ScriptStep(action="if", params={**params, "then": []}))
+
+    async def test_equals_beside_a_list_form_is_refused(self, runner, simulator):
+        """It belongs on an entry; ignoring it would make a typo look
+        accepted."""
+        with pytest.raises(ScriptError, match="'equals' applies to 'condition'"):
+            await runner._execute_step(
+                ScriptStep(
+                    action="if",
+                    params={"conditions": ["door_closed"], "equals": "on", "then": []},
+                )
+            )
+
+    @pytest.mark.parametrize("value", [[], "door_closed", 3], ids=["empty", "string", "int"])
+    async def test_a_list_form_must_be_a_non_empty_list(self, runner, simulator, value):
+        with pytest.raises(ScriptError, match="non-empty list"):
+            await runner._execute_step(
+                ScriptStep(action="if", params={"conditions": value, "then": []})
+            )
+
+    async def test_an_entry_that_is_neither_name_nor_mapping_is_refused(self, runner, simulator):
+        with pytest.raises(ScriptError, match="condition name or a mapping"):
+            await runner._execute_step(ScriptStep(action="if", params={"any": [3], "then": []}))
+
+    async def test_an_entry_without_a_condition_is_refused(self, runner, simulator):
+        with pytest.raises(ScriptError, match="has no 'condition'"):
+            await runner._execute_step(
+                ScriptStep(action="if", params={"conditions": [{"equals": "on"}], "then": []})
+            )
+
+    async def test_an_unknown_key_in_an_entry_is_refused(self, runner, simulator):
+        with pytest.raises(ScriptError, match="Unknown key"):
+            await runner._execute_step(
+                ScriptStep(
+                    action="if",
+                    params={"conditions": [{"condition": "door_closed", "equal": "x"}], "then": []},
+                )
+            )
+
+    async def test_nesting_expresses_what_flat_and_or_cannot(self, runner, simulator):
+        """`(a and b) or c` needs no nested boolean syntax: blocks nest.
+
+        Which is why there is deliberately no nested `and:`/`or:` - that is
+        where a config DSL becomes a language you debug instead of use.
+        """
+        script = Script.from_yaml(
+            "name: t\n"
+            "steps:\n"
+            "  - action: if\n"
+            "    conditions: [door_closed, power]\n"
+            "    then:\n"
+            "      - action: if\n"
+            "        condition: obstruction\n"
+            "        equals: 'off'\n"
+            "        then:\n"
+            "          - action: obstruction\n"
+        )
+
+        assert await runner.run(script, verbose=False) is True
+        assert simulator.state.obstruction_active is True
+
+
+class TestComparisonOperators:
+    """`equals` alone made most conditions unusable.
+
+    "wait until the door has opened 100 times" or "assert the battery is
+    below 75" had no spelling at all.
+    """
+
+    @pytest.mark.parametrize(
+        ("operator", "limit", "holds"),
+        [
+            ("equals", 50, True),
+            ("equals", 51, False),
+            ("not_equals", 51, True),
+            ("not_equals", 50, False),
+            ("above", 49, True),
+            ("above", 50, False),
+            ("below", 51, True),
+            ("below", 50, False),
+            ("at_least", 50, True),
+            ("at_least", 51, False),
+            ("at_most", 50, True),
+            ("at_most", 49, False),
+        ],
+    )
+    async def test_each_operator_at_its_boundary(self, runner, simulator, operator, limit, holds):
+        """Both sides of every boundary: `above` excludes its limit,
+        `at_least` includes it, and the pairs are exact inverses."""
+        simulator.state.battery_percent = 50
+
+        assert runner._if_holds({"condition": "battery", operator: limit}) is holds
+
+    async def test_more_than_one_comparison_is_refused(self, runner, simulator):
+        """Two answers to one question is a typo, not a range."""
+        with pytest.raises(ScriptError, match="more than one comparison"):
+            runner._if_holds({"condition": "battery", "above": 10, "below": 90})
+
+    async def test_a_non_boolean_condition_needs_a_comparison(self, runner, simulator):
+        """`condition: battery` alone has no sensible default."""
+        with pytest.raises(ScriptError, match="not a yes/no condition"):
+            runner._if_holds({"condition": "battery"})
+
+    @pytest.mark.parametrize("condition", ["door_status", "door_closed"])
+    async def test_a_numeric_comparison_needs_a_number(self, runner, simulator, condition):
+        """Comparing a status string against 25 has no meaning, and
+        silently answering False would hide the mistake."""
+        with pytest.raises(ScriptError, match="needs a numeric condition"):
+            runner._if_holds({"condition": condition, "above": 25})
+
+    async def test_position_is_the_numeric_door_condition(self, runner, simulator):
+        """Mirrors PowerPetDoor.position, so the two cannot disagree."""
+        assert runner._if_holds({"condition": "position", "equals": 0}) is True
+
+        simulator.state.door_status = DOOR_STATE_KEEPUP
+        assert runner._if_holds({"condition": "position", "at_least": 100}) is True
+
+    async def test_a_boolean_condition_compares_as_a_boolean(self, runner, simulator):
+        """`equals: 1` and `equals: enabled` both mean "on"; comparing the
+        rendered text accepted only some spellings."""
+        simulator.state.power = True
+
+        for spelling in (True, 1, "1", "on", "true", "yes", "enabled"):
+            assert runner._if_holds({"condition": "power", "equals": spelling}) is True
+
+    async def test_a_bad_boolean_expectation_is_refused(self, runner, simulator):
+        with pytest.raises(ScriptError, match="must be true or false"):
+            runner._if_holds({"condition": "power", "equals": "maybe"})
+
+
+class TestTheDoorToggleAction:
+    """`toggle` is the door, matching the CLI."""
+
+    async def test_it_opens_a_closed_door(self, runner, simulator):
+        await runner._execute_step(ScriptStep(action="toggle"))
+
+        assert await simulator.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+
+    async def test_it_closes_an_open_door(self, runner, simulator):
+        await simulator.open_door(hold=True)
+        await simulator.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+
+        await runner._execute_step(ScriptStep(action="toggle"))
+
+        assert await simulator.wait_for_status(DOOR_STATE_CLOSED, timeout=2.0)
+
+    async def test_it_does_nothing_mid_travel(self, runner, simulator):
+        simulator.state.door_status = DOOR_STATE_RISING
+
+        await runner._execute_step(ScriptStep(action="toggle"))
+
+        assert simulator.state.door_status == DOOR_STATE_RISING
+
+
+class TestObstructionScriptForms:
+    """The script action takes the argument the CLI command takes."""
+
+    @pytest.mark.parametrize(
+        ("params", "active", "oneshot"),
+        [
+            ({}, True, True),
+            ({"state": "on"}, True, False),
+            ({"duration": 0}, True, False),
+        ],
+        ids=["bare-one-shot", "on-until-cleared", "zero-until-cleared"],
+    )
+    async def test_placing_it(self, runner, simulator, params, active, oneshot):
+        await runner._execute_step(ScriptStep(action="obstruction", params=params))
+
+        assert simulator.state.obstruction_active is active
+        assert simulator.state.obstruction_oneshot is oneshot
+
+    async def test_state_off_clears_it(self, runner, simulator):
+        """The explicit clear a script needs: read out of order, "say it
+        again to toggle" is not an instruction anyone can follow."""
+        simulator.simulate_obstruction(0)
+
+        await runner._execute_step(ScriptStep(action="obstruction", params={"state": "off"}))
+
+        assert simulator.state.obstruction_active is False
+
+    async def test_toggle_flips_it(self, runner, simulator):
+        await runner._execute_step(ScriptStep(action="obstruction", params={"state": "toggle"}))
+        assert simulator.state.obstruction_active is True
+
+        await runner._execute_step(ScriptStep(action="obstruction", params={"state": "toggle"}))
+        assert simulator.state.obstruction_active is False
+
+    async def test_a_misspelled_state_is_refused(self, runner, simulator):
+        with pytest.raises(ScriptError, match="expected on, off, toggle"):
+            await runner._execute_step(
+                ScriptStep(action="obstruction", params={"state": "nonsense"})
+            )
+
+
+class TestSensorScriptForms:
+    """`inside`/`outside` take the same argument, and are pet presence."""
+
+    async def test_state_on_holds_the_sensor(self, runner, simulator):
+        await runner._execute_step(ScriptStep(action="inside", params={"state": "on"}))
+
+        assert simulator.state.pet_present("inside") is True
+
+    async def test_state_off_releases_it(self, runner, simulator):
+        simulator.hold_sensor("outside", True)
+
+        await runner._execute_step(ScriptStep(action="outside", params={"state": "off"}))
+
+        assert simulator.state.pet_present("outside") is False
+
+    async def test_a_duration_still_works(self, runner, simulator):
+        await runner._execute_step(ScriptStep(action="inside", params={"duration": 0.05}))
+
+        assert simulator.state.pet_present("inside") is True
+        await asyncio.sleep(0.15)
+        assert simulator.state.pet_present("inside") is False
+
+
+class TestSimpleCommandShorthandForNewActions:
+    """The one-line form, which `run` and the tests both use."""
+
+    def test_it_parses_the_new_actions(self):
+        script = Script.from_simple_commands(
+            ["if door_closed", "inside on", "inside 0.5", "obstruction off", "toggle"]
+        )
+
+        assert [s.params for s in script.steps] == [
+            {"condition": "door_closed"},
+            {"state": "on"},
+            {"duration": "0.5"},
+            {"state": "off"},
+            {},
+        ]
+
+
+class TestWaitForOnListConditions:
+    """A list or a comparison has no transition to be signalled by, so it
+    polls - and the error message still has to name what was waited on."""
+
+    async def test_a_condition_list_can_be_waited_on(self, runner, simulator):
+        await runner._execute_step(
+            ScriptStep(
+                action="wait_for",
+                params={"conditions": ["door_closed", "power"], "timeout": 1},
+            )
+        )
+
+    async def test_the_timeout_names_the_list_form(self, runner, simulator):
+        with pytest.raises(ScriptError, match="conditions="):
+            await runner._execute_step(
+                ScriptStep(
+                    action="wait_for",
+                    params={"conditions": ["door_open"], "timeout": 0.05},
+                )
+            )
+
+    async def test_the_timeout_names_the_any_form(self, runner, simulator):
+        with pytest.raises(ScriptError, match="any="):
+            await runner._execute_step(
+                ScriptStep(action="wait_for", params={"any": ["door_open"], "timeout": 0.05})
+            )
+
+    async def test_a_numeric_comparison_polls(self, runner, simulator):
+        """Not a status transition, so it cannot be signalled."""
+        assert runner._status_set_for({"condition": "battery", "above": 10}) is None
+
+    def test_a_condition_with_no_form_at_all_describes_itself(self, runner):
+        """The `(none)` fallback, which only a malformed step reaches."""
+        assert runner._describe_condition({}) == "(none)"
+
+    def test_a_bare_sensor_shorthand_takes_the_default_pulse(self):
+        """`inside` with no argument is a pulse, not a hold."""
+        script = Script.from_simple_commands(["inside", "obstruction"])
+
+        assert [s.params for s in script.steps] == [{}, {}]
+
+
+class TestTheDoorConditionsAreSymmetric:
+    """`door_closing` had no `door_opening` counterpart.
+
+    `DOOR_STATES_OPENING` existed in `const.py` the whole time - it is
+    half of what `is_open` is built from - so the asymmetry was an
+    omission rather than a decision.
+    """
+
+    @pytest.mark.parametrize(
+        ("status", "opening", "closing"),
+        [
+            (DOOR_STATE_CLOSED, False, False),
+            (DOOR_STATE_RISING, True, False),
+            (DOOR_STATE_SLOWING, True, False),
+            (DOOR_STATE_HOLDING, False, False),
+            (DOOR_STATE_KEEPUP, False, False),
+            (DOOR_STATE_CLOSING, False, True),
+            (DOOR_STATE_CLOSING_TOP_OPEN, False, True),
+            (DOOR_STATE_CLOSING_MID_OPEN, False, True),
+        ],
+    )
+    async def test_every_status_answers_both(self, runner, simulator, status, opening, closing):
+        """The pair partitions travel: no state is both, and each of the
+        five moving states is exactly one."""
+        simulator.state.door_status = status
+
+        assert runner._if_holds({"condition": "door_opening"}) is opening
+        assert runner._if_holds({"condition": "door_closing"}) is closing
+
+    async def test_waiting_for_opening_is_signalled_not_polled(self, runner, simulator):
+        """`DOOR_RISING` is brief; a 50 ms poll would miss it, which is
+        exactly why `door_closing` takes the deterministic path too."""
+        assert runner._status_set_for({"condition": "door_opening"}) == (
+            DOOR_STATE_RISING,
+            DOOR_STATE_SLOWING,
+        )
+
+    async def test_it_is_in_the_published_vocabulary(self):
+        assert "door_opening" in scripting.ASSERT_CONDITIONS
+        assert "door_opening" in scripting.CONDITION_NAMES
+
+
+class TestTheConditionVocabularyIsPinned:
+    """The names themselves, as a literal.
+
+    The error messages derive their list from this tuple, so they cannot
+    catch it changing. This can: adding or removing a condition has to be
+    a deliberate line in a diff, not a side effect of touching the value
+    registry.
+    """
+
+    def test_the_exact_set(self):
+        assert scripting.CONDITION_NAMES == (
+            "ac_present",
+            "auto",
+            "autoretract",
+            "battery",
+            "battery_present",
+            "charge_rate",
+            "closing_mid_time",
+            "closing_start_time",
+            "closing_top_time",
+            "cmd_lockout",
+            "discharge_rate",
+            "door_closed",
+            "door_closing",
+            "door_open",
+            "door_opening",
+            "door_status",
+            "firmware_version",
+            "hardware_version",
+            "has_remote_id",
+            "has_remote_key",
+            "hold_time",
+            "inside",
+            "notified_inside_off",
+            "notified_inside_on",
+            "notified_low_battery",
+            "notified_outside_off",
+            "notified_outside_on",
+            "notify_inside_off",
+            "notify_inside_on",
+            "notify_low_battery",
+            "notify_outside_off",
+            "notify_outside_on",
+            "obstruction",
+            "outside",
+            "position",
+            "power",
+            "rise_time",
+            "safety_lock",
+            "sensor_retrigger_window",
+            "sensor_trigger_voltage",
+            "sleep_sensor_trigger_voltage",
+            "slowing_time",
+            "time",
+            "timezone",
+            "total_auto_retracts",
+            "total_open_cycles",
+        )
+
+    def test_the_comparisons(self):
+        assert scripting.COMPARISONS == (
+            "equals",
+            "not_equals",
+            "above",
+            "below",
+            "at_least",
+            "at_most",
+        )
+
+
+class TestTheNotifyAction:
+    """A script that waits on a notification has to be able to enable it."""
+
+    @pytest.mark.parametrize(
+        ("name", "attribute"),
+        sorted(scripting.NOTIFICATION_SETTINGS.items()),
+    )
+    async def test_it_switches_each_one_on(self, runner, simulator, name, attribute):
+        setattr(simulator.state, attribute, False)
+
+        await runner._execute_step(ScriptStep(action="notify", params={"name": name}))
+
+        assert getattr(simulator.state, attribute) is True
+
+    async def test_state_off_switches_one_back_off(self, runner, simulator):
+        simulator.state.sensor_on_indoor = True
+
+        await runner._execute_step(
+            ScriptStep(action="notify", params={"name": "inside_on", "state": "off"})
+        )
+
+        assert simulator.state.sensor_on_indoor is False
+
+    async def test_a_hyphenated_name_normalizes(self, runner, simulator):
+        await runner._execute_step(ScriptStep(action="notify", params={"name": "low-battery"}))
+
+        assert simulator.state.low_battery is True
+
+    async def test_an_unknown_name_is_refused(self, runner, simulator):
+        with pytest.raises(ScriptError, match="Unknown notification: bogus"):
+            await runner._execute_step(ScriptStep(action="notify", params={"name": "bogus"}))
+
+    async def test_the_counters_are_readable_as_conditions(self, runner, simulator):
+        """Counts, so a script can wait for the *third* one."""
+        simulator.state.sensor_on_indoor = True
+        assert runner._if_holds({"condition": "notified_inside_on", "equals": 0}) is True
+
+        simulator.notify("inside_on")
+        simulator.notify("inside_on")
+
+        assert runner._if_holds({"condition": "notified_inside_on", "at_least": 2}) is True

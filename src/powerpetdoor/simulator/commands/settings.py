@@ -5,15 +5,15 @@
 
 """Settings management commands."""
 
-import math
 import random
 from typing import TYPE_CHECKING
 
 from ...i18n import t
 from ...tz_utils import get_available_timezones
+from ..coerce import CoercionError
+from ..values import read_value, set_named_value
 from .base import (
     ArgSpec,
-    BoolToggleCommandMixin,
     CommandResult,
     SubcommandInfo,
     command,
@@ -34,94 +34,10 @@ if TYPE_CHECKING:
     from ..server import DoorSimulator
 
 
-class SettingsCommandsMixin(BoolToggleCommandMixin):
+class SettingsCommandsMixin:
     """Mixin providing settings management commands."""
 
     simulator: "DoorSimulator"
-
-    @command(
-        "safety",
-        ["s"],
-        "Toggle or set outside sensor safety lock",
-        category="settings",
-        args=[
-            ArgSpec(
-                "value",
-                "bool_toggle",
-                required=False,
-                description="on/off or omit to toggle",
-            )
-        ],
-        subcommands=[SubcommandInfo("toggle", ["t"], "Toggle safety lock")],
-    )
-    def safety(self, value: bool | None = None) -> CommandResult:
-        """Toggle or set safety lock."""
-        return self._toggle_bool(
-            "safety_lock", "Safety lock", value, broadcast_func="broadcast_safety_lock"
-        )
-
-    @subcommand("safety", "toggle", ["t"], "Toggle safety lock")
-    def safety_toggle(self) -> CommandResult:
-        """Toggle safety lock."""
-        return self._toggle_bool(
-            "safety_lock", "Safety lock", None, broadcast_func="broadcast_safety_lock"
-        )
-
-    @command(
-        "lockout",
-        ["l"],
-        "Toggle or set command lockout",
-        category="settings",
-        args=[
-            ArgSpec(
-                "value",
-                "bool_toggle",
-                required=False,
-                description="on/off or omit to toggle",
-            )
-        ],
-        subcommands=[SubcommandInfo("toggle", ["t"], "Toggle command lockout")],
-    )
-    def lockout(self, value: bool | None = None) -> CommandResult:
-        """Toggle or set command lockout."""
-        return self._toggle_bool(
-            "cmd_lockout", "Command lockout", value, broadcast_func="broadcast_cmd_lockout"
-        )
-
-    @subcommand("lockout", "toggle", ["t"], "Toggle command lockout")
-    def lockout_toggle(self) -> CommandResult:
-        """Toggle command lockout."""
-        return self._toggle_bool(
-            "cmd_lockout", "Command lockout", None, broadcast_func="broadcast_cmd_lockout"
-        )
-
-    @command(
-        "autoretract",
-        ["a"],
-        "Toggle or set auto-retract",
-        category="settings",
-        args=[
-            ArgSpec(
-                "value",
-                "bool_toggle",
-                required=False,
-                description="on/off or omit to toggle",
-            )
-        ],
-        subcommands=[SubcommandInfo("toggle", ["t"], "Toggle auto-retract")],
-    )
-    def autoretract(self, value: bool | None = None) -> CommandResult:
-        """Toggle or set auto-retract."""
-        return self._toggle_bool(
-            "autoretract", "Auto-retract", value, broadcast_func="broadcast_autoretract"
-        )
-
-    @subcommand("autoretract", "toggle", ["t"], "Toggle auto-retract")
-    def autoretract_toggle(self) -> CommandResult:
-        """Toggle auto-retract."""
-        return self._toggle_bool(
-            "autoretract", "Auto-retract", None, broadcast_func="broadcast_autoretract"
-        )
 
     @command(
         "holdtime",
@@ -157,21 +73,13 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
                 t(
                     "simulator.commands.settings.hold_time_s",
                     "Hold time: {hold_time}s",
-                    hold_time=self.simulator.state.hold_time,
+                    hold_time=read_value(self.simulator.state, "hold_time"),
                 ),
             )
-        if not math.isfinite(seconds):
-            return CommandResult(
-                False,
-                t(
-                    "simulator.commands.settings.hold_time_must_finite_number",
-                    "Hold time must be a finite number, got {seconds}",
-                    seconds=seconds,
-                ),
-            )
-        self.simulator.state.hold_time = seconds
-        # Broadcast hold time change to connected PPD clients
-        self.simulator.broadcast_hold_time()
+        try:
+            set_named_value(self.simulator, "hold_time", seconds)
+        except CoercionError as exc:
+            return CommandResult(False, str(exc))
         return CommandResult(
             True,
             t(
@@ -206,7 +114,7 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
                 t(
                     "simulator.commands.settings.battery_2",
                     "Battery: {battery_percent}%",
-                    battery_percent=self.simulator.state.battery_percent,
+                    battery_percent=read_value(self.simulator.state, "battery"),
                 ),
             )
         pct = max(0, min(100, percent))
@@ -222,95 +130,6 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
         self.simulator.set_battery(pct)
         return CommandResult(
             True, t("simulator.commands.settings.battery_set", "Battery set to {pct}%", pct=pct)
-        )
-
-    @command(
-        "ac",
-        [],
-        "Toggle or set AC power connection",
-        category="settings",
-        subcommands=[
-            SubcommandInfo("connect", ["c"], "Connect AC power"),
-            SubcommandInfo("disconnect", ["d"], "Disconnect AC power"),
-            SubcommandInfo("toggle", ["t"], "Toggle AC connection"),
-        ],
-    )
-    def ac(self) -> CommandResult:
-        """Toggle AC power connection (default action).
-
-        Phrased as "AC set to ..." rather than "AC: ...": the latter is how
-        the read-only displays (`battery`, `holdtime`) phrase themselves, so
-        a bare `ac` would otherwise look like it was showing rather than
-        changing.
-        """
-        present = not self.simulator.state.ac_present
-        self.simulator.set_ac_present(present)
-        state = "connected" if present else "disconnected"
-        return CommandResult(
-            True, t("simulator.commands.settings.ac_set", "AC set to {state}", state=state)
-        )
-
-    @subcommand("ac", "connect", ["c"], "Connect AC power")
-    def ac_connect(self) -> CommandResult:
-        """Connect AC power."""
-        self.simulator.set_ac_present(True)
-        return CommandResult(
-            True, t("simulator.commands.settings.ac_set_connected", "AC set to connected")
-        )
-
-    @subcommand("ac", "disconnect", ["d"], "Disconnect AC power")
-    def ac_disconnect(self) -> CommandResult:
-        """Disconnect AC power."""
-        self.simulator.set_ac_present(False)
-        return CommandResult(
-            True, t("simulator.commands.settings.ac_set_disconnected", "AC set to disconnected")
-        )
-
-    @subcommand("ac", "toggle", ["t"], "Toggle AC connection")
-    def ac_toggle(self) -> CommandResult:
-        """Toggle AC connection."""
-        present = not self.simulator.state.ac_present
-        self.simulator.set_ac_present(present)
-        state = "connected" if present else "disconnected"
-        return CommandResult(
-            True, t("simulator.commands.settings.ac_set", "AC set to {state}", state=state)
-        )
-
-    @command(
-        "battery_present",
-        ["bp"],
-        "Toggle or set battery presence",
-        category="settings",
-        args=[
-            ArgSpec(
-                "value",
-                "bool_toggle",
-                required=False,
-                description="on/off or omit to toggle",
-            )
-        ],
-        subcommands=[SubcommandInfo("toggle", ["t"], "Toggle battery presence")],
-    )
-    def battery_present(self, value: bool | None = None) -> CommandResult:
-        """Toggle or set battery presence."""
-        if value is None:
-            present = not self.simulator.state.battery_present
-        else:
-            present = value
-        self.simulator.set_battery_present(present)
-        state = "installed" if present else "removed"
-        return CommandResult(
-            True, t("simulator.commands.settings.battery", "Battery: {state}", state=state)
-        )
-
-    @subcommand("battery_present", "toggle", ["t"], "Toggle battery presence")
-    def battery_present_toggle(self) -> CommandResult:
-        """Toggle battery presence."""
-        present = not self.simulator.state.battery_present
-        self.simulator.set_battery_present(present)
-        state = "installed" if present else "removed"
-        return CommandResult(
-            True, t("simulator.commands.settings.battery", "Battery: {state}", state=state)
         )
 
     @command(
@@ -345,7 +164,7 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
                 ),
             )
         else:
-            current_rate = self.simulator.state.battery_config.charge_rate
+            current_rate = read_value(self.simulator.state, "charge_rate")
             return CommandResult(
                 True,
                 t(
@@ -388,7 +207,7 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
                 ),
             )
         else:
-            current_rate = self.simulator.state.battery_config.discharge_rate
+            current_rate = read_value(self.simulator.state, "discharge_rate")
             return CommandResult(
                 True,
                 t(
@@ -414,79 +233,46 @@ class SettingsCommandsMixin(BoolToggleCommandMixin):
         ],
     )
     def timezone(self, tz: str | None = None) -> CommandResult:
-        """Set or show timezone.
+        """Set or show the timezone.
 
-        Accepts either:
-        - IANA timezone name (e.g., 'America/New_York')
-        - POSIX TZ string (e.g., 'EST5EDT,M3.2.0,M11.1.0')
+        Takes either an IANA name (`America/New_York`) or a POSIX TZ
+        string (`EST5EDT,M3.2.0,M11.1.0`), because both are things an
+        operator has to hand. It is **stored** as POSIX either way: the
+        door speaks POSIX and nothing else, so that is what a connected
+        client sees whichever spelling was typed here.
+
+        The conversion, and the refusal of anything that is neither,
+        belong to the value's setter - which a script's `set timezone`
+        and a state document reach too. This only reports the result.
         """
-        from ...tz_utils import (
-            get_available_timezones,
-            get_posix_tz_string,
-            is_cache_initialized,
-            parse_posix_tz_string,
-        )
+        from ...tz_utils import find_iana_for_posix, is_cache_initialized
 
         if tz is None:
-            # Show current timezone
-            current = self.simulator.state.timezone
-            display = current
-            if is_cache_initialized():
-                posix = get_posix_tz_string(current)
-                if posix:
-                    display = f"{current} ({posix})"
+            stored = str(read_value(self.simulator.state, "timezone"))
+            # The rule is what is stored; the name is the readable part.
+            iana = find_iana_for_posix(stored) if is_cache_initialized() else None
+            display = f"{stored} ({iana})" if iana else stored
             return CommandResult(
                 True,
                 t("simulator.commands.settings.timezone", "Timezone: {display}", display=display),
             )
 
-        # Validate and set timezone
-        # Check if it's an IANA timezone
-        if "/" in tz or tz in ("UTC", "GMT"):
-            available = get_available_timezones()
-            if available and tz not in available:
-                return CommandResult(
-                    False,
-                    t(
-                        "simulator.commands.settings.unknown_timezone",
-                        "Unknown timezone: {tz}",
-                        tz=tz,
-                    ),
-                )
-            self.simulator.state.timezone = tz
-            # Broadcast timezone change to connected PPD clients
-            self.simulator.broadcast_timezone()
-            posix = get_posix_tz_string(tz) if is_cache_initialized() else None
-            if posix:
-                return CommandResult(
-                    True,
-                    t(
-                        "simulator.commands.settings.timezone_set_2",
-                        "Timezone set to {tz} ({posix})",
-                        tz=tz,
-                        posix=posix,
-                    ),
-                )
+        try:
+            set_named_value(self.simulator, "timezone", tz)
+        except CoercionError as exc:
+            return CommandResult(False, str(exc))
+
+        stored = str(read_value(self.simulator.state, "timezone"))
+        if stored == tz:
             return CommandResult(
                 True, t("simulator.commands.settings.timezone_set", "Timezone set to {tz}", tz=tz)
             )
-
-        # Try to parse as POSIX TZ string
-        parsed = parse_posix_tz_string(tz)
-        if parsed and parsed.get("std_abbrev"):
-            # Valid POSIX format - store directly
-            self.simulator.state.timezone = tz
-            # Broadcast timezone change to connected PPD clients
-            self.simulator.broadcast_timezone()
-            return CommandResult(
-                True, t("simulator.commands.settings.timezone_set", "Timezone set to {tz}", tz=tz)
-            )
-
         return CommandResult(
-            False,
+            True,
             t(
-                "simulator.commands.settings.invalid_timezone_use_iana_name",
-                "Invalid timezone: {tz}. Use IANA name (e.g., 'America/New_York') or POSIX string (e.g., 'EST5EDT,M3.2.0,M11.1.0')",
+                "simulator.commands.settings.timezone_set_2",
+                "Timezone set to {tz} ({posix})",
                 tz=tz,
+                posix=stored,
             ),
         )

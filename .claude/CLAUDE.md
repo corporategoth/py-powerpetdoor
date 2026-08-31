@@ -301,3 +301,10 @@ What stays, because it is correctness rather than security:
 - `sanitize_text`/`sanitize_field` on every network-derived value that
   reaches a log or a terminal.
 - The control channel's `127.0.0.1` default bind.
+
+Related, and for the same reason: **do not add `--max-clients`, connection
+refusal, or contention emulation to the simulator.** A real door serves one
+connection and degrades into unexplained timeouts when a second attaches;
+reproducing that would break the test suite, `ppd-simulator-ctl` and the CLI
+at once, since those attach alongside the client under test. The divergence
+is deliberate and documented in `docs/simulator.md`.

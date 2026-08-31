@@ -60,6 +60,35 @@ _LOGGER = logging.getLogger(__name__)
 #: number of slots a hostile SET_SCHEDULE stream can allocate.
 MAX_SCHEDULE_INDEX = 255
 
+#: Highest hour a schedule time may carry. **24, not 23**: the device
+#: spells the end of the day as ``24:00`` and honours it - see
+#: :data:`END_OF_DAY`. It is one past the last real hour, so it is only a
+#: time at all when the minute is zero.
+MAX_SCHEDULE_HOUR = 24
+
+#: Highest minute a schedule time may carry.
+MAX_SCHEDULE_MINUTE = 59
+
+
+def valid_schedule_time(hour: int, minute: int) -> bool:
+    """Whether ``hour:minute`` is a time this device can hold.
+
+    The one place this rule lives. It was previously written out in four:
+    the wire coercion, the CLI's ``time_range`` parser, the state
+    document loader and the field's own documentation - and they
+    disagreed. Two capped the hour at 23, which is narrower than the
+    device, and only the state loader knew that hour 24 requires a zero
+    minute.
+
+    Hour 24 is legal and means the end of the day: a window of
+    ``20:00-24:00`` reports the sensor enabled at 21:07. Being one past the last real hour, it is a time
+    only when the minute is zero - ``24:30`` is half an hour past the end
+    of the day, which is not a time at all.
+    """
+    if not (0 <= hour <= MAX_SCHEDULE_HOUR and 0 <= minute <= MAX_SCHEDULE_MINUTE):
+        return False
+    return not (hour == MAX_SCHEDULE_HOUR and minute)
+
 
 def coerce_schedule_int(value: object, name: str, maximum: int) -> int:
     """Coerce an untrusted wire value to an int in ``0..maximum``.
@@ -219,7 +248,9 @@ def coerce_schedule_time(value: object, name: str, *, require_hour: bool = True)
 
     The minute defaults to 0, matching the protocol's own ``{hour: H, min: 0}``
     shape. Hour 24 is accepted: ``24:00`` is a natural end-of-day encoding and
-    the firmware is not ours to constrain.
+    the firmware is not ours to constrain. Hour 24 with a non-zero minute is
+    not a time at all, so it is refused on the way in and read as ``24:00``
+    when the device is the one reporting it.
 
     Args:
         require_hour: True when validating a schedule someone is asking us to
@@ -251,8 +282,28 @@ def coerce_schedule_time(value: object, name: str, *, require_hour: bool = True)
                 value=value,
             )
         )
-    hour = coerce_schedule_int(value.get(FIELD_HOUR, 0), f"{name} hour", 24)
-    minute = coerce_schedule_int(value.get(FIELD_MINUTE, 0), f"{name} minute", 59)
+    hour = coerce_schedule_int(value.get(FIELD_HOUR, 0), f"{name} hour", MAX_SCHEDULE_HOUR)
+    minute = coerce_schedule_int(value.get(FIELD_MINUTE, 0), f"{name} minute", MAX_SCHEDULE_MINUTE)
+    if not valid_schedule_time(hour, minute):
+        # The individual ranges are already checked above, so the only
+        # way to get here is `24:xx`: the end of the day with something
+        # after it. Refuse it when someone is asking us to store it, for
+        # the same reason a missing hour is refused there.
+        if require_hour:
+            raise ValueError(
+                t(
+                    "schedule.schedule_hour_24_needs_zero_minute",
+                    "Schedule {name} may only be {MAX_SCHEDULE_HOUR}:00, got {hour}:{minute:02d}",
+                    name=name,
+                    MAX_SCHEDULE_HOUR=MAX_SCHEDULE_HOUR,
+                    hour=hour,
+                    minute=minute,
+                )
+            )
+        # Reported by the device, where refusing would discard a schedule
+        # that really exists. Read it as the end of the day it is trying
+        # to spell.
+        minute = 0
     return hour, minute
 
 
@@ -423,7 +474,7 @@ def wire_json_bool(value: bool) -> bool:
 def wire_bool_string(value: bool) -> str:
     """Spell a flag as the string ``"true"``/``"false"``.
 
-    **Verified against firmware 1.7.18**: this is how the device spells
+    This is how the device spells
     every flag inside ``GET_SETTINGS.settings`` (except ``doorOptions``,
     which is an int) and every flag inside
     ``GET_NOTIFICATIONS.notifications``.
@@ -434,7 +485,7 @@ def wire_bool_string(value: bool) -> str:
 def wire_int_flag(value: bool) -> int:
     """Spell a flag as the integer ``1``/``0``.
 
-    **Verified against firmware 1.7.18**: this is how the device spells
+    This is how the device spells
     ``inside``/``outside`` in ``GET_SENSORS``, the echoed field in an
     individual setting reply (``ENABLE_INSIDE`` -> ``{"inside": 1}``),
     ``doorOptions``, and ``enabled``/``inside``/``outside``/``daysOfWeek``
@@ -474,7 +525,7 @@ class ScheduleWireFormat:
 #: These spellings have run against real hardware since v0.1.0.
 SCHEDULE_WIRE_TO_DEVICE = ScheduleWireFormat(
     index=wire_int,
-    enabled=wire_json_bool,  # JSON boolean - proven against real firmware
+    enabled=wire_json_bool,  # JSON boolean
     inside=wire_json_bool,
     outside=wire_json_bool,
     day=wire_int_flag,  # 1/0 integers
@@ -483,7 +534,7 @@ SCHEDULE_WIRE_TO_DEVICE = ScheduleWireFormat(
 )
 
 #: **device -> client**: the shape a real door REPLIES with, and therefore
-#: what the simulator emits. **Verified against firmware 1.7.18**: a
+#: what the simulator emits. A
 #: ``GET_SCHEDULE`` reply spells ``enabled``, ``inside`` and ``outside`` as
 #: the integers ``1``/``0``, and ``daysOfWeek`` as a list of integers.
 #:
@@ -501,7 +552,7 @@ SCHEDULE_WIRE_FROM_DEVICE = replace(
 
 #: How the device spells "the end of the day": hour 24, minute 0.
 #:
-#: **Measured against firmware 1.7.18.** A window of ``20:00-24:00`` reports
+#: A window of ``20:00-24:00`` reports
 #: the sensor enabled at 21:07, and ``00:00-24:00`` enables it outright, so
 #: hour 24 is not merely tolerated on input - the schedule engine honours it.
 END_OF_DAY: Final = (24, 0)
@@ -515,7 +566,7 @@ def normalise_window_end(end: tuple[int, int]) -> tuple[int, int]:
 
     Midnight is the *first* minute of a day, so as an END it says the
     opposite of what anyone writing it means. The device does not reinterpret
-    it: measured on firmware 1.7.18, a window of ``20:00-00:00`` leaves the
+    it: a window of ``20:00-00:00`` leaves the
     sensor DISABLED, because the engine simply compares ``start <= now < end``
     and ``end`` of 0 is never greater than a start of 1200. The entry is
     stored perfectly and never fires.
@@ -538,8 +589,8 @@ def schedule_window_is_empty(start: tuple[int, int], end: tuple[int, int]) -> bo
     The engine is ``start <= now < end``. Any window whose end does not
     exceed its start therefore matches no minute at all.
 
-    **Measured against firmware 1.7.18**, all with the entry enabled and
-    ``timersEnabled`` on: ``16:01-16:01`` and ``21:01-21:01`` (start == end)
+    All of these were with the entry enabled and ``timersEnabled`` on:
+    ``16:01-16:01`` and ``21:01-21:01`` (start == end)
     both report the sensor DISABLED, as do ``20:00-00:00`` and
     ``00:00-00:00``. A window that ends before it begins does NOT wrap past
     midnight - ``23:00-21:30`` reports disabled both on the day it names and
@@ -600,7 +651,7 @@ def build_schedule_payload(
 def build_set_schedule_message(schedule: dict[str, Any]) -> dict[str, Any]:
     """Build the ``SET_SCHEDULE`` message fields for a schedule payload.
 
-    **Verified against firmware 1.7.18**: the device requires the slot
+    The device requires the slot
     ``index`` as a *sibling* of the ``schedule`` object. A message carrying
     only ``schedule`` is answered ``success: "false"`` and writes nothing,
     however the entry itself is spelled.

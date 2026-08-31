@@ -18,64 +18,40 @@ import json
 import logging
 import math
 from collections.abc import Callable
-from datetime import datetime
+from typing import TYPE_CHECKING
 
 from ..const import (
     CMD_CLOSE,
     CMD_DELETE_SCHEDULE,
-    CMD_DISABLE_AUTO,
-    CMD_DISABLE_AUTORETRACT,
-    CMD_DISABLE_CMD_LOCKOUT,
-    CMD_DISABLE_INSIDE,
-    CMD_DISABLE_OUTSIDE,
-    CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
-    CMD_ENABLE_AUTO,
-    CMD_ENABLE_AUTORETRACT,
-    CMD_ENABLE_CMD_LOCKOUT,
-    CMD_ENABLE_INSIDE,
-    CMD_ENABLE_OUTSIDE,
-    CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
     CMD_GET_DOOR_BATTERY,
     CMD_GET_DOOR_OPEN_STATS,
     CMD_GET_DOOR_STATUS,
-    CMD_GET_HOLD_TIME,
     CMD_GET_HW_INFO,
     CMD_GET_NOTIFICATIONS,
-    CMD_GET_POWER,
     CMD_GET_SCHEDULE,
     CMD_GET_SCHEDULE_LIST,
-    CMD_GET_SENSOR_TRIGGER_VOLTAGE,
     CMD_GET_SENSORS,
     CMD_GET_SETTINGS,
-    CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     CMD_GET_TIME,
-    CMD_GET_TIMEZONE,
     CMD_HAS_REMOTE_ID,
     CMD_HAS_REMOTE_KEY,
     CMD_OPEN,
     CMD_OPEN_AND_HOLD,
-    CMD_POWER_OFF,
-    CMD_POWER_ON,
     CMD_SET_HOLD_TIME,
     CMD_SET_NOTIFICATIONS,
     CMD_SET_SCHEDULE,
-    CMD_SET_SCHEDULE_LIST,
     CMD_SET_SENSOR_TRIGGER_VOLTAGE,
     CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
-    CMD_SET_TIME,
     CMD_SET_TIMEZONE,
     COMMAND,
     COMMAND_ENVELOPE_COMMANDS,
     CONFIG,
-    DOOR_STATE_CLOSED,
     DOOR_STATUS,
     DOOR_TO_PHONE,
     FIELD_AC_PRESENT,
-    FIELD_AUTO,
     FIELD_BATTERY_PERCENT,
     FIELD_BATTERY_PRESENT,
     FIELD_CMD,
-    FIELD_CMD_LOCKOUT,
     FIELD_DIRECTION,
     FIELD_DOOR_STATUS,
     FIELD_FW_MAJOR,
@@ -94,8 +70,6 @@ from ..const import (
     FIELD_MSG_ID_RESPONSE,
     FIELD_NOTIFICATIONS,
     FIELD_OUTSIDE,
-    FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
-    FIELD_POWER,
     FIELD_REASON,
     FIELD_SCHEDULE,
     FIELD_SCHEDULES,
@@ -103,32 +77,40 @@ from ..const import (
     FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
     FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
     FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_STATE,
-    FIELD_SENSOR_TRIGGER_VOLTAGE,
     FIELD_SETTINGS,
-    FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     FIELD_SUCCESS,
     FIELD_TIME,
     FIELD_TOTAL_AUTO_RETRACTS,
     FIELD_TOTAL_OPEN_CYCLES,
     FIELD_TZ,
     FIELD_VOLTAGE,
-    NOTIFY_SENSOR_INDOOR,
-    NOTIFY_SENSOR_OUTDOOR,
     PING,
     PONG,
-    SENSOR_STATE_OFF,
-    SENSOR_STATE_ON,
     SUCCESS_FALSE,
     SUCCESS_TRUE,
-    TIME_FORMAT,
 )
 from ..framing import FrameScanner
 from ..i18n import t
 from ..sanitize import MAX_LOGGED_LENGTH, sanitize_field, sanitize_text
 from ..schedule import MAX_SCHEDULE_INDEX, wire_bool_string, wire_int_flag
+from ..tz_utils import parse_posix_tz_string
 from .engine import DoorMotionEngine
 from .state import DoorSimulatorState, Schedule
+from .values import VALUES
+from .wire_values import (
+    IGNORED_TRIGGER_VOLTAGE,
+    MAX_HOLD_TIME_CENTISECONDS,
+    MAX_TIMEZONE_LENGTH,
+    MAX_TRIGGER_VOLTAGE,
+    WIRE_SWITCHES,
+    WIRE_VALUES,
+    notifications_payload,
+    read,
+    settings_payload,
+)
+
+if TYPE_CHECKING:
+    from .server import DoorSimulator
 
 logger = logging.getLogger(__name__)
 
@@ -138,26 +120,6 @@ logger = logging.getLogger(__name__)
 #: (:mod:`powerpetdoor.sanitize`) and is shared with the client library and
 #: the interactive front end.
 sanitize_log_text = sanitize_text
-
-#: Widest hold time (centiseconds) accepted from the wire; matches the
-#: operator-side ``holdtime`` command's 900 s ceiling.
-MAX_HOLD_TIME_CENTISECONDS = 90000
-#: Longest ``SET_TIMEZONE`` string accepted from the wire. Real POSIX TZ
-#: strings and IANA names are far shorter than this.
-MAX_TIMEZONE_LENGTH = 128
-#: Widest sensor trigger voltage accepted from the wire (millivolts).
-MAX_TRIGGER_VOLTAGE = 65535
-
-
-class SilentDropError(Exception):
-    """Raised by a handler whose command the device answers with silence.
-
-    Exactly one command behaves this way (``SET_TIME``), and it matters:
-    every other rejected shape gets a ``success: "false"`` envelope, so a
-    client that treats "no failure envelope" as success hangs. Raising
-    rather than returning keeps the "every handler path ends in a
-    response" rule visible at the one place it is broken.
-    """
 
 
 class WireValueError(ValueError):
@@ -252,38 +214,15 @@ def _coerce_wire_string(value: object, name: str, max_length: int) -> str:
     return value
 
 
-def make_sensor_notification(
-    state: DoorSimulatorState, sensor: str, sensor_state: str
-) -> dict | None:
-    """Build the bare notification envelope for a sensor event.
+def _version_parts(version: object, count: int) -> list[int]:
+    """Split a dotted version into the ints the wire carries.
 
-    Per docs/protocol.md "Notification Events", notification events use a
-    bare envelope with no ``CMD``/``success``/``msgID``: the event name is a
-    key with an empty-string value plus a ``sensorState`` of "on"/"off".
-
-    Args:
-        state: Simulator state (consulted for notification enable settings).
-        sensor: "inside" or "outside".
-        sensor_state: SENSOR_STATE_ON or SENSOR_STATE_OFF.
-
-    Returns:
-        The notification message dict, or None if the corresponding
-        notification setting is disabled.
+    The registry keeps a version as the one string every other surface
+    shows - `1.7.18` - so the wire's five separate integer fields are a
+    translation, not a second copy of the value.
     """
-    if sensor == "inside":
-        if sensor_state == SENSOR_STATE_ON and not state.sensor_on_indoor:
-            return None
-        if sensor_state == SENSOR_STATE_OFF and not state.sensor_off_indoor:
-            return None
-        notify_type = NOTIFY_SENSOR_INDOOR
-    else:  # outside
-        if sensor_state == SENSOR_STATE_ON and not state.sensor_on_outdoor:
-            return None
-        if sensor_state == SENSOR_STATE_OFF and not state.sensor_off_outdoor:
-            return None
-        notify_type = NOTIFY_SENSOR_OUTDOOR
-
-    return {notify_type: "", FIELD_SENSOR_STATE: sensor_state}
+    parts = [int(part) for part in str(version).split(".")]
+    return (parts + [0] * count)[:count]
 
 
 class CommandRegistry:
@@ -303,7 +242,7 @@ class CommandRegistry:
         Usage:
             @CommandRegistry.handler(CMD_GET_SETTINGS)
             async def handle_get_settings(self, msg, response):
-                response[FIELD_SETTINGS] = self.state.get_settings()
+                response[FIELD_SETTINGS] = settings_payload(self.state)
         """
 
         def decorator(func):
@@ -328,6 +267,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         broadcast_status: Callable[[], None] | None = None,
         on_disconnect: Callable[["DoorSimulatorProtocol"], None] | None = None,
         engine: DoorMotionEngine | None = None,
+        simulator: "DoorSimulator | None" = None,
     ):
         self.state = state
         self.on_command = on_command
@@ -339,12 +279,32 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         # daemon re-scan its retained buffer every time.
         self._scanner = FrameScanner()
         self._tasks: set[asyncio.Task] = set()
+        #: The simulator this connection belongs to. Wire-driven changes
+        #: go through its value registry and its door methods, so they
+        #: have exactly the side effects a change from the prompt has.
+        #:
+        #: A connection made outside a server - the protocol unit tests -
+        #: gets one built over the same state rather than a second,
+        #: simpler way of applying a value. Two ways to apply one value is
+        #: how the wire and the prompt drifted apart to begin with; there
+        #: is now only the one.
+        adopted = simulator is None
+        if simulator is None:
+            from .server import DoorSimulator as _DoorSimulator
+
+            simulator = _DoorSimulator(state=state)
+        self.simulator: DoorSimulator = simulator
         self._owns_engine = engine is None
         self.engine = engine or DoorMotionEngine(
             state,
             broadcast_status=self._broadcast_or_send_status,
-            notify_sensor=self._send_sensor_notification,
+            # A pet reaching a sensor raises a notification, which the
+            # simulator counts, logs and delivers. It is deliberately not
+            # a wire message - see simulator/notifications.py.
+            notify_sensor=simulator._notify_sensor_reached,
         )
+        if adopted:
+            simulator.engine = self.engine
 
     @property
     def buffer(self) -> str:
@@ -510,11 +470,11 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         Returns (allowed, reason).
         """
         # Power must be on for door commands
-        if cmd in COMMAND_ENVELOPE_COMMANDS and not self.state.power:
+        if cmd in COMMAND_ENVELOPE_COMMANDS and not read(self.state, "power"):
             return False, "Power is OFF"
 
         # Command lockout blocks remote commands when enabled
-        if self.state.cmd_lockout and cmd in COMMAND_ENVELOPE_COMMANDS:
+        if read(self.state, "cmd_lockout") and cmd in COMMAND_ENVELOPE_COMMANDS:
             return False, "Command lockout is enabled"
 
         return True, ""
@@ -562,7 +522,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         if self.on_command:
             self.on_command(cmd, msg)
 
-        # Verified against firmware 1.7.18: only door motion is a "cmd".
+        # Only door motion is a "cmd".
         # `{"cmd": "ENABLE_INSIDE"}` is answered success:"false" by a real
         # door while `{"config": "ENABLE_INSIDE"}` succeeds. Reproduced so
         # a caller that picks the wrong envelope key fails here rather than
@@ -601,16 +561,6 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
         try:
             await handler(self, msg, response)
-        except SilentDropError:
-            # The device answers nothing at all - see `_handle_set_time`.
-            logger.info(
-                t(
-                    "simulator.protocol.simulator_answered_silence_as_device",
-                    "Simulator: %s answered with silence, as the device does",
-                ),
-                sanitize_field(cmd, MAX_LOGGED_LENGTH),
-            )
-            return
         except WireValueError as err:
             # A deliberate rejection: the handler validated an untrusted
             # field and refused it before touching state. Report the actual
@@ -649,7 +599,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     def _send_response(self, response: dict) -> None:
         """Send a command response, dropping ``msgID`` when it failed.
 
-        **Verified against firmware 1.7.18**: a real door echoes ``msgId``
+        A real door echoes ``msgId``
         back as ``msgID`` on success, and omits it entirely on failure -
         the observed shape is ``{"success": "false", "dir": "d2p",
         "CMD": "..."}``. A client that pairs replies to requests by id
@@ -672,117 +622,75 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     @CommandRegistry.handler(CMD_GET_SETTINGS)
     async def _handle_get_settings(self, msg: dict, response: dict) -> None:
-        response[FIELD_SETTINGS] = self.state.get_settings()
+        response[FIELD_SETTINGS] = settings_payload(self.state)
 
     @CommandRegistry.handler(CMD_GET_DOOR_STATUS)
     async def _handle_get_door_status(self, msg: dict, response: dict) -> None:
-        response[FIELD_DOOR_STATUS] = self.state.door_status
+        response[FIELD_DOOR_STATUS] = read(self.state, "door_status")
 
     # A real door spells the same concept differently per command, and the
     # simulator reproduces that rather than normalizing it (see
     # docs/protocol.md, "Value spellings"). Two rules cover every handler
     # below:
     #
-    # * a field carried at the TOP LEVEL of a reply is an int 1/0 - verified
-    #   for GET_SENSORS and for the individual setting replies
-    #   (`{"config": "ENABLE_INSIDE"}` -> `{"inside": 1}`);
+    # * a top-level flag is spelled per FIELD, not by a single rule:
+    #   `GET_SENSORS` answers `inside`/`outside` as the ints 1/0, while
+    #   `GET_POWER` and `GET_TIMERS_ENABLED` answer `power_state` and
+    #   `timersEnabled` as the strings "true"/"false". The wire table
+    #   carries which is which;
     # * a field carried inside a `settings` object is spelled the way
     #   GET_SETTINGS spells it - "true"/"false" strings, except doorOptions
     #   which is an int.
-    #
-    # Five commands this project defines have NO handler on purpose. Firmware
-    # 1.7.18 answers success:"false" to every one of them, so the simulator
-    # lets them fall through to "Unknown command" too:
-    #
-    #   GET_TIMERS_ENABLED, GET_AUTORETRACT, GET_CMD_LOCKOUT,
-    #   GET_OUTSIDE_SENSOR_SAFETY_LOCK, CHECK_RESET_REASON
-    #
-    # The first four read out of GET_SETTINGS instead (`timersEnabled`,
-    # `doorOptions`, `allowCmdLockout`, `outsideSensorSafetyLock`); the
-    # last has no substitute. The constants stay in const.py: the client
-    # keeps response handlers for them in case another firmware revision
-    # does implement them.
 
     @CommandRegistry.handler(CMD_GET_SENSORS)
     async def _handle_get_sensors(self, msg: dict, response: dict) -> None:
-        response[FIELD_INSIDE] = wire_int_flag(self.state.inside)
-        response[FIELD_OUTSIDE] = wire_int_flag(self.state.outside)
-
-    @CommandRegistry.handler(CMD_GET_POWER)
-    async def _handle_get_power(self, msg: dict, response: dict) -> None:
-        response[FIELD_POWER] = wire_int_flag(self.state.power)
+        response[FIELD_INSIDE] = wire_int_flag(read(self.state, "inside"))
+        response[FIELD_OUTSIDE] = wire_int_flag(read(self.state, "outside"))
 
     @CommandRegistry.handler(CMD_GET_HW_INFO)
     async def _handle_get_hw_info(self, msg: dict, response: dict) -> None:
+        # The registry keeps these as dotted strings, which is how every
+        # other surface shows them; the wire splits them into five ints.
+        fw_major, fw_minor, fw_patch = _version_parts(read(self.state, "firmware_version"), 3)
+        hw_ver, hw_rev = _version_parts(read(self.state, "hardware_version"), 2)
         response[FIELD_FWINFO] = {
-            FIELD_FW_MAJOR: self.state.fw_major,
-            FIELD_FW_MINOR: self.state.fw_minor,
-            FIELD_FW_PATCH: self.state.fw_patch,
-            FIELD_HW_VERSION: self.state.hw_ver,
-            FIELD_HW_REVISION: self.state.hw_rev,
+            FIELD_FW_MAJOR: fw_major,
+            FIELD_FW_MINOR: fw_minor,
+            FIELD_FW_PATCH: fw_patch,
+            FIELD_HW_VERSION: hw_ver,
+            FIELD_HW_REVISION: hw_rev,
         }
 
     @CommandRegistry.handler(CMD_GET_DOOR_BATTERY)
     async def _handle_get_battery(self, msg: dict, response: dict) -> None:
+        present = read(self.state, "battery_present")
         # Report 0% if battery is not present
-        percent = self.state.battery_percent if self.state.battery_present else 0
-        response[FIELD_BATTERY_PERCENT] = percent
-        # "true"/"false" strings, verified against firmware 1.7.18 -
-        # `batteryPercent` alongside them is an int.
-        response[FIELD_BATTERY_PRESENT] = wire_bool_string(self.state.battery_present)
-        response[FIELD_AC_PRESENT] = wire_bool_string(self.state.ac_present)
+        response[FIELD_BATTERY_PERCENT] = read(self.state, "battery") if present else 0
+        # "true"/"false" strings - `batteryPercent` alongside them is an int.
+        response[FIELD_BATTERY_PRESENT] = wire_bool_string(present)
+        response[FIELD_AC_PRESENT] = wire_bool_string(read(self.state, "ac_present"))
 
     @CommandRegistry.handler(CMD_GET_DOOR_OPEN_STATS)
     async def _handle_get_stats(self, msg: dict, response: dict) -> None:
-        response[FIELD_TOTAL_OPEN_CYCLES] = self.state.total_open_cycles
-        response[FIELD_TOTAL_AUTO_RETRACTS] = self.state.total_auto_retracts
+        response[FIELD_TOTAL_OPEN_CYCLES] = read(self.state, "total_open_cycles")
+        response[FIELD_TOTAL_AUTO_RETRACTS] = read(self.state, "total_auto_retracts")
 
     @CommandRegistry.handler(CMD_GET_NOTIFICATIONS)
     async def _handle_get_notifications(self, msg: dict, response: dict) -> None:
-        response[FIELD_NOTIFICATIONS] = self.state.get_notifications()
-
-    @CommandRegistry.handler(CMD_GET_TIMEZONE)
-    async def _handle_get_timezone(self, msg: dict, response: dict) -> None:
-        # POSIX, as real hardware answers - the single conversion lives on
-        # the state so this and GET_SETTINGS cannot disagree.
-        response[FIELD_TZ] = self.state.wire_timezone()
+        response[FIELD_NOTIFICATIONS] = notifications_payload(self.state)
 
     @CommandRegistry.handler(CMD_GET_TIME)
     async def _handle_get_time(self, msg: dict, response: dict) -> None:
         """Answer the door's own wall clock, in its configured timezone.
 
-        **Verified against firmware 1.7.18**: undocumented by the vendor,
+        Undocumented by the vendor,
         but present, and worth having because schedules are evaluated
         against this clock - it is the only way to check that a door will
         fire a schedule when you expect it to.
         """
-        response[FIELD_TIME] = datetime.now(self.state.get_tzinfo()).strftime(TIME_FORMAT)
-
-    @CommandRegistry.handler(CMD_SET_TIME)
-    async def _handle_set_time(self, msg: dict, response: dict) -> None:
-        """Answer a ``SET_TIME`` with **silence**, as the real door does.
-
-        **Verified against firmware 1.7.18**: the clock is read-only, and
-        this one command is answered with no frame at all - where every
-        other rejected shape (including ``SET_CLOCK``, ``SET_DATE`` and
-        ``SYNC_TIME``) answers ``success: "false"``. Reproduced so a
-        client that reads silence as success hangs here rather than only
-        against hardware.
-        """
-        raise SilentDropError(CMD_SET_TIME)
-
-    @CommandRegistry.handler(CMD_GET_HOLD_TIME)
-    async def _handle_get_hold_time(self, msg: dict, response: dict) -> None:
-        # Convert seconds to centiseconds for protocol
-        response[FIELD_HOLD_TIME] = int(self.state.hold_time * 100)
-
-    @CommandRegistry.handler(CMD_GET_SENSOR_TRIGGER_VOLTAGE)
-    async def _handle_get_sensor_voltage(self, msg: dict, response: dict) -> None:
-        response[FIELD_SENSOR_TRIGGER_VOLTAGE] = self.state.sensor_trigger_voltage
-
-    @CommandRegistry.handler(CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE)
-    async def _handle_get_sleep_voltage(self, msg: dict, response: dict) -> None:
-        response[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE] = self.state.sleep_sensor_trigger_voltage
+        # Through the registry, so the wire's answer and `get time` are
+        # the same computation rather than two that happen to agree.
+        response[FIELD_TIME] = VALUES["time"].get(self.state)
 
     # ==========================================================================
     # Command Handlers - Schedule Commands
@@ -790,7 +698,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     @CommandRegistry.handler(CMD_GET_SCHEDULE_LIST)
     async def _handle_get_schedule_list(self, msg: dict, response: dict) -> None:
-        response[FIELD_SCHEDULES] = self.state.get_schedule_list()
+        response[FIELD_SCHEDULES] = sorted(self.simulator.get_schedules())
 
     @staticmethod
     def _wire_schedule_index(msg: dict) -> int | None:
@@ -813,8 +721,9 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     @CommandRegistry.handler(CMD_GET_SCHEDULE)
     async def _handle_get_schedule(self, msg: dict, response: dict) -> None:
         index = self._wire_schedule_index(msg)
-        if index is not None and index in self.state.schedules:
-            response[FIELD_SCHEDULE] = self.state.schedules[index].to_dict()
+        schedule = None if index is None else self.simulator.get_schedule(index)
+        if schedule is not None:
+            response[FIELD_SCHEDULE] = schedule.to_dict()
         else:
             response[FIELD_SUCCESS] = SUCCESS_FALSE
             response[FIELD_REASON] = "Schedule not found"
@@ -826,7 +735,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             response[FIELD_SUCCESS] = SUCCESS_FALSE
             response[FIELD_REASON] = "Missing schedule"
             return
-        # Observed on firmware 1.7.18: the slot index must be sent alongside
+        # The slot index must be sent alongside
         # the schedule object. Sending only "schedule" is answered
         # success:"false" and writes nothing.
         if FIELD_INDEX not in msg:
@@ -848,7 +757,7 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             response[FIELD_SUCCESS] = SUCCESS_FALSE
             response[FIELD_REASON] = str(err)
             return
-        self.state.schedules[schedule.index] = schedule
+        self._store_schedule(schedule)
         response[FIELD_SCHEDULE] = schedule.to_dict()
         logger.info(
             t("simulator.protocol.simulator_schedule_saved", "Simulator: Schedule %s saved"),
@@ -858,8 +767,8 @@ class DoorSimulatorProtocol(asyncio.Protocol):
     @CommandRegistry.handler(CMD_DELETE_SCHEDULE)
     async def _handle_delete_schedule(self, msg: dict, response: dict) -> None:
         index = self._wire_schedule_index(msg)
-        if index is not None and index in self.state.schedules:
-            del self.state.schedules[index]
+        if index is not None and self.simulator.get_schedule(index) is not None:
+            self._drop_schedule(index)
             # The real device echoes the deleted index in the response
             response[FIELD_INDEX] = index
             logger.info(
@@ -873,74 +782,18 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             response[FIELD_SUCCESS] = SUCCESS_FALSE
             response[FIELD_REASON] = "Schedule not found"
 
-    @CommandRegistry.handler(CMD_SET_SCHEDULE_LIST)
-    async def _handle_set_schedule_list(self, msg: dict, response: dict) -> None:
-        """Replace the whole schedule store from the wire.
-
-        The field is *required*, and must be a list. Defaulting an absent
-        ``schedules`` to ``[]`` made a one-word packet wipe every stored
-        schedule and answer ``success: "true"``, and a wrong-typed field
-        fell straight through to the same success response having done
-        nothing. "Clear everything" now has to be spelled out as an
-        explicit ``"schedules": []``, and every other shape is rejected
-        with a reason the way docs/protocol.md says every ``SET_*`` is.
-        """
-        if FIELD_SCHEDULES not in msg:
-            raise WireValueError(
-                t(
-                    "simulator.protocol.required",
-                    "{FIELD_SCHEDULES} is required",
-                    FIELD_SCHEDULES=FIELD_SCHEDULES,
-                )
-            )
-        schedules_data = msg[FIELD_SCHEDULES]
-        if not isinstance(schedules_data, list):
-            raise WireValueError(
-                t(
-                    "simulator.protocol.must_list_got",
-                    "{FIELD_SCHEDULES} must be a list, got {schedules_data!r}",
-                    FIELD_SCHEDULES=FIELD_SCHEDULES,
-                    schedules_data=schedules_data,
-                )
-            )
-        try:
-            parsed = [Schedule.from_dict(sched_data) for sched_data in schedules_data]
-        except ValueError as err:
-            # Reject the whole list atomically: a partial load would
-            # leave the simulator in a state no client asked for.
-            logger.warning(
-                t(
-                    "simulator.protocol.simulator_rejected_schedule_list",
-                    "Simulator: Rejected schedule list: %s",
-                ),
-                sanitize_field(err, MAX_LOGGED_LENGTH),
-            )
-            response[FIELD_SUCCESS] = SUCCESS_FALSE
-            response[FIELD_REASON] = str(err)
-            return
-        # Clear existing and load new schedules
-        self.state.schedules.clear()
-        for schedule in parsed:
-            self.state.schedules[schedule.index] = schedule
-        logger.info(
-            t("simulator.protocol.simulator_loaded_schedules", "Simulator: Loaded %d schedules"),
-            len(schedules_data),
-        )
-        response[FIELD_SCHEDULES] = self.state.get_schedule_list()
-
     # ==========================================================================
     # Command Handlers - Remote/Reset Info
     # ==========================================================================
 
     @CommandRegistry.handler(CMD_HAS_REMOTE_ID)
     async def _handle_has_remote_id(self, msg: dict, response: dict) -> None:
-        # Verified against firmware 1.7.18: the field is `has_id`, and its
-        # value is a "true"/"false" string.
-        response[FIELD_HAS_REMOTE_ID] = wire_bool_string(self.state.has_remote_id)
+        # The field is `has_id`, and its value is a "true"/"false" string.
+        response[FIELD_HAS_REMOTE_ID] = wire_bool_string(read(self.state, "has_remote_id"))
 
     @CommandRegistry.handler(CMD_HAS_REMOTE_KEY)
     async def _handle_has_remote_key(self, msg: dict, response: dict) -> None:
-        response[FIELD_HAS_REMOTE_KEY] = wire_bool_string(self.state.has_remote_key)
+        response[FIELD_HAS_REMOTE_KEY] = wire_bool_string(read(self.state, "has_remote_key"))
 
     # ==========================================================================
     # Command Handlers - Door Commands
@@ -948,135 +801,52 @@ class DoorSimulatorProtocol(asyncio.Protocol):
 
     @CommandRegistry.handler(CMD_OPEN)
     async def _handle_open(self, msg: dict, response: dict) -> None:
-        self.engine.open(hold=False)
-        response[FIELD_DOOR_STATUS] = self.state.door_status
+        await self.simulator.open_door(hold=False)
+        response[FIELD_DOOR_STATUS] = read(self.state, "door_status")
 
     @CommandRegistry.handler(CMD_OPEN_AND_HOLD)
     async def _handle_open_and_hold(self, msg: dict, response: dict) -> None:
-        self.engine.open(hold=True)
-        response[FIELD_DOOR_STATUS] = self.state.door_status
+        await self.simulator.open_door(hold=True)
+        response[FIELD_DOOR_STATUS] = read(self.state, "door_status")
 
     @CommandRegistry.handler(CMD_CLOSE)
     async def _handle_close(self, msg: dict, response: dict) -> None:
-        self.engine.close()
-        response[FIELD_DOOR_STATUS] = self.state.door_status
+        await self.simulator.close_door()
+        response[FIELD_DOOR_STATUS] = read(self.state, "door_status")
 
     # ==========================================================================
     # Command Handlers - Enable/Disable Commands
     # ==========================================================================
 
-    @CommandRegistry.handler(CMD_ENABLE_INSIDE)
-    async def _handle_enable_inside(self, msg: dict, response: dict) -> None:
-        self.state.inside = True
-        response[FIELD_INSIDE] = wire_int_flag(True)
+    def _store_schedule(self, schedule: Schedule) -> None:
+        """Store a schedule the way every other source stores one."""
+        self.simulator.add_schedule(schedule, announce=False)
 
-    @CommandRegistry.handler(CMD_DISABLE_INSIDE)
-    async def _handle_disable_inside(self, msg: dict, response: dict) -> None:
-        self.state.inside = False
-        response[FIELD_INSIDE] = wire_int_flag(False)
+    def _drop_schedule(self, index: int) -> None:
+        """Delete a schedule the way every other source deletes one."""
+        self.simulator.remove_schedule(index, announce=False)
 
-    @CommandRegistry.handler(CMD_ENABLE_OUTSIDE)
-    async def _handle_enable_outside(self, msg: dict, response: dict) -> None:
-        self.state.outside = True
-        response[FIELD_OUTSIDE] = wire_int_flag(True)
+    def _apply_value(self, name: str, value: object) -> None:
+        """Apply a wire-driven change through the shared value registry.
 
-    @CommandRegistry.handler(CMD_DISABLE_OUTSIDE)
-    async def _handle_disable_outside(self, msg: dict, response: dict) -> None:
-        self.state.outside = False
-        response[FIELD_OUTSIDE] = wire_int_flag(False)
+        The registry is what the CLI and the script DSL write through, so
+        routing the wire through it too means a change has the same side
+        effects whoever made it: enabling a sensor re-asks whether a pet
+        already waiting at it may now come in, which a handler that only
+        assigned to `state` did not.
 
-    @CommandRegistry.handler(CMD_ENABLE_AUTO)
-    async def _handle_enable_auto(self, msg: dict, response: dict) -> None:
-        self.state.auto = True
-        response[FIELD_AUTO] = wire_int_flag(True)
+        ``announce=False`` because a wire command answers in its own
+        response; broadcasting as well would tell the requester twice.
 
-    @CommandRegistry.handler(CMD_DISABLE_AUTO)
-    async def _handle_disable_auto(self, msg: dict, response: dict) -> None:
-        self.state.auto = False
-        response[FIELD_AUTO] = wire_int_flag(False)
-
-    @CommandRegistry.handler(CMD_POWER_ON)
-    async def _handle_power_on(self, msg: dict, response: dict) -> None:
-        self.state.power = True
-        response[FIELD_POWER] = wire_int_flag(True)
-        logger.info(t("simulator.protocol.simulator_power", "Simulator: Power ON"))
-
-    @CommandRegistry.handler(CMD_POWER_OFF)
-    async def _handle_power_off(self, msg: dict, response: dict) -> None:
-        self.state.power = False
-        response[FIELD_POWER] = wire_int_flag(False)
-        logger.info(t("simulator.protocol.simulator_power_off", "Simulator: Power OFF"))
-        # If door is open, close it when power goes off
-        if self.state.door_status != DOOR_STATE_CLOSED:
-            self.engine.close()
-
-    @CommandRegistry.handler(CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK)
-    async def _handle_enable_safety_lock(self, msg: dict, response: dict) -> None:
-        self.state.safety_lock = True
-        response[FIELD_SETTINGS] = {FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: wire_bool_string(True)}
-        logger.info(
-            t(
-                "simulator.protocol.simulator_outside_sensor_safety_lock",
-                "Simulator: Outside sensor safety lock ENABLED",
-            )
-        )
-
-    @CommandRegistry.handler(CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK)
-    async def _handle_disable_safety_lock(self, msg: dict, response: dict) -> None:
-        self.state.safety_lock = False
-        response[FIELD_SETTINGS] = {FIELD_OUTSIDE_SENSOR_SAFETY_LOCK: wire_bool_string(False)}
-        logger.info(
-            t(
-                "simulator.protocol.simulator_outside_sensor_safety_lock_1",
-                "Simulator: Outside sensor safety lock DISABLED",
-            )
-        )
-
-    @CommandRegistry.handler(CMD_ENABLE_CMD_LOCKOUT)
-    async def _handle_enable_cmd_lockout(self, msg: dict, response: dict) -> None:
-        self.state.cmd_lockout = True
-        response[FIELD_SETTINGS] = {FIELD_CMD_LOCKOUT: wire_bool_string(True)}
-        logger.info(
-            t(
-                "simulator.protocol.simulator_command_lockout_enabled",
-                "Simulator: Command lockout ENABLED",
-            )
-        )
-
-    @CommandRegistry.handler(CMD_DISABLE_CMD_LOCKOUT)
-    async def _handle_disable_cmd_lockout(self, msg: dict, response: dict) -> None:
-        self.state.cmd_lockout = False
-        response[FIELD_SETTINGS] = {FIELD_CMD_LOCKOUT: wire_bool_string(False)}
-        logger.info(
-            t(
-                "simulator.protocol.simulator_command_lockout_disabled",
-                "Simulator: Command lockout DISABLED",
-            )
-        )
-
-    @CommandRegistry.handler(CMD_ENABLE_AUTORETRACT)
-    async def _handle_enable_autoretract(self, msg: dict, response: dict) -> None:
-        self.state.autoretract = True
-        # Verified against firmware 1.7.18: these two answer with the WHOLE
-        # settings object, not just the field they changed.
-        response[FIELD_SETTINGS] = self.state.get_settings()
-        logger.info(
-            t(
-                "simulator.protocol.simulator_auto_retract_enabled",
-                "Simulator: Auto-retract ENABLED",
-            )
-        )
-
-    @CommandRegistry.handler(CMD_DISABLE_AUTORETRACT)
-    async def _handle_disable_autoretract(self, msg: dict, response: dict) -> None:
-        self.state.autoretract = False
-        response[FIELD_SETTINGS] = self.state.get_settings()
-        logger.info(
-            t(
-                "simulator.protocol.simulator_auto_retract_disabled",
-                "Simulator: Auto-retract DISABLED",
-            )
-        )
+        Raises:
+            KeyError: If ``name`` is not a device value. The wire carries
+                what a real door carries; the simulation's own knobs -
+                flap timings, battery rates - have no wire spelling and
+                must not acquire one through this door.
+        """
+        if VALUES[name].simulation_only:
+            raise KeyError(name)
+        VALUES[name].apply(self.simulator, value, announce=False)
 
     # ==========================================================================
     # Command Handlers - Set Commands
@@ -1089,10 +859,29 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             # and then breaks GET_SETTINGS and every schedule evaluation for
             # the life of the process - validate before assigning.
             timezone = _coerce_wire_string(msg[FIELD_TZ], FIELD_TZ, MAX_TIMEZONE_LENGTH)
-            # Store the wire (POSIX) value as-is; schedule evaluation maps
-            # it back to an IANA zone (see DoorSimulatorState.get_tzinfo).
-            self.state.timezone = timezone
-        response[FIELD_TZ] = self.state.timezone
+            # The wire carries POSIX in both directions - `GET_TIMEZONE`,
+            # `GET_SETTINGS` and this command's own reply all answer
+            # `EST5EDT,M3.2.0,M11.1.0`, never an IANA name. So an IANA
+            # name arriving here is a client that has not converted, and
+            # accepting it would let that client pass against the
+            # simulator and then read back something it never sent.
+            #
+            # IANA names are the business of `door.py` and anything above
+            # it, and of the simulator's own operator surfaces - the
+            # prompt's `timezone` command takes either and converts.
+            parsed = parse_posix_tz_string(timezone)
+            if not parsed or not parsed.get("std_abbrev"):
+                raise WireValueError(
+                    t(
+                        "simulator.protocol.must_posix",
+                        "{FIELD_TZ} must be a POSIX TZ string "
+                        "(e.g. EST5EDT,M3.2.0,M11.1.0), got {timezone!r}",
+                        FIELD_TZ=FIELD_TZ,
+                        timezone=timezone,
+                    )
+                )
+            self._apply_value("timezone", timezone)
+        response.update(WIRE_VALUES["timezone"].payload(self.state))
 
     @CommandRegistry.handler(CMD_SET_HOLD_TIME)
     async def _handle_set_hold_time(self, msg: dict, response: dict) -> None:
@@ -1104,20 +893,19 @@ class DoorSimulatorProtocol(asyncio.Protocol):
                 msg[FIELD_HOLD_TIME], FIELD_HOLD_TIME, 0, MAX_HOLD_TIME_CENTISECONDS
             )
             # Convert centiseconds to seconds for internal storage
-            self.state.hold_time = centiseconds / 100.0
+            self._apply_value("hold_time", centiseconds / 100.0)
             logger.info(
                 t(
                     "simulator.protocol.simulator_hold_time_set_s",
                     "Simulator: Hold time set to %ss",
                 ),
-                self.state.hold_time,
+                read(self.state, "hold_time"),
             )
-        # Convert seconds to centiseconds for protocol response
-        response[FIELD_HOLD_TIME] = int(self.state.hold_time * 100)
+        response.update(WIRE_VALUES["hold_time"].payload(self.state))
 
     @CommandRegistry.handler(CMD_SET_NOTIFICATIONS)
     async def _handle_set_notifications(self, msg: dict, response: dict) -> None:
-        # Observed on firmware 1.7.18: the flags must arrive inside a nested
+        # The flags must arrive inside a nested
         # "notifications" object. Top-level fields are answered
         # success:"false" and write nothing, and a nested object carrying any
         # value as a *string* is answered with the current settings but does
@@ -1135,27 +923,29 @@ class DoorSimulatorProtocol(asyncio.Protocol):
             # reply is a normal success envelope carrying the *current*
             # settings, so a client that checks `success`, or even reads the
             # echoed settings back, sees a healthy write.
-            response[FIELD_NOTIFICATIONS] = self.state.get_notifications()
+            response[FIELD_NOTIFICATIONS] = notifications_payload(self.state)
             return
 
         # Every value is a real JSON boolean by now, so there is nothing
         # left to coerce and nothing that can half-apply.
-        attributes = {
-            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: "sensor_on_indoor",
-            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: "sensor_off_indoor",
-            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: "sensor_on_outdoor",
-            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: "sensor_off_outdoor",
+        # Through the value registry, as the prompt and a script do, so a
+        # switch is flipped the same way whoever flipped it.
+        fields = {
+            FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS: "inside_on",
+            FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS: "inside_off",
+            FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS: "outside_on",
+            FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS: "outside_off",
             FIELD_LOW_BATTERY_NOTIFICATIONS: "low_battery",
         }
-        for field_name, attribute in attributes.items():
+        for field_name, notification in fields.items():
             if field_name in nested:
-                setattr(self.state, attribute, nested[field_name])
-        response[FIELD_NOTIFICATIONS] = self.state.get_notifications()
+                self._apply_value(f"notify_{notification}", nested[field_name])
+        response[FIELD_NOTIFICATIONS] = notifications_payload(self.state)
 
     def _wire_voltage(self, msg: dict) -> int:
         """Read the new threshold out of a voltage setter's message.
 
-        **Verified against firmware 1.7.18**: both setters take ``voltage``
+        Both setters take ``voltage``
         and reject the ``sensorTriggerVoltage`` /
         ``sleepSensorTriggerVoltage`` name their getters answer with - the
         one docs/protocol.md used to document. Emulated, so a caller that
@@ -1173,21 +963,26 @@ class DoorSimulatorProtocol(asyncio.Protocol):
                     FIELD_VOLTAGE=FIELD_VOLTAGE,
                 )
             )
-        # Nothing does arithmetic on this today, so an arbitrary JSON value
-        # is currently inert - it is the same latent trap as holdTime, so
-        # bound it at the door rather than later.
-        return _coerce_wire_int(msg[FIELD_VOLTAGE], FIELD_VOLTAGE, 0, MAX_TRIGGER_VOLTAGE)
+        # Bounded at the door rather than later, as holdTime is. The bound
+        # SATURATES rather than refusing, because that is what the device
+        # does: 2**32-1 comes back as 2**31-1 with success:"true".
+        value = _coerce_wire_int(msg[FIELD_VOLTAGE], FIELD_VOLTAGE, -(2**63), 2**63 - 1)
+        return min(max(value, 0), MAX_TRIGGER_VOLTAGE)
 
     @CommandRegistry.handler(CMD_SET_SENSOR_TRIGGER_VOLTAGE)
     async def _handle_set_sensor_voltage(self, msg: dict, response: dict) -> None:
-        self.state.sensor_trigger_voltage = self._wire_voltage(msg)
-        # The reply echoes the GETTER's field name, not the setter's.
-        response[FIELD_SENSOR_TRIGGER_VOLTAGE] = self.state.sensor_trigger_voltage
+        voltage = self._wire_voltage(msg)
+        # Measured: 0 is accepted and ignored, leaving the old value.
+        if voltage != IGNORED_TRIGGER_VOLTAGE:
+            self._apply_value("sensor_trigger_voltage", voltage)
+        response.update(WIRE_VALUES["sensor_trigger_voltage"].payload(self.state))
 
     @CommandRegistry.handler(CMD_SET_SLEEP_SENSOR_TRIGGER_VOLTAGE)
     async def _handle_set_sleep_voltage(self, msg: dict, response: dict) -> None:
-        self.state.sleep_sensor_trigger_voltage = self._wire_voltage(msg)
-        response[FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE] = self.state.sleep_sensor_trigger_voltage
+        voltage = self._wire_voltage(msg)
+        if voltage != IGNORED_TRIGGER_VOLTAGE:
+            self._apply_value("sleep_sensor_trigger_voltage", voltage)
+        response.update(WIRE_VALUES["sleep_sensor_trigger_voltage"].payload(self.state))
 
     # ==========================================================================
     # Door Operation Delegation (single engine - see engine.py)
@@ -1201,16 +996,16 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         """
         self.engine.trigger_sensor(sensor)
 
-    def simulate_obstruction(self):
-        """Simulate obstruction detection (inside sensor active indefinitely)."""
-        self.engine.simulate_obstruction()
+    def simulate_obstruction(self, duration: float | None = None):
+        """Place (or clear) a physical obstruction in the doorway."""
+        self.engine.simulate_obstruction(duration)
 
     def _send_door_status(self):
         """Send unsolicited door status update to this client only."""
         self._send(
             {
                 FIELD_CMD: DOOR_STATUS,
-                FIELD_DOOR_STATUS: self.state.door_status,
+                FIELD_DOOR_STATUS: read(self.state, "door_status"),
                 FIELD_SUCCESS: SUCCESS_TRUE,
                 FIELD_DIRECTION: DOOR_TO_PHONE,
             }
@@ -1223,22 +1018,62 @@ class DoorSimulatorProtocol(asyncio.Protocol):
         else:
             self._send_door_status()
 
-    def _send_sensor_notification(self, sensor: str, state: str = SENSOR_STATE_ON):
-        """Send sensor trigger notification (bare envelope) if enabled.
 
-        Args:
-            sensor: "inside" or "outside"
-            state: "on" (sensor triggered) or "off" (sensor released)
-        """
-        notification = make_sensor_notification(self.state, sensor, state)
-        if notification is None:
-            return
-        self._send(notification)
-        logger.debug(
-            t(
-                "simulator.protocol.simulator_sent_sensor_notification",
-                "Simulator: Sent %s sensor %s notification",
-            ),
-            sensor,
-            state,
+def _switch_handler(name: str, enabled: bool):
+    """One half of a value's enable/disable pair, from the wire table.
+
+    Fourteen of these were written out by hand, and each was the same
+    three lines: apply the value, answer with its payload, log it. The
+    table already says which command carries which value and what the
+    payload looks like, so the handler is derived from it rather than
+    restated - and a new switch is one row, not two handlers plus two
+    log strings.
+    """
+
+    async def handle(self: DoorSimulatorProtocol, msg: dict, response: dict) -> None:
+        self._apply_value(name, enabled)
+        response.update(WIRE_VALUES[name].payload(self.state))
+        logger.info(
+            t("simulator.protocol.simulator_setting", "Simulator: %s %s"),
+            name,
+            "ENABLED" if enabled else "DISABLED",
         )
+
+    handle.__name__ = f"_handle_{'enable' if enabled else 'disable'}_{name}"
+    return handle
+
+
+def _getter_handler(name: str):
+    """A ``GET_*`` that reads back exactly one value, from the wire table.
+
+    The reply to such a getter *is* the value's payload - the same body
+    the setter answers with and the same one a broadcast carries - so
+    six handlers were six restatements of what the table already said.
+    One of them had drifted: `GET_HOLD_TIME` did its own `* 100` rather
+    than asking :func:`hold_time_centiseconds`, making it a third copy of
+    the seconds-to-centiseconds conversion.
+
+    Getters that report more than one value (`GET_SENSORS`) or something
+    assembled (`GET_SETTINGS`, `GET_HW_INFO`) stay hand-written, because
+    there is no single value for the table to name.
+    """
+
+    async def handle(self: DoorSimulatorProtocol, msg: dict, response: dict) -> None:
+        response.update(WIRE_VALUES[name].payload(self.state))
+
+    handle.__name__ = f"_handle_get_{name}"
+    return handle
+
+
+for _name, _wire in WIRE_VALUES.items():
+    if _wire.getter is not None:
+        CommandRegistry.handler(_wire.getter)(_getter_handler(_name))
+del _name, _wire
+
+
+for _name in WIRE_SWITCHES:
+    _wire = WIRE_VALUES[_name]
+    assert _wire.disable is not None  # WIRE_SWITCHES is defined by having one
+    CommandRegistry.handler(_wire.enable)(_switch_handler(_name, True))
+    CommandRegistry.handler(_wire.disable)(_switch_handler(_name, False))
+del _name, _wire

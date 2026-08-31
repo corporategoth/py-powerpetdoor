@@ -478,3 +478,31 @@ class TestRegisterAllSubcommands:
             del CommandHandler.zbadpath_func
             del CommandHandler.zhistory_func
             del CommandHandler.zdeep_func
+
+
+class TestNoTwoCommandsClaimTheSameWord:
+    """A duplicate name or alias is resolved silently, in registration order.
+
+    ``toggle`` was written with the alias ``t``, which ``holdtime`` already
+    owned. Nothing complained: the registry is a flat dict, so the second
+    registration simply lost, ``toggle`` had no short form, and typing ``t``
+    set the hold time. Every other clash class in this tree fails loudly,
+    and coverage cannot see this one at all - both commands are reachable by
+    their full names, so every existing test still passed.
+    """
+
+    def test_every_command_word_is_claimed_exactly_once(self):
+        registry = get_command_registry()
+
+        claims: dict[str, list[str]] = {}
+        for name, info in registry.items():
+            # The registry stores each alias as its own key pointing at the
+            # same CommandInfo, so walk the declared aliases instead.
+            for word in (info.name, *info.aliases):
+                claims.setdefault(word, [])
+                if info.name not in claims[word]:
+                    claims[word].append(info.name)
+            assert name in (info.name, *info.aliases)
+
+        contested = {word: owners for word, owners in claims.items() if len(owners) > 1}
+        assert contested == {}

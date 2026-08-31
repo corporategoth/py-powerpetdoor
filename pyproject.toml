@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pypowerpetdoor"
-version = "0.4.3"
+version = "0.5.0"
 description = "Python library for communicating with Power Pet Door devices"
 readme = "README.md"
 license = {text = "MIT"}
@@ -73,6 +73,19 @@ dev = [
     # scripts/setup-dev.sh, which is what a fresh clone should run.
     "pre-commit>=3.7.0",
     "types-PyYAML>=6.0",
+    # Validates the generated JSON Schemas, and the built-in scripts
+    # against them - a schema nothing checks is a schema that drifts.
+    "jsonschema>=4.21.0",
+]
+
+docs = [
+    "sphinx>=7.3.0",
+    "sphinx-rtd-theme>=2.0.0",
+    # Same autodoc source, markdown out - which is what the wiki and an
+    # IDE can read. Writing a second doc generator to get markdown would
+    # re-implement the signature extraction and docstring parsing autodoc
+    # already does.
+    "sphinx-markdown-builder>=0.6.7",
 ]
 
 [project.urls]

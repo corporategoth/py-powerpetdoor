@@ -30,6 +30,14 @@ Example usage:
 
 from .cli import main, run_simulator
 from .commands import CommandHandler, CommandResult
+from .control import (
+    CommandFailedError,
+    LocalSimulator,
+    RemoteSimulator,
+    SimulatorControlError,
+    SimulatorController,
+    simulator_control,
+)
 from .protocol import CommandRegistry, DoorSimulatorProtocol
 from .scripting import (
     AssertionFailed,
@@ -42,6 +50,13 @@ from .scripting import (
 )
 from .server import DoorSimulator
 from .state import BatteryConfig, DoorSimulatorState, DoorTimingConfig, Schedule
+from .state_io import (
+    StateDocumentError,
+    apply_document,
+    load_document,
+    state_from_document,
+    state_to_document,
+)
 
 __all__ = [
     # Main classes
@@ -60,6 +75,19 @@ __all__ = [
     # Commands
     "CommandHandler",
     "CommandResult",
+    # Programmatic control (local or over a daemon's control port)
+    "SimulatorController",
+    "LocalSimulator",
+    "RemoteSimulator",
+    "simulator_control",
+    "SimulatorControlError",
+    "CommandFailedError",
+    # State documents
+    "state_to_document",
+    "state_from_document",
+    "apply_document",
+    "load_document",
+    "StateDocumentError",
     # Scripting
     "Script",
     "ScriptRunner",

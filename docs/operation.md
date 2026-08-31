@@ -189,17 +189,28 @@ The vendor app calls this *"always allow pet entry inside override timers"*
 rather than the name; see
 [What the app calls these settings](protocol.md#what-the-app-calls-these-settings).
 
-When enabled, the outside sensor is ignored for door activation, but still detects and can send notifications.
+**It grants entry; it does not deny it.** When enabled, the outside sensor
+opens the door **regardless of the schedule** — that is the whole point of
+"override timers".
 
 | State | Behavior |
 |-------|----------|
-| **Enabled** | Outside sensor won't open door, but still detects |
-| **Disabled** | Outside sensor can trigger door to open |
+| **Enabled** | Outside sensor opens the door even outside a scheduled window |
+| **Disabled** | Outside sensor obeys the schedule like the inside one |
 
 **Use cases:**
-- Keep pets inside (they can exit but not re-enter via pet door)
-- Night lockout while maintaining detection alerts
-- Override schedule-based sensor activation
+- Let a pet back in at any hour, while the schedule still governs the inside sensor
+- Keep timed access for outgoing trips without stranding a pet outside
+
+**Confirmed by direct measurement**: with the app switch off the door
+reports `outsideSensorSafetyLock: "false"`, and with it on, `"true"`. See
+[What the app calls these settings](protocol.md#what-the-app-calls-these-settings)
+for the full capture.
+
+**Still unsettled:** whether an enabled lock also overrides a *disabled*
+outside sensor, or only the schedule. The app says "override timers", so
+the simulator overrides the schedule only. Probing that needs hardware:
+disable the outside sensor, enable the lock, and trigger it.
 
 ### Command Lockout / Pet Proximity Keep-Open
 
@@ -236,10 +247,13 @@ When a sensor is active and detecting something:
 
 2. **Outside sensor active**: Blocks door closing if:
    - Outside sensor is enabled (`outside = true`)
-   - Safety lock is OFF (`outsideSensorSafetyLock = false`)
    - Command lockout is OFF (`allowCmdLockout = false`)
 
 If **command lockout is ON**, sensor detection never blocks door closing, regardless of other settings.
+
+The safety lock does not appear in that list. It grants **entry** past the
+schedule and says nothing about whether a detected pet holds the door open —
+that is command lockout's job, above.
 
 ---
 
@@ -267,12 +281,11 @@ When schedules are disabled (`timersEnabled = false`):
 
 **Example**: A schedule for inside sensor from 6:00 to 22:00 means pets can only exit during those hours (assuming inside sensor opens door for exit).
 
-**Window boundaries** — measured against firmware 1.7.18, not inferred. The
+**Window boundaries** — measured, not inferred. The
 engine is exactly `start <= now < end`, so the start minute is included and
 the end minute excluded: `6:00`–`22:00` covers 6:00 through 21:59.
 
-Three things follow, and the first two are the opposite of what this document
-used to claim:
+Three things follow:
 
 - **A window cannot cross midnight.** An end earlier than the start does
   *not* wrap. `23:00`–`01:00` is stored perfectly and never fires — not on
@@ -355,7 +368,9 @@ During door movement, state changes happen at physical positions, not fixed time
 
 ### Obstruction During Opening
 
-If an obstruction is detected during opening (RISING/SLOWING), behavior depends on the door's firmware. The simulator treats this as the door reaching its current position and entering HOLDING state.
+What a real door does if it meets an obstruction on the way *up* has not been
+observed. The simulator models obstructions on the closing path only, where
+the behaviour is known, and ignores them while the door is rising.
 
 ---
 
@@ -364,13 +379,5 @@ If an obstruction is detected during opening (RISING/SLOWING), behavior depends 
 ### Remote ID and Key
 
 The `HAS_REMOTE_ID` and `HAS_REMOTE_KEY` diagnostic commands check for the presence of pairing credentials. These are likely used for mobile app pairing - when you pair the door with the Power Pet Door mobile app, these IDs are set.
-
-### Reset Reasons
-
-The `CHECK_RESET_REASON` command returns why the door last reset:
-- `POWER_ON` - Normal power cycle
-- `WATCHDOG` - Watchdog timer reset
-- `SOFT_RESET` - Software-initiated reset
-- Other values may exist
 
 If you have additional information about these features, contributions are welcome.

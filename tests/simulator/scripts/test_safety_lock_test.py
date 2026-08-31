@@ -26,36 +26,58 @@ class TestSafetyLockTest:
         script = get_builtin_script("safety_lock_test")
         assert script.name == "Outside Sensor Safety Lock Test"
 
-    def test_script_tests_both_sensors(self):
-        """Script should test both inside and outside sensors."""
+    def test_script_exercises_the_outside_sensor_both_ways(self):
+        """The lock is the *outside* sensor's schedule override, so the
+        script triggers that sensor with the lock off and then on."""
         script = get_builtin_script("safety_lock_test")
-        triggers = [
-            s for s in script.steps if s.action == "trigger_sensor" or s.action == "trigger"
-        ]
+        triggers = [s for s in script.steps if s.action == "trigger"]
         sensors = [s.params.get("sensor", "") for s in triggers]
 
-        assert "outside" in sensors
-        assert "inside" in sensors
+        assert sensors == ["outside", "outside"]
 
-    async def test_script_passes_with_one_inside_cycle(self, runner, simulator):
-        """Only the inside trigger cycles the door; safety lock is restored."""
+    def test_script_puts_a_closed_window_in_the_way(self):
+        """Without a schedule there is nothing for the lock to override."""
+        script = get_builtin_script("safety_lock_test")
+
+        assert any(s.action == "add_schedule" for s in script.steps)
+
+    async def test_script_passes_with_two_cycles(self, runner, simulator):
+        """One cycle inside the window, one granted by the lock."""
         result = await runner.run(get_builtin_script("safety_lock_test"), verbose=False)
 
         assert result is True
         assert simulator.state.door_status == DOOR_STATE_CLOSED
-        assert simulator.state.total_open_cycles == 1
+        assert simulator.state.total_open_cycles == 2
         assert simulator.state.safety_lock is False
 
-    async def test_outside_blocked_inside_works(self, simulator):
-        """Direct simulator check: safety lock blocks outside, not inside."""
-        simulator.state.safety_lock = True
+    async def test_the_lock_grants_entry_past_a_closed_window(self, simulator):
+        """Direct check, the polarity this script exists to pin.
 
-        # Outside sensor is ignored synchronously - the door does not move
+        **Measured on the door** (see docs/protocol.md): the app
+        calls this "always allow pet entry inside override timers", and
+        `GET_SETTINGS` confirms the mapping is direct. It grants entry; it
+        does not deny it. This asserted the opposite.
+        """
+        from powerpetdoor.simulator.state import Schedule
+
+        simulator.state.schedules = {
+            0: Schedule(
+                index=0,
+                enabled=True,
+                days_of_week=[True] * 7,
+                outside=True,
+                start_hour=0,
+                start_min=0,
+                end_hour=0,
+                end_min=1,
+            )
+        }
+
         simulator.trigger_sensor("outside")
         assert simulator.state.door_status == DOOR_STATE_CLOSED
 
-        # Inside sensor starts the door rising synchronously
-        simulator.trigger_sensor("inside")
+        simulator.state.safety_lock = True
+        simulator.trigger_sensor("outside")
         assert simulator.state.door_status == DOOR_STATE_RISING
 
 
@@ -63,10 +85,16 @@ class TestSafetyLockTest:
 class TestSafetyLockTestMessages:
     """Broadcasts observed by a connected client during safety_lock_test."""
 
-    async def test_broadcasts_exact_single_cycle(self, runner, simulator, message_capture):
-        """The blocked outside trigger adds nothing; one inside cycle only."""
+    async def test_broadcasts_exactly_two_cycles(self, runner, simulator, message_capture):
+        """One cycle inside the window, one the lock grants past it.
+
+        This expected a single cycle, on the reading that a locked door
+        refuses the outside sensor entirely. Measured on hardware, the
+        lock grants entry - so the locked trigger opens the door too.
+        """
         result = await runner.run(get_builtin_script("safety_lock_test"), verbose=False)
         assert result is True
 
-        sequence = await message_capture.wait_for_status_sequence(FULL_CYCLE)
-        assert sequence == FULL_CYCLE
+        expected = FULL_CYCLE + FULL_CYCLE
+        sequence = await message_capture.wait_for_status_sequence(expected)
+        assert sequence == expected

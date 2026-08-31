@@ -12,18 +12,16 @@ resolution, and the command/subcommand decorators.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 # Importing the handler module populates the global command registry and
 # registers all subcommands (needed for get_canonical_command tests).
 import powerpetdoor.simulator.commands.handler  # noqa: F401
+from powerpetdoor.schedule import MAX_SCHEDULE_HOUR
 from powerpetdoor.simulator.commands.base import (
     DAY_NAMES,
     DAY_PRESET_NAMES,
     ArgSpec,
-    BoolToggleCommandMixin,
     CommandInfo,
     SubcommandInfo,
     _parse_days_str,
@@ -290,13 +288,39 @@ class TestParseTimeStr:
         assert _parse_time_str("0:00") == (0, 0)
         assert _parse_time_str("23:59") == (23, 59)
 
+    def test_the_end_of_the_day_is_accepted(self):
+        """`24:00` is what the device itself calls the end of the day.
+
+        This asserted `24` was refused, which made the CLI narrower than
+        the wire: an operator could not type the `20:00-24:00` window
+        the door is measured to honour.
+        """
+        assert _parse_time_str("24") == (24, 0)
+        assert _parse_time_str("24:00") == (24, 0)
+
+    def test_past_the_end_of_the_day_is_refused(self):
+        """One past the last hour is only a time when the minute is zero."""
+        with pytest.raises(ValueError, match="Invalid time: 24:30"):
+            _parse_time_str("24:30")
+
     def test_hour_out_of_range(self):
-        with pytest.raises(ValueError, match="Invalid time: 24"):
-            _parse_time_str("24")
+        with pytest.raises(ValueError, match="Invalid time: 25"):
+            _parse_time_str("25")
 
     def test_minute_out_of_range(self):
         with pytest.raises(ValueError, match="Invalid time: 12:60"):
             _parse_time_str("12:60")
+
+    def test_the_cli_accepts_exactly_what_the_wire_does(self):
+        """One rule, not two. The bound lives in `schedule.py`.
+
+        A second copy of "0..23" in this layer is how the CLI came to
+        refuse a window the protocol accepts.
+        """
+        for hour in range(MAX_SCHEDULE_HOUR + 1):
+            assert _parse_time_str(f"{hour}:00") == (hour, 0)
+        with pytest.raises(ValueError):
+            _parse_time_str(f"{MAX_SCHEDULE_HOUR + 1}:00")
 
 
 # ============================================================================
@@ -520,57 +544,6 @@ class TestGetCanonicalCommand:
 
         assert get_canonical_command("zc md im") == "zcanon middle innermost"
         assert get_canonical_command("zcanon middle innermost") is None
-
-
-# ============================================================================
-# BoolToggleCommandMixin (shared toggle helper)
-# ============================================================================
-
-
-class _Toggler(BoolToggleCommandMixin):
-    def __init__(self, simulator):
-        self.simulator = simulator
-
-
-class TestBoolToggleCommandMixin:
-    @pytest.fixture
-    def toggler(self):
-        broadcasts = []
-        simulator = SimpleNamespace(
-            state=SimpleNamespace(flag=False),
-            broadcast_flag=broadcasts.append,
-        )
-        return _Toggler(simulator), broadcasts
-
-    def test_set_without_broadcast_func(self, toggler):
-        instance, broadcasts = toggler
-        result = instance._toggle_bool("flag", "Flag", True)
-        assert result.success is True
-        assert result.message == "Flag: ON"
-        assert instance.simulator.state.flag is True
-        assert broadcasts == []
-
-    def test_toggle_with_broadcast(self, toggler):
-        instance, broadcasts = toggler
-        result = instance._toggle_bool("flag", "Flag", None, broadcast_func="broadcast_flag")
-        assert result.message == "Flag: ON"
-        assert broadcasts == [True]
-
-        result = instance._toggle_bool("flag", "Flag", None, broadcast_func="broadcast_flag")
-        assert result.message == "Flag: OFF"
-        assert broadcasts == [True, False]
-
-    def test_missing_broadcast_method_tolerated(self, toggler):
-        instance, broadcasts = toggler
-        result = instance._toggle_bool("flag", "Flag", True, broadcast_func="broadcast_missing")
-        assert result.success is True
-        assert result.message == "Flag: ON"
-        assert broadcasts == []
-
-    def test_enabled_disabled_format(self, toggler):
-        instance, _ = toggler
-        result = instance._toggle_bool("flag", "Flag", False, fmt="enabled|disabled")
-        assert result.message == "Flag: disabled"
 
 
 # ============================================================================

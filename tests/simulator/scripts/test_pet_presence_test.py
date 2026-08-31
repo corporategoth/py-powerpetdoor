@@ -30,8 +30,10 @@ class TestPetPresenceTest:
         """Script should include pet_presence and pet_off actions."""
         script = get_builtin_script("pet_presence_test")
         actions = [s.action for s in script.steps]
-        assert "pet_presence" in actions
-        assert "pet_off" in actions
+        # `pet_presence` is gone: a sensor held active *is* pet
+        # presence, so the script says `inside` with a duration of 0.
+        assert "inside" in actions
+        assert "trigger" in actions
 
     def test_script_waits_past_hold_time_with_pet_present(self):
         """The wall-clock wait genuinely exceeds the configured hold time.

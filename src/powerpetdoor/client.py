@@ -20,7 +20,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, overload
 
 from .const import (
-    CMD_CHECK_RESET_REASON,
     CMD_DELETE_SCHEDULE,
     CMD_DISABLE_AUTO,
     CMD_DISABLE_AUTORETRACT,
@@ -34,16 +33,12 @@ from .const import (
     CMD_ENABLE_INSIDE,
     CMD_ENABLE_OUTSIDE,
     CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
-    CMD_GET_AUTO,
-    CMD_GET_AUTORETRACT,
-    CMD_GET_CMD_LOCKOUT,
     CMD_GET_DOOR_BATTERY,
     CMD_GET_DOOR_OPEN_STATS,
     CMD_GET_DOOR_STATUS,
     CMD_GET_HOLD_TIME,
     CMD_GET_HW_INFO,
     CMD_GET_NOTIFICATIONS,
-    CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
     CMD_GET_POWER,
     CMD_GET_SCHEDULE,
     CMD_GET_SCHEDULE_LIST,
@@ -93,14 +88,12 @@ from .const import (
     FIELD_OUTSIDE_SENSOR_SAFETY_LOCK,
     FIELD_POWER,
     FIELD_REASON,
-    FIELD_RESET_REASON,
     FIELD_SCHEDULE,
     FIELD_SCHEDULES,
     FIELD_SENSOR_OFF_INDOOR_NOTIFICATIONS,
     FIELD_SENSOR_OFF_OUTDOOR_NOTIFICATIONS,
     FIELD_SENSOR_ON_INDOOR_NOTIFICATIONS,
     FIELD_SENSOR_ON_OUTDOOR_NOTIFICATIONS,
-    FIELD_SENSOR_STATE,
     FIELD_SENSOR_TRIGGER_VOLTAGE,
     FIELD_SETTINGS,
     FIELD_SLEEP_SENSOR_TRIGGER_VOLTAGE,
@@ -111,9 +104,6 @@ from .const import (
     FIELD_TZ,
     FIELD_VOLTAGE,
     MINIMUM_TIME_BETWEEN_MSGS,
-    NOTIFY_LOW_BATTERY,
-    NOTIFY_SENSOR_INDOOR,
-    NOTIFY_SENSOR_OUTDOOR,
     PHONE_TO_DOOR,
     PING,
     PONG,
@@ -177,9 +167,11 @@ class ResponseHandlerRegistry:
             cmds: One or more command strings this handler processes
 
         Example:
-            @ResponseHandlerRegistry.handler(CMD_GET_POWER, CMD_POWER_ON, CMD_POWER_OFF)
-            def _handle_power(self, msg, future):
-                ...
+            ::
+
+                @ResponseHandlerRegistry.handler(CMD_GET_POWER, CMD_POWER_ON, CMD_POWER_OFF)
+                def _handle_power(self, msg, future):
+                    ...
         """
 
         def decorator(func):
@@ -262,7 +254,7 @@ def make_bool(v: str | int | bool | None) -> bool | None:
 def autoretract_from_door_options(value: object) -> bool | None:
     """Read the auto-retract flag out of a ``doorOptions`` value.
 
-    **Verified against firmware 1.7.18**: ``doorOptions`` is an integer
+    ``doorOptions`` is an integer
     **bitfield**, not the ``"0"``/``"1"`` flag this project documented for
     years. ``DISABLE_AUTORETRACT`` leaves it at ``0`` and
     ``ENABLE_AUTORETRACT`` leaves it at ``2``, so auto-retract is
@@ -296,7 +288,7 @@ def autoretract_from_door_options(value: object) -> bool | None:
 def build_set_voltage_message(millivolts: int) -> dict[str, int]:
     """Build the message fields for either sensor-trigger-voltage setter.
 
-    **Verified against firmware 1.7.18**: both
+    Both
     ``SET_SENSOR_TRIGGER_VOLTAGE`` and
     ``SET_SLEEP_SENSOR_TRIGGER_VOLTAGE`` take their new value in a field
     named ``voltage`` - **not** the ``sensorTriggerVoltage`` /
@@ -312,7 +304,7 @@ def build_set_voltage_message(millivolts: int) -> dict[str, int]:
         )
 
     Args:
-        millivolts: The trigger threshold. The probed unit sat at 2000 and
+        millivolts: The trigger threshold. A typical unit ships at 2000 and
             accepted 1500/1800.
 
     Returns:
@@ -325,7 +317,7 @@ def build_set_voltage_message(millivolts: int) -> dict[str, int]:
 def envelope_for_command(cmd: str) -> str:
     """Return the envelope key ``cmd`` must be sent under.
 
-    **Verified against firmware 1.7.18.** The two envelope keys are not
+    The two envelope keys are not
     interchangeable: ``{"cmd": "ENABLE_INSIDE"}`` is answered
     ``success: "false"`` and does nothing, while
     ``{"config": "ENABLE_INSIDE"}`` succeeds. Only door motion is a
@@ -360,8 +352,7 @@ def build_set_hold_time_message(seconds: float) -> dict[str, int]:
             notify=True, **build_set_hold_time_message(2.0),
         )
 
-    The centisecond unit is **verified against firmware 1.7.18** - the
-    probed unit reported ``holdOpenTime: 200`` for its 2-second hold.
+    The unit is centiseconds: ``holdOpenTime: 200`` is a 2-second hold.
 
     Args:
         seconds: Hold-open time in seconds. Truncated, not rounded, to
@@ -385,7 +376,7 @@ def build_set_notifications_message(
 ) -> dict[str, dict[str, bool]]:
     """Build the ``SET_NOTIFICATIONS`` message fields.
 
-    **Verified against firmware 1.7.18.** The device requires a nested
+    The device requires a nested
     ``notifications`` object carrying **all five** flags as **JSON
     booleans**. Two failure modes were observed, and the second is the
     dangerous one:
@@ -481,11 +472,15 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._last_ping: str | None = None
         self._last_command: str | None = None
         self._can_dequeue = False
-        self._last_send = 0.0
+        self._last_reply = 0.0
         self._last_ping_time = 0.0
         self._failed_msg = 0
         self._failed_pings = 0
         self._inflight_msg_id: int | None = None
+        #: Monotonic send time per outstanding ``msgId``, so a reply's
+        #: round-trip can be timed. Monotonic, not the wall clock: an NTP
+        #: step must not be able to turn a latency into a negative number.
+        self._sent_at: dict[int | str, float] = {}
         # One scanner per client, carried across data_received() calls: a
         # device that dribbles the bytes of a never-terminated object must
         # not make us re-scan the retained buffer every time.
@@ -550,10 +545,8 @@ class PowerPetDoorClient(asyncio.Protocol):
 
         self.remote_id_listeners: dict[str, Callable[[bool], None]] = {}
         self.remote_key_listeners: dict[str, Callable[[bool], None]] = {}
-        self.reset_reason_listeners: dict[str, Callable[[str], None]] = {}
         self.schedule_update_listeners: dict[str, Callable[[dict], None]] = {}
         self.schedule_delete_listeners: dict[str, Callable[[int], None]] = {}
-        self.notification_event_listeners: dict[str, Callable[[str, str | None], None]] = {}
 
         # Lifecycle handlers may be plain callables or coroutine functions;
         # _dispatch_handler schedules any awaitable result on the loop.
@@ -664,10 +657,8 @@ class PowerPetDoorClient(asyncio.Protocol):
         sleep_sensor_trigger_voltage_update: Callable[[int], None] | None = None,
         remote_id_update: Callable[[bool], None] | None = None,
         remote_key_update: Callable[[bool], None] | None = None,
-        reset_reason_update: Callable[[str], None] | None = None,
         schedule_update: Callable[[dict], None] | None = None,
         schedule_delete: Callable[[int], None] | None = None,
-        notification_event: Callable[[str, str | None], None] | None = None,
     ) -> None:
         """Register callbacks for device state updates.
 
@@ -698,14 +689,8 @@ class PowerPetDoorClient(asyncio.Protocol):
             sleep_sensor_trigger_voltage_update: Called with sleep trigger voltage
             remote_id_update: Called with True if device has remote ID
             remote_key_update: Called with True if device has remote key
-            reset_reason_update: Called with reset reason string
             schedule_update: Called with schedule dict when schedule is added/updated
             schedule_delete: Called with schedule index when schedule is deleted
-            notification_event: Called as ``callback(event, state)`` when the
-                device announces an event; event is one of
-                ``NOTIFY_SENSOR_INDOOR``, ``NOTIFY_SENSOR_OUTDOOR`` or
-                ``NOTIFY_LOW_BATTERY`` and state is the reported
-                ``sensorState`` ("on"/"off") or None if not provided
         """
         if door_status_update:
             self.door_status_listeners[name] = door_status_update
@@ -810,14 +795,10 @@ class PowerPetDoorClient(asyncio.Protocol):
             self.remote_id_listeners[name] = remote_id_update
         if remote_key_update:
             self.remote_key_listeners[name] = remote_key_update
-        if reset_reason_update:
-            self.reset_reason_listeners[name] = reset_reason_update
         if schedule_update:
             self.schedule_update_listeners[name] = schedule_update
         if schedule_delete:
             self.schedule_delete_listeners[name] = schedule_delete
-        if notification_event:
-            self.notification_event_listeners[name] = notification_event
 
     def del_listener(self, name: str) -> None:
         """Remove all listeners registered under a name.
@@ -849,10 +830,8 @@ class PowerPetDoorClient(asyncio.Protocol):
         self.sleep_sensor_trigger_voltage_listeners.pop(name, None)
         self.remote_id_listeners.pop(name, None)
         self.remote_key_listeners.pop(name, None)
-        self.reset_reason_listeners.pop(name, None)
         self.schedule_update_listeners.pop(name, None)
         self.schedule_delete_listeners.pop(name, None)
-        self.notification_event_listeners.pop(name, None)
 
     # -------------------------------------------------------------------------
     # Listener/future dispatch helpers
@@ -1048,7 +1027,7 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._notify_listeners(self.sensor_listeners[FIELD_POWER], FIELD_POWER, val)
             self._resolve_future(future, val)
 
-    @ResponseHandlerRegistry.handler(CMD_GET_AUTO, CMD_ENABLE_AUTO, CMD_DISABLE_AUTO)
+    @ResponseHandlerRegistry.handler(CMD_ENABLE_AUTO, CMD_DISABLE_AUTO)
     def _handle_auto(self, msg: dict, future) -> None:
         """Handle timers/auto enabled responses."""
         if FIELD_AUTO in msg:
@@ -1057,7 +1036,6 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._resolve_future(future, val)
 
     @ResponseHandlerRegistry.handler(
-        CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK,
         CMD_ENABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
         CMD_DISABLE_OUTSIDE_SENSOR_SAFETY_LOCK,
     )
@@ -1073,9 +1051,7 @@ class PowerPetDoorClient(asyncio.Protocol):
             )
             self._resolve_future(future, val)
 
-    @ResponseHandlerRegistry.handler(
-        CMD_GET_CMD_LOCKOUT, CMD_ENABLE_CMD_LOCKOUT, CMD_DISABLE_CMD_LOCKOUT
-    )
+    @ResponseHandlerRegistry.handler(CMD_ENABLE_CMD_LOCKOUT, CMD_DISABLE_CMD_LOCKOUT)
     def _handle_cmd_lockout(self, msg: dict, future) -> None:
         """Handle command lockout responses."""
         settings = self._payload_mapping(msg, FIELD_SETTINGS)
@@ -1084,13 +1060,11 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._notify_listeners(self.sensor_listeners[FIELD_CMD_LOCKOUT], FIELD_CMD_LOCKOUT, val)
             self._resolve_future(future, val)
 
-    @ResponseHandlerRegistry.handler(
-        CMD_GET_AUTORETRACT, CMD_ENABLE_AUTORETRACT, CMD_DISABLE_AUTORETRACT
-    )
+    @ResponseHandlerRegistry.handler(CMD_ENABLE_AUTORETRACT, CMD_DISABLE_AUTORETRACT)
     def _handle_autoretract(self, msg: dict, future) -> None:
         """Handle autoretract responses.
 
-        Firmware 1.7.18 answers ENABLE_/DISABLE_AUTORETRACT with the
+        The door answers ENABLE_/DISABLE_AUTORETRACT with the
         **whole** settings object rather than the single changed field, so
         this reads its one field out of whatever arrived.
         """
@@ -1236,14 +1210,6 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._notify_listeners(self.remote_key_listeners, val)
             self._resolve_future(future, val)
 
-    @ResponseHandlerRegistry.handler(CMD_CHECK_RESET_REASON)
-    def _handle_reset_reason(self, msg: dict, future) -> None:
-        """Handle CHECK_RESET_REASON response."""
-        if FIELD_RESET_REASON in msg:
-            val = msg[FIELD_RESET_REASON]
-            self._notify_listeners(self.reset_reason_listeners, val)
-            self._resolve_future(future, val)
-
     @ResponseHandlerRegistry.handler(PONG)
     def _handle_pong(self, msg: dict, future) -> None:
         """Handle PONG keepalive response."""
@@ -1254,48 +1220,6 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._notify_listeners(self.on_ping, diff)
             self._failed_pings = 0
             self._last_ping = None
-
-    @ResponseHandlerRegistry.handler(
-        NOTIFY_SENSOR_INDOOR, NOTIFY_SENSOR_OUTDOOR, NOTIFY_LOW_BATTERY
-    )
-    def _handle_notification_event_cmd(self, msg: dict, future) -> None:
-        """Handle CMD-style notification event envelopes.
-
-        The documented device format is the bare envelope (see
-        :meth:`_dispatch_notification_event`), but CMD-style variants
-        (``{"CMD": "SENSOR_INDOOR", "success": "true", ...}``) are
-        tolerated and dispatched to the same listeners.
-        """
-        self._notify_listeners(
-            self.notification_event_listeners, msg.get(FIELD_CMD), msg.get(FIELD_SENSOR_STATE)
-        )
-
-    def _dispatch_notification_event(self, msg: dict) -> bool:
-        """Dispatch a bare notification event envelope, if this is one.
-
-        The device announces sensor and battery events outside the normal
-        command-response envelope (see docs/protocol.md "Notification
-        Events"), e.g. ``{"SENSOR_INDOOR": "", "sensorState": "on"}`` or
-        ``{"LOW_BATTERY": ""}`` — no ``CMD``, ``success`` or ``msgID``.
-
-        Args:
-            msg: The decoded message.
-
-        Returns:
-            True if the message was a notification event (dispatched to
-            ``notification_event`` listeners), False otherwise.
-        """
-        for event in (NOTIFY_SENSOR_INDOOR, NOTIFY_SENSOR_OUTDOOR, NOTIFY_LOW_BATTERY):
-            if event in msg:
-                state = msg.get(FIELD_SENSOR_STATE)
-                _LOGGER.debug(
-                    t("client.notification_event_state", "Notification event: %s (state=%s)"),
-                    event,
-                    sanitize_field(state),
-                )
-                self._notify_listeners(self.notification_event_listeners, event, state)
-                return True
-        return False
 
     def _dispatch_handler(self, name: str, callback: Callable) -> None:
         """Invoke a lifecycle handler, supporting sync and async callables.
@@ -1530,6 +1454,11 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._reconnect_attempts = 0
 
         if self.cfg_keepalive:
+            # No ping here. Connecting is followed by a refresh (see
+            # PowerPetDoor._on_connect), and every reply is timed, so a
+            # ping would duplicate a measurement already being taken. A
+            # caller that connects and sends nothing gets one from this
+            # timer instead.
             self._keepalive = self._track_task(self.keepalive())
 
         # Flush anything that was enqueued while disconnected, otherwise
@@ -1640,10 +1569,11 @@ class PowerPetDoorClient(asyncio.Protocol):
         self._can_dequeue = False
         self._last_ping = None
         self._last_command = None
-        self._last_send = 0
+        self._last_reply = 0.0
         self._failed_msg = 0
         self._failed_pings = 0
         self._inflight_msg_id = None
+        self._sent_at.clear()
         self._scanner.reset()
         self._queue.clear()
         self._msg_sequence = 0  # Reset sequence counter
@@ -1702,34 +1632,77 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._schedule_reconnect()
 
     async def keepalive(self) -> None:
+        """Ping once the link has been quiet for ``cfg_keepalive`` seconds.
+
+        An **idle** timer, not a heartbeat: :meth:`_write_message`
+        reschedules it on every send, so a PING only goes out when nothing
+        else has. Traffic that is being answered already proves the
+        connection is alive, and - since
+        :meth:`_record_response_latency` times those answers - already
+        reports latency too, so a ping on a busy link would be a frame
+        spent to learn nothing.
+        """
         _keepalive = self._keepalive
         await asyncio.sleep(self.cfg_keepalive)
         if _keepalive and not _keepalive.cancelled():
-            if self._last_ping is not None:
-                self._failed_pings += 1
-                if self._failed_pings < MAX_FAILED_PINGS:
-                    _LOGGER.warning(
-                        t("client.last_ping_responded", "Last PING not responded to %d of %d..."),
-                        self._failed_pings,
-                        MAX_FAILED_PINGS,
-                    )
-                else:
-                    _LOGGER.error(
-                        t(
-                            "client.last_ping_responded_times",
-                            "Last PING not responded to %d times.",
-                        ),
-                        self._failed_pings,
-                    )
-                    self._drop_connection()
-                    return
+            self._ping_once()
 
-            # The wire token stays wall-clock milliseconds (device
-            # compatibility); latency is measured against the monotonic
-            # clock so NTP steps cannot skew it.
-            self._last_ping = str(round(time.time() * 1000))
-            self._last_ping_time = time.monotonic()
-            self.send_message(PING, self._last_ping)
+    def _ping_once(self) -> bool:
+        """Send one PING, first accounting for any that went unanswered.
+
+        Returns False when the connection has been dropped for repeated
+        silence.
+        """
+        if self._last_ping is not None:
+            self._failed_pings += 1
+            if self._failed_pings < MAX_FAILED_PINGS:
+                _LOGGER.warning(
+                    t("client.last_ping_responded", "Last PING not responded to %d of %d..."),
+                    self._failed_pings,
+                    MAX_FAILED_PINGS,
+                )
+            else:
+                _LOGGER.error(
+                    t(
+                        "client.last_ping_responded_times",
+                        "Last PING not responded to %d times.",
+                    ),
+                    self._failed_pings,
+                )
+                self._drop_connection()
+                return False
+
+        # The wire token stays wall-clock milliseconds (device
+        # compatibility); latency is measured against the monotonic
+        # clock so NTP steps cannot skew it.
+        self._last_ping = str(round(time.time() * 1000))
+        self._last_ping_time = time.monotonic()
+        self.send_message(PING, self._last_ping)
+        return True
+
+    def _record_response_latency(self, reply_msg_id: object) -> None:
+        """Report the round-trip of an ordinary command, as a PONG would.
+
+        Latency used to come only from the keepalive PING, which meant it
+        described a synthetic frame sent when the link was quiet rather
+        than the real work. Every successful reply carries the `msgID` of
+        its request, so the round-trip is already there to be read.
+
+        Only *successful* replies, necessarily: **[V]** a failure response
+        carries no `msgID` at all (see docs/protocol.md), so there is
+        nothing to pair it with. A `PONG` carries none either and is timed
+        separately, against the token it echoes.
+        """
+        if not isinstance(reply_msg_id, (int, str)):
+            return
+        sent_at = self._sent_at.pop(reply_msg_id, None)
+        if sent_at is None:
+            return
+        # Anything older than the reply we just paired is unanswerable:
+        # the device answers in order, so a still-pending earlier id was
+        # answered with a failure (which carries no msgID) or not at all.
+        self._sent_at = {k: v for k, v in self._sent_at.items() if v > sent_at}
+        self._notify_listeners(self.on_ping, round((time.monotonic() - sent_at) * 1000))
 
     def _fail_inflight_future(self, exc: Exception) -> None:
         """Fail the future paired with the in-flight message, if any."""
@@ -1808,7 +1781,12 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._keepalive.cancel()
             self._keepalive = None
         try:
-            diff = time.monotonic() - self._last_send
+            # Quiet time since the door last spoke, not since we last
+            # sent. Sends are serialized behind a reply already, so a
+            # send-relative floor is satisfied by any round trip longer
+            # than itself - it stops contributing precisely when the door
+            # is slow, which is when it drops requests.
+            diff = time.monotonic() - self._last_reply
             if diff < MINIMUM_TIME_BETWEEN_MSGS:
                 await asyncio.sleep(MINIMUM_TIME_BETWEEN_MSGS - diff)
             # Re-check after the sleep: disconnect() may have run in the
@@ -1824,7 +1802,6 @@ class PowerPetDoorClient(asyncio.Protocol):
                 return
             _LOGGER.debug(t("client.tx", "TX > %s"), rawdata)
             transport.write(rawdata)
-            self._last_send = time.monotonic()
 
             if self.cfg_keepalive:
                 self._keepalive = self._track_task(self.keepalive())
@@ -1881,6 +1858,9 @@ class PowerPetDoorClient(asyncio.Protocol):
         # Track the in-flight msgId so check_receipt can fail its future
         # if the message is ultimately dropped.
         self._inflight_msg_id = data.get(FIELD_MSG_ID)
+        msg_id = data.get(FIELD_MSG_ID)
+        if isinstance(msg_id, (int, str)):
+            self._sent_at[msg_id] = time.monotonic()
         self._failed_msg = 0
         rawdata = json.dumps(data).encode("ascii")
         await self._send_data(rawdata)
@@ -1938,6 +1918,9 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._drop_connection()
             return
 
+        # The door has just transmitted, so the quiet period starts here.
+        self._last_reply = time.monotonic()
+
         for frame in frames:
             try:
                 msg = json.loads(frame)
@@ -1985,12 +1968,6 @@ class PowerPetDoorClient(asyncio.Protocol):
             return
 
         cmd = msg.get(FIELD_CMD)
-
-        # Device-initiated notification events use a bare envelope with no
-        # CMD/success fields (docs/protocol.md "Notification Events").
-        if cmd is None and self._dispatch_notification_event(msg):
-            return
-
         success = msg.get(FIELD_SUCCESS)
         if cmd is None and success is None:
             _LOGGER.warning(
@@ -2006,6 +1983,7 @@ class PowerPetDoorClient(asyncio.Protocol):
         reply_msg_id = msg.get(FIELD_MSG_ID_RESPONSE)
         if reply_msg_id is not None:
             self.replyMsgId = reply_msg_id
+            self._record_response_latency(reply_msg_id)
             # The device supplies this; anything that is not a usable dict
             # key (a list, a dict, ...) must not raise here - it simply
             # matches no outstanding future.
@@ -2071,8 +2049,8 @@ class PowerPetDoorClient(asyncio.Protocol):
                 if future is not None and not future.done():
                     future.set_exception(CommandError(cmd, reason))
                 elif reply_msg_id is None and acknowledged_inflight:
-                    # Verified against firmware 1.7.18: **failure responses
-                    # carry no msgID at all**, so they cannot be paired with
+                    # **Failure responses carry no msgID at all**, so they
+                    # cannot be paired with
                     # a request by id. Cancelling the retry timer (above)
                     # without failing the future left the caller's `await`
                     # hanging until its own timeout - or forever, for a

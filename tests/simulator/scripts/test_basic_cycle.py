@@ -33,7 +33,7 @@ class TestBasicCycle:
         # Starts by asserting the door is closed
         assert script.steps[0].action == "assert"
         assert script.steps[0].params == {"condition": "door_status", "equals": "DOOR_CLOSED"}
-        assert "trigger_sensor" in actions
+        assert "trigger" in actions
         # Deterministic: synchronizes on door state, not wall-clock waits
         assert "wait_for" in actions
         assert "wait" not in actions

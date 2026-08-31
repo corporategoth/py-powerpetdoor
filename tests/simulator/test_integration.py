@@ -41,7 +41,7 @@ from tests.simulator.wire import WireCapture
 #: HOLDING, and for a complete open/hold/close cycle.
 OPENING_SEQUENCE = [DOOR_STATE_RISING, DOOR_STATE_SLOWING, DOOR_STATE_HOLDING]
 CLOSING_SEQUENCE = [
-    # DOOR_CLOSING first: measured on a real door (firmware 1.7.18), the
+    # DOOR_CLOSING first: the
     # motor starts before the flap moves and the device reports it.
     DOOR_STATE_CLOSING,
     DOOR_STATE_CLOSING_TOP_OPEN,

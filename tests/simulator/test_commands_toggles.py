@@ -26,14 +26,20 @@ from powerpetdoor.const import (
     CMD_POWER_ON,
     CMD_SET_NOTIFICATIONS,
     DOOR_STATE_CLOSED,
+    DOOR_STATE_CLOSING,
+    DOOR_STATE_CLOSING_MID_OPEN,
+    DOOR_STATE_CLOSING_TOP_OPEN,
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
     DOOR_STATE_RISING,
+    DOOR_STATE_SLOWING,
     FIELD_AUTO,
     FIELD_CMD,
     FIELD_INSIDE,
     FIELD_OUTSIDE,
     FIELD_POWER,
+    SUCCESS_FALSE,
+    SUCCESS_TRUE,
 )
 from powerpetdoor.simulator import (
     DoorSimulator,
@@ -129,13 +135,13 @@ class TestPowerCommand:
         assert state.power is False
         payload = _last_payload(mock_client)
         assert payload[FIELD_CMD] == CMD_POWER_OFF
-        assert payload[FIELD_POWER] == 0
+        assert payload[FIELD_POWER] == SUCCESS_FALSE
 
         result = await command_handler.execute("power on")
         assert result.message == "Power: ON"
         payload = _last_payload(mock_client)
         assert payload[FIELD_CMD] == CMD_POWER_ON
-        assert payload[FIELD_POWER] == 1
+        assert payload[FIELD_POWER] == SUCCESS_TRUE
 
     async def test_toggle_subcommand_and_aliases(self, command_handler):
         state = command_handler.simulator.state
@@ -164,13 +170,13 @@ class TestAutoCommand:
         assert state.auto is False
         payload = _last_payload(mock_client)
         assert payload[FIELD_CMD] == CMD_DISABLE_AUTO
-        assert payload[FIELD_AUTO] == 0
+        assert payload[FIELD_AUTO] == SUCCESS_FALSE
 
         result = await command_handler.execute("auto on")
         assert result.message == "Auto (schedule): ON"
         payload = _last_payload(mock_client)
         assert payload[FIELD_CMD] == CMD_ENABLE_AUTO
-        assert payload[FIELD_AUTO] == 1
+        assert payload[FIELD_AUTO] == SUCCESS_TRUE
 
     async def test_bare_toggle_alias_and_subcommand(self, command_handler):
         state = command_handler.simulator.state
@@ -302,25 +308,105 @@ class TestNotifyRemaining:
 
 
 class TestObstructionCommand:
-    async def test_obstruction_activates_inside_sensor(self, command_handler):
+    async def test_obstruction_places_a_one_shot(self, command_handler):
         state = command_handler.simulator.state
-        state.outside_sensor_active = True
 
         result = await command_handler.execute("obstruction")
         assert result.success is True
-        assert result.message == "Simulating obstruction"
-        assert state.inside_sensor_active is True
+        assert result.message == "Obstruction placed (cleared by the retract it causes)"
+        assert state.obstruction_active is True
+        assert state.obstruction_oneshot is True
+
+    async def test_obstruction_arms_no_sensor(self, command_handler):
+        """The distinction the command exists to make: it is not a collar."""
+        state = command_handler.simulator.state
+
+        await command_handler.execute("obstruction")
+        assert state.inside_sensor_active is False
         assert state.outside_sensor_active is False
+
+    async def test_a_second_obstruction_clears_it(self, command_handler):
+        state = command_handler.simulator.state
+        await command_handler.execute("obstruction")
+
+        result = await command_handler.execute("obstruction")
+        assert result.success is True
+        assert result.message == "Obstruction cleared"
+        assert state.obstruction_active is False
+
+    async def test_zero_stays_until_cleared(self, command_handler):
+        """0 is the boundary: still there afterwards, unlike a one-shot."""
+        state = command_handler.simulator.state
+
+        result = await command_handler.execute("obstruction 0")
+        assert result.message == "Obstruction placed (until cleared)"
+        assert state.obstruction_oneshot is False
+
+    async def test_a_positive_duration_reports_its_window(self, command_handler):
+        """The other side of the 0 boundary."""
+        state = command_handler.simulator.state
+
+        result = await command_handler.execute("obstruction 5")
+        assert result.message == "Obstruction placed for 5.0s"
+        assert state.obstruction_active is True
 
     async def test_obstruction_alias_x(self, command_handler):
         result = await command_handler.execute("x")
         assert result.success is True
-        assert result.message == "Simulating obstruction"
+        assert result.message == "Obstruction placed (cleared by the retract it causes)"
 
 
 # ============================================================================
-# Door commands (inside / outside / close / hold / cycle)
+# Door commands (inside / outside / close / hold / cycle / toggle)
 # ============================================================================
+
+
+class TestToggleCommand:
+    """`toggle` mirrors PowerPetDoor.toggle, including its mid-travel no-op."""
+
+    async def test_toggle_opens_a_closed_door(self, command_handler):
+        state = command_handler.simulator.state
+        assert state.door_status == DOOR_STATE_CLOSED
+
+        result = await command_handler.execute("toggle")
+        assert result.success is True
+        assert result.message == "Toggle: opening and holding"
+        await command_handler.simulator.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+
+    async def test_toggle_closes_an_open_door(self, command_handler):
+        simulator = command_handler.simulator
+        await simulator.open_door(hold=True)
+        await simulator.wait_for_status(DOOR_STATE_KEEPUP, timeout=2.0)
+
+        result = await command_handler.execute("toggle")
+        assert result.success is True
+        assert result.message == "Toggle: closing"
+        await simulator.wait_for_status(DOOR_STATE_CLOSED, timeout=2.0)
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            DOOR_STATE_RISING,
+            DOOR_STATE_SLOWING,
+            DOOR_STATE_CLOSING,
+            DOOR_STATE_CLOSING_TOP_OPEN,
+            DOOR_STATE_CLOSING_MID_OPEN,
+        ],
+    )
+    async def test_toggle_is_a_noop_mid_travel(self, command_handler, status):
+        """Nothing but an obstruction interrupts a door in motion."""
+        state = command_handler.simulator.state
+        state.door_status = status
+
+        result = await command_handler.execute("toggle")
+        assert result.success is True
+        assert result.message == f"Toggle: ignored, door is in motion ({status})"
+        assert state.door_status == status
+
+    async def test_toggle_alias_tg(self, command_handler):
+        result = await command_handler.execute("tg")
+        assert result.success is True
+        assert result.message == "Toggle: opening and holding"
 
 
 class TestInsideCommand:
@@ -344,17 +430,43 @@ class TestInsideCommand:
         state.inside_sensor_active = False
 
         result = await command_handler.execute("inside 0")
-        assert result.message == "Inside sensor activated (toggle)"
+        assert result.message == "Inside sensor active"
         assert state.inside_sensor_active is True
 
         result = await command_handler.execute("inside 0")
-        assert result.message == "Inside sensor deactivated (toggle)"
+        assert result.message == "Inside sensor clear"
         assert state.inside_sensor_active is False
+
+    async def test_on_off_and_toggle_say_which_they_mean(self, command_handler):
+        """`0` toggles, which a script read out of order cannot rely on."""
+        state = command_handler.simulator.state
+        state.power = False
+
+        assert (await command_handler.execute("inside on")).message == "Inside sensor active"
+        assert state.inside_sensor_active is True
+        assert (await command_handler.execute("inside on")).message == "Inside sensor active"
+        assert state.inside_sensor_active is True
+
+        assert (await command_handler.execute("inside off")).message == "Inside sensor clear"
+        assert state.inside_sensor_active is False
+        assert (await command_handler.execute("inside toggle")).message == "Inside sensor active"
+
+    async def test_a_misspelled_argument_is_refused(self, command_handler):
+        """Failing closed to "off" would silently clear the sensor."""
+        state = command_handler.simulator.state
+        state.power = False
+        await command_handler.execute("inside on")
+
+        result = await command_handler.execute("inside nonsense")
+
+        assert result.success is False
+        assert "expected on, off, toggle" in result.message
+        assert state.inside_sensor_active is True
 
     async def test_negative_duration_rejected(self, command_handler):
         result = await command_handler.execute("inside -1")
         assert result.success is False
-        assert result.message == "'-1' is below minimum (0)\nUsage: inside [duration]"
+        assert "between 0 and" in result.message
 
     async def test_alias_i(self, command_handler):
         command_handler.simulator.state.power = False
@@ -378,12 +490,37 @@ class TestOutsideCommand:
         state.outside_sensor_active = False
 
         result = await command_handler.execute("outside 0")
-        assert result.message == "Outside sensor activated (toggle)"
+        assert result.message == "Outside sensor active"
         assert state.outside_sensor_active is True
 
         result = await command_handler.execute("o 0")
-        assert result.message == "Outside sensor deactivated (toggle)"
+        assert result.message == "Outside sensor clear"
+
+    async def test_on_off_and_toggle_say_which_they_mean(self, command_handler):
+        """`0` toggles, which a script read out of order cannot rely on."""
+        state = command_handler.simulator.state
+        state.power = False
+
+        assert (await command_handler.execute("outside on")).message == "Outside sensor active"
+        assert state.outside_sensor_active is True
+        assert (await command_handler.execute("outside on")).message == "Outside sensor active"
+        assert state.outside_sensor_active is True
+
+        assert (await command_handler.execute("outside off")).message == "Outside sensor clear"
         assert state.outside_sensor_active is False
+        assert (await command_handler.execute("outside toggle")).message == "Outside sensor active"
+
+    async def test_a_misspelled_argument_is_refused(self, command_handler):
+        """Failing closed to "off" would silently clear the sensor."""
+        state = command_handler.simulator.state
+        state.power = False
+        await command_handler.execute("outside on")
+
+        result = await command_handler.execute("outside nonsense")
+
+        assert result.success is False
+        assert "expected on, off, toggle" in result.message
+        assert state.outside_sensor_active is True
 
     async def test_sensors_mutually_exclusive(self, command_handler):
         state = command_handler.simulator.state
@@ -591,3 +728,74 @@ class TestTheSelectedLocaleReachesRealCommandOutput:
             "de_de",
             "simulator.commands.control.debug_logging_disabled",
         ) in german.missing_keys()
+
+
+class TestObstructionArgumentForms:
+    """`obstruction` takes the argument `inside`/`outside` take."""
+
+    async def test_bare_toggles(self, command_handler):
+        state = command_handler.simulator.state
+
+        assert (await command_handler.execute("obstruction")).success is True
+        assert state.obstruction_active is True
+
+        assert (await command_handler.execute("obstruction")).message == "Obstruction cleared"
+        assert state.obstruction_active is False
+
+    async def test_on_is_explicit_and_stays(self, command_handler):
+        """`on` places one that survives the retract it causes; a bare
+        `obstruction` places a one-shot instead."""
+        state = command_handler.simulator.state
+
+        result = await command_handler.execute("obstruction on")
+
+        assert result.message == "Obstruction placed (until cleared)"
+        assert state.obstruction_active is True
+        assert state.obstruction_oneshot is False
+
+    async def test_off_clears_it(self, command_handler):
+        state = command_handler.simulator.state
+        await command_handler.execute("obstruction on")
+
+        result = await command_handler.execute("obstruction off")
+
+        assert result.message == "Obstruction cleared"
+        assert state.obstruction_active is False
+
+    async def test_toggle_says_which_way_it_went(self, command_handler):
+        state = command_handler.simulator.state
+
+        assert (await command_handler.execute("obstruction toggle")).success is True
+        assert state.obstruction_active is True
+        assert (await command_handler.execute("obstruction toggle")).message == (
+            "Obstruction cleared"
+        )
+
+    async def test_a_duration_reports_its_window(self, command_handler):
+        result = await command_handler.execute("obstruction 5")
+
+        assert result.message == "Obstruction placed for 5.0s"
+
+    async def test_zero_is_until_cleared(self, command_handler):
+        """The boundary against a positive duration."""
+        result = await command_handler.execute("obstruction 0")
+
+        assert result.message == "Obstruction placed (until cleared)"
+        assert command_handler.simulator.state.obstruction_oneshot is False
+
+    async def test_a_negative_duration_is_refused(self, command_handler):
+        result = await command_handler.execute("obstruction -1")
+
+        assert result.success is False
+        assert "between 0 and" in result.message
+
+    async def test_a_misspelled_argument_is_refused(self, command_handler):
+        """Failing closed to "off" would silently clear the doorway."""
+        state = command_handler.simulator.state
+        await command_handler.execute("obstruction on")
+
+        result = await command_handler.execute("obstruction nonsense")
+
+        assert result.success is False
+        assert "expected on, off, toggle" in result.message
+        assert state.obstruction_active is True

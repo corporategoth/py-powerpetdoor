@@ -7,7 +7,7 @@ steps:
   - action: set
     name: hold_time
     value: "1"
-  - action: trigger_sensor
+  - action: trigger
     sensor: inside
   - action: wait_for
     condition: door_open
@@ -21,7 +21,7 @@ steps:
   # Test 2: Outside sensor
   - action: log
     message: "=== Test 2: Outside Sensor ==="
-  - action: trigger_sensor
+  - action: trigger
     sensor: outside
   - action: wait_for
     condition: door_open
@@ -38,7 +38,7 @@ steps:
   - action: set
     name: power
     value: "off"
-  - action: trigger_sensor
+  - action: trigger
     sensor: inside
   - action: assert
     condition: door_status
@@ -49,20 +49,30 @@ steps:
   - action: log
     message: "Power off: PASSED"
 
-  # Test 4: Safety lock
+  # Test 4: Safety lock - the app's "always allow pet entry inside override
+  # timers". It GRANTS entry past the schedule; the wire name reads like an
+  # interlock and this suite used to assert that, wrongly.
   - action: log
     message: "=== Test 4: Safety Lock ==="
+  - action: add_schedule
+    index: 0
+    enabled: true
   - action: set
     name: safety_lock
-    value: "on"
-  - action: trigger_sensor
+    value: on
+  - action: trigger
     sensor: outside
-  - action: assert
-    condition: door_status
-    equals: DOOR_CLOSED
+  - action: wait_for
+    condition: door_open
+    timeout: 5
+  - action: wait_for
+    condition: door_closed
+    timeout: 15
   - action: set
     name: safety_lock
-    value: "off"
+    value: off
+  - action: remove_schedule
+    index: 0
   - action: log
     message: "Safety lock: PASSED"
 
@@ -71,7 +81,8 @@ steps:
     message: "=== Test 5: Open and Hold ==="
   - action: open
   - action: wait_for
-    condition: door_keepup
+    condition: door_status
+    equals: DOOR_KEEPUP
     timeout: 5
   # Genuine time passage: stay past the 1s hold time to prove KEEPUP
   # does not auto-close.

@@ -7,6 +7,657 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — three setters answer with the whole settings object
+
+`ENABLE_CMD_LOCKOUT`/`DISABLE_CMD_LOCKOUT` and the outside-safety-lock
+pair answer with **every** setting, not the one field they changed. The
+simulator answered a one-field `settings` object, and `docs/protocol.md`
+said outright that these two "were not probed". They are now.
+
+That completes a pattern worth knowing: the three settings with **no
+getter of their own** — `doorOptions`, `allowCmdLockout`,
+`outsideSensorSafetyLock` — are exactly the three whose setter answers
+with the whole object. The fat reply is what compensates for the missing
+read. `docs/protocol.md` gains a table mapping every settings field to
+its getter and its setter's reply shape.
+
+Also worth stating because it cannot be derived: a getter is named after
+neither the field nor the toggle consistently. `timersEnabled` is read by
+`GET_TIMERS_ENABLED` (the field), `power_state` by `GET_POWER` (the
+toggle), and `holdOpenTime` by `GET_HOLD_TIME`, which answers under a
+third name again — `holdTime`.
+
+### Changed — the docs say what the door does, not how we found out
+
+Every "verified against firmware 1.7.18", "measured by cycling a real
+door" and "the probed unit reported" is gone — around 160 of them across
+the source, docs and tests. What a reader needs is the behaviour; how it
+came to be known is not part of the protocol. Where a future firmware
+*changes* something, say so then ("added in", "removed in") — that is a
+fact about the protocol rather than about our testing.
+
+Names that turned out not to be commands are gone too, rather than
+recorded as absent. The spec's completeness check is now a positive
+perimeter — every described command must have a handler — instead of a
+list of mistakes to assert the absence of, which grew with each one.
+
+### Fixed — `GET_TIMERS_ENABLED` exists, and had been deleted as a hallucination
+
+Asked directly, a door answers
+`{"timersEnabled": "false", "success": "true", "CMD": "GET_TIMERS_ENABLED"}`.
+It is the read side of `ENABLE_TIMERS`/`DISABLE_TIMERS` — whether
+scheduling is in force, which is a different thing from the sensor
+enables `GET_SENSORS` reports and from the unit power in `GET_POWER`.
+
+It had been removed from `const.py`, the simulator and the docs as a name
+the firmware did not implement. It is back, on every layer: the constant
+is exported again, the simulator answers it, and `docs/protocol.md` gains
+a **Scheduling Control** section — `ENABLE_TIMERS`/`DISABLE_TIMERS` had
+never been documented at all.
+
+Note the naming asymmetry that hid it: the toggles are `*_TIMERS` but the
+getter is named after the *field*. `GET_TIMERS` is not a command.
+
+These are confirmed not to exist, asked one at a time: `GET_TIMERS`,
+`GET_AUTO`, `GET_SCHEDULES_ENABLED`, `GET_AUTORETRACT`, `GET_DOOR_OPTIONS`,
+`GET_CMD_LOCKOUT`, `GET_LOCKOUT`, `GET_OUTSIDE_SENSOR_SAFETY_LOCK`,
+`GET_SAFETY_LOCK`, `CHECK_RESET_REASON`, `GET_RESET_REASON`.
+
+### Fixed — there is no rule that a top-level flag is an int
+
+`GET_POWER` answers `power_state` as the **string** `"true"`/`"false"`,
+not the int `1`/`0` the simulator was sending. So does
+`GET_TIMERS_ENABLED` with `timersEnabled`, and both are strings inside
+`settings` as well. Only the sensor pair is ints.
+
+The wrong spelling came from a stated generalisation — one pair was
+checked and the code said "the others follow the same shape". They are
+three different things (the sensors are armed or not, the power is the
+motor, the timers are the schedule), and they do not share a spelling.
+The wire table now carries which is which per field.
+
+### Changed — the getters come from the wire table too
+
+Six `GET_*` handlers restated what `WIRE_VALUES` already said, because a
+getter that reads back one value answers with exactly that value's
+payload. They are generated now. One had already drifted:
+`GET_HOLD_TIME` did its own `* 100` rather than asking
+`hold_time_centiseconds`, making it a third copy of the
+seconds-to-centiseconds conversion.
+
+Getters that report several values (`GET_SENSORS`) or something assembled
+(`GET_SETTINGS`, `GET_HW_INFO`) stay hand-written, and `MULTI_VALUE_GETTERS`
+records the first kind so the `also-in-GET_SETTINGS` cross-reference still
+finds them.
+
+### Fixed — the schedule hour is 0-24, and four layers disagreed about it
+
+`24:00` is the device's own spelling for the end of the day and the
+schedule engine honours it — a window of `20:00-24:00` reports the sensor enabled at 21:07. Four places
+decided whether a schedule time was acceptable, and they did not agree:
+
+| | hour ceiling | knew `24:xx` is not a time |
+|---|---|---|
+| the wire coercion | 24 | no |
+| the state-document loader | 24 | **yes** |
+| the CLI's `time_range` | **23** | no |
+| the field's documentation | **23** | no |
+
+So the CLI refused a window the protocol accepts, the published spec
+advertised a bound narrower than the device, and `24:30` — half an hour
+past the end of the day — was accepted and stored by three of the four.
+
+There is now one rule, `valid_schedule_time`, and all four ask it.
+`24:30` is refused on the way in; when the *device* is the one reporting
+it, it is read as `24:00` rather than discarding a schedule that really
+exists.
+
+### Changed — bounds are derived from the registry, not restated
+
+Reading and writing were routed through the value registry long before
+the rules governing acceptable values were, so the bounds drifted.
+`totalOpenCycles` and `totalAutoRetracts` documented no maximum at all
+while the registry capped both at 2**31-1, and the hold-time ceiling was
+written out twice — 900 seconds in one place, 90000 centiseconds in
+another, with nothing tying them together.
+
+Wire bounds now come from `VALUES` through `WIRE_BOUNDS`, which declares
+the unit scale once. A test pins that every numeric wire field either
+derives its bounds or names why it cannot.
+
+### Added — the protocol reference is now something you can read
+
+`schemas/asyncapi.json` reached the wiki as a filename. Anyone wanting to
+know what `SET_HOLD_TIME` takes had to open 400 KB of JSON.
+
+It is now rendered as six wiki pages: an index carrying all 41 commands,
+and a page each for door motion, settings, information, schedules and
+notifications. Every command gets its fields, types, units, constraints
+and a complete worked exchange. Nothing is authored — it comes from the
+document, which comes from the code, so a new command documents itself.
+`docs/protocol.md` keeps the *explanation* and links to it; the reference
+links back.
+
+### Fixed — the objects on this wire described themselves as "an object"
+
+`settings`, `schedule`, `notifications` and `fwInfo` carry the richest
+and least guessable structures in the protocol, and the spec said
+`type: object` and stopped. Their 30 members are now documented
+individually — including the traps: `doorOptions` is a bitfield rather
+than a flag, `allowCmdLockout` reads backwards, `holdOpenTime` is this
+object's name for `holdTime` and is in centiseconds, and `inside` means
+a switch in `settings` but *which sensor a window governs* in `schedule`.
+
+A test pins that every member the door actually emits is documented, so
+a new settings key cannot ship as a bare name.
+
+Two schedule commands also documented nothing, because the prober ran
+against a door with no schedules: `GET_SCHEDULE` answered
+`"schedule": null` and `GET_SCHEDULE_LIST` answered `[]`. The probe now
+seeds a slot — with a different schedule from the one `SET_SCHEDULE`
+writes, so the effect probe cannot mistake the seed for the write.
+
+### Fixed — the client paced itself against the wrong clock
+
+`MINIMUM_TIME_BETWEEN_MSGS` measured from the **previous send**. Because
+the client already sends one message at a time and waits for the answer,
+that floor was satisfied by any round trip longer than itself — so it
+contributed nothing exactly when the door was slowest, which is when it
+drops requests: a rested door answers in
+~32 ms and the 200 ms floor added 168 ms of dead time; a loaded door
+answers in ~300 ms and the floor added **nothing**.
+
+The gap is now measured from the door's reply, and is **50 ms** rather
+than 200 ms. Startup is roughly 2.3 s for 30 commands instead of ~6 s,
+and the loaded case gains protection it did not have.
+
+50 ms rather than 25 ms on measurement, not caution: 25 ms dropped 3 of
+579 requests where 50 ms dropped 0 of 222, and a dropped request costs a
+full 10 s timeout — which makes 25 ms *slower* in expectation.
+
+### Documented — silence is a dropped request, not an answer
+
+The door occasionally answers nothing at all, for **any** command,
+including entirely valid ones. Several hundred requests against firmware
+found no rule a client can design around: pacing does not fix it
+(20 requests back-to-back dropped nothing while the same 20 spaced
+150 ms apart dropped eleven), and neither does limiting concurrency (one
+outstanding request still drops; ten sometimes do not).
+
+A client must never read silence as success or as failure. It means no
+answer arrived — reissue the request.
+
+### Removed — two commands the door does not implement
+
+
+- **`SET_SCHEDULE_LIST`** is refused with the same bare failure as a name
+  nobody has ever heard of, even when handed a payload it would have had
+  to accept. The schedule API is `GET_SCHEDULE_LIST`, `GET_SCHEDULE`,
+  `SET_SCHEDULE` and `DELETE_SCHEDULE`; there is no bulk setter.
+- **`SET_TIME`** is refused normally, across nine payload spellings. It
+  was recorded here as answering with *silence* and called the strangest
+  behaviour in the protocol — that was a dropped request in a rapid
+  sequence, attributed to the command rather than to the door.
+
+Both are gone from `const.py` and from the simulator, along with the
+`SilentDropError` machinery that existed only to reproduce that silence.
+`docs/protocol.md` lists them with the other names that do not exist.
+
+### Changed — timezones are POSIX below the abstraction
+
+**BREAKING for anything that sent an IANA name over the wire.** The door
+speaks POSIX and nothing else — `EST5EDT,M3.2.0,M11.1.0`, never
+`America/New_York` — in *both* directions. That boundary is now enforced
+rather than assumed:
+
+- `SET_TIMEZONE` **refuses** an IANA name instead of storing something it
+  could never answer with. Its reply, `GET_TIMEZONE`, `GET_SETTINGS` and
+  the broadcast all carry the same stored POSIX rule.
+- The simulator **stores** POSIX. The conversion moved from the read path
+  to the one setter that writes the value, so `timezone America/New_York`
+  at the prompt stores the rule and every reader returns it unconverted.
+  The default state is `EST5EDT,M3.2.0,M11.1.0`.
+- `PowerPetDoor.set_timezone` takes **either** spelling and converts, so a
+  caller holding `America/New_York` — which is what Home Assistant has —
+  does not need to know what the wire wants. It raises `ValueError` for a
+  string that is neither.
+- The prompt, the script DSL, the control socket and state documents also
+  take either and convert on the way in.
+
+`powerpetdoor.tz_utils.to_posix_tz` is the single conversion all of them
+share.
+
+`SET_TIMEZONE` previously echoed the raw stored value while every other
+reader converted, so a client could read back something it never sent.
+
+### Changed — one core, four interfaces
+
+The simulator had grown four ways to do the same thing. The prompt, the
+script DSL, the control socket and the wire each wrote state their own
+way, and they had drifted into disagreeing about what a change *means*:
+
+- `inside_enable on` at the prompt left a pet waiting at the sensor,
+  while `ENABLE_INSIDE` off the wire let it in.
+- `power off` dropped an open flap on the wire and not at the prompt.
+- `SET_TIMEZONE` echoed the raw IANA name while `GET_TIMEZONE`,
+  `GET_SETTINGS` and the timezone broadcast all sent the POSIX form.
+- Only `trigger_sensor` raised a notification, so `trigger inside`
+  reported a pet and `inside on` did not — the same pet, the same sensor.
+- `set_pet_in_doorway()` wrote the two sensor flags and stopped: no open
+  gate, no notification. A pet placed that way stood at an enabled sensor
+  with the door shut.
+
+Behaviour now belongs to the core, and an interface decides only how to
+*say* it:
+
+- **The value registry** (`simulator/values.py`) declares each value once
+  — how it reads, how it writes, what it accepts, what side effects it
+  has. `read_value` and `set_named_value` are the only ways in and out.
+- **The wire table** (`simulator/wire_values.py`) holds each value's wire
+  spelling. A command's response and its unsolicited broadcast are built
+  from the same row, so they cannot disagree.
+- **Generated surfaces.** The wire's enable/disable handler pairs, the
+  prompt's named switch commands (`power`, `safety`, `inside_enable`, …)
+  and the broadcasts are derived from those tables rather than written
+  out. Adding a value is one row, not four hand-written copies.
+- **Presence has one writer.** `_set_pet_present` owns sensor mutual
+  exclusion and reports whether a pet *arrived*, which is what raises a
+  notification — so every verb that puts a pet at a sensor reports it.
+- **Schedules gained shared readers** (`get_schedules`, `get_schedule`)
+  to match the writers they already had, and a `set_schedules` that
+  announces a wholesale replacement as the individual changes it is.
+
+Side effects always run; only the announce differs by source, because a
+wire command answers in its own response rather than also broadcasting.
+
+The wire protocol is unchanged except where it was internally
+inconsistent: `SET_TIMEZONE` now echoes the POSIX form every other
+command answers with.
+
+### Added — machine-readable specs
+
+`schemas/`, generated from the same tables the runtime reads and checked
+by a pre-commit hook and a test:
+
+- `script.schema.json` — JSON Schema (2020-12) for the YAML script DSL.
+  Point an editor at it for completion and inline errors; it refuses
+  every mistake the runner refuses.
+- `state.schema.json` — JSON Schema for `--initial-state` documents.
+- `asyncapi.json` — AsyncAPI 3.0 for the door protocol, which models the
+  unsolicited door-status pushes an HTTP-shaped description cannot.
+
+`docs/protocol.md` is deliberately **not** generated: its value is the
+firmware-verified behaviour in its prose, which a schema has nowhere to
+put. The specs describe the shape; the prose says what a real door does.
+
+`docs/api/` builds a Sphinx HTML reference from the existing docstrings.
+The machine-readable description of the Python API remains the shipped
+type information (PEP 561), which needs no build.
+
+### Added — `trigger`, and schedule control from scripts
+
+`trigger <inside|outside>` at the prompt: a pet walking *through* a
+sensor rather than standing at it. It was scriptable and reachable from
+the control socket, but impossible to type.
+
+Scripts gained `enable_schedule` and `clear_schedules`, matching the
+prompt's `schedule enable` / `disable` / `clear`.
+
+### Added — guards against the drift that caused all of this
+
+Run at every commit:
+
+- Interface modules may not read or write state directly, only through
+  the shared accessors.
+- A command's wire response and its broadcast must carry the same
+  payload.
+- Anything one operator surface can do, the others can too — with an
+  exemption list for deliberate differences that is itself checked for
+  staleness.
+- Every command and script action must appear in the reference docs, and
+  the docs may not name one that no longer exists.
+
+### Removed — the wire notification constants
+
+`NOTIFY_SENSOR_INDOOR`, `NOTIFY_SENSOR_OUTDOOR`, `NOTIFY_LOW_BATTERY`,
+`FIELD_SENSOR_STATE`, `SENSOR_STATE_ON` and `SENSOR_STATE_OFF`, and the
+simulator's emission of them.
+
+The door delivers notifications through the vendor's phone service. No
+probe ever provoked one on TCP 3000, and `docs/protocol.md` said as much
+— the shape was reverse-engineered from documentation of the phone
+service. The client had no parser for them, so the simulator was emitting
+a message no real door was seen to send and no client could receive.
+
+The simulator still *raises* all five: counted, logged, and delivered to
+listeners, so a script can wait on one. It just does not put them on the
+wire.
+
+### Fixed — the safety lock was backwards
+
+**BREAKING, and measured on a real door.** `outsideSensorSafetyLock` is the
+vendor app's *"always allow pet entry inside override timers"*: enabled, the
+outside sensor opens the door **regardless of the schedule**. It grants
+entry; it does not deny it.
+
+The simulator implemented the opposite — refusing the outside sensor
+outright — because the wire name reads like an interlock, and
+`docs/operation.md` documented **both** readings in adjacent paragraphs.
+
+Settled by reading `GET_SETTINGS` across three switch combinations on
+the door. Each app switch drives exactly one wire field,
+independently, and nothing else in the payload moved:
+
+| Allow pet to keep door open | Always allow pet entry … | `allowCmdLockout` | `outsideSensorSafetyLock` |
+|---|---|---|---|
+| OFF | OFF | `"true"` | `"false"` |
+| ON | ON | `"false"` | `"true"` |
+| ON | OFF | `"false"` | `"false"` |
+
+So the first switch is **inverted** against its field and the second is
+**direct**. `allowCmdLockout` needed no change: `"true"` means the lockout
+is in force, and the door ignores a nearby pet and closes on its timer.
+
+The lock also lost its reference in `is_sensor_blocking_close` — granting
+entry says nothing about whether a detected pet holds a door open, which is
+command lockout's job. Whether it *also* overrides a disabled outside
+sensor, rather than only the schedule, is still unprobed and recorded as
+such.
+
+### Fixed — the trigger voltages
+
+**Measured on the same door.** All three of this project's numbers were
+invented and all three were wrong:
+
+- The field is a signed 32-bit integer in **millivolts**. A real door
+  reports **2000** for both thresholds; the simulator defaulted to 100 and
+  50, which no door has ever reported.
+- Values above `2147483647` **saturate**; this project *refused* anything
+  above `65535`, a ceiling it made up.
+- **`voltage: 0` is accepted and silently ignored** — confirmed by priming
+  the door to 500, sending 0, and reading back 500. The door's third
+  accept-and-ignore, after a nested `SET_NOTIFICATIONS` payload and the
+  silence answering `SET_TIME`.
+
+The state-document loader had inherited a 0–1023 bound from a 10-bit-ADC
+guess, so a document describing a real door was rejected.
+
+### Fixed — latency, and a ping that could never fire
+
+Latency is now measured on **every successful command reply**, paired by the
+`msgID` the protocol already echoes and timed on the monotonic clock. It
+previously came only from the keepalive PING, which
+`_write_message` rescheduled on *every send* — so `keepalive` was an idle
+timer, not a heartbeat, and a client sending more often than the interval
+starved the ping entirely. Latency then stayed unknown forever with nothing
+appearing broken.
+
+Only successful replies can be timed: **[V]** a failure response carries no
+`msgID` at all, and neither does a `PONG`.
+
+The keepalive stays an idle timer, which is correct — traffic that is being
+answered proves liveness, and now reports latency too. Net effect: fewer
+frames than before, and a latency reading that reflects real work.
+
+### Fixed — a pet shut out stayed shut out
+
+A sensor held active while it was disabled — or while power, command
+lockout, the safety lock or the schedule refused it — recorded the pet but
+left the door shut, and nothing re-ran that decision. Re-enabling the sensor
+left the pet standing there, because the door only opened on a *re-trigger*
+and a pet that never moved does not re-trigger. Any change to a gating
+setting now re-asks the question.
+
+### Changed — `pet` is gone; the sensors absorbed it
+
+**BREAKING.** `pet on` and `inside 0` were the same thing — a sensor held
+active *is* a collar sitting in range — except that `pet on` never opened a
+closed door, which a real collar does. The redundant one that was also
+wrong is the one that went, from both the CLI and the script DSL.
+
+`inside`, `outside` and `obstruction` now take one argument:
+`on` / `off` / `toggle` / a number of seconds. The one difference is what a
+*bare* command means — a sensor pulses, an obstruction toggles — and that
+difference is physical: a pet walks past a sensor, a boot is placed.
+
+Pet presence works at **either** sensor now, which is the only way to
+exercise the safety lock from a script.
+
+### Changed — one condition vocabulary, and real comparisons
+
+**BREAKING.** The 22 "fused" condition names (`power_on`, `door_keepup`,
+`inside_enabled`, …) are gone. Twenty were pure duplication of
+`condition` + `equals`, carried in two extra lookup tables with
+special-case code; the two that were not — `door_open` and `door_closing` —
+are ordinary yes/no conditions now, alongside `door_closed`,
+`door_opening` and a numeric `position` that mirrors
+`PowerPetDoor.position`. (`door_opening` is genuinely new — there was a
+`door_closing` with no counterpart, though `DOOR_STATES_OPENING` had been
+sitting in `const.py` all along.)
+
+`assert`, `wait_for`, `if` and `repeat` all read through one table, so
+`assert door_closed` — the most natural assertion in a door simulator, and
+previously *rejected* because `wait_for` owned the name — works.
+
+Conditions gained comparisons: `not_equals`, `above`, `below`, `at_least`,
+`at_most`. `equals` alone left "wait until the door has opened 100 times"
+and "assert the battery is below 75" with no spelling at all. The numeric
+four refuse a non-numeric condition rather than silently answering false.
+
+Yes/no conditions now compare **as booleans**, so `equals: 1`,
+`equals: true` and `equals: enabled` all work where a text comparison
+against the rendered `"on"` accepted only some of them.
+
+### Changed — script actions mirror the CLI
+
+**BREAKING.** `trigger_sensor` (use `trigger`), `pet_presence`/`pet_on`/
+`pet_off` (use `inside`/`outside`) and the settings-`toggle` action are
+gone. `toggle` is now **the door**, as it is in the CLI; a setting inverts
+through `set <name> toggle`, mirroring the CLI's `power toggle`.
+
+`repeat` takes `times`, a condition, or both — a condition makes it a
+*while* loop, re-tested before each pass, and with both it stops at
+whichever comes first. `if` takes `condition`/`conditions`/`any`.
+
+### Fixed — a misspelled boolean no longer means "off"
+
+`set power maybe` silently turned the power **off** and reported PASSED; a
+state document saying `power: "maybe"` did the same. The coercer inherited
+fail-closed behaviour from the *wire* parser, where it is correct — an
+unreadable flag must never grant access, and a stored schedule must stay
+loadable. For a value a human wrote it is a bug. Authored booleans now
+raise; the wire parser is unchanged.
+
+
+### Removed — commands that were never part of the protocol
+
+**BREAKING.** Four command names, and everything hanging off them, are
+gone. The door rejects all four, so they were constants nobody could use,
+response handlers for replies no door sends, and — in `docs/client.md` —
+a menu with poison on it:
+
+- `CMD_GET_AUTORETRACT`, `CMD_GET_CMD_LOCKOUT`,
+  `CMD_GET_OUTSIDE_SENSOR_SAFETY_LOCK`, `CMD_CHECK_RESET_REASON` and
+  `FIELD_RESET_REASON` are no longer defined or exported.
+
+`CMD_GET_AUTO` was removed alongside them and should not have been. Its
+*name* suggested `GET_AUTO`, which does not exist; its **value** was
+`"GET_TIMERS_ENABLED"`, which does. It is back as `CMD_GET_TIMERS_ENABLED`,
+named after what it puts on the wire so the two cannot be confused
+again — see the entry above.
+- The four `GET_*` names came out of their shared response handlers; the
+  handlers still serve the `ENABLE_*`/`DISABLE_*` commands, which is where
+  those replies actually come from. Read the state itself from
+  `GET_SETTINGS` — `timersEnabled`, `doorOptions`, `allowCmdLockout`,
+  `outsideSensorSafetyLock`.
+- **`reset_reason_update` is removed from `add_listener()`.** `resetReason`
+  was never protocol: it entered this library as scaffolding in its first
+  commit, was never present in the older `ha-powerpetdoor` integration, and
+  its documented values (`POWER_ON`, `WATCHDOG`, `SOFT_RESET`) are the
+  generic reset reasons of any microcontroller rather than anything this
+  vendor is known to send. `docs/protocol.md` marked it **[R]** — never
+  observed from any device — and it never could be. `CHECK_RESET_REASON`
+  had a working simulator handler until 0.4.2 removed it; the client half
+  was left standing, so the callback could not fire.
+
+Nothing replaces them. An undefined name is rejected by the simulator's
+ordinary unknown-command path, exactly as any name nobody has heard of is,
+which is the whole point. The probe result — that these five do not work,
+and what to read instead — stays in `docs/protocol.md`.
+
+### Fixed — `toggle()` no longer reverses a door in motion
+
+**BREAKING.** `PowerPetDoor.toggle()` tested `is_open`, which is
+deliberately wider than "open": it covers `RISING` and `SLOWING` so a
+consumer rendering a cover entity sees a door on its way up as open rather
+than closed. Toggle read that as "open, so close it" and reversed a door
+that was still rising — contradicting its own docstring, which already said
+it does nothing mid-travel. It now acts only on a settled door
+(`CLOSED`/`IDLE` → open, `HOLDING`/`KEEPUP` → close) and is a no-op in
+either direction of travel. Nothing but an obstruction is known to
+interrupt a real door in motion. `is_open` itself is unchanged.
+
+### Changed — an obstruction is no longer a sensor
+
+The simulator modelled an obstruction by setting `inside_sensor_active`,
+which conflated two different physical things. The proximity sensors detect
+a **collar** and hold the door open before it ever moves. An obstruction is
+something the flap travels *into* — a pet with no collar, a boot, a block of
+wood — and would trip neither sensor. Both can end in an auto-retract, from
+opposite directions, and `totalAutoRetracts` counts either.
+
+- New `obstruction_active` / `obstruction_oneshot` state. An obstruction no
+  longer feeds `is_sensor_blocking_close()`, so a door with one under it
+  still starts its close normally and discovers it at the last transition
+  before `DOOR_CLOSED` — it cannot close the whole way.
+- **With autoretract off the door now rests on it.** `docs/operation.md`
+  says the motor stops rather than retracting; the simulator had no way to
+  express that and simply closed. It now parks in `DOOR_CLOSING_MID_OPEN`
+  until the obstruction is cleared, or until autoretract is turned on, in
+  which case it retracts from where it stands.
+- `obstruction` takes an optional duration, in the CLI and in scripts. Bare
+  `obstruction` toggles, placing a **one-shot** that the retract it causes
+  clears; `0` leaves it until cleared, across retracts; a positive value is
+  seconds. `DoorSimulator.clear_obstruction()` removes one explicitly.
+- `obstruction` is assertable from a script (`on`/`off`).
+
+### Added — state documents
+
+The simulator's configuration now has a serializable form, which is what
+`--initial-state`, `reset` and a remote client's state query all needed.
+One schema, three uses.
+
+- **`--initial-state FILE`** applies a document over the defaults at
+  startup; a bare `reset` returns to it. **JSON always; YAML when PyYAML is
+  installed** — PyYAML is optional here and a state file must not be the
+  flag that makes it mandatory, and JSON is what the door itself speaks.
+  `--firmware`/`--hardware` win over the document, the ordinary precedence
+  of a command line over its config.
+- **`--states-dir DIR`** holds documents `reset` can load by bare name.
+- **`reset [document]`** — command and script action. Stops the door, parks
+  it closed, clears the sensors, any obstruction *and* the statistics, then
+  broadcasts everything: a reset that left clients believing the old world
+  would be worse than none. Counts reset because they are state, not
+  configuration, and leaving them would make test isolation quietly wrong.
+- **`list states`** lists what `reset` will accept, alongside
+  `list scripts` (which a bare `list` still means). Only documents that
+  resolve *inside* `--states-dir` are advertised, so what is listed is
+  exactly what `reset` accepts. There are no built-in state documents — a
+  shipped one would be invented device configuration rather than observed.
+- `state_to_document`, `state_from_document`, `apply_document`,
+  `load_document` are public, for building documents programmatically.
+
+Documents are partial: every section and key is optional and merges over
+the defaults. Unknown keys are refused rather than ignored, matching the
+script DSL. `schedules` replaces the whole table rather than merging per
+index. Live motion state is deliberately absent — the engine owns it.
+
+**`reset` inherits the script path policy rather than inventing one.** Over
+the unauthenticated control channel only bare names from `--states-dir`
+resolve; a `reset` that could name any file on the host would reopen in a
+new place the hole `_load_script_restricted` closes for scripts.
+
+### Added — driving a simulator from Python
+
+`simulator_control()` gives one interface over a simulator you start and a
+`--daemon` you connect to, so a test can be written once and run against
+either. `ppd-simulator-ctl` could already do this from a shell; a program
+could not.
+
+**The shared surface is commands, not state.** The local half exposes the
+live `DoorSimulatorState`, being the same object in the same process; the
+remote half has no state accessor at all. Over a socket a state could only
+be a copy, and one that *looked* live would be the same defect the vendor
+app has. Assert against a remote door by running a script: `run <name>
+wait` reports PASSED/FAILED, and `assert` steps are where this project
+already puts assertions.
+
+Three lifecycle verbs, for the same reason `stop` and `shutdown` are
+already distinct: `stop_script()` stops the script, `close()` releases what
+the object owns — **remotely that is a disconnect, never a shutdown** — and
+`shutdown()` says so out loud. Leaving an `async with` calls `close()`, so
+a client that merely dialled a daemon cannot kill it on the way out.
+
+`run_script(name)` closes the last gap in remote scripting: `run <name>
+wait` already existed on the wire; the Python API for it did not.
+
+### Added — scripting
+
+- **One condition vocabulary.** `wait_for` now takes the same
+  `condition` + `equals` pair `assert` does, so
+  `wait_for {condition: total_auto_retracts, equals: 3}` is expressible.
+  The fused names (`door_closed`, `power_on`, …) remain as shorthands and
+  work in `assert` too — `assert door_closed`, the most natural assertion
+  in a door simulator, used to be rejected purely because `wait_for` owned
+  the name. `_other_table_hint`'s condition half existed only to apologise
+  for that split and is gone.
+- **`if` / `else`** blocks. The condition takes one of three forms —
+  `condition:` (+ `equals:`), `conditions:` (all must hold), or `any:` (at
+  least one) — with list entries written either as a fused shorthand or as
+  a `condition`/`equals` mapping. Exactly one form per step: two would be
+  two answers to one question. There is deliberately **no nested
+  `and:`/`or:`** — blocks nest, so `(a and b) or c` is an `if` inside an
+  `else`, and nested boolean algebra is where a config DSL becomes a
+  language you debug instead of use.
+- **`repeat`** blocks, taking `times`, a condition, or both. A condition —
+  in the same three forms `if` accepts — makes it a *while* loop, re-tested
+  before each pass; with both, it stops at whichever comes first. There is
+  no `until`, because the condition vocabulary is paired, so "until X" is
+  "while its opposite". A condition-only loop is bounded too, and reaching
+  that backstop is an error rather than a quiet exit: a hung CI build that
+  reported PASSED would be worse than one that merely hangs.
+- **`on_timeout: continue`** on `wait_for`. Branching on "it did not
+  happen" then needs no third mechanism: the condition is still false, so
+  the next `if` sees it.
+- **`reset`** as a script action.
+
+Nested blocks are parsed when the script is *loaded*, so a misspelled
+action inside an untaken `else` fails then rather than the first time that
+branch is reached.
+
+### Changed
+
+- **The scripting language has its own document**, `docs/scripting.md`.
+  It had outgrown its section in `docs/simulator.md`, which now points at
+  it and keeps the commands that *run* scripts.
+
+### Added
+
+- **`toggle` simulator command** (`tg`), mirroring `PowerPetDoor.toggle()`
+  including the mid-travel no-op.
+- Shared door-state sets in `const.py` — `DOOR_STATES_CLOSED`,
+  `DOOR_STATES_FULLY_OPEN`, `DOOR_STATES_OPENING`, `DOOR_STATES_CLOSING`,
+  `DOOR_STATES_OPEN`, `DOOR_STATES_IN_TRAVEL` — so the library and the
+  simulator answer "is this door open" from one definition instead of two.
+- Shared `coerce_number`/`coerce_bool`: the script channel and the state
+  document channel are two writers of the same fields and must not disagree
+  about what `hold_time: inf` means.
+- A registry guard test refusing two commands that claim the same name or
+  alias. `toggle` was first written as `t`, which `holdtime` already owned;
+  the flat registry resolved it silently in registration order, leaving
+  `toggle` with no short form and `t` still setting the hold time. Both
+  commands remained reachable by full name, so every existing test passed.
+
 ## [0.4.3] - 2026-08-25
 
 ### Changed
