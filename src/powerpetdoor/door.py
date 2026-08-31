@@ -425,11 +425,17 @@ class Schedule:
 
         The end is normalised first, so this answers the useful question -
         "if I write this, will it do anything?" - rather than the literal
-        one. The two differ for exactly one spelling: a door that literally
-        holds ``00:00-00:00`` is gating that sensor OFF right now (measured),
-        while this reports False because sending it would produce
-        ``00:00-24:00``, a whole day. That spelling only exists on a door by
-        mistake, and re-saving it makes the door agree.
+        one. The two differ for **every window ending at 00:00**, not just
+        ``00:00-00:00``: a door literally holding ``20:00-00:00`` is gating
+        that sensor off right now, because its engine compares
+        ``start <= now < end`` and an end of 0 is never past a start of
+        1200. This reports False for all of them, because *sending* one
+        rewrites the end to ``24:00`` and it becomes a real window.
+
+        So for a schedule you have just READ from a door, False here does
+        not mean "this is doing something" - it means "this would do
+        something if you saved it back". Re-saving is what makes the door
+        agree.
 
         See :func:`powerpetdoor.schedule.schedule_window_is_empty`. Worth
         asking, because a window that can never fire and one that is switched

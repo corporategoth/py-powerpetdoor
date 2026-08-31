@@ -284,7 +284,7 @@ class TestArgHelp:
         assert result.success is True
         assert result.message.startswith("holdtime [seconds]")
         assert "Set or show hold time in seconds" in result.message
-        assert "min: 0.1" in result.message
+        assert "min: 0" in result.message
         assert "max: 900" in result.message
         assert "[optional]" in result.message
 

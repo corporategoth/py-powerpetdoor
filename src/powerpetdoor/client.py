@@ -47,6 +47,7 @@ from .const import (
     CMD_GET_SETTINGS,
     CMD_GET_SLEEP_SENSOR_TRIGGER_VOLTAGE,
     CMD_GET_TIME,
+    CMD_GET_TIMERS_ENABLED,
     CMD_GET_TIMEZONE,
     CMD_HAS_REMOTE_ID,
     CMD_HAS_REMOTE_KEY,
@@ -1027,7 +1028,7 @@ class PowerPetDoorClient(asyncio.Protocol):
             self._notify_listeners(self.sensor_listeners[FIELD_POWER], FIELD_POWER, val)
             self._resolve_future(future, val)
 
-    @ResponseHandlerRegistry.handler(CMD_ENABLE_AUTO, CMD_DISABLE_AUTO)
+    @ResponseHandlerRegistry.handler(CMD_GET_TIMERS_ENABLED, CMD_ENABLE_AUTO, CMD_DISABLE_AUTO)
     def _handle_auto(self, msg: dict, future) -> None:
         """Handle timers/auto enabled responses."""
         if FIELD_AUTO in msg:

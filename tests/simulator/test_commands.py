@@ -830,10 +830,14 @@ steps:
     message: ok
 """
 
+#: Loads cleanly, fails while running - the case `run ... wait` reports
+#: on. An unknown action is now refused at load instead, which is a
+#: different path with a different message.
 FAILING_SCRIPT = """\
 name: Failing Script
 steps:
-  - action: bogus_action
+  - action: assert
+    condition: door_open
 """
 
 

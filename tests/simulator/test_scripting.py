@@ -3035,6 +3035,68 @@ class TestNestedBlocksAreParsedAtLoadTime:
     the first time its `else` was reached.
     """
 
+    def test_a_bad_action_in_an_untaken_branch_fails_the_load(self):
+        """The guarantee this class is named for, finally asserted.
+
+        The class checked only that nested blocks became `ScriptStep`
+        objects - which they did - while the actions inside them were
+        never looked at. A script whose untaken `else` was full of
+        nonsense ran to completion and reported PASSED, and scripts gate
+        CI by exit code, so the failure mode was a green run that tested
+        nothing.
+        """
+        with pytest.raises(ScriptError, match="Unknown action: totally_bogus"):
+            Script.from_yaml(
+                "name: t\n"
+                "steps:\n"
+                "  - action: if\n"
+                "    condition: door_closed\n"
+                "    then:\n"
+                "      - action: close\n"
+                "    else:\n"
+                "      - action: totally_bogus\n"
+            )
+
+    def test_a_bad_parameter_in_an_untaken_branch_fails_the_load(self):
+        with pytest.raises(ScriptError, match="Unknown parameter"):
+            Script.from_yaml(
+                "name: t\n"
+                "steps:\n"
+                "  - action: if\n"
+                "    condition: door_closed\n"
+                "    then:\n"
+                "      - action: close\n"
+                "    else:\n"
+                "      - action: close\n"
+                "        nonexistent_param: 1\n"
+            )
+
+    def test_a_bad_action_inside_repeat_fails_the_load(self):
+        """`repeat` holds a block too, and a repeat of zero never runs it."""
+        with pytest.raises(ScriptError, match="Unknown action: totally_bogus"):
+            Script.from_yaml(
+                "name: t\nsteps:\n  - action: repeat\n    count: 0\n"
+                "    steps:\n      - action: totally_bogus\n"
+            )
+
+    def test_a_non_string_action_is_named_rather_than_crashing(self):
+        """`action: 42` is truthy, so it passes the missing-action check.
+
+        It used to reach the executor and raise AttributeError on
+        `.lower()`; now it is refused by name like any other action the
+        DSL does not have.
+        """
+        with pytest.raises(ScriptError, match="Unknown action: 42"):
+            Script.from_yaml("name: t\nsteps:\n  - action: 42\n")
+
+    def test_a_block_keyword_is_not_reported_as_an_unknown_parameter(self):
+        """`then`/`else`/`steps` are the blocks themselves, not stray keys."""
+        script = Script.from_yaml(
+            "name: t\nsteps:\n  - action: if\n    condition: door_closed\n"
+            "    then:\n      - action: close\n    else:\n      - action: open\n"
+        )
+        assert len(script.steps) == 1
+
     def test_a_nested_block_becomes_script_steps(self):
         script = Script.from_yaml(
             "name: t\n"

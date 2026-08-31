@@ -154,10 +154,25 @@ class TestTheProtocolReferenceIsRendered:
         assert len(placed) == len(set(placed)), "a command was filed on two pages"
 
     def test_every_index_link_resolves_to_a_real_anchor(self, spec):
-        """A ToC entry pointing at a heading that does not exist is a 404."""
+        """A ToC entry pointing at a heading that does not exist is a 404.
+
+        The link count is asserted first, and that is not decoration: the
+        pattern only matches lowercase anchors, which is exactly what
+        `anchor()` produces. Drop the `.lower()` and the pattern matches
+        NOTHING - the loop body never runs and the test passes having
+        checked nothing at all, disarmed by the very regression it exists
+        to catch.
+        """
         index = render_index(spec)
         bodies = {page: render_page(key, spec) for key, page, _, _ in CATEGORIES}
-        for page, target in re.findall(r"\]\((Protocol-[A-Za-z-]+)#([a-z_0-9]+)\)", index):
+        links = re.findall(r"\]\((Protocol-[A-Za-z-]+)#([a-z_0-9]+)\)", index)
+
+        expected = sum(len(names) for names in commands_by_category(spec).values())
+        assert len(links) == expected, (
+            f"matched {len(links)} anchor links, expected one per command ({expected})"
+        )
+
+        for page, target in links:
             assert page in bodies, f"index links to unknown page {page}"
             assert f"### {target.upper()}" in bodies[page], f"{page} has no anchor #{target}"
 

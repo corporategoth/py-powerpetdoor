@@ -713,6 +713,27 @@ class TestKeepalive:
         client._keepalive = asyncio.get_running_loop().create_future()
         client._can_dequeue = False  # Keep the PING in the queue for inspection
 
+    async def test_a_send_re_arms_the_keepalive(self, mock_client):
+        """`_send_data` cancels the idle timer, so it MUST restore it.
+
+        Nearly every test here runs with `cfg_keepalive=0`, which hides
+        this: with a real interval, failing to re-arm means the first
+        message ever sent kills the keepalive for the life of the
+        connection. A door that then goes silent is never detected,
+        never dropped and never retried - the connection just stops
+        working, quietly.
+        """
+        client, transport, _ = mock_client
+        client._last_command = None
+        client.cfg_keepalive = 30
+        client._last_reply = time.monotonic() - MINIMUM_TIME_BETWEEN_MSGS
+
+        await client._send_data(b'{"config": "X"}')
+
+        assert transport.written_data != [], "nothing was sent"
+        assert client._keepalive is not None, "the send left the keepalive disarmed"
+        client._keepalive.cancel()
+
     async def test_keepalive_sends_ping(self, mock_client):
         """keepalive() itself enqueues a PING carrying the last-ping token."""
         client, _, _ = mock_client
@@ -1272,6 +1293,29 @@ class TestCheckReceipt:
         assert waited >= MINIMUM_TIME_BETWEEN_MSGS * 0.5, (
             f"sent after only {waited * 1000:.0f}ms of quiet"
         )
+
+    async def test_a_reply_is_what_starts_the_quiet_period(self, mock_client):
+        """The WRITER of the pacing clock, not just its reader.
+
+        Every other pacing test sets `_last_reply` by hand, so all of them
+        survive deleting the one line in `data_received` that stamps it -
+        and without that line the clock never advances from 0.0, the gap
+        never applies, and the change this suite exists to protect does
+        nothing at all in real operation.
+        """
+        client, transport, _ = mock_client
+        client._last_command = None
+        assert client._last_reply == 0.0, "fixture should start with no reply seen"
+
+        client.data_received(b'{"success": "true", "CMD": "GET_SETTINGS"}')
+
+        assert client._last_reply > 0.0, "data_received did not stamp the pacing clock"
+
+        # And the stamp is what makes the next send wait.
+        task = asyncio.ensure_future(client._send_data(b'{"config": "X"}'))
+        await asyncio.sleep(0)
+        assert transport.written_data == [], "sent without leaving the quiet period"
+        await task
 
     async def test_send_data_transport_gone_after_sleep(self, mock_client, caplog):
         """disconnect() during the rate-limit sleep is not fatal.
@@ -1888,7 +1932,10 @@ class TestMonotonicTiming:
 
         client, _, _ = mock_client
         client._last_command = None
-        client._last_send = time.monotonic()
+        # `_last_reply`, not `_last_send`: the pacing clock was renamed when
+        # it stopped counting from our own send. Setting the dead name left
+        # this test no longer forcing the sleep it was written around.
+        client._last_reply = time.monotonic()
 
         wall_calls = []
 

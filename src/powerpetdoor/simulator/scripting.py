@@ -432,6 +432,56 @@ class Script:
         )
 
     @classmethod
+    def _validate_step(cls, action: object, params: dict, i: int) -> None:
+        """Refuse an unknown action or parameter while LOADING.
+
+        Recursing into the blocks was only half of the promise this DSL
+        makes. The steps inside an untaken `else` were built into
+        :class:`ScriptStep` objects and never looked at again, so a
+        misspelled action there was found the first time that branch was
+        reached - which for a branch that is never taken is never. A
+        script full of nonsense ran to completion and reported PASSED,
+        and scripts gate CI by exit code.
+
+        The same two checks the executor makes, in the same words, so a
+        name is right or wrong at one place regardless of when it is
+        noticed.
+        """
+        # `str()` rather than an isinstance guard: YAML will hand back an
+        # int for `action: 42`, which is truthy and so survives the
+        # missing-action check above. Naming it as an unknown action is
+        # both the honest answer and better than the AttributeError the
+        # executor used to raise on it.
+        name = str(action).lower().replace("-", "_")
+        known_params = _ACTION_PARAMS.get(name)
+        if known_params is None:
+            raise ScriptError(
+                t(
+                    "simulator.scripting.unknown_action_use",
+                    "Unknown action: {action}. Use: {arg0}",
+                    action=name,
+                    arg0=", ".join(sorted(_ACTION_PARAMS)),
+                )
+            )
+        unexpected = sorted(set(params) - known_params - STEP_ANNOTATION_KEYS - set(BLOCK_PARAMS))
+        if unexpected:
+            accepted = (
+                f"Use: {', '.join(sorted(known_params))}"
+                if known_params
+                else f"{name} takes no parameters"
+            )
+            raise ScriptError(
+                t(
+                    "simulator.scripting.unknown_parameter_s_plus_annotations",
+                    "Unknown parameter(s) for {action}: {arg0}. {accepted} (plus the annotations {annotations})",
+                    action=name,
+                    arg0=", ".join(unexpected),
+                    accepted=accepted,
+                    annotations=", ".join(sorted(STEP_ANNOTATION_KEYS)),
+                )
+            )
+
+    @classmethod
     def _parse_steps(cls, steps_data: object) -> list["ScriptStep"]:
         """Parse a step list, recursing into the blocks `if` and `repeat` hold.
 
@@ -463,6 +513,7 @@ class Script:
                 for block in BLOCK_PARAMS:
                     if block in params:
                         params[block] = cls._parse_steps(params[block])
+                cls._validate_step(action, params, i)
                 steps.append(ScriptStep(action=action, params=params, line_number=i))
             else:
                 raise ScriptError(

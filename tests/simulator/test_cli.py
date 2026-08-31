@@ -198,11 +198,16 @@ steps:
     message: hello
 """
 
+#: A script that LOADS cleanly and fails while running, which is what
+#: the oneshot reporting path is about. It used to fail on an unknown
+#: action, but those are now refused at load time, and a load failure
+#: takes a different path with a different message.
 FAILING_SCRIPT = """\
 name: Failing Script
 description: A script that always fails
 steps:
-  - action: bogus_action
+  - action: assert
+    condition: door_open
 """
 
 

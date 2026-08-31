@@ -21,6 +21,7 @@ from powerpetdoor.simulator.control import (
     SimulatorController,
     simulator_control,
 )
+from powerpetdoor.simulator.prompt_common import escape_message, unescape_message
 
 
 @pytest.fixture
@@ -301,3 +302,39 @@ class TestTheSharedSurface:
             "reset fixture",
             "shutdown",
         ]
+
+
+class TestAMessageCannotForgeExtraLines:
+    """The control channel escapes newlines so a message stays one line.
+
+    `control.py` briefly carried its own unescaper that replaced `\\n`
+    before `\\\\`, so a literal backslash followed by an `n` - an ordinary
+    Windows path, `scripts\\new.yaml` - had its `n` eaten and a real line
+    feed put in its place. That is the escaping defeated at the point it
+    is undone: a caller logging the message gets a forged second record.
+
+    `ctl.py` never had the bug because it imports the shared helper. This
+    pins that both readers keep using it.
+    """
+
+    def test_a_backslash_survives_the_round_trip(self):
+        for probe in (
+            r"Unknown setting: scripts\new.yaml",
+            r"C:\temp\nothing",
+            "trailing backslash \\",
+            "a real\nnewline",
+        ):
+            assert unescape_message(escape_message(probe)) == probe, probe
+
+    def test_no_line_feed_is_manufactured(self):
+        """The property the escaping exists for."""
+        forged = unescape_message(escape_message(r"path\new"))
+        assert "\n" not in forged
+
+    def test_control_does_not_carry_its_own_unescaper(self):
+        """A second copy is how the two answers diverged in the first place."""
+        import powerpetdoor.simulator.control as control
+
+        assert not hasattr(control, "_unescape"), (
+            "control.py has re-grown a private unescaper; use prompt_common's"
+        )

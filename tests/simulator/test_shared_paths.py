@@ -1213,3 +1213,45 @@ class TestTheScheduleTimeRuleIsDeclaredOnce:
         hour = OBJECT_FIELD_DOCS[FIELD_SCHEDULE][FIELD_INSIDE_PREFIX + FIELD_START_TIME_SUFFIX]
         assert hour["properties"][FIELD_HOUR]["maximum"] == MAX_SCHEDULE_HOUR
         assert hour["properties"][FIELD_MINUTE]["maximum"] == MAX_SCHEDULE_MINUTE
+
+
+class TestTheClientCanReadEverythingTheDoorAnswers:
+    """A wire command the simulator answers but the client cannot parse.
+
+    `GET_TIMERS_ENABLED` was restored to `const.py`, to the simulator, to
+    the wire table and to the docs - and missed in the client's response
+    registry, which is the one surface that turns the reply into a value.
+    The future then resolves with the raw envelope instead of a bool and
+    the field's listeners never fire.
+
+    Nothing could see it: a missing registry key adds no uncovered line,
+    so the 100% gate is met, and every other test of that handler drives
+    it through the *setter* commands, which were still registered.
+
+    Derived from the wire table rather than listed, so the next command
+    to arrive is covered without anyone remembering this file.
+    """
+
+    def test_every_getter_has_a_client_response_handler(self):
+        from powerpetdoor.client import ResponseHandlerRegistry
+
+        missing = sorted(
+            wire.getter
+            for wire in WIRE_VALUES.values()
+            if wire.getter is not None and wire.getter not in ResponseHandlerRegistry._handlers
+        )
+        assert missing == [], (
+            f"the simulator answers {missing} but the client cannot parse the reply"
+        )
+
+    def test_every_switch_command_has_a_client_response_handler(self):
+        """The setters answer with the value too, and are read the same way."""
+        from powerpetdoor.client import ResponseHandlerRegistry
+
+        missing = sorted(
+            command
+            for name in WIRE_SWITCHES
+            for command in (WIRE_VALUES[name].enable, WIRE_VALUES[name].disable)
+            if command is not None and command not in ResponseHandlerRegistry._handlers
+        )
+        assert missing == [], f"the door answers {missing} but the client ignores the reply"

@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any
 from ..i18n import t
 from ..sanitize import sanitize_text
 from .cli import DEFAULT_CONTROL_HOST
+from .prompt_common import unescape_message
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -263,9 +264,9 @@ class RemoteSimulator(SimulatorController):
                 )
             text = raw.decode(errors="replace").strip()
             if text.startswith("OK:"):
-                return _unescape(text[3:].strip())
+                return sanitize_text(unescape_message(text[3:].strip()))
             if text.startswith("ERROR:"):
-                raise CommandFailedError(_unescape(text[6:].strip()))
+                raise CommandFailedError(sanitize_text(unescape_message(text[6:].strip())))
             # LOG:/STATUS: lines are not answers to anything.
 
     async def close(self) -> None:
@@ -284,11 +285,6 @@ class RemoteSimulator(SimulatorController):
                 # here would replace whatever the `with` body was failing
                 # on with a connection error from the unwind.
                 pass
-
-
-def _unescape(message: str) -> str:
-    r"""Undo the control channel's ``\n`` escaping."""
-    return message.replace("\\n", "\n").replace("\\\\", "\\")
 
 
 @asynccontextmanager

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from ...i18n import t
 from ...tz_utils import get_available_timezones
 from ..coerce import CoercionError
-from ..values import read_value, set_named_value
+from ..values import VALUES, read_value, set_named_value
 from .base import (
     ArgSpec,
     CommandResult,
@@ -49,9 +49,16 @@ class SettingsCommandsMixin:
                 "seconds",
                 "float",
                 required=False,
-                min_value=0.1,
-                max_value=900,
-                description="Hold time in seconds (0.1-900), omit to show current value",
+                # From the registry, not restated: `set hold_time 0` is
+                # accepted everywhere else, and a 0.1 floor written out
+                # here made this one surface narrower than the wire, the
+                # DSL and the state document.
+                min_value=VALUES["hold_time"].minimum,
+                max_value=VALUES["hold_time"].maximum,
+                description=(
+                    f"Hold time in seconds ({VALUES['hold_time'].minimum:g}-"
+                    f"{VALUES['hold_time'].maximum:g}), omit to show current value"
+                ),
             )
         ],
     )

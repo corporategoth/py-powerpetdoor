@@ -246,21 +246,39 @@ class TestHoldtimeCommand:
         assert payload[FIELD_HOLD_TIME] == 500
 
     async def test_below_minimum(self, command_handler):
-        result = await command_handler.execute("holdtime 0.05")
+        result = await command_handler.execute("holdtime -1")
         assert result.success is False
-        assert result.message == "'0.05' is below minimum (0.1)\nUsage: holdtime [seconds]"
+        assert result.message == "'-1' is below minimum (0.0)\nUsage: holdtime [seconds]"
 
-    async def test_zero_rejected(self, command_handler):
+    async def test_zero_accepted(self, command_handler):
+        """Zero is legal here because it is legal everywhere else.
+
+        This asserted the opposite, pinning a 0.1 floor that existed only
+        in this command's own ArgSpec. `set hold_time 0`, the wire, the
+        DSL and a state document all took zero, so the prompt was the one
+        surface that refused it.
+        """
         result = await command_handler.execute("holdtime 0")
-        assert result.success is False
-        assert result.message == "'0' is below minimum (0.1)\nUsage: holdtime [seconds]"
+        assert result.success is True
+        assert command_handler.simulator.state.hold_time == 0.0
 
     async def test_boundary_values_accepted(self, command_handler):
-        """The documented 0.1-900 bounds, asserted *at* the edges."""
-        assert (await command_handler.execute("holdtime 0.1")).success is True
-        assert command_handler.simulator.state.hold_time == 0.1
+        """The registry's bounds, asserted *at* the edges."""
+        assert (await command_handler.execute("holdtime 0")).success is True
+        assert command_handler.simulator.state.hold_time == 0.0
         assert (await command_handler.execute("holdtime 900")).success is True
         assert command_handler.simulator.state.hold_time == 900.0
+
+    async def test_the_prompt_bound_is_the_registry_bound(self, command_handler):
+        """Derived, so the two cannot drift apart again.
+
+        Asserted through `help`, which is where an operator reads it.
+        """
+        from powerpetdoor.simulator.values import VALUES
+
+        message = (await command_handler.execute("holdtime help")).message
+        assert f"min: {VALUES['hold_time'].minimum:g}" in message
+        assert f"max: {VALUES['hold_time'].maximum:g}" in message
 
     @pytest.mark.parametrize("raw", ["nan", "inf", "Infinity", "1e400"])
     async def test_non_finite_is_refused_without_touching_state(self, command_handler, raw):
