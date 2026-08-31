@@ -3138,12 +3138,44 @@ class TestNestedBlocksAreParsedAtLoadTime:
             Script.from_yaml("name: t\nsteps:\n  - action: 42\n")
 
     def test_a_block_keyword_is_not_reported_as_an_unknown_parameter(self):
-        """`then`/`else`/`steps` are the blocks themselves, not stray keys."""
-        script = Script.from_yaml(
-            "name: t\nsteps:\n  - action: if\n    condition: door_closed\n"
-            "    then:\n      - action: close\n    else:\n      - action: open\n"
+        """`then`/`else`/`steps` are the blocks themselves, not stray keys.
+
+        Uses `repeat` as well as `if`: this asserted only `if`, whose
+        parameters already contain `then` and `else`, so it passed
+        whether or not the check subtracted the block keywords - and the
+        subtraction it was written to justify was what made the load
+        check weaker than the executor's.
+        """
+        assert (
+            len(
+                Script.from_yaml(
+                    "name: t\nsteps:\n  - action: if\n    condition: door_closed\n"
+                    "    then:\n      - action: close\n    else:\n      - action: open\n"
+                ).steps
+            )
+            == 1
         )
-        assert len(script.steps) == 1
+        assert (
+            len(
+                Script.from_yaml(
+                    "name: t\nsteps:\n  - action: repeat\n    times: 2\n"
+                    "    steps:\n      - action: close\n"
+                ).steps
+            )
+            == 1
+        )
+
+    def test_a_block_on_an_action_that_has_none_is_refused(self):
+        """The direction the old test could not see.
+
+        `wait` has no block, so a `steps:` on it is a stray key - caught
+        at run time by the executor and, until now, not at load.
+        """
+        with pytest.raises(ScriptError, match="Unknown parameter"):
+            Script.from_yaml(
+                "name: t\nsteps:\n  - action: wait\n    seconds: 1\n"
+                "    steps:\n      - action: close\n"
+            )
 
     def test_a_nested_block_becomes_script_steps(self):
         script = Script.from_yaml(

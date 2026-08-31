@@ -1232,26 +1232,45 @@ class TestTheClientCanReadEverythingTheDoorAnswers:
     to arrive is covered without anyone remembering this file.
     """
 
-    def test_every_getter_has_a_client_response_handler(self):
-        from powerpetdoor.client import ResponseHandlerRegistry
+    @staticmethod
+    def _every_wire_command() -> set[str]:
+        """Every command in the wire table, by all three roles.
 
-        missing = sorted(
-            wire.getter
+        The first version of this walked `getter` and the SWITCH
+        enable/disable pairs, which left the four `CMD_SET_*` value
+        commands - hold time, timezone and the two voltages - outside the
+        perimeter entirely. Dropping `SET_SENSOR_TRIGGER_VOLTAGE` from
+        its handler left the whole suite green at 100% coverage, which is
+        the very hole this class exists to close, one category over.
+        """
+        return {
+            command
             for wire in WIRE_VALUES.values()
-            if wire.getter is not None and wire.getter not in ResponseHandlerRegistry._handlers
-        )
-        assert missing == [], (
-            f"the simulator answers {missing} but the client cannot parse the reply"
-        )
+            for command in (wire.enable, wire.disable, wire.getter)
+            if command is not None
+        }
 
-    def test_every_switch_command_has_a_client_response_handler(self):
-        """The setters answer with the value too, and are read the same way."""
+    def test_every_wire_command_has_a_client_response_handler(self):
         from powerpetdoor.client import ResponseHandlerRegistry
 
         missing = sorted(
             command
-            for name in WIRE_SWITCHES
-            for command in (WIRE_VALUES[name].enable, WIRE_VALUES[name].disable)
-            if command is not None and command not in ResponseHandlerRegistry._handlers
+            for command in self._every_wire_command()
+            if command not in ResponseHandlerRegistry._handlers
         )
-        assert missing == [], f"the door answers {missing} but the client ignores the reply"
+        assert missing == [], f"the door answers {missing} but the client cannot parse the reply"
+
+    def test_the_perimeter_covers_the_setters_too(self):
+        """Named, because their absence is what made the hole invisible."""
+        covered = self._every_wire_command()
+        for command in (
+            "SET_HOLD_TIME",
+            "SET_TIMEZONE",
+            "SET_SENSOR_TRIGGER_VOLTAGE",
+            "SET_SLEEP_SENSOR_TRIGGER_VOLTAGE",
+        ):
+            assert command in covered, f"{command} is outside the perimeter"
+
+    def test_the_perimeter_is_not_empty(self):
+        """A derivation that matched nothing would pass silently."""
+        assert len(self._every_wire_command()) >= 20

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -331,10 +332,47 @@ class TestAMessageCannotForgeExtraLines:
         forged = unescape_message(escape_message(r"path\new"))
         assert "\n" not in forged
 
-    def test_control_does_not_carry_its_own_unescaper(self):
-        """A second copy is how the two answers diverged in the first place."""
-        import powerpetdoor.simulator.control as control
+    async def test_control_py_itself_unescapes_correctly(self):
+        """Drives `control.py`'s OWN parse path, not prompt_common's.
 
-        assert not hasattr(control, "_unescape"), (
-            "control.py has re-grown a private unescaper; use prompt_common's"
-        )
+        The first version of this class tested `prompt_common`, which
+        never had the bug, and then asserted that the identifier
+        `_unescape` was absent - so re-inlining the exact defect under
+        any other name passed, with ruff and mypy clean. A test named for
+        a module has to execute that module.
+        """
+        probe = r"Unknown setting: scripts\new.yaml"
+        control = _control_reading(f"OK: {escape_message(probe)}\n")
+
+        assert await control._read_response("get x") == probe
+
+    async def test_control_py_does_not_forge_a_line_in_an_error(self):
+        """The error path unescapes too, and raises what it built."""
+        probe = r"bad path: C:\temp\new"
+        control = _control_reading(f"ERROR: {escape_message(probe)}\n")
+
+        with pytest.raises(CommandFailedError) as failure:
+            await control._read_response("get x")
+
+        assert str(failure.value) == probe
+        assert "\n" not in str(failure.value)
+
+
+def _control_reading(reply: str):
+    """A `RemoteSimulator` whose reader returns one canned line.
+
+    Enough of the object to drive `_read_response`, which is where the
+    unescaping actually happens.
+    """
+    from powerpetdoor.simulator.control import RemoteSimulator
+
+    control = RemoteSimulator.__new__(RemoteSimulator)
+    control._timeout = 1.0
+    control._reader = SimpleNamespace(readline=lambda: _resolved(reply.encode()))
+    return control
+
+
+def _resolved(value):
+    future: asyncio.Future = asyncio.get_event_loop().create_future()
+    future.set_result(value)
+    return future

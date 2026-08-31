@@ -446,6 +446,31 @@ class TestTheDocumentedToggleWord:
         assert (await handler.execute("set power TOGGLE")).success is True
         assert sim.state.power is False
 
+    async def test_the_typed_name_is_canonicalised_too(self, handler, sim):
+        """Not just the word `toggle`.
+
+        Every other test here passes an already-canonical name, so
+        dropping `canonical_name` survived them all - and then `set POWER
+        toggle` flipped the power AND reported an error for 'POWER',
+        which is the worst of both answers.
+        """
+        sim.state.power = True
+
+        result = await handler.execute("set POWER toggle")
+
+        assert result.success is True
+        assert sim.state.power is False
+        assert "POWER" not in result.message, "the reply echoed the uncanonical name"
+        assert "power" in result.message
+
+    async def test_a_hyphenated_name_toggles(self, handler, sim):
+        """`-` is the other spelling `canonical_name` folds."""
+        before = read_value(sim.state, "notify_low_battery")
+
+        assert (await handler.execute("set notify-low-battery toggle")).success is True
+
+        assert read_value(sim.state, "notify_low_battery") is not before
+
     async def test_toggling_a_non_boolean_says_what_can_be_toggled(self, handler):
         result = await handler.execute("set hold_time toggle")
 
