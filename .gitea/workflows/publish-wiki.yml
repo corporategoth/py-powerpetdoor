@@ -60,8 +60,13 @@ jobs:
             echo "No wiki token available - set WIKI_TOKEN in the repository secrets." >&2
             exit 1
           fi
-          host="${GITHUB_SERVER_URL#https://}"
-          git clone "https://x-access-token:${WIKI_TOKEN}@${host}/${GITHUB_REPOSITORY}.wiki.git" wiki
+          # Split the scheme off rather than assuming https: the runner
+          # reaches Gitea on its container-internal address, which is
+          # `http://gitea:3000`. Stripping a literal "https://" left that
+          # untouched and produced `https://http://gitea:3000/...`.
+          scheme="${GITHUB_SERVER_URL%%://*}"
+          host="${GITHUB_SERVER_URL#*://}"
+          git clone "${scheme}://x-access-token:${WIKI_TOKEN}@${host}/${GITHUB_REPOSITORY}.wiki.git" wiki
           # Replace rather than merge: the wiki is a rendering, so a page
           # that is no longer generated should stop existing.
           find wiki -maxdepth 1 -name '*.md' -delete
