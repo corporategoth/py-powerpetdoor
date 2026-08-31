@@ -1232,45 +1232,63 @@ class TestTheClientCanReadEverythingTheDoorAnswers:
     to arrive is covered without anyone remembering this file.
     """
 
+    #: Commands the door answers with no body worth parsing, so the
+    #: client rightly has no response handler. Door motion is reported by
+    #: the unsolicited `DOOR_STATUS` push instead, which has its own
+    #: handler - a dedicated one here would only duplicate it.
+    NO_RESPONSE_HANDLER_NEEDED = {
+        "OPEN": "answered by the DOOR_STATUS push",
+        "OPEN_AND_HOLD": "answered by the DOOR_STATUS push",
+        "CLOSE": "answered by the DOOR_STATUS push",
+    }
+
     @staticmethod
-    def _every_wire_command() -> set[str]:
-        """Every command in the wire table, by all three roles.
+    def _every_command_the_door_answers() -> set[str]:
+        """The authoritative set: what the simulator actually handles.
 
-        The first version of this walked `getter` and the SWITCH
-        enable/disable pairs, which left the four `CMD_SET_*` value
-        commands - hold time, timezone and the two voltages - outside the
-        perimeter entirely. Dropping `SET_SENSOR_TRIGGER_VOLTAGE` from
-        its handler left the whole suite green at 100% coverage, which is
-        the very hole this class exists to close, one category over.
+        Twice this perimeter was derived from a table that *describes*
+        the commands rather than from the commands themselves, and twice
+        it had a hole. First it walked only `WireValue.getter`, missing
+        the four `CMD_SET_*`. Widening it to all three roles still only
+        reached 24 of the 42 the simulator answers, because
+        `MULTI_VALUE_GETTERS` is a separate table a `WireValue`
+        structurally cannot express - so `GET_SENSORS` could lose its
+        client handler with the whole suite green.
+
+        The registry of handlers is the set that cannot be incomplete: a
+        command the simulator answers is in it by construction.
         """
-        return {
-            command
-            for wire in WIRE_VALUES.values()
-            for command in (wire.enable, wire.disable, wire.getter)
-            if command is not None
-        }
+        from powerpetdoor.simulator.protocol import CommandRegistry
 
-    def test_every_wire_command_has_a_client_response_handler(self):
+        return set(CommandRegistry._handlers)
+
+    def test_every_command_the_door_answers_can_be_read_by_the_client(self):
         from powerpetdoor.client import ResponseHandlerRegistry
 
         missing = sorted(
             command
-            for command in self._every_wire_command()
+            for command in self._every_command_the_door_answers()
             if command not in ResponseHandlerRegistry._handlers
+            and command not in self.NO_RESPONSE_HANDLER_NEEDED
         )
         assert missing == [], f"the door answers {missing} but the client cannot parse the reply"
 
-    def test_the_perimeter_covers_the_setters_too(self):
-        """Named, because their absence is what made the hole invisible."""
-        covered = self._every_wire_command()
-        for command in (
-            "SET_HOLD_TIME",
-            "SET_TIMEZONE",
-            "SET_SENSOR_TRIGGER_VOLTAGE",
-            "SET_SLEEP_SENSOR_TRIGGER_VOLTAGE",
-        ):
-            assert command in covered, f"{command} is outside the perimeter"
+    def test_the_exclusions_are_commands_that_exist(self):
+        """An exclusion for a command nobody sends would hide a real gap."""
+        answered = self._every_command_the_door_answers()
+        stale = sorted(set(self.NO_RESPONSE_HANDLER_NEEDED) - answered)
+        assert stale == [], f"excluded commands the door does not answer: {stale}"
 
-    def test_the_perimeter_is_not_empty(self):
-        """A derivation that matched nothing would pass silently."""
-        assert len(self._every_wire_command()) >= 20
+    def test_every_exclusion_has_a_reason(self):
+        assert all(reason.strip() for reason in self.NO_RESPONSE_HANDLER_NEEDED.values())
+
+    def test_the_perimeter_is_the_whole_command_set(self):
+        """A derivation that matched little would pass silently.
+
+        Pinned against the simulator's own registry rather than a
+        literal, so adding a command raises the floor automatically.
+        """
+        from powerpetdoor.simulator.protocol import CommandRegistry
+
+        assert self._every_command_the_door_answers() == set(CommandRegistry._handlers)
+        assert len(self._every_command_the_door_answers()) >= 40

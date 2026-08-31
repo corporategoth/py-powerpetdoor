@@ -11,6 +11,7 @@ import asyncio
 import copy
 import logging
 import sys
+import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -3213,6 +3214,54 @@ class TestTheAppSettingPolarities:
 
         door._on_settings({FIELD_AUTORETRACT: 3})
         assert door.autoretract is True
+
+
+class TestTheTimezoneScanStaysOffTheEventLoop:
+    """Building the tzdata cache is hundreds of blocking `open()` calls.
+
+    `to_posix_tz` warms it itself when cold - via the SYNC initialiser,
+    on whatever thread called it. On the event loop that is a stall of
+    tens of milliseconds, so both `PowerPetDoor` paths warm it in a
+    thread first and leave `to_posix_tz` nothing to do.
+
+    The read path (`refresh_time`) is pinned incidentally, because a cold
+    cache changes its return type from aware to naive. The write path
+    sends the identical value either way - the only difference is whether
+    the loop stops - so nothing caught its removal, and two reviewers
+    found the same silence independently.
+    """
+
+    async def test_set_timezone_does_not_scan_tzdata_on_the_loop(self, door, monkeypatch):
+        from powerpetdoor import tz_utils
+
+        # Cold, as a fresh process is.
+        monkeypatch.setattr(tz_utils, "_cache_initialized", False)
+        monkeypatch.setattr(tz_utils, "_posix_to_iana", {})
+        monkeypatch.setattr(tz_utils, "_iana_to_posix", {})
+        monkeypatch.setattr(tz_utils, "_iana_timezones", set())
+
+        on_loop: list[str] = []
+        real_sync = tz_utils.init_timezone_cache_sync
+
+        def spy() -> None:
+            # `async_init_timezone_cache` reaches the same function through
+            # `asyncio.to_thread`, so being off the loop's thread is what
+            # distinguishes the two routes.
+            if threading.current_thread() is threading.main_thread():
+                on_loop.append("blocking scan on the event loop")
+            real_sync()
+
+        monkeypatch.setattr(tz_utils, "init_timezone_cache_sync", spy)
+
+        await door.set_timezone("America/New_York")
+
+        assert on_loop == [], on_loop[0] if on_loop else ""
+
+    async def test_set_timezone_still_sends_the_posix_form(self, door, simulator):
+        """Warming must not change what goes on the wire."""
+        await door.set_timezone("America/New_York")
+
+        assert simulator.state.timezone.startswith("EST5EDT"), simulator.state.timezone
 
 
 class TestANotificationChangeIsDetectable:
