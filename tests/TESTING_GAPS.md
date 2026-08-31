@@ -2,7 +2,7 @@
 
 This file is **auto-generated** by CI after each test run. Do not edit manually.
 
-**Last updated:** 2026-08-31 18:37 UTC
+**Last updated:** 2026-08-31 20:30 UTC
 
 ## Summary
 
@@ -10,8 +10,8 @@ This file is **auto-generated** by CI after each test run. Do not edit manually.
 |--------|-------|
 | Line Coverage | 100.00% |
 | Branch Coverage | 100.00% |
-| Lines Covered | 7,347 / 7,347 |
-| Branches Covered | 2,512 / 2,512 |
+| Lines Covered | 7,376 / 7,376 |
+| Branches Covered | 2,528 / 2,528 |
 | Lines Missing | 0 |
 
 ## Coverage by Category
@@ -71,8 +71,8 @@ None. Every `exclude_lines` and `partial_branches` pattern above matches only th
 
 | Lines | Type | Reason | Code |
 |-------|------|--------|------|
-| 77 | no cover | *no reason given* | `raise NotImplementedError` |
-| 144 | no cover | *no reason given* | `raise NotImplementedError` |
+| 78 | no cover | *no reason given* | `raise NotImplementedError` |
+| 145 | no cover | *no reason given* | `raise NotImplementedError` |
 
 #### `simulator/ctl.py` (1 lines)
 
