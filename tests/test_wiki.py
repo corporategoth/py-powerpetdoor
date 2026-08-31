@@ -211,6 +211,22 @@ class TestTheProtocolReferenceIsRendered:
         }
         assert not any("d[]" in row for row in field_table(payload))
 
+    def test_required_fields_are_marked_as_required(self, spec):
+        """Forcing every Required cell to the em-dash used to survive.
+
+        Forty `yes` cells vanish from the schedules page alone, and a
+        reader building a `SET_SCHEDULE` learns nothing about which
+        fields the door insists on.
+        """
+        page = render_page("schedules", spec)
+        rows = [r for r in page.splitlines() if r.startswith("| `")]
+        required = [r for r in rows if "| yes |" in r]
+
+        assert required, "not one field on the schedules page is marked required"
+        # The envelope key and the command's own arguments are required.
+        assert any("`config`" in r for r in required)
+        assert any("`index`" in r for r in required)
+
     def test_units_reach_the_table(self, spec):
         """A reader who misses `centiseconds` sends seconds and is 100x off."""
         assert "(centiseconds)" in render_page("settings", spec)

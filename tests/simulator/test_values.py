@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from powerpetdoor.const import DOOR_STATE_CLOSED, DOOR_STATE_KEEPUP
 from powerpetdoor.door import PowerPetDoor
 from powerpetdoor.simulator import DoorSimulator, DoorSimulatorState
 from powerpetdoor.simulator.coerce import CoercionError
@@ -32,6 +33,7 @@ from powerpetdoor.simulator.values import (
     VALUE_NAMES,
     VALUES,
     WRITABLE,
+    read_value,
     set_named_value,
     toggle_named_value,
 )
@@ -411,3 +413,88 @@ class TestGeneratedSwitchCommands:
     def test_no_two_rows_claim_the_same_word(self):
         words = [w for s in SWITCH_COMMANDS for w in (s.name, *s.aliases)]
         assert len(words) == len(set(words))
+
+
+class TestTheDocumentedToggleWord:
+    """`set <name> toggle` inverts a yes/no value.
+
+    `docs/simulator.md` says so and the script DSL has always taken it,
+    but the prompt answered "must be true or false", which left every
+    value with no named command of its own - the five notification
+    switches, `obstruction`, the two remote flags - invertible from a
+    script and not by hand.
+    """
+
+    async def test_toggle_inverts_a_switch(self, handler, sim):
+        sim.state.power = True
+
+        assert (await handler.execute("set power toggle")).success is True
+        assert sim.state.power is False
+        assert (await handler.execute("set power toggle")).success is True
+        assert sim.state.power is True
+
+    async def test_toggle_reaches_a_value_with_no_command_of_its_own(self, handler, sim):
+        """The case that motivated it: no `notify_low_battery` word exists."""
+        before = read_value(sim.state, "notify_low_battery")
+
+        assert (await handler.execute("set notify_low_battery toggle")).success is True
+
+        assert read_value(sim.state, "notify_low_battery") is not before
+
+    async def test_toggle_is_case_insensitive(self, handler, sim):
+        sim.state.power = True
+        assert (await handler.execute("set power TOGGLE")).success is True
+        assert sim.state.power is False
+
+    async def test_toggling_a_non_boolean_says_what_can_be_toggled(self, handler):
+        result = await handler.execute("set hold_time toggle")
+
+        assert result.success is False
+        assert "holds a value, not a state" in result.message
+        assert "power" in result.message
+
+    async def test_an_unknown_name_still_refuses(self, handler):
+        result = await handler.execute("set no_such_value toggle")
+        assert result.success is False
+
+    async def test_a_literal_true_still_works(self, handler, sim):
+        """The ordinary path must be untouched."""
+        sim.state.power = False
+        assert (await handler.execute("set power true")).success is True
+        assert sim.state.power is True
+
+
+class TestPowerOnDoesNotMoveTheFlap:
+    """Cutting power drops an open flap; restoring it must not move one.
+
+    `COMMAND_DOCS` says so of `POWER_ON` in as many words - "The flap is
+    not moved by this" - and dropping the `not` from the setter's guard
+    made power-on *close* the door, with the whole suite still green. A
+    door that shuts its flap the moment power returns could close on a
+    pet standing in it.
+    """
+
+    async def test_power_off_closes_an_open_flap(self, sim):
+        sim.state.power = True
+        sim.state.door_status = DOOR_STATE_KEEPUP
+
+        set_named_value(sim, "power", False)
+
+        assert sim.state.door_status != DOOR_STATE_KEEPUP
+
+    async def test_power_on_leaves_an_open_flap_alone(self, sim):
+        """The half that was unpinned."""
+        sim.state.power = False
+        sim.state.door_status = DOOR_STATE_KEEPUP
+
+        set_named_value(sim, "power", True)
+
+        assert sim.state.door_status == DOOR_STATE_KEEPUP, "power-on moved the flap"
+
+    async def test_power_on_leaves_a_closed_flap_closed(self, sim):
+        sim.state.power = False
+        sim.state.door_status = DOOR_STATE_CLOSED
+
+        set_named_value(sim, "power", True)
+
+        assert sim.state.door_status == DOOR_STATE_CLOSED

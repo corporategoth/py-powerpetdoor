@@ -1317,6 +1317,40 @@ class TestCheckReceipt:
         assert transport.written_data == [], "sent without leaving the quiet period"
         await task
 
+    async def test_a_reply_reports_its_own_round_trip_in_ms(self, mock_client):
+        """The only latency source on a busy link, and it was unobserved.
+
+        The keepalive became an *idle* timer, so a link carrying real
+        traffic never pings - this pairing is all there is. Three separate
+        mutations survived here: never pairing the reply, never recording
+        the send time, and reporting seconds where the listener documents
+        milliseconds.
+        """
+        client, _, _ = mock_client
+        seen: list[int] = []
+        client.on_ping["t"] = seen.append
+
+        client._sent_at[7] = time.monotonic() - 0.250
+        client._record_response_latency(7)
+
+        assert len(seen) == 1, "the round trip was never reported"
+        # Milliseconds, not seconds: 0.25s is 250, not 0.
+        assert 200 <= seen[0] <= 400, f"reported {seen[0]}, which is not ms"
+
+    async def test_a_reconnect_forgets_the_previous_connections_sends(self, mock_client):
+        """Otherwise the first reply after an outage reports minutes.
+
+        The same reset restarts `_msg_sequence` at 0, so ids repeat: a
+        timestamp from before the outage is still sitting under the id the
+        new connection is about to use, and gets paired with it.
+        """
+        client, _, _ = mock_client
+        client._sent_at[1] = time.monotonic() - 300  # five minutes ago
+
+        client.disconnect()
+
+        assert client._sent_at == {}, "a pre-outage send time survived the reconnect"
+
     async def test_send_data_transport_gone_after_sleep(self, mock_client, caplog):
         """disconnect() during the rate-limit sleep is not fatal.
 

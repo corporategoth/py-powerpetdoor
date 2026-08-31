@@ -1399,10 +1399,18 @@ def main():
     # for the same reason a typo'd --scripts-dir does.
     initial_state_document = None
     if args.initial_state is not None:
-        from .state_io import StateDocumentError, load_document
+        from .state import DoorSimulatorState
+        from .state_io import StateDocumentError, apply_document, load_document
 
         try:
             initial_state_document = load_document(args.initial_state)
+            # Loading only parses; the keys and values are checked when the
+            # document is APPLIED, which happened later, inside start(), and
+            # escaped as a traceback. Applying it to a throwaway state here
+            # asks the same question at the moment the comment above says it
+            # should be asked. `reset <name>` already reported these
+            # perfectly at runtime - only the startup path did not.
+            apply_document(DoorSimulatorState(), initial_state_document)
         except StateDocumentError as exc:
             parser.error(
                 t(

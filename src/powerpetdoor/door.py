@@ -156,6 +156,7 @@ from .schedule import (
     window_minutes,
 )
 from .tz_utils import (
+    async_init_timezone_cache,
     resolve_tzinfo,
     to_posix_tz,
 )
@@ -1320,6 +1321,18 @@ class PowerPetDoor:
         # gives the caller an instant they can compare and render either
         # way round. Without the timezone there is nothing to anchor it
         # to, so the naive reading is all there is.
+        #
+        # The cache has to be warm first. The door reports POSIX, and
+        # mapping POSIX back to an IANA zone is a lookup in a table built
+        # by scanning tzdata - cold, it returns None and this method
+        # silently hands back a NAIVE datetime, contradicting the
+        # guarantee above. Only the write path (`set_timezone`) warmed it,
+        # so the return TYPE depended on whether a caller happened to set
+        # the timezone first. Done here rather than inside `resolve_tzinfo`
+        # because that is also on the simulator's per-trigger schedule
+        # path, where a blocking tzdata scan does not belong.
+        if self._timezone:
+            await async_init_timezone_cache()
         door_tz = resolve_tzinfo(self._timezone) if self._timezone else None
         if door_tz is None:
             return reading

@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+import yaml
 
 from powerpetdoor.const import DOOR_STATE_CLOSED
 from powerpetdoor.simulator.scripting import YAML_AVAILABLE, get_builtin_script
@@ -59,3 +62,35 @@ class TestBasicCycleMessages:
 
         sequence = await message_capture.wait_for_status_sequence(FULL_CYCLE)
         assert sequence == FULL_CYCLE
+
+
+class TestTheDocumentedScriptTableMatchesTheScripts:
+    """`docs/scripting.md` lists each built-in script and what it does.
+
+    Two rows had drifted from the script they describe, and the
+    `safety_lock_test` row stated the INVERSE of the behaviour: the
+    safety lock lets a pet in past a closed schedule window, and the doc
+    said it blocked the outside sensor. That is precisely the confusion
+    the rest of these docs exist to correct.
+
+    Derived from the scripts' own `description:` fields, so the table
+    cannot drift again.
+    """
+
+    SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "src/powerpetdoor/simulator/scripts"
+    DOC = Path(__file__).resolve().parents[3] / "docs/scripting.md"
+
+    def test_every_script_row_quotes_its_own_description(self):
+        doc = self.DOC.read_text(encoding="utf-8")
+        mismatched = []
+        for path in sorted(self.SCRIPTS_DIR.glob("*.yaml")):
+            described = yaml.safe_load(path.read_text(encoding="utf-8")).get("description", "")
+            row = f"| `{path.stem}` | {described} |"
+            if row not in doc:
+                mismatched.append(f"{path.stem}: doc does not carry {described!r}")
+        assert mismatched == [], "\n".join(mismatched)
+
+    def test_every_script_is_listed(self):
+        doc = self.DOC.read_text(encoding="utf-8")
+        for path in sorted(self.SCRIPTS_DIR.glob("*.yaml")):
+            assert f"| `{path.stem}` |" in doc, f"{path.stem} is not in the table"

@@ -104,7 +104,18 @@ class ValueCommandsMixin:
         :class:`CommandResult`.
         """
         try:
-            key = set_named_value(self.simulator, name, value)
+            # `toggle` is documented as a value `set` accepts, and the
+            # script DSL has always taken it. The prompt refused it with
+            # "must be true or false", which left the values that have no
+            # named command of their own - the notification switches,
+            # obstruction, the remote flags - invertible from a script but
+            # not by hand. Same route either way: `toggle_named_value`
+            # writes through `set_named_value`.
+            if value.strip().lower() == "toggle":
+                key = canonical_name(name)
+                toggle_named_value(self.simulator, key)
+            else:
+                key = set_named_value(self.simulator, name, value)
         except CoercionError as exc:
             return CommandResult(False, str(exc))
         return CommandResult(True, render_value(key, self.simulator.state))

@@ -8,7 +8,7 @@
 from typing import TYPE_CHECKING
 
 from ...i18n import t
-from ...schedule import MAX_SCHEDULE_INDEX
+from ...schedule import MAX_SCHEDULE_INDEX, MIDNIGHT, schedule_window_is_empty
 from ..values import read_value
 from .base import DAY_NAMES, DAY_PRESETS, ArgSpec, CommandResult, command, subcommand
 
@@ -92,6 +92,47 @@ class ScheduleCommandsMixin:
             lines.append(self._format_schedule(schedules[idx]))
         return CommandResult(True, "\n".join(lines))
 
+    def _refuse_empty_window(
+        self, start: tuple[int, int], end: tuple[int, int]
+    ) -> CommandResult | None:
+        """Refuse a window the device would store and never act on.
+
+        The engine is ``start <= now < end``, so any end that does not
+        exceed its start matches no minute. The library refuses these on
+        the send path with this same explanation; the prompt used to
+        accept them and report success, leaving a schedule that silently
+        gates its sensors off for good - indistinguishable in a listing
+        from one that is merely disabled.
+        """
+        if not schedule_window_is_empty(start, end):
+            return None
+        if end == MIDNIGHT:
+            # Midnight as an END is the common way to mean "until the day
+            # is over", and the device spells that 24:00. Say so, rather
+            # than advising a second window of 00:00-00:00.
+            return CommandResult(
+                False,
+                t(
+                    "simulator.commands.schedules.window_ends_at_midnight",
+                    "{arg0}-{arg1} covers no time: midnight is the FIRST minute of a "
+                    "day, so as an end it is before every start. Use {arg0}-24:00 for "
+                    "the rest of the day.",
+                    arg0=self._format_time(*start),
+                    arg1=self._format_time(*end),
+                ),
+            )
+        return CommandResult(
+            False,
+            t(
+                "simulator.commands.schedules.window_covers_no_time",
+                "{arg0}-{arg1} covers no time: the end must be later than the start. "
+                "A window cannot run past midnight in one entry - use {arg0}-24:00 "
+                "today and 00:00-{arg1} tomorrow.",
+                arg0=self._format_time(*start),
+                arg1=self._format_time(*end),
+            ),
+        )
+
     @subcommand(
         "schedule",
         "add",
@@ -148,6 +189,10 @@ class ScheduleCommandsMixin:
                 False,
                 t("simulator.commands.schedules.free_schedule_slots", "No free schedule slots"),
             )
+
+        refusal = self._refuse_empty_window((start_h, start_m), (end_h, end_m))
+        if refusal is not None:
+            return refusal
 
         # Create schedule
         schedule = self._Schedule(
@@ -365,6 +410,9 @@ class ScheduleCommandsMixin:
         if isinstance(sched, CommandResult):
             return sched
         start_h, start_m, end_h, end_m = time
+        refusal = self._refuse_empty_window((start_h, start_m), (end_h, end_m))
+        if refusal is not None:
+            return refusal
         sched.start_hour = start_h
         sched.start_min = start_m
         sched.end_hour = end_h

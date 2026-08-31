@@ -3068,6 +3068,54 @@ class TestStateDocumentArguments:
         assert exit_info.value.code == 2
         assert "not valid" in capsys.readouterr().err
 
+    def test_an_unknown_key_in_the_initial_state_exits_two(self, tmp_path, monkeypatch, capsys):
+        """A CONTENT error, not a syntax one.
+
+        Loading only parses; the keys are checked when the document is
+        applied, which happened later inside start() and escaped as a
+        32-line traceback. A missing file and a syntax error both gave a
+        clean usage line, so this was the one shape of bad
+        `--initial-state` that did not.
+        """
+        bad = tmp_path / "bad.json"
+        bad.write_text('{"nonexistent_key": 1}')
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--initial-state", str(bad)])
+
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main()
+
+        err = capsys.readouterr().err
+        assert exit_info.value.code == 2
+        assert "Unknown key(s)" in err
+        assert "Traceback" not in err
+
+    def test_a_bad_value_in_the_initial_state_exits_two(self, tmp_path, monkeypatch, capsys):
+        bad = tmp_path / "bad.json"
+        bad.write_text('{"settings": {"power": "maybe"}}')
+        monkeypatch.setattr(sys, "argv", ["ppd-simulator", "--initial-state", str(bad)])
+
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main()
+
+        err = capsys.readouterr().err
+        assert exit_info.value.code == 2
+        assert "must be true or false" in err
+        assert "Traceback" not in err
+
+    def test_a_valid_initial_state_still_starts(self, tmp_path, monkeypatch):
+        """The check must not reject documents that were always fine."""
+        good = tmp_path / "good.json"
+        good.write_text('{"settings": {"power": false}}')
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            # Ephemeral port and a brief run: the point is that argument
+            # parsing accepts the document, not that the server does work.
+            ["ppd-simulator", "--initial-state", str(good), "--run-for", "0.1", "--port", "0"],
+        )
+
+        cli.main()
+
     def test_a_states_dir_that_is_not_a_directory_exits_two(self, tmp_path, monkeypatch, capsys):
         """A typo'd directory used to be found only by a ctl user much
         later, which is why --scripts-dir checks this too."""

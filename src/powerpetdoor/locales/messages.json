@@ -191,6 +191,8 @@
   "simulator.commands.schedules.schedule_time": "Schedule #{index} time: {arg0}-{arg1}",
   "simulator.commands.schedules.schedules_auto_mode_implicit_all": "Schedules (auto mode {auto_status}):\n  (implicit): {arg0}, all days, 00:00-23:59",
   "simulator.commands.schedules.schedules_clear": "No schedules to clear",
+  "simulator.commands.schedules.window_covers_no_time": "{arg0}-{arg1} covers no time: the end must be later than the start. A window cannot run past midnight in one entry - use {arg0}-24:00 today and 00:00-{arg1} tomorrow.",
+  "simulator.commands.schedules.window_ends_at_midnight": "{arg0}-{arg1} covers no time: midnight is the FIRST minute of a day, so as an end it is before every start. Use {arg0}-24:00 for the rest of the day.",
   "simulator.commands.scripts.dropped_queued_script_s": "Dropped {arg0} queued script(s)",
   "simulator.commands.scripts.nothing_running_queued": "Nothing running or queued",
   "simulator.commands.scripts.queued_script": "Queued script: {name}",

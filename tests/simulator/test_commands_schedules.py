@@ -440,3 +440,58 @@ class TestScheduleTime:
             "Time range must be in format <start>-<end> (e.g., 6:00-22:00)\n"
             "Usage: schedule time <index> <start-end>"
         )
+
+
+class TestTheOperatorCannotStoreADeadWindow:
+    """A window the device stores and never acts on.
+
+    The engine is ``start <= now < end``, so an end that does not exceed
+    its start matches no minute of any day. `validate_for_send()` has
+    always refused these with an explanation; the prompt accepted them
+    and answered "Added schedule #0", leaving a schedule that gates its
+    sensors off for good and looks, in a listing, exactly like one that
+    was deliberately disabled.
+    """
+
+    async def test_a_zero_length_window_is_refused(self, command_handler):
+        result = await command_handler.execute("schedule add both 10:00-10:00")
+        assert result.success is False
+        assert "covers no time" in result.message
+        assert not command_handler.simulator.state.schedules, "a dead schedule was stored"
+
+    async def test_a_backwards_window_is_refused(self, command_handler):
+        result = await command_handler.execute("schedule add inside 23:00-21:30")
+        assert result.success is False
+        assert "covers no time" in result.message
+
+    async def test_midnight_as_an_end_gets_its_own_advice(self, command_handler):
+        """`20:00-00:00` is the mistake an operator actually makes.
+
+        Telling them to write `00:00-00:00 tomorrow` would be nonsense;
+        the device spells the end of a day `24:00`.
+        """
+        result = await command_handler.execute("schedule add inside 20:00-00:00")
+        assert result.success is False
+        assert "Use 20:00-24:00 for the rest of the day" in result.message
+
+    async def test_the_end_of_the_day_is_still_accepted(self, command_handler):
+        """The window the advice recommends must itself work."""
+        result = await command_handler.execute("schedule add inside 20:00-24:00")
+        assert result.success is True
+        assert command_handler.simulator.state.schedules[0].end_hour == 24
+
+    async def test_an_ordinary_window_is_unaffected(self, command_handler):
+        result = await command_handler.execute("schedule add inside 6:00-22:00")
+        assert result.success is True
+
+    async def test_schedule_time_refuses_one_too(self, command_handler):
+        """The twin: `schedule time` writes the same field by another route."""
+        assert (await command_handler.execute("schedule add inside 6:00-22:00")).success is True
+
+        result = await command_handler.execute("schedule time 0 10:00-10:00")
+
+        assert result.success is False
+        assert "covers no time" in result.message
+        # And the stored window is untouched.
+        assert command_handler.simulator.state.schedules[0].start_hour == 6
+        assert command_handler.simulator.state.schedules[0].end_hour == 22

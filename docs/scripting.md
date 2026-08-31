@@ -500,10 +500,10 @@ prints the authoritative list.
 | Script | Description |
 |--------|-------------|
 | `basic_cycle` | Pet triggers inside sensor, door opens, holds, then closes |
-| `obstruction_test` | Tests that door auto-retracts when obstruction detected |
+| `obstruction_test` | Tests that door auto-retracts when it closes onto an obstruction |
 | `pet_presence_test` | Tests that pet in doorway keeps the door open past its hold time |
 | `power_lockout_test` | Tests that commands are blocked when power off or lockout enabled |
-| `safety_lock_test` | Tests that outside sensor is blocked when safety lock enabled |
+| `safety_lock_test` | Tests that the safety lock lets a pet in past a closed schedule window |
 | `schedule_test` | Tests that sensors respect schedule time windows |
 | `full_test_suite` | Comprehensive test of all simulator features |
 

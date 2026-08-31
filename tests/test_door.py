@@ -11,7 +11,7 @@ import asyncio
 import copy
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -2992,6 +2992,33 @@ class TestDoorClockFacade:
         # Read back in the door's own zone, it is exactly what the door said.
         face = when.astimezone(ZoneInfo("America/New_York")).strftime(TIME_FORMAT)
         assert face == door.device_time
+
+    async def test_refresh_time_is_aware_for_the_posix_zone_a_door_reports(self, door, monkeypatch):
+        """The zone a REAL door sends, from a cold cache.
+
+        The test above uses `America/New_York`, which `ZoneInfo()`
+        resolves on its own - so it passed while this path was broken. A
+        door reports POSIX (`EST5EDT,M3.2.0,M11.1.0`), and mapping that
+        back to an IANA zone needs the tzdata cache. Nothing on the read
+        path built it, so an integrator who never called `set_timezone()`
+        got a NAIVE datetime from a method documenting an aware one, and
+        `when - datetime.now(tz)` raised TypeError.
+        """
+        from powerpetdoor import tz_utils
+
+        # Cold: exactly what a fresh process looks like.
+        monkeypatch.setattr(tz_utils, "_cache_initialized", False)
+        monkeypatch.setattr(tz_utils, "_posix_to_iana", {})
+        monkeypatch.setattr(tz_utils, "_iana_to_posix", {})
+        monkeypatch.setattr(tz_utils, "_iana_timezones", set())
+        door._timezone = "EST5EDT,M3.2.0,M11.1.0"
+
+        when = await door.refresh_time()
+
+        assert when is not None
+        assert when.tzinfo is not None, "a POSIX zone still yielded a naive reading"
+        # The point of being aware: it can be compared to an aware now.
+        assert isinstance(when - datetime.now().astimezone(), timedelta)
 
     async def test_refresh_time_stays_naive_without_a_zone(self, door):
         """With no timezone there is nothing to anchor the reading to."""
