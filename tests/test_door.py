@@ -3213,3 +3213,57 @@ class TestTheAppSettingPolarities:
 
         door._on_settings({FIELD_AUTORETRACT: 3})
         assert door.autoretract is True
+
+
+class TestANotificationChangeIsDetectable:
+    """A settings object handed out and then mutated tells nobody.
+
+    `_on_notify_*` updated `self._notifications` in place while the
+    property returned that same object, so a snapshot taken before a
+    change equalled the state after it and poll-and-compare could never
+    see a notification setting move. There was no other route either:
+    `on_settings_change` fires for `GET_SETTINGS`, whose payload carries
+    none of these five flags.
+
+    `battery` replaces its object, which is why the same comparison has
+    always worked there.
+    """
+
+    def test_a_snapshot_survives_a_later_change(self):
+        door = PowerPetDoor("127.0.0.1")
+        before = door.notifications
+
+        door._on_notify_inside_on("x", True)
+
+        assert before.inside_on is False, "the snapshot was mutated underneath the caller"
+        assert door.notifications.inside_on is True
+        assert before != door.notifications, "poll-and-compare cannot see the change"
+
+    @pytest.mark.parametrize(
+        "handler,attribute",
+        [
+            ("_on_notify_inside_on", "inside_on"),
+            ("_on_notify_inside_off", "inside_off"),
+            ("_on_notify_outside_on", "outside_on"),
+            ("_on_notify_outside_off", "outside_off"),
+            ("_on_notify_low_battery", "low_battery"),
+        ],
+    )
+    def test_every_flag_replaces_rather_than_mutates(self, handler, attribute):
+        """All five, because a fix on one path when five exist is not a fix."""
+        door = PowerPetDoor("127.0.0.1")
+        before = door.notifications
+
+        getattr(door, handler)("x", True)
+
+        assert getattr(before, attribute) is False
+        assert getattr(door.notifications, attribute) is True
+
+    def test_an_unreadable_value_keeps_the_previous_one(self):
+        """Replacing must not lose the fail-soft behaviour."""
+        door = PowerPetDoor("127.0.0.1")
+        door._on_notify_low_battery("x", True)
+
+        door._on_notify_low_battery("x", None)
+
+        assert door.notifications.low_battery is True

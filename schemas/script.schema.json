@@ -26,1567 +26,1600 @@
   "additionalProperties": false,
   "$defs": {
     "step": {
-      "type": "object",
-      "required": [
-        "action"
-      ],
       "oneOf": [
         {
-          "title": "add_schedule",
-          "description": "Store a schedule allowing both sensors, every day, all day.",
-          "properties": {
-            "enabled": {
-              "oneOf": [
-                {
-                  "type": "boolean"
+          "type": "object",
+          "required": [
+            "action"
+          ],
+          "oneOf": [
+            {
+              "title": "add_schedule",
+              "description": "Store a schedule allowing both sensors, every day, all day.",
+              "properties": {
+                "enabled": {
+                  "oneOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "enum": [
+                        "on",
+                        "off",
+                        "yes",
+                        "no",
+                        "true",
+                        "false",
+                        "enabled",
+                        "disabled",
+                        "1",
+                        "0"
+                      ]
+                    }
+                  ],
+                  "description": "Whether the schedule is active."
                 },
-                {
-                  "enum": [
-                    "on",
-                    "off",
-                    "yes",
-                    "no",
-                    "true",
-                    "false",
-                    "enabled",
-                    "disabled",
-                    "1",
-                    "0"
-                  ]
-                }
-              ],
-              "description": "Whether the schedule is active."
-            },
-            "index": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 255,
-              "description": "Schedule slot."
-            },
-            "action": {
-              "const": "add_schedule"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "assert",
-          "description": "Fail the script unless a condition holds.",
-          "properties": {
-            "above": {
-              "description": "Must be greater than this."
-            },
-            "any": {
-              "type": "array",
-              "items": {
-                "enum": [
-                  "ac_present",
-                  "auto",
-                  "autoretract",
-                  "battery",
-                  "battery_present",
-                  "charge_rate",
-                  "closing_mid_time",
-                  "closing_start_time",
-                  "closing_top_time",
-                  "cmd_lockout",
-                  "discharge_rate",
-                  "door_closed",
-                  "door_closing",
-                  "door_open",
-                  "door_opening",
-                  "door_status",
-                  "firmware_version",
-                  "hardware_version",
-                  "has_remote_id",
-                  "has_remote_key",
-                  "hold_time",
-                  "inside",
-                  "notified_inside_off",
-                  "notified_inside_on",
-                  "notified_low_battery",
-                  "notified_outside_off",
-                  "notified_outside_on",
-                  "notify_inside_off",
-                  "notify_inside_on",
-                  "notify_low_battery",
-                  "notify_outside_off",
-                  "notify_outside_on",
-                  "obstruction",
-                  "outside",
-                  "position",
-                  "power",
-                  "rise_time",
-                  "safety_lock",
-                  "sensor_retrigger_window",
-                  "sensor_trigger_voltage",
-                  "sleep_sensor_trigger_voltage",
-                  "slowing_time",
-                  "time",
-                  "timezone",
-                  "total_auto_retracts",
-                  "total_open_cycles"
-                ]
-              },
-              "description": "Several conditions, any one of which may hold."
-            },
-            "at_least": {
-              "description": "Must be at least this."
-            },
-            "at_most": {
-              "description": "Must be at most this."
-            },
-            "below": {
-              "description": "Must be less than this."
-            },
-            "condition": {
-              "enum": [
-                "ac_present",
-                "auto",
-                "autoretract",
-                "battery",
-                "battery_present",
-                "charge_rate",
-                "closing_mid_time",
-                "closing_start_time",
-                "closing_top_time",
-                "cmd_lockout",
-                "discharge_rate",
-                "door_closed",
-                "door_closing",
-                "door_open",
-                "door_opening",
-                "door_status",
-                "firmware_version",
-                "hardware_version",
-                "has_remote_id",
-                "has_remote_key",
-                "hold_time",
-                "inside",
-                "notified_inside_off",
-                "notified_inside_on",
-                "notified_low_battery",
-                "notified_outside_off",
-                "notified_outside_on",
-                "notify_inside_off",
-                "notify_inside_on",
-                "notify_low_battery",
-                "notify_outside_off",
-                "notify_outside_on",
-                "obstruction",
-                "outside",
-                "position",
-                "power",
-                "rise_time",
-                "safety_lock",
-                "sensor_retrigger_window",
-                "sensor_trigger_voltage",
-                "sleep_sensor_trigger_voltage",
-                "slowing_time",
-                "time",
-                "timezone",
-                "total_auto_retracts",
-                "total_open_cycles"
-              ],
-              "description": "The name to test."
-            },
-            "conditions": {
-              "type": "array",
-              "items": {
-                "enum": [
-                  "ac_present",
-                  "auto",
-                  "autoretract",
-                  "battery",
-                  "battery_present",
-                  "charge_rate",
-                  "closing_mid_time",
-                  "closing_start_time",
-                  "closing_top_time",
-                  "cmd_lockout",
-                  "discharge_rate",
-                  "door_closed",
-                  "door_closing",
-                  "door_open",
-                  "door_opening",
-                  "door_status",
-                  "firmware_version",
-                  "hardware_version",
-                  "has_remote_id",
-                  "has_remote_key",
-                  "hold_time",
-                  "inside",
-                  "notified_inside_off",
-                  "notified_inside_on",
-                  "notified_low_battery",
-                  "notified_outside_off",
-                  "notified_outside_on",
-                  "notify_inside_off",
-                  "notify_inside_on",
-                  "notify_low_battery",
-                  "notify_outside_off",
-                  "notify_outside_on",
-                  "obstruction",
-                  "outside",
-                  "position",
-                  "power",
-                  "rise_time",
-                  "safety_lock",
-                  "sensor_retrigger_window",
-                  "sensor_trigger_voltage",
-                  "sleep_sensor_trigger_voltage",
-                  "slowing_time",
-                  "time",
-                  "timezone",
-                  "total_auto_retracts",
-                  "total_open_cycles"
-                ]
-              },
-              "description": "Several conditions, all of which must hold."
-            },
-            "equals": {
-              "description": "Expected value."
-            },
-            "not_equals": {
-              "description": "Value it must not be."
-            },
-            "action": {
-              "const": "assert"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "battery",
-          "description": "Set the battery percentage.",
-          "properties": {
-            "percent": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 100,
-              "description": "Battery charge, 0-100."
-            },
-            "value": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 100,
-              "description": "The new value. `toggle` inverts a yes/no one."
-            },
-            "action": {
-              "const": "battery"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "clear_schedules",
-          "description": "Delete every schedule.",
-          "properties": {
-            "action": {
-              "const": "clear_schedules"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "close",
-          "description": "Close the door.",
-          "properties": {
-            "action": {
-              "const": "close"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "cycle",
-          "description": "Open, hold for hold_time, then close - the door button.",
-          "properties": {
-            "action": {
-              "const": "cycle"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "enable_schedule",
-          "description": "Switch a stored schedule on or off.",
-          "properties": {
-            "index": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 255,
-              "description": "Schedule slot."
-            },
-            "state": {
-              "oneOf": [
-                {
-                  "type": "boolean"
+                "index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255,
+                  "description": "Schedule slot."
                 },
-                {
-                  "enum": [
-                    "on",
-                    "off",
-                    "yes",
-                    "no",
-                    "true",
-                    "false",
-                    "enabled",
-                    "disabled",
-                    "1",
-                    "0"
-                  ]
-                }
-              ],
-              "description": "on/off/true/false. Omit to toggle."
-            },
-            "action": {
-              "const": "enable_schedule"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "if",
-          "description": "Run one block of steps or another, depending on a condition.",
-          "properties": {
-            "above": {
-              "description": "Must be greater than this."
-            },
-            "any": {
-              "type": "array",
-              "items": {
-                "enum": [
-                  "ac_present",
-                  "auto",
-                  "autoretract",
-                  "battery",
-                  "battery_present",
-                  "charge_rate",
-                  "closing_mid_time",
-                  "closing_start_time",
-                  "closing_top_time",
-                  "cmd_lockout",
-                  "discharge_rate",
-                  "door_closed",
-                  "door_closing",
-                  "door_open",
-                  "door_opening",
-                  "door_status",
-                  "firmware_version",
-                  "hardware_version",
-                  "has_remote_id",
-                  "has_remote_key",
-                  "hold_time",
-                  "inside",
-                  "notified_inside_off",
-                  "notified_inside_on",
-                  "notified_low_battery",
-                  "notified_outside_off",
-                  "notified_outside_on",
-                  "notify_inside_off",
-                  "notify_inside_on",
-                  "notify_low_battery",
-                  "notify_outside_off",
-                  "notify_outside_on",
-                  "obstruction",
-                  "outside",
-                  "position",
-                  "power",
-                  "rise_time",
-                  "safety_lock",
-                  "sensor_retrigger_window",
-                  "sensor_trigger_voltage",
-                  "sleep_sensor_trigger_voltage",
-                  "slowing_time",
-                  "time",
-                  "timezone",
-                  "total_auto_retracts",
-                  "total_open_cycles"
-                ]
-              },
-              "description": "Several conditions, any one of which may hold."
-            },
-            "at_least": {
-              "description": "Must be at least this."
-            },
-            "at_most": {
-              "description": "Must be at most this."
-            },
-            "below": {
-              "description": "Must be less than this."
-            },
-            "condition": {
-              "enum": [
-                "ac_present",
-                "auto",
-                "autoretract",
-                "battery",
-                "battery_present",
-                "charge_rate",
-                "closing_mid_time",
-                "closing_start_time",
-                "closing_top_time",
-                "cmd_lockout",
-                "discharge_rate",
-                "door_closed",
-                "door_closing",
-                "door_open",
-                "door_opening",
-                "door_status",
-                "firmware_version",
-                "hardware_version",
-                "has_remote_id",
-                "has_remote_key",
-                "hold_time",
-                "inside",
-                "notified_inside_off",
-                "notified_inside_on",
-                "notified_low_battery",
-                "notified_outside_off",
-                "notified_outside_on",
-                "notify_inside_off",
-                "notify_inside_on",
-                "notify_low_battery",
-                "notify_outside_off",
-                "notify_outside_on",
-                "obstruction",
-                "outside",
-                "position",
-                "power",
-                "rise_time",
-                "safety_lock",
-                "sensor_retrigger_window",
-                "sensor_trigger_voltage",
-                "sleep_sensor_trigger_voltage",
-                "slowing_time",
-                "time",
-                "timezone",
-                "total_auto_retracts",
-                "total_open_cycles"
-              ],
-              "description": "The name to test."
-            },
-            "conditions": {
-              "type": "array",
-              "items": {
-                "enum": [
-                  "ac_present",
-                  "auto",
-                  "autoretract",
-                  "battery",
-                  "battery_present",
-                  "charge_rate",
-                  "closing_mid_time",
-                  "closing_start_time",
-                  "closing_top_time",
-                  "cmd_lockout",
-                  "discharge_rate",
-                  "door_closed",
-                  "door_closing",
-                  "door_open",
-                  "door_opening",
-                  "door_status",
-                  "firmware_version",
-                  "hardware_version",
-                  "has_remote_id",
-                  "has_remote_key",
-                  "hold_time",
-                  "inside",
-                  "notified_inside_off",
-                  "notified_inside_on",
-                  "notified_low_battery",
-                  "notified_outside_off",
-                  "notified_outside_on",
-                  "notify_inside_off",
-                  "notify_inside_on",
-                  "notify_low_battery",
-                  "notify_outside_off",
-                  "notify_outside_on",
-                  "obstruction",
-                  "outside",
-                  "position",
-                  "power",
-                  "rise_time",
-                  "safety_lock",
-                  "sensor_retrigger_window",
-                  "sensor_trigger_voltage",
-                  "sleep_sensor_trigger_voltage",
-                  "slowing_time",
-                  "time",
-                  "timezone",
-                  "total_auto_retracts",
-                  "total_open_cycles"
-                ]
-              },
-              "description": "Several conditions, all of which must hold."
-            },
-            "else": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/step"
-              },
-              "description": "Steps to run when it does not."
-            },
-            "equals": {
-              "description": "Expected value."
-            },
-            "not_equals": {
-              "description": "Value it must not be."
-            },
-            "then": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/step"
-              },
-              "description": "Steps to run when the condition holds."
-            },
-            "action": {
-              "const": "if"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "inside",
-          "description": "Put a pet at the inside sensor, for a moment or indefinitely.",
-          "properties": {
-            "duration": {
-              "type": "number",
-              "minimum": 0,
-              "description": "Seconds to hold. 0 means until cleared."
-            },
-            "state": {
-              "oneOf": [
-                {
-                  "type": "boolean"
+                "action": {
+                  "const": "add_schedule"
                 },
-                {
-                  "enum": [
-                    "on",
-                    "off",
-                    "yes",
-                    "no",
-                    "true",
-                    "false",
-                    "enabled",
-                    "disabled",
-                    "1",
-                    "0"
-                  ]
-                }
-              ],
-              "description": "on/off/true/false. Omit to toggle."
-            },
-            "action": {
-              "const": "inside"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "log",
-          "description": "Print a message to the script log.",
-          "properties": {
-            "message": {
-              "type": "string",
-              "description": "Text to log."
-            },
-            "action": {
-              "const": "log"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "notify",
-          "description": "Switch a notification on or off.",
-          "properties": {
-            "name": {
-              "enum": [
-                "inside_off",
-                "inside_on",
-                "low_battery",
-                "outside_off",
-                "outside_on"
-              ],
-              "description": "The value, or notification, to act on."
-            },
-            "state": {
-              "oneOf": [
-                {
-                  "type": "boolean"
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
                 },
-                {
-                  "enum": [
-                    "on",
-                    "off",
-                    "yes",
-                    "no",
-                    "true",
-                    "false",
-                    "enabled",
-                    "disabled",
-                    "1",
-                    "0"
-                  ]
-                }
-              ],
-              "description": "on/off/true/false. Omit to toggle."
-            },
-            "action": {
-              "const": "notify"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "obstruction",
-          "description": "Place or clear a physical blockage in the doorway.",
-          "properties": {
-            "duration": {
-              "type": "number",
-              "minimum": 0,
-              "description": "Seconds to hold. 0 means until cleared."
-            },
-            "state": {
-              "oneOf": [
-                {
-                  "type": "boolean"
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
                 },
-                {
-                  "enum": [
-                    "on",
-                    "off",
-                    "yes",
-                    "no",
-                    "true",
-                    "false",
-                    "enabled",
-                    "disabled",
-                    "1",
-                    "0"
-                  ]
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
                 }
+              },
+              "required": [
+                "action"
               ],
-              "description": "on/off/true/false. Omit to toggle."
+              "additionalProperties": false
             },
-            "action": {
-              "const": "obstruction"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "open",
-          "description": "Open the door and hold it open until something closes it.",
-          "properties": {
-            "action": {
-              "const": "open"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "outside",
-          "description": "Put a pet at the outside sensor. Mutually exclusive with inside.",
-          "properties": {
-            "duration": {
-              "type": "number",
-              "minimum": 0,
-              "description": "Seconds to hold. 0 means until cleared."
-            },
-            "state": {
-              "oneOf": [
-                {
-                  "type": "boolean"
+            {
+              "title": "assert",
+              "description": "Fail the script unless a condition holds.",
+              "properties": {
+                "above": {
+                  "description": "Must be greater than this."
                 },
-                {
+                "any": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "ac_present",
+                      "auto",
+                      "autoretract",
+                      "battery",
+                      "battery_present",
+                      "charge_rate",
+                      "closing_mid_time",
+                      "closing_start_time",
+                      "closing_top_time",
+                      "cmd_lockout",
+                      "discharge_rate",
+                      "door_closed",
+                      "door_closing",
+                      "door_open",
+                      "door_opening",
+                      "door_status",
+                      "firmware_version",
+                      "hardware_version",
+                      "has_remote_id",
+                      "has_remote_key",
+                      "hold_time",
+                      "inside",
+                      "notified_inside_off",
+                      "notified_inside_on",
+                      "notified_low_battery",
+                      "notified_outside_off",
+                      "notified_outside_on",
+                      "notify_inside_off",
+                      "notify_inside_on",
+                      "notify_low_battery",
+                      "notify_outside_off",
+                      "notify_outside_on",
+                      "obstruction",
+                      "outside",
+                      "position",
+                      "power",
+                      "rise_time",
+                      "safety_lock",
+                      "sensor_retrigger_window",
+                      "sensor_trigger_voltage",
+                      "sleep_sensor_trigger_voltage",
+                      "slowing_time",
+                      "time",
+                      "timezone",
+                      "total_auto_retracts",
+                      "total_open_cycles"
+                    ]
+                  },
+                  "description": "Several conditions, any one of which may hold."
+                },
+                "at_least": {
+                  "description": "Must be at least this."
+                },
+                "at_most": {
+                  "description": "Must be at most this."
+                },
+                "below": {
+                  "description": "Must be less than this."
+                },
+                "condition": {
                   "enum": [
-                    "on",
-                    "off",
-                    "yes",
-                    "no",
-                    "true",
-                    "false",
-                    "enabled",
-                    "disabled",
-                    "1",
-                    "0"
-                  ]
+                    "ac_present",
+                    "auto",
+                    "autoretract",
+                    "battery",
+                    "battery_present",
+                    "charge_rate",
+                    "closing_mid_time",
+                    "closing_start_time",
+                    "closing_top_time",
+                    "cmd_lockout",
+                    "discharge_rate",
+                    "door_closed",
+                    "door_closing",
+                    "door_open",
+                    "door_opening",
+                    "door_status",
+                    "firmware_version",
+                    "hardware_version",
+                    "has_remote_id",
+                    "has_remote_key",
+                    "hold_time",
+                    "inside",
+                    "notified_inside_off",
+                    "notified_inside_on",
+                    "notified_low_battery",
+                    "notified_outside_off",
+                    "notified_outside_on",
+                    "notify_inside_off",
+                    "notify_inside_on",
+                    "notify_low_battery",
+                    "notify_outside_off",
+                    "notify_outside_on",
+                    "obstruction",
+                    "outside",
+                    "position",
+                    "power",
+                    "rise_time",
+                    "safety_lock",
+                    "sensor_retrigger_window",
+                    "sensor_trigger_voltage",
+                    "sleep_sensor_trigger_voltage",
+                    "slowing_time",
+                    "time",
+                    "timezone",
+                    "total_auto_retracts",
+                    "total_open_cycles"
+                  ],
+                  "description": "The name to test."
+                },
+                "conditions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "ac_present",
+                      "auto",
+                      "autoretract",
+                      "battery",
+                      "battery_present",
+                      "charge_rate",
+                      "closing_mid_time",
+                      "closing_start_time",
+                      "closing_top_time",
+                      "cmd_lockout",
+                      "discharge_rate",
+                      "door_closed",
+                      "door_closing",
+                      "door_open",
+                      "door_opening",
+                      "door_status",
+                      "firmware_version",
+                      "hardware_version",
+                      "has_remote_id",
+                      "has_remote_key",
+                      "hold_time",
+                      "inside",
+                      "notified_inside_off",
+                      "notified_inside_on",
+                      "notified_low_battery",
+                      "notified_outside_off",
+                      "notified_outside_on",
+                      "notify_inside_off",
+                      "notify_inside_on",
+                      "notify_low_battery",
+                      "notify_outside_off",
+                      "notify_outside_on",
+                      "obstruction",
+                      "outside",
+                      "position",
+                      "power",
+                      "rise_time",
+                      "safety_lock",
+                      "sensor_retrigger_window",
+                      "sensor_trigger_voltage",
+                      "sleep_sensor_trigger_voltage",
+                      "slowing_time",
+                      "time",
+                      "timezone",
+                      "total_auto_retracts",
+                      "total_open_cycles"
+                    ]
+                  },
+                  "description": "Several conditions, all of which must hold."
+                },
+                "equals": {
+                  "description": "Expected value."
+                },
+                "not_equals": {
+                  "description": "Value it must not be."
+                },
+                "action": {
+                  "const": "assert"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
                 }
-              ],
-              "description": "on/off/true/false. Omit to toggle."
-            },
-            "action": {
-              "const": "outside"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "remove_schedule",
-          "description": "Delete a schedule.",
-          "properties": {
-            "index": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 255,
-              "description": "Schedule slot."
-            },
-            "action": {
-              "const": "remove_schedule"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "repeat",
-          "description": "Run a block of steps a number of times, or while a condition holds.",
-          "properties": {
-            "above": {
-              "description": "Must be greater than this."
-            },
-            "any": {
-              "type": "array",
-              "items": {
-                "enum": [
-                  "ac_present",
-                  "auto",
-                  "autoretract",
-                  "battery",
-                  "battery_present",
-                  "charge_rate",
-                  "closing_mid_time",
-                  "closing_start_time",
-                  "closing_top_time",
-                  "cmd_lockout",
-                  "discharge_rate",
-                  "door_closed",
-                  "door_closing",
-                  "door_open",
-                  "door_opening",
-                  "door_status",
-                  "firmware_version",
-                  "hardware_version",
-                  "has_remote_id",
-                  "has_remote_key",
-                  "hold_time",
-                  "inside",
-                  "notified_inside_off",
-                  "notified_inside_on",
-                  "notified_low_battery",
-                  "notified_outside_off",
-                  "notified_outside_on",
-                  "notify_inside_off",
-                  "notify_inside_on",
-                  "notify_low_battery",
-                  "notify_outside_off",
-                  "notify_outside_on",
-                  "obstruction",
-                  "outside",
-                  "position",
-                  "power",
-                  "rise_time",
-                  "safety_lock",
-                  "sensor_retrigger_window",
-                  "sensor_trigger_voltage",
-                  "sleep_sensor_trigger_voltage",
-                  "slowing_time",
-                  "time",
-                  "timezone",
-                  "total_auto_retracts",
-                  "total_open_cycles"
-                ]
               },
-              "description": "Several conditions, any one of which may hold."
-            },
-            "at_least": {
-              "description": "Must be at least this."
-            },
-            "at_most": {
-              "description": "Must be at most this."
-            },
-            "below": {
-              "description": "Must be less than this."
-            },
-            "condition": {
-              "enum": [
-                "ac_present",
-                "auto",
-                "autoretract",
-                "battery",
-                "battery_present",
-                "charge_rate",
-                "closing_mid_time",
-                "closing_start_time",
-                "closing_top_time",
-                "cmd_lockout",
-                "discharge_rate",
-                "door_closed",
-                "door_closing",
-                "door_open",
-                "door_opening",
-                "door_status",
-                "firmware_version",
-                "hardware_version",
-                "has_remote_id",
-                "has_remote_key",
-                "hold_time",
-                "inside",
-                "notified_inside_off",
-                "notified_inside_on",
-                "notified_low_battery",
-                "notified_outside_off",
-                "notified_outside_on",
-                "notify_inside_off",
-                "notify_inside_on",
-                "notify_low_battery",
-                "notify_outside_off",
-                "notify_outside_on",
-                "obstruction",
-                "outside",
-                "position",
-                "power",
-                "rise_time",
-                "safety_lock",
-                "sensor_retrigger_window",
-                "sensor_trigger_voltage",
-                "sleep_sensor_trigger_voltage",
-                "slowing_time",
-                "time",
-                "timezone",
-                "total_auto_retracts",
-                "total_open_cycles"
+              "required": [
+                "action"
               ],
-              "description": "The name to test."
+              "additionalProperties": false
             },
-            "conditions": {
-              "type": "array",
-              "items": {
-                "enum": [
-                  "ac_present",
-                  "auto",
-                  "autoretract",
-                  "battery",
-                  "battery_present",
-                  "charge_rate",
-                  "closing_mid_time",
-                  "closing_start_time",
-                  "closing_top_time",
-                  "cmd_lockout",
-                  "discharge_rate",
-                  "door_closed",
-                  "door_closing",
-                  "door_open",
-                  "door_opening",
-                  "door_status",
-                  "firmware_version",
-                  "hardware_version",
-                  "has_remote_id",
-                  "has_remote_key",
-                  "hold_time",
-                  "inside",
-                  "notified_inside_off",
-                  "notified_inside_on",
-                  "notified_low_battery",
-                  "notified_outside_off",
-                  "notified_outside_on",
-                  "notify_inside_off",
-                  "notify_inside_on",
-                  "notify_low_battery",
-                  "notify_outside_off",
-                  "notify_outside_on",
-                  "obstruction",
-                  "outside",
-                  "position",
-                  "power",
-                  "rise_time",
-                  "safety_lock",
-                  "sensor_retrigger_window",
-                  "sensor_trigger_voltage",
-                  "sleep_sensor_trigger_voltage",
-                  "slowing_time",
-                  "time",
-                  "timezone",
-                  "total_auto_retracts",
-                  "total_open_cycles"
-                ]
-              },
-              "description": "Several conditions, all of which must hold."
-            },
-            "equals": {
-              "description": "Expected value."
-            },
-            "not_equals": {
-              "description": "Value it must not be."
-            },
-            "steps": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/step"
-              },
-              "description": "The block to run."
-            },
-            "times": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 10000,
-              "description": "How many iterations."
-            },
-            "action": {
-              "const": "repeat"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "reset",
-          "description": "Return the door to its defaults, or to a named state document.",
-          "properties": {
-            "initial_state": {
-              "type": "string",
-              "description": "A state document to reset to, by name or path."
-            },
-            "action": {
-              "const": "reset"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "set",
-          "description": "Set a named value. `toggle` as the value inverts a yes/no one.",
-          "properties": {
-            "name": {
-              "enum": [
-                "ac_present",
-                "auto",
-                "autoretract",
-                "battery",
-                "battery_present",
-                "charge_rate",
-                "closing_mid_time",
-                "closing_start_time",
-                "closing_top_time",
-                "cmd_lockout",
-                "discharge_rate",
-                "firmware_version",
-                "hardware_version",
-                "has_remote_id",
-                "has_remote_key",
-                "hold_time",
-                "inside",
-                "notify_inside_off",
-                "notify_inside_on",
-                "notify_low_battery",
-                "notify_outside_off",
-                "notify_outside_on",
-                "obstruction",
-                "outside",
-                "power",
-                "rise_time",
-                "safety_lock",
-                "sensor_retrigger_window",
-                "sensor_trigger_voltage",
-                "sleep_sensor_trigger_voltage",
-                "slowing_time",
-                "timezone",
-                "total_auto_retracts",
-                "total_open_cycles"
-              ],
-              "description": "The value, or notification, to act on."
-            },
-            "value": {
-              "description": "The new value. `toggle` inverts a yes/no one.",
-              "oneOf": [
-                {
-                  "type": [
-                    "string",
-                    "number",
-                    "boolean"
-                  ]
+            {
+              "title": "battery",
+              "description": "Set the battery percentage.",
+              "properties": {
+                "percent": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "description": "Battery charge, 0-100."
+                },
+                "value": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "description": "The new value. `toggle` inverts a yes/no one."
+                },
+                "action": {
+                  "const": "battery"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
                 }
-              ]
-            },
-            "action": {
-              "const": "set"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "toggle",
-          "description": "Open the door if closed, close it if open; nothing mid-travel.",
-          "properties": {
-            "action": {
-              "const": "toggle"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "trigger",
-          "description": "A pet walks through a sensor, rather than standing at it.",
-          "properties": {
-            "sensor": {
-              "enum": [
-                "inside",
-                "outside"
-              ],
-              "description": "Which sensor: inside or outside."
-            },
-            "action": {
-              "const": "trigger"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "wait",
-          "description": "Pause for a number of seconds.",
-          "properties": {
-            "seconds": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 86400.0,
-              "description": "How long to wait."
-            },
-            "action": {
-              "const": "wait"
-            },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "title": "wait_for",
-          "description": "Wait until a condition holds, or time out.",
-          "properties": {
-            "above": {
-              "description": "Must be greater than this."
-            },
-            "any": {
-              "type": "array",
-              "items": {
-                "enum": [
-                  "ac_present",
-                  "auto",
-                  "autoretract",
-                  "battery",
-                  "battery_present",
-                  "charge_rate",
-                  "closing_mid_time",
-                  "closing_start_time",
-                  "closing_top_time",
-                  "cmd_lockout",
-                  "discharge_rate",
-                  "door_closed",
-                  "door_closing",
-                  "door_open",
-                  "door_opening",
-                  "door_status",
-                  "firmware_version",
-                  "hardware_version",
-                  "has_remote_id",
-                  "has_remote_key",
-                  "hold_time",
-                  "inside",
-                  "notified_inside_off",
-                  "notified_inside_on",
-                  "notified_low_battery",
-                  "notified_outside_off",
-                  "notified_outside_on",
-                  "notify_inside_off",
-                  "notify_inside_on",
-                  "notify_low_battery",
-                  "notify_outside_off",
-                  "notify_outside_on",
-                  "obstruction",
-                  "outside",
-                  "position",
-                  "power",
-                  "rise_time",
-                  "safety_lock",
-                  "sensor_retrigger_window",
-                  "sensor_trigger_voltage",
-                  "sleep_sensor_trigger_voltage",
-                  "slowing_time",
-                  "time",
-                  "timezone",
-                  "total_auto_retracts",
-                  "total_open_cycles"
-                ]
               },
-              "description": "Several conditions, any one of which may hold."
-            },
-            "at_least": {
-              "description": "Must be at least this."
-            },
-            "at_most": {
-              "description": "Must be at most this."
-            },
-            "below": {
-              "description": "Must be less than this."
-            },
-            "condition": {
-              "enum": [
-                "ac_present",
-                "auto",
-                "autoretract",
-                "battery",
-                "battery_present",
-                "charge_rate",
-                "closing_mid_time",
-                "closing_start_time",
-                "closing_top_time",
-                "cmd_lockout",
-                "discharge_rate",
-                "door_closed",
-                "door_closing",
-                "door_open",
-                "door_opening",
-                "door_status",
-                "firmware_version",
-                "hardware_version",
-                "has_remote_id",
-                "has_remote_key",
-                "hold_time",
-                "inside",
-                "notified_inside_off",
-                "notified_inside_on",
-                "notified_low_battery",
-                "notified_outside_off",
-                "notified_outside_on",
-                "notify_inside_off",
-                "notify_inside_on",
-                "notify_low_battery",
-                "notify_outside_off",
-                "notify_outside_on",
-                "obstruction",
-                "outside",
-                "position",
-                "power",
-                "rise_time",
-                "safety_lock",
-                "sensor_retrigger_window",
-                "sensor_trigger_voltage",
-                "sleep_sensor_trigger_voltage",
-                "slowing_time",
-                "time",
-                "timezone",
-                "total_auto_retracts",
-                "total_open_cycles"
+              "required": [
+                "action"
               ],
-              "description": "The name to test."
+              "additionalProperties": false
             },
-            "conditions": {
-              "type": "array",
-              "items": {
-                "enum": [
-                  "ac_present",
-                  "auto",
-                  "autoretract",
-                  "battery",
-                  "battery_present",
-                  "charge_rate",
-                  "closing_mid_time",
-                  "closing_start_time",
-                  "closing_top_time",
-                  "cmd_lockout",
-                  "discharge_rate",
-                  "door_closed",
-                  "door_closing",
-                  "door_open",
-                  "door_opening",
-                  "door_status",
-                  "firmware_version",
-                  "hardware_version",
-                  "has_remote_id",
-                  "has_remote_key",
-                  "hold_time",
-                  "inside",
-                  "notified_inside_off",
-                  "notified_inside_on",
-                  "notified_low_battery",
-                  "notified_outside_off",
-                  "notified_outside_on",
-                  "notify_inside_off",
-                  "notify_inside_on",
-                  "notify_low_battery",
-                  "notify_outside_off",
-                  "notify_outside_on",
-                  "obstruction",
-                  "outside",
-                  "position",
-                  "power",
-                  "rise_time",
-                  "safety_lock",
-                  "sensor_retrigger_window",
-                  "sensor_trigger_voltage",
-                  "sleep_sensor_trigger_voltage",
-                  "slowing_time",
-                  "time",
-                  "timezone",
-                  "total_auto_retracts",
-                  "total_open_cycles"
-                ]
+            {
+              "title": "clear_schedules",
+              "description": "Delete every schedule.",
+              "properties": {
+                "action": {
+                  "const": "clear_schedules"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
               },
-              "description": "Several conditions, all of which must hold."
-            },
-            "equals": {
-              "description": "Expected value."
-            },
-            "not_equals": {
-              "description": "Value it must not be."
-            },
-            "on_timeout": {
-              "enum": [
-                "fail",
-                "continue"
+              "required": [
+                "action"
               ],
-              "description": "What a timeout means: fail the script, or continue."
+              "additionalProperties": false
             },
-            "timeout": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 86400.0,
-              "description": "Seconds to wait before giving up."
+            {
+              "title": "close",
+              "description": "Close the door.",
+              "properties": {
+                "action": {
+                  "const": "close"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
             },
-            "action": {
-              "const": "wait_for"
+            {
+              "title": "cycle",
+              "description": "Open, hold for hold_time, then close - the door button.",
+              "properties": {
+                "action": {
+                  "const": "cycle"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
             },
-            "comment": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
+            {
+              "title": "enable_schedule",
+              "description": "Switch a stored schedule on or off.",
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255,
+                  "description": "Schedule slot."
+                },
+                "state": {
+                  "oneOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "enum": [
+                        "on",
+                        "off",
+                        "yes",
+                        "no",
+                        "true",
+                        "false",
+                        "enabled",
+                        "disabled",
+                        "1",
+                        "0"
+                      ]
+                    }
+                  ],
+                  "description": "on/off/true/false. Omit to toggle."
+                },
+                "action": {
+                  "const": "enable_schedule"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
             },
-            "description": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
+            {
+              "title": "if",
+              "description": "Run one block of steps or another, depending on a condition.",
+              "properties": {
+                "above": {
+                  "description": "Must be greater than this."
+                },
+                "any": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "ac_present",
+                      "auto",
+                      "autoretract",
+                      "battery",
+                      "battery_present",
+                      "charge_rate",
+                      "closing_mid_time",
+                      "closing_start_time",
+                      "closing_top_time",
+                      "cmd_lockout",
+                      "discharge_rate",
+                      "door_closed",
+                      "door_closing",
+                      "door_open",
+                      "door_opening",
+                      "door_status",
+                      "firmware_version",
+                      "hardware_version",
+                      "has_remote_id",
+                      "has_remote_key",
+                      "hold_time",
+                      "inside",
+                      "notified_inside_off",
+                      "notified_inside_on",
+                      "notified_low_battery",
+                      "notified_outside_off",
+                      "notified_outside_on",
+                      "notify_inside_off",
+                      "notify_inside_on",
+                      "notify_low_battery",
+                      "notify_outside_off",
+                      "notify_outside_on",
+                      "obstruction",
+                      "outside",
+                      "position",
+                      "power",
+                      "rise_time",
+                      "safety_lock",
+                      "sensor_retrigger_window",
+                      "sensor_trigger_voltage",
+                      "sleep_sensor_trigger_voltage",
+                      "slowing_time",
+                      "time",
+                      "timezone",
+                      "total_auto_retracts",
+                      "total_open_cycles"
+                    ]
+                  },
+                  "description": "Several conditions, any one of which may hold."
+                },
+                "at_least": {
+                  "description": "Must be at least this."
+                },
+                "at_most": {
+                  "description": "Must be at most this."
+                },
+                "below": {
+                  "description": "Must be less than this."
+                },
+                "condition": {
+                  "enum": [
+                    "ac_present",
+                    "auto",
+                    "autoretract",
+                    "battery",
+                    "battery_present",
+                    "charge_rate",
+                    "closing_mid_time",
+                    "closing_start_time",
+                    "closing_top_time",
+                    "cmd_lockout",
+                    "discharge_rate",
+                    "door_closed",
+                    "door_closing",
+                    "door_open",
+                    "door_opening",
+                    "door_status",
+                    "firmware_version",
+                    "hardware_version",
+                    "has_remote_id",
+                    "has_remote_key",
+                    "hold_time",
+                    "inside",
+                    "notified_inside_off",
+                    "notified_inside_on",
+                    "notified_low_battery",
+                    "notified_outside_off",
+                    "notified_outside_on",
+                    "notify_inside_off",
+                    "notify_inside_on",
+                    "notify_low_battery",
+                    "notify_outside_off",
+                    "notify_outside_on",
+                    "obstruction",
+                    "outside",
+                    "position",
+                    "power",
+                    "rise_time",
+                    "safety_lock",
+                    "sensor_retrigger_window",
+                    "sensor_trigger_voltage",
+                    "sleep_sensor_trigger_voltage",
+                    "slowing_time",
+                    "time",
+                    "timezone",
+                    "total_auto_retracts",
+                    "total_open_cycles"
+                  ],
+                  "description": "The name to test."
+                },
+                "conditions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "ac_present",
+                      "auto",
+                      "autoretract",
+                      "battery",
+                      "battery_present",
+                      "charge_rate",
+                      "closing_mid_time",
+                      "closing_start_time",
+                      "closing_top_time",
+                      "cmd_lockout",
+                      "discharge_rate",
+                      "door_closed",
+                      "door_closing",
+                      "door_open",
+                      "door_opening",
+                      "door_status",
+                      "firmware_version",
+                      "hardware_version",
+                      "has_remote_id",
+                      "has_remote_key",
+                      "hold_time",
+                      "inside",
+                      "notified_inside_off",
+                      "notified_inside_on",
+                      "notified_low_battery",
+                      "notified_outside_off",
+                      "notified_outside_on",
+                      "notify_inside_off",
+                      "notify_inside_on",
+                      "notify_low_battery",
+                      "notify_outside_off",
+                      "notify_outside_on",
+                      "obstruction",
+                      "outside",
+                      "position",
+                      "power",
+                      "rise_time",
+                      "safety_lock",
+                      "sensor_retrigger_window",
+                      "sensor_trigger_voltage",
+                      "sleep_sensor_trigger_voltage",
+                      "slowing_time",
+                      "time",
+                      "timezone",
+                      "total_auto_retracts",
+                      "total_open_cycles"
+                    ]
+                  },
+                  "description": "Several conditions, all of which must hold."
+                },
+                "else": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/step"
+                  },
+                  "description": "Steps to run when it does not."
+                },
+                "equals": {
+                  "description": "Expected value."
+                },
+                "not_equals": {
+                  "description": "Value it must not be."
+                },
+                "then": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/step"
+                  },
+                  "description": "Steps to run when the condition holds."
+                },
+                "action": {
+                  "const": "if"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
             },
-            "note": {
-              "type": "string",
-              "description": "Free-text annotation; read by nothing."
+            {
+              "title": "inside",
+              "description": "Put a pet at the inside sensor, for a moment or indefinitely.",
+              "properties": {
+                "duration": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Seconds to hold. 0 means until cleared."
+                },
+                "state": {
+                  "oneOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "enum": [
+                        "on",
+                        "off",
+                        "yes",
+                        "no",
+                        "true",
+                        "false",
+                        "enabled",
+                        "disabled",
+                        "1",
+                        "0"
+                      ]
+                    }
+                  ],
+                  "description": "on/off/true/false. Omit to toggle."
+                },
+                "action": {
+                  "const": "inside"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "title": "log",
+              "description": "Print a message to the script log.",
+              "properties": {
+                "message": {
+                  "type": "string",
+                  "description": "Text to log."
+                },
+                "action": {
+                  "const": "log"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "title": "notify",
+              "description": "Switch a notification on or off.",
+              "properties": {
+                "name": {
+                  "enum": [
+                    "inside_off",
+                    "inside_on",
+                    "low_battery",
+                    "outside_off",
+                    "outside_on"
+                  ],
+                  "description": "The value, or notification, to act on."
+                },
+                "state": {
+                  "oneOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "enum": [
+                        "on",
+                        "off",
+                        "yes",
+                        "no",
+                        "true",
+                        "false",
+                        "enabled",
+                        "disabled",
+                        "1",
+                        "0"
+                      ]
+                    }
+                  ],
+                  "description": "on/off/true/false. Omit to toggle."
+                },
+                "action": {
+                  "const": "notify"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "title": "obstruction",
+              "description": "Place or clear a physical blockage in the doorway.",
+              "properties": {
+                "duration": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Seconds to hold. 0 means until cleared."
+                },
+                "state": {
+                  "oneOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "enum": [
+                        "on",
+                        "off",
+                        "yes",
+                        "no",
+                        "true",
+                        "false",
+                        "enabled",
+                        "disabled",
+                        "1",
+                        "0"
+                      ]
+                    }
+                  ],
+                  "description": "on/off/true/false. Omit to toggle."
+                },
+                "action": {
+                  "const": "obstruction"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "title": "open",
+              "description": "Open the door and hold it open until something closes it.",
+              "properties": {
+                "action": {
+                  "const": "open"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "title": "outside",
+              "description": "Put a pet at the outside sensor. Mutually exclusive with inside.",
+              "properties": {
+                "duration": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Seconds to hold. 0 means until cleared."
+                },
+                "state": {
+                  "oneOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "enum": [
+                        "on",
+                        "off",
+                        "yes",
+                        "no",
+                        "true",
+                        "false",
+                        "enabled",
+                        "disabled",
+                        "1",
+                        "0"
+                      ]
+                    }
+                  ],
+                  "description": "on/off/true/false. Omit to toggle."
+                },
+                "action": {
+                  "const": "outside"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "title": "remove_schedule",
+              "description": "Delete a schedule.",
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255,
+                  "description": "Schedule slot."
+                },
+                "action": {
+                  "const": "remove_schedule"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "title": "repeat",
+              "description": "Run a block of steps a number of times, or while a condition holds.",
+              "properties": {
+                "above": {
+                  "description": "Must be greater than this."
+                },
+                "any": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "ac_present",
+                      "auto",
+                      "autoretract",
+                      "battery",
+                      "battery_present",
+                      "charge_rate",
+                      "closing_mid_time",
+                      "closing_start_time",
+                      "closing_top_time",
+                      "cmd_lockout",
+                      "discharge_rate",
+                      "door_closed",
+                      "door_closing",
+                      "door_open",
+                      "door_opening",
+                      "door_status",
+                      "firmware_version",
+                      "hardware_version",
+                      "has_remote_id",
+                      "has_remote_key",
+                      "hold_time",
+                      "inside",
+                      "notified_inside_off",
+                      "notified_inside_on",
+                      "notified_low_battery",
+                      "notified_outside_off",
+                      "notified_outside_on",
+                      "notify_inside_off",
+                      "notify_inside_on",
+                      "notify_low_battery",
+                      "notify_outside_off",
+                      "notify_outside_on",
+                      "obstruction",
+                      "outside",
+                      "position",
+                      "power",
+                      "rise_time",
+                      "safety_lock",
+                      "sensor_retrigger_window",
+                      "sensor_trigger_voltage",
+                      "sleep_sensor_trigger_voltage",
+                      "slowing_time",
+                      "time",
+                      "timezone",
+                      "total_auto_retracts",
+                      "total_open_cycles"
+                    ]
+                  },
+                  "description": "Several conditions, any one of which may hold."
+                },
+                "at_least": {
+                  "description": "Must be at least this."
+                },
+                "at_most": {
+                  "description": "Must be at most this."
+                },
+                "below": {
+                  "description": "Must be less than this."
+                },
+                "condition": {
+                  "enum": [
+                    "ac_present",
+                    "auto",
+                    "autoretract",
+                    "battery",
+                    "battery_present",
+                    "charge_rate",
+                    "closing_mid_time",
+                    "closing_start_time",
+                    "closing_top_time",
+                    "cmd_lockout",
+                    "discharge_rate",
+                    "door_closed",
+                    "door_closing",
+                    "door_open",
+                    "door_opening",
+                    "door_status",
+                    "firmware_version",
+                    "hardware_version",
+                    "has_remote_id",
+                    "has_remote_key",
+                    "hold_time",
+                    "inside",
+                    "notified_inside_off",
+                    "notified_inside_on",
+                    "notified_low_battery",
+                    "notified_outside_off",
+                    "notified_outside_on",
+                    "notify_inside_off",
+                    "notify_inside_on",
+                    "notify_low_battery",
+                    "notify_outside_off",
+                    "notify_outside_on",
+                    "obstruction",
+                    "outside",
+                    "position",
+                    "power",
+                    "rise_time",
+                    "safety_lock",
+                    "sensor_retrigger_window",
+                    "sensor_trigger_voltage",
+                    "sleep_sensor_trigger_voltage",
+                    "slowing_time",
+                    "time",
+                    "timezone",
+                    "total_auto_retracts",
+                    "total_open_cycles"
+                  ],
+                  "description": "The name to test."
+                },
+                "conditions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "ac_present",
+                      "auto",
+                      "autoretract",
+                      "battery",
+                      "battery_present",
+                      "charge_rate",
+                      "closing_mid_time",
+                      "closing_start_time",
+                      "closing_top_time",
+                      "cmd_lockout",
+                      "discharge_rate",
+                      "door_closed",
+                      "door_closing",
+                      "door_open",
+                      "door_opening",
+                      "door_status",
+                      "firmware_version",
+                      "hardware_version",
+                      "has_remote_id",
+                      "has_remote_key",
+                      "hold_time",
+                      "inside",
+                      "notified_inside_off",
+                      "notified_inside_on",
+                      "notified_low_battery",
+                      "notified_outside_off",
+                      "notified_outside_on",
+                      "notify_inside_off",
+                      "notify_inside_on",
+                      "notify_low_battery",
+                      "notify_outside_off",
+                      "notify_outside_on",
+                      "obstruction",
+                      "outside",
+                      "position",
+                      "power",
+                      "rise_time",
+                      "safety_lock",
+                      "sensor_retrigger_window",
+                      "sensor_trigger_voltage",
+                      "sleep_sensor_trigger_voltage",
+                      "slowing_time",
+                      "time",
+                      "timezone",
+                      "total_auto_retracts",
+                      "total_open_cycles"
+                    ]
+                  },
+                  "description": "Several conditions, all of which must hold."
+                },
+                "equals": {
+                  "description": "Expected value."
+                },
+                "not_equals": {
+                  "description": "Value it must not be."
+                },
+                "steps": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/step"
+                  },
+                  "description": "The block to run."
+                },
+                "times": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 10000,
+                  "description": "How many iterations."
+                },
+                "action": {
+                  "const": "repeat"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "title": "reset",
+              "description": "Return the door to its defaults, or to a named state document.",
+              "properties": {
+                "initial_state": {
+                  "type": "string",
+                  "description": "A state document to reset to, by name or path."
+                },
+                "action": {
+                  "const": "reset"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "title": "set",
+              "description": "Set a named value. `toggle` as the value inverts a yes/no one.",
+              "properties": {
+                "name": {
+                  "enum": [
+                    "ac_present",
+                    "auto",
+                    "autoretract",
+                    "battery",
+                    "battery_present",
+                    "charge_rate",
+                    "closing_mid_time",
+                    "closing_start_time",
+                    "closing_top_time",
+                    "cmd_lockout",
+                    "discharge_rate",
+                    "firmware_version",
+                    "hardware_version",
+                    "has_remote_id",
+                    "has_remote_key",
+                    "hold_time",
+                    "inside",
+                    "notify_inside_off",
+                    "notify_inside_on",
+                    "notify_low_battery",
+                    "notify_outside_off",
+                    "notify_outside_on",
+                    "obstruction",
+                    "outside",
+                    "power",
+                    "rise_time",
+                    "safety_lock",
+                    "sensor_retrigger_window",
+                    "sensor_trigger_voltage",
+                    "sleep_sensor_trigger_voltage",
+                    "slowing_time",
+                    "timezone",
+                    "total_auto_retracts",
+                    "total_open_cycles"
+                  ],
+                  "description": "The value, or notification, to act on."
+                },
+                "value": {
+                  "description": "The new value. `toggle` inverts a yes/no one.",
+                  "oneOf": [
+                    {
+                      "type": [
+                        "string",
+                        "number",
+                        "boolean"
+                      ]
+                    }
+                  ]
+                },
+                "action": {
+                  "const": "set"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "title": "toggle",
+              "description": "Open the door if closed, close it if open; nothing mid-travel.",
+              "properties": {
+                "action": {
+                  "const": "toggle"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "title": "trigger",
+              "description": "A pet walks through a sensor, rather than standing at it.",
+              "properties": {
+                "sensor": {
+                  "enum": [
+                    "inside",
+                    "outside"
+                  ],
+                  "description": "Which sensor: inside or outside."
+                },
+                "action": {
+                  "const": "trigger"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "title": "wait",
+              "description": "Pause for a number of seconds.",
+              "properties": {
+                "seconds": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 86400.0,
+                  "description": "How long to wait."
+                },
+                "action": {
+                  "const": "wait"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "title": "wait_for",
+              "description": "Wait until a condition holds, or time out.",
+              "properties": {
+                "above": {
+                  "description": "Must be greater than this."
+                },
+                "any": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "ac_present",
+                      "auto",
+                      "autoretract",
+                      "battery",
+                      "battery_present",
+                      "charge_rate",
+                      "closing_mid_time",
+                      "closing_start_time",
+                      "closing_top_time",
+                      "cmd_lockout",
+                      "discharge_rate",
+                      "door_closed",
+                      "door_closing",
+                      "door_open",
+                      "door_opening",
+                      "door_status",
+                      "firmware_version",
+                      "hardware_version",
+                      "has_remote_id",
+                      "has_remote_key",
+                      "hold_time",
+                      "inside",
+                      "notified_inside_off",
+                      "notified_inside_on",
+                      "notified_low_battery",
+                      "notified_outside_off",
+                      "notified_outside_on",
+                      "notify_inside_off",
+                      "notify_inside_on",
+                      "notify_low_battery",
+                      "notify_outside_off",
+                      "notify_outside_on",
+                      "obstruction",
+                      "outside",
+                      "position",
+                      "power",
+                      "rise_time",
+                      "safety_lock",
+                      "sensor_retrigger_window",
+                      "sensor_trigger_voltage",
+                      "sleep_sensor_trigger_voltage",
+                      "slowing_time",
+                      "time",
+                      "timezone",
+                      "total_auto_retracts",
+                      "total_open_cycles"
+                    ]
+                  },
+                  "description": "Several conditions, any one of which may hold."
+                },
+                "at_least": {
+                  "description": "Must be at least this."
+                },
+                "at_most": {
+                  "description": "Must be at most this."
+                },
+                "below": {
+                  "description": "Must be less than this."
+                },
+                "condition": {
+                  "enum": [
+                    "ac_present",
+                    "auto",
+                    "autoretract",
+                    "battery",
+                    "battery_present",
+                    "charge_rate",
+                    "closing_mid_time",
+                    "closing_start_time",
+                    "closing_top_time",
+                    "cmd_lockout",
+                    "discharge_rate",
+                    "door_closed",
+                    "door_closing",
+                    "door_open",
+                    "door_opening",
+                    "door_status",
+                    "firmware_version",
+                    "hardware_version",
+                    "has_remote_id",
+                    "has_remote_key",
+                    "hold_time",
+                    "inside",
+                    "notified_inside_off",
+                    "notified_inside_on",
+                    "notified_low_battery",
+                    "notified_outside_off",
+                    "notified_outside_on",
+                    "notify_inside_off",
+                    "notify_inside_on",
+                    "notify_low_battery",
+                    "notify_outside_off",
+                    "notify_outside_on",
+                    "obstruction",
+                    "outside",
+                    "position",
+                    "power",
+                    "rise_time",
+                    "safety_lock",
+                    "sensor_retrigger_window",
+                    "sensor_trigger_voltage",
+                    "sleep_sensor_trigger_voltage",
+                    "slowing_time",
+                    "time",
+                    "timezone",
+                    "total_auto_retracts",
+                    "total_open_cycles"
+                  ],
+                  "description": "The name to test."
+                },
+                "conditions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "ac_present",
+                      "auto",
+                      "autoretract",
+                      "battery",
+                      "battery_present",
+                      "charge_rate",
+                      "closing_mid_time",
+                      "closing_start_time",
+                      "closing_top_time",
+                      "cmd_lockout",
+                      "discharge_rate",
+                      "door_closed",
+                      "door_closing",
+                      "door_open",
+                      "door_opening",
+                      "door_status",
+                      "firmware_version",
+                      "hardware_version",
+                      "has_remote_id",
+                      "has_remote_key",
+                      "hold_time",
+                      "inside",
+                      "notified_inside_off",
+                      "notified_inside_on",
+                      "notified_low_battery",
+                      "notified_outside_off",
+                      "notified_outside_on",
+                      "notify_inside_off",
+                      "notify_inside_on",
+                      "notify_low_battery",
+                      "notify_outside_off",
+                      "notify_outside_on",
+                      "obstruction",
+                      "outside",
+                      "position",
+                      "power",
+                      "rise_time",
+                      "safety_lock",
+                      "sensor_retrigger_window",
+                      "sensor_trigger_voltage",
+                      "sleep_sensor_trigger_voltage",
+                      "slowing_time",
+                      "time",
+                      "timezone",
+                      "total_auto_retracts",
+                      "total_open_cycles"
+                    ]
+                  },
+                  "description": "Several conditions, all of which must hold."
+                },
+                "equals": {
+                  "description": "Expected value."
+                },
+                "not_equals": {
+                  "description": "Value it must not be."
+                },
+                "on_timeout": {
+                  "enum": [
+                    "fail",
+                    "continue"
+                  ],
+                  "description": "What a timeout means: fail the script, or continue."
+                },
+                "timeout": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 86400.0,
+                  "description": "Seconds to wait before giving up."
+                },
+                "action": {
+                  "const": "wait_for"
+                },
+                "comment": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-text annotation; read by nothing."
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "action"
-          ],
-          "additionalProperties": false
+          ]
+        },
+        {
+          "title": "shorthand",
+          "description": "An action with no parameters, written as a bare string: `- close`.",
+          "type": "string",
+          "enum": [
+            "add_schedule",
+            "assert",
+            "battery",
+            "clear_schedules",
+            "close",
+            "cycle",
+            "enable_schedule",
+            "if",
+            "inside",
+            "log",
+            "notify",
+            "obstruction",
+            "open",
+            "outside",
+            "remove_schedule",
+            "repeat",
+            "reset",
+            "set",
+            "toggle",
+            "trigger",
+            "wait",
+            "wait_for"
+          ]
         }
       ]
     }

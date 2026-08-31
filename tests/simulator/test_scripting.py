@@ -3079,6 +3079,54 @@ class TestNestedBlocksAreParsedAtLoadTime:
                 "    steps:\n      - action: totally_bogus\n"
             )
 
+    def test_the_bare_string_form_is_validated_too(self):
+        """`- clsoe`, the shorthand the docs invite.
+
+        The first version of this check ran only on the mapping form, so
+        the shorthand walked straight past it and a script of pure
+        nonsense still reported PASSED - the same failure, one spelling
+        over. A fix that lands on one path when two exist is a failed fix.
+        """
+        with pytest.raises(ScriptError, match="Unknown action: clsoe"):
+            Script.from_yaml("name: t\nsteps:\n  - clsoe\n")
+
+    def test_the_bare_string_form_is_validated_inside_an_untaken_branch(self):
+        with pytest.raises(ScriptError, match="Unknown action: clsoe"):
+            Script.from_yaml(
+                "name: t\nsteps:\n  - action: if\n    condition: door_closed\n"
+                "    then:\n      - close\n    else:\n      - clsoe\n"
+            )
+
+    def test_the_valid_shorthand_still_loads(self):
+        script = Script.from_yaml("name: t\nsteps:\n  - close\n  - open\n")
+        assert [s.action for s in script.steps] == ["close", "open"]
+
+    def test_a_stray_block_key_is_refused_at_load(self):
+        """The load check must not be weaker than the run check.
+
+        It subtracted the block keywords for EVERY action, which excused
+        them on actions that have no block: `close` with a `then:` passed
+        the load and was refused at run time, and inside an untaken
+        branch was never caught at all.
+        """
+        with pytest.raises(ScriptError, match="Unknown parameter"):
+            Script.from_yaml("name: t\nsteps:\n  - action: close\n    then:\n      - open\n")
+
+    def test_the_real_block_keywords_are_still_accepted(self):
+        """`if` owns then/else and `repeat` owns steps - they are its parameters."""
+        assert Script.from_yaml(
+            "name: t\nsteps:\n  - action: if\n    condition: door_closed\n"
+            "    then:\n      - close\n    else:\n      - open\n"
+        )
+        assert Script.from_yaml(
+            "name: t\nsteps:\n  - action: repeat\n    times: 2\n    steps:\n      - close\n"
+        )
+
+    def test_a_load_error_names_the_step(self):
+        """The executor always said which step; the load check dropped it."""
+        with pytest.raises(ScriptError, match="Step 2:"):
+            Script.from_yaml("name: t\nsteps:\n  - close\n  - clsoe\n")
+
     def test_a_non_string_action_is_named_rather_than_crashing(self):
         """`action: 42` is truthy, so it passes the missing-action check.
 

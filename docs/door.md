@@ -376,9 +376,22 @@ Schedules are evaluated against the door's own clock, so this is the only
 way to check that a door will fire a schedule when you expect it to:
 
 ```python
-when = await door.refresh_time()  # naive datetime, local to door.timezone
+when = await door.refresh_time()  # AWARE datetime, in THIS machine's zone
 print(door.device_time)  # the raw asctime string it sent
+
+# It is an instant, so it compares directly against an aware now:
+print(when - datetime.now().astimezone())
+
+# To see the face value the door reported, convert back:
+print(when.astimezone(ZoneInfo(door.timezone)))
 ```
+
+Both halves of that comment used to say the opposite. The door sends a
+bare `asctime` with no offset; the reading is anchored to the door's own
+timezone and then converted to local, so it is an instant a caller can
+compare, not a wall clock that is silently wrong unless they happen to
+share the door's zone. It falls back to naive only when
+:attr:`timezone` has not been read yet - call `refresh_settings()` first.
 
 `refresh_time()` returns `None` if the string was unparseable;
 `device_time` still holds it verbatim in that case. It is deliberately not

@@ -431,6 +431,22 @@ class Script:
             source_file=source_file,
         )
 
+    @staticmethod
+    def _at_step(i: int, message: str) -> str:
+        """Prefix a load-time complaint with the step it came from.
+
+        The executor has always said "Script error at step 7"; the load
+        check took the index and dropped it, so a 35-step file with
+        several `wait` steps answered "Unknown parameter(s) for wait"
+        and left the reader to find which one.
+        """
+        return t(
+            "simulator.scripting.step_prefix",
+            "Step {i}: {message}",
+            i=i,
+            message=message,
+        )
+
     @classmethod
     def _validate_step(cls, action: object, params: dict, i: int) -> None:
         """Refuse an unknown action or parameter while LOADING.
@@ -456,14 +472,22 @@ class Script:
         known_params = _ACTION_PARAMS.get(name)
         if known_params is None:
             raise ScriptError(
-                t(
-                    "simulator.scripting.unknown_action_use",
-                    "Unknown action: {action}. Use: {arg0}",
-                    action=name,
-                    arg0=", ".join(sorted(_ACTION_PARAMS)),
+                cls._at_step(
+                    i,
+                    t(
+                        "simulator.scripting.unknown_action_use",
+                        "Unknown action: {action}. Use: {arg0}",
+                        action=name,
+                        arg0=", ".join(sorted(_ACTION_PARAMS)),
+                    ),
                 )
             )
-        unexpected = sorted(set(params) - known_params - STEP_ANNOTATION_KEYS - set(BLOCK_PARAMS))
+        # NOT minus BLOCK_PARAMS: `_ACTION_PARAMS` already lists `then`
+        # and `else` under `if`, and `steps` under `repeat`, so subtracting
+        # them again only excused the actions that have no block - `close`
+        # with a `then:` passed the load check and was refused at run time,
+        # making this weaker than the check it claims to mirror.
+        unexpected = sorted(set(params) - known_params - STEP_ANNOTATION_KEYS)
         if unexpected:
             accepted = (
                 f"Use: {', '.join(sorted(known_params))}"
@@ -471,13 +495,16 @@ class Script:
                 else f"{name} takes no parameters"
             )
             raise ScriptError(
-                t(
-                    "simulator.scripting.unknown_parameter_s_plus_annotations",
-                    "Unknown parameter(s) for {action}: {arg0}. {accepted} (plus the annotations {annotations})",
-                    action=name,
-                    arg0=", ".join(unexpected),
-                    accepted=accepted,
-                    annotations=", ".join(sorted(STEP_ANNOTATION_KEYS)),
+                cls._at_step(
+                    i,
+                    t(
+                        "simulator.scripting.unknown_parameter_s_plus_annotations",
+                        "Unknown parameter(s) for {action}: {arg0}. {accepted} (plus the annotations {annotations})",
+                        action=name,
+                        arg0=", ".join(unexpected),
+                        accepted=accepted,
+                        annotations=", ".join(sorted(STEP_ANNOTATION_KEYS)),
+                    ),
                 )
             )
 
@@ -497,7 +524,12 @@ class Script:
         steps: list[ScriptStep] = []
         for i, step_data in enumerate(steps_data, 1):
             if isinstance(step_data, str):
-                # Simple action with no params: "- close"
+                # Simple action with no params: "- close". Validated like
+                # any other: the first version of this checked only the
+                # mapping form, so `- clsoe` in an untaken branch still
+                # loaded, ran to completion and reported PASSED - the very
+                # thing the check was added to stop.
+                cls._validate_step(step_data, {}, i)
                 steps.append(ScriptStep(action=step_data, line_number=i))
             elif isinstance(step_data, dict):
                 params = dict(step_data)

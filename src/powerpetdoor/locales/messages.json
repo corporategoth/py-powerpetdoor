@@ -338,6 +338,7 @@
   "simulator.scripting.step": "  Step {line_number}: {arg0}",
   "simulator.scripting.step_invalid_step_format": "Step {i}: invalid step format",
   "simulator.scripting.step_missing_action_field": "Step {i}: missing 'action' field",
+  "simulator.scripting.step_prefix": "Step {i}: {message}",
   "simulator.scripting.steps_must_list": "'steps' must be a list",
   "simulator.scripting.text": "  {arg0}",
   "simulator.scripting.timeout_waiting_condition": "Timeout waiting for condition: {condition}",

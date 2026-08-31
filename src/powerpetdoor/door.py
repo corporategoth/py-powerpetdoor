@@ -33,7 +33,7 @@ import logging
 import math
 import sys
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -1149,9 +1149,16 @@ class PowerPetDoor:
                 letting the door refuse it, so the caller learns which of
                 the two it got wrong.
         """
+        # Warm the cache off the loop first. `to_posix_tz` builds it on
+        # first use by scanning tzdata - hundreds of blocking `open()`
+        # calls - and doing that inline stalls the event loop for tens of
+        # milliseconds. The read path in `refresh_time` warms it the same
+        # way; this is the other half.
+        await async_init_timezone_cache()
+        posix = to_posix_tz(tz)
         await self._await_response(
             CMD_SET_TIMEZONE,
-            self._client.send_message(CONFIG, CMD_SET_TIMEZONE, notify=True, tz=to_posix_tz(tz)),
+            self._client.send_message(CONFIG, CMD_SET_TIMEZONE, notify=True, tz=posix),
             timeout,
         )
 
@@ -1957,28 +1964,38 @@ class PowerPetDoor:
     def _on_total_retracts_update(self, field_name: str, value: int) -> None:
         self._total_auto_retracts = _keep_int(value, self._total_auto_retracts, field_name)
 
+    def _replace_notification(self, attribute: str, field_name: str, value: bool | None) -> None:
+        """Store one notification flag by REPLACING the settings object.
+
+        Not by mutating it. The property hands the object out, so an
+        in-place update changed what a caller was already holding: a
+        snapshot taken before the change equalled the state after it, and
+        poll-and-compare could never see a notification setting move.
+        There was no other route either - `on_settings_change` fires on
+        `GET_SETTINGS`, whose payload carries none of these five flags.
+
+        `battery` has always replaced its object, which is why the same
+        comparison works there.
+        """
+        current = getattr(self._notifications, attribute)
+        self._notifications = replace(
+            self._notifications, **{attribute: _keep_flag(value, current, field_name)}
+        )
+
     def _on_notify_inside_on(self, field_name: str, value: bool | None) -> None:
-        self._notifications.inside_on = _keep_flag(value, self._notifications.inside_on, field_name)
+        self._replace_notification("inside_on", field_name, value)
 
     def _on_notify_inside_off(self, field_name: str, value: bool | None) -> None:
-        self._notifications.inside_off = _keep_flag(
-            value, self._notifications.inside_off, field_name
-        )
+        self._replace_notification("inside_off", field_name, value)
 
     def _on_notify_outside_on(self, field_name: str, value: bool | None) -> None:
-        self._notifications.outside_on = _keep_flag(
-            value, self._notifications.outside_on, field_name
-        )
+        self._replace_notification("outside_on", field_name, value)
 
     def _on_notify_outside_off(self, field_name: str, value: bool | None) -> None:
-        self._notifications.outside_off = _keep_flag(
-            value, self._notifications.outside_off, field_name
-        )
+        self._replace_notification("outside_off", field_name, value)
 
     def _on_notify_low_battery(self, field_name: str, value: bool | None) -> None:
-        self._notifications.low_battery = _keep_flag(
-            value, self._notifications.low_battery, field_name
-        )
+        self._replace_notification("low_battery", field_name, value)
 
     async def _on_connect(self) -> None:
         """Handle connection established."""

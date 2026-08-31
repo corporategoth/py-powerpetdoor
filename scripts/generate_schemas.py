@@ -183,10 +183,27 @@ def script_schema() -> dict[str, Any]:
         "required": ["steps"],
         "additionalProperties": False,
         "$defs": {
+            # A step is either the mapping form or the bare-string
+            # shorthand for an action that takes no parameters. The
+            # runner has always accepted `- close`; the schema said
+            # `'close' is not of type 'object'`, so an editor validating
+            # against this flagged a working script as broken.
             "step": {
-                "type": "object",
-                "required": ["action"],
-                "oneOf": branches,
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "required": ["action"],
+                        "oneOf": branches,
+                    },
+                    {
+                        "title": "shorthand",
+                        "description": (
+                            "An action with no parameters, written as a bare string: `- close`."
+                        ),
+                        "type": "string",
+                        "enum": sorted(_ACTION_PARAMS),
+                    },
+                ]
             }
         },
     }

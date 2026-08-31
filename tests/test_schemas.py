@@ -108,7 +108,34 @@ class TestGeneratedFilesAreCurrent:
 # ============================================================================
 
 
+def _action_branches(script_schema):
+    """The per-action mapping branches.
+
+    A step is now either the mapping form or the bare-string shorthand
+    (`- close`), which the runner has always taken and the schema used to
+    reject, so the branches sit one level in.
+    """
+    forms = script_schema["$defs"]["step"]["oneOf"]
+    mapping = next(form for form in forms if form.get("type") == "object")
+    return mapping["oneOf"]
+
+
 class TestScriptSchema:
+    def test_the_bare_string_shorthand_is_accepted(self, script_schema):
+        """`- close` is a legal step; the schema said otherwise.
+
+        An editor validating against the published schema flagged a
+        script the runner runs happily.
+        """
+        forms = script_schema["$defs"]["step"]["oneOf"]
+        shorthand = next(form for form in forms if form.get("type") == "string")
+        assert set(shorthand["enum"]) == set(_ACTION_PARAMS)
+
+    def test_the_shorthand_still_refuses_a_typo(self, script_schema):
+        validator = Draft202012Validator(script_schema)
+        assert list(validator.iter_errors({"name": "t", "steps": ["clsoe"]}))
+        assert not list(validator.iter_errors({"name": "t", "steps": ["close"]}))
+
     def test_it_is_a_valid_json_schema(self, script_schema):
         Draft202012Validator.check_schema(script_schema)
 
@@ -116,30 +143,30 @@ class TestScriptSchema:
         assert script_schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
 
     def test_every_action_has_a_branch(self, script_schema):
-        branches = {b["title"] for b in script_schema["$defs"]["step"]["oneOf"]}
+        branches = {b["title"] for b in _action_branches(script_schema)}
         assert branches == set(_ACTION_PARAMS)
 
     def test_every_branch_carries_its_description(self, script_schema):
-        for branch in script_schema["$defs"]["step"]["oneOf"]:
+        for branch in _action_branches(script_schema):
             assert branch["description"] == ACTION_DESCRIPTIONS[branch["title"]]
 
     def test_a_branch_offers_exactly_that_actions_parameters(self, script_schema):
         """The schema's strictness has to match the runner's."""
-        for branch in script_schema["$defs"]["step"]["oneOf"]:
+        for branch in _action_branches(script_schema):
             action = branch["title"]
             offered = set(branch["properties"]) - {"action", "comment", "description", "note"}
             assert offered == set(_ACTION_PARAMS[action]), action
 
     def test_setting_names_come_from_the_registry(self, script_schema):
-        branch = next(b for b in script_schema["$defs"]["step"]["oneOf"] if b["title"] == "set")
+        branch = next(b for b in _action_branches(script_schema) if b["title"] == "set")
         assert branch["properties"]["name"]["enum"] == list(WRITABLE)
 
     def test_condition_names_come_from_the_registry(self, script_schema):
-        branch = next(b for b in script_schema["$defs"]["step"]["oneOf"] if b["title"] == "assert")
+        branch = next(b for b in _action_branches(script_schema) if b["title"] == "assert")
         assert branch["properties"]["condition"]["enum"] == list(ASSERT_CONDITIONS)
 
     def test_notification_names_come_from_the_registry(self, script_schema):
-        branch = next(b for b in script_schema["$defs"]["step"]["oneOf"] if b["title"] == "notify")
+        branch = next(b for b in _action_branches(script_schema) if b["title"] == "notify")
         assert branch["properties"]["name"]["enum"] == list(NOTIFICATION_NAMES)
 
     @pytest.mark.parametrize("path", sorted(SCRIPTS_DIR.glob("*.yaml")), ids=lambda p: p.name)
