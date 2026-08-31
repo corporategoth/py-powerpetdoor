@@ -2,7 +2,7 @@
 
 This file is **auto-generated** by CI after each test run. Do not edit manually.
 
-**Last updated:** 2026-08-25 15:17 UTC
+**Last updated:** 2026-08-31 18:30 UTC
 
 ## Summary
 
@@ -10,8 +10,8 @@ This file is **auto-generated** by CI after each test run. Do not edit manually.
 |--------|-------|
 | Line Coverage | 100.00% |
 | Branch Coverage | 100.00% |
-| Lines Covered | 6,610 / 6,610 |
-| Branches Covered | 2,306 / 2,306 |
+| Lines Covered | 7,347 / 7,347 |
+| Branches Covered | 2,512 / 2,512 |
 | Lines Missing | 0 |
 
 ## Coverage by Category
@@ -19,9 +19,9 @@ This file is **auto-generated** by CI after each test run. Do not edit manually.
 | Category | Files | Coverage | Status |
 |----------|-------|----------|--------|
 | Core Library | 8 | 100.0% | :green_circle: |
-| Simulator | 5 | 100.0% | :green_circle: |
+| Simulator | 11 | 100.0% | :green_circle: |
 | Simulator CLI | 3 | 100.0% | :green_circle: |
-| Simulator Commands | 12 | 100.0% | :green_circle: |
+| Simulator Commands | 13 | 100.0% | :green_circle: |
 
 ## Status: 100% Coverage :green_circle:
 
@@ -58,17 +58,31 @@ None. Every `exclude_lines` and `partial_branches` pattern above matches only th
 
 ### Pragma Exclusions
 
-**3 lines** across **2 files** in **3 annotations** are excluded via `# pragma: no cover` or `# pragma: no branch`.
+**7 lines** across **4 files** in **7 annotations** are excluded via `# pragma: no cover` or `# pragma: no branch`.
 
 #### `simulator/cli.py` (2 lines)
 
 | Lines | Type | Reason | Code |
 |-------|------|--------|------|
 | 128 | no branch | defensive: enable() always installs a handler | `if self._handler:` |
-| 962 | no branch | bound after start() | `if simulator.server and simulator.server.sockets:` |
+| 973 | no branch | bound after start() | `if simulator.server and simulator.server.sockets:` |
+
+#### `simulator/control.py` (2 lines)
+
+| Lines | Type | Reason | Code |
+|-------|------|--------|------|
+| 77 | no cover | *no reason given* | `raise NotImplementedError` |
+| 144 | no cover | *no reason given* | `raise NotImplementedError` |
 
 #### `simulator/ctl.py` (1 lines)
 
 | Lines | Type | Reason | Code |
 |-------|------|--------|------|
 | 675 | no cover | defensive: socket_reader swallows its own cancellation; only an outer cancel landing exactly on this await would raise | `except asyncio.CancelledError:` |
+
+#### `simulator/state_io.py` (2 lines)
+
+| Lines | Type | Reason | Code |
+|-------|------|--------|------|
+| 41 | no cover | *no reason given* | `try:` |
+| 45 | no cover | *no reason given* | `except ImportError:` |
