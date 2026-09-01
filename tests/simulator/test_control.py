@@ -255,7 +255,11 @@ class TestTheSharedSurface:
         controller = SimulatorController()
 
         with pytest.raises(NotImplementedError):
-            asyncio.get_event_loop_policy()
+            # No `get_event_loop_policy()` here: it did nothing except emit
+            # a DeprecationWarning on 3.14, which this suite treats as an
+            # error - and being the FIRST statement in the block, anything
+            # it raised would have satisfied `pytest.raises` without
+            # `execute` ever being called.
             asyncio.run(controller.execute("status"))
         with pytest.raises(NotImplementedError):
             asyncio.run(controller.close())
@@ -366,13 +370,14 @@ def _control_reading(reply: str):
     """
     from powerpetdoor.simulator.control import RemoteSimulator
 
+    async def readline() -> bytes:
+        return reply.encode()
+
     control = RemoteSimulator.__new__(RemoteSimulator)
     control._timeout = 1.0
-    control._reader = SimpleNamespace(readline=lambda: _resolved(reply.encode()))
+    # A coroutine function, not a pre-resolved future: building one needed
+    # a loop handle, and reaching for it through `asyncio.get_event_loop()`
+    # raises a DeprecationWarning on 3.14 that this suite treats as an
+    # error. `readline` is awaited, so a coroutine is what it wants anyway.
+    control._reader = SimpleNamespace(readline=readline)
     return control
-
-
-def _resolved(value):
-    future: asyncio.Future = asyncio.get_event_loop().create_future()
-    future.set_result(value)
-    return future
