@@ -5,7 +5,13 @@
 #   release cut on Gitea
 #     -> this job renders docs/ + the Sphinx API reference to wiki pages
 #     -> pushes them to the Gitea wiki
-#     -> sync-wiki.yml (on: wiki) carries them to the GitHub mirror
+#     -> and then invokes the same sync sync-wiki.yml runs
+#
+# It invokes the sync itself rather than leaving it to `on: wiki`, because
+# Gitea raises that event for wiki edits made through the UI or the API
+# and NOT for a `git push` to the wiki repository - which is exactly how
+# this job publishes. Measured: the push below produced no `wiki` event
+# and no mirror, while a one-page API edit produced both.
 #
 # Nothing here writes to GitHub. The wiki is written on Gitea, exactly as
 # the release is, and reaches the mirror the same way - see the "Gitea is
@@ -81,3 +87,16 @@ jobs:
           fi
           git commit -m "Wiki for ${GITHUB_REF_NAME}"
           git push
+
+  # Same reusable workflow `sync-wiki.yml` uses, on the same pin - so a
+  # wiki published here reaches the mirror by the identical path a UI
+  # edit does. Running it twice for one change is harmless: it force
+  # syncs a rendering, so it is idempotent.
+  sync:
+    name: Mirror the wiki to GitHub
+    needs: publish
+    uses: neuromancy/workflows/.gitea/workflows/sync-github-wiki.yml@5d9eb7fbdc4212eea790375b2ec82f421a30037a # v1.1.0
+    secrets:
+      github_token: ${{ secrets.GH_PAT }}
+    with:
+      github_repo: "corporategoth/py-powerpetdoor"
