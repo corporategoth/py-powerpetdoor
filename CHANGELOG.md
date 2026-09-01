@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-01
+
+### Fixed — things that were wrong in 0.4.3 and are not any more
+
+Found by review passes over this release's work, each reproduced before
+it was fixed:
+
+- **`refresh_time()` returned a naive datetime**, contradicting its own
+  documented "aware" guarantee, whenever the caller had not previously
+  set the timezone. The door reports POSIX and mapping POSIX back to an
+  IANA zone needs the tzdata cache, which only the *write* path warmed -
+  so the return TYPE depended on call order, and comparing the result to
+  `datetime.now(tz)` raised `TypeError`. Both paths warm it now, off the
+  event loop.
+- **A notification setting could not be observed to change.** The five
+  handlers mutated the settings object in place while the property
+  handed that same object out, so a snapshot taken before a change
+  equalled the state after it. There was no alternative route either:
+  `on_settings_change` fires for `GET_SETTINGS`, whose payload carries
+  none of the five flags. They replace the object now, as `battery`
+  always has.
+- **`set_timezone()` stalled the event loop** for tens of milliseconds
+  the first time it was given an IANA name, building the tzdata cache
+  inline - 607 blocking `open()` calls.
+- **The simulator prompt stored schedule windows the library refuses.**
+  `schedule add both 10:00-10:00` reported success and left a schedule
+  that gates both sensors off for good, indistinguishable in a listing
+  from one deliberately disabled. `schedule add` and `schedule time`
+  both refuse them now, and a window ending at midnight is told to use
+  `24:00` rather than nonsense about tomorrow.
+- **Scripts did not validate untaken branches**, though the
+  documentation promised they did. A misspelled action inside an `else`
+  that never ran was never found, so a script of nonsense completed and
+  reported PASSED - and scripts gate CI by exit code. Both the mapping
+  and bare-string step forms are checked at load now, and the message
+  names the step.
+- **`--initial-state` reported content errors as a traceback** where a
+  missing file and a syntax error both gave a clean usage line.
+- **`set <name> toggle` was documented and refused**, leaving the
+  notification switches, `obstruction` and the remote flags invertible
+  from a script but not by hand.
+- **`holdtime` refused `0`** on a 0.1s floor no other surface had.
+- **The published script schema rejected `- close`**, the shorthand the
+  runner has always accepted, so an editor validating against it flagged
+  working scripts as broken.
+
 ### Fixed — three setters answer with the whole settings object
 
 `ENABLE_CMD_LOCKOUT`/`DISABLE_CMD_LOCKOUT` and the outside-safety-lock
@@ -1521,7 +1567,8 @@ accepted, and the run still exited 0.
 - Async/await interface using asyncio
 - Support for Python 3.11, 3.12, 3.13, and 3.14
 
-[Unreleased]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.4.0...v0.4.1
