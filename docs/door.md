@@ -383,7 +383,8 @@ print(door.device_time)  # the raw asctime string it sent
 print(when - datetime.now().astimezone())
 
 # To see the face value the door reported, convert back:
-print(when.astimezone(ZoneInfo(door.timezone)))
+# `resolve_tzinfo`, not `ZoneInfo`: door.timezone is a POSIX string.
+print(when.astimezone(resolve_tzinfo(door.timezone)))
 ```
 
 Both halves of that comment used to say the opposite. The door sends a

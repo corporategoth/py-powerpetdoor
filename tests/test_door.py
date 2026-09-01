@@ -69,6 +69,7 @@ from powerpetdoor.simulator import (
 from powerpetdoor.simulator.wire_values import (
     settings_payload,
 )
+from powerpetdoor.tz_utils import resolve_tzinfo
 from tests.conftest import GOLDEN_SCHEDULE_WIRE_TO_DEVICE, assert_schedule_wire_types
 
 # ============================================================================
@@ -2953,10 +2954,15 @@ class TestDoorClockFacade:
         when = await door.refresh_time()
 
         assert isinstance(when, datetime)
-        # The simulator answers from its own clock, in its own timezone, so
-        # only the *shape* is deterministic - that it round-trips through
-        # TIME_FORMAT is the contract.
-        assert when.strftime(TIME_FORMAT) == door.device_time
+        # `refresh_time` returns the reading in THIS machine's zone, so its
+        # face value equals the door's raw string only when the two zones
+        # happen to agree. That held on a developer's machine and failed in
+        # CI, which runs UTC. Convert back to the door's own zone - the
+        # round trip the docstring documents - and the comparison is
+        # timezone-independent.
+        door_tz = resolve_tzinfo(door.timezone) if door.timezone else None
+        face = when.astimezone(door_tz) if door_tz else when
+        assert face.strftime(TIME_FORMAT) == door.device_time
 
     async def test_device_time_keeps_the_raw_string(self, door):
         await door.refresh_time()

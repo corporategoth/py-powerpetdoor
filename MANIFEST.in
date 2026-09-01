@@ -17,6 +17,12 @@
 # asserts this choice, so it cannot drift back silently.
 graft tests
 graft docs
+# The suite reads both: `tests/test_schemas.py` validates the published
+# schemas and `tests/test_wiki.py` imports the generators under `scripts/`.
+# Shipping the tests without them is the same "advertises a suite it cannot
+# execute" problem this file exists to prevent - the packaging job caught it.
+graft schemas
+graft scripts
 include CHANGELOG.md
 include uv.lock
 

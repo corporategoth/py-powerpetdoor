@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.0] - 2026-09-01
 
+### Fixed — `refresh_time()` is local, and the docs said how to undo that wrongly
+
+The reading is returned in **this machine's** timezone, as an aware
+datetime - so it can be compared against `datetime.now()` directly. To
+see the face value the door reported, either read `device_time`, which
+is untouched, or convert with `resolve_tzinfo(door.timezone)`.
+
+Both the docstring and `docs/door.md` said to convert with
+`ZoneInfo(door.timezone)`, which **raises**: `timezone` holds the POSIX
+string the door reports, and `ZoneInfo` does not accept those.
+
+### Fixed — the sdist could not run the suite it ships
+
+`tests/test_schemas.py` reads `schemas/` and `tests/test_wiki.py`
+imports the generators under `scripts/`; neither directory was shipped,
+so the published artifact carried tests that could not run - the exact
+condition `MANIFEST.in` exists to prevent. Both are now included, and
+the schemas are useful to a consumer in their own right.
+
 ### Fixed — things that were wrong in 0.4.3 and are not any more
 
 Found by review passes over this release's work, each reproduced before

@@ -1299,7 +1299,10 @@ class PowerPetDoor:
 
             To see the face value the door reported, either read
             :attr:`device_time`, which is untouched, or convert back with
-            ``result.astimezone(ZoneInfo(door.timezone))``.
+            ``result.astimezone(resolve_tzinfo(door.timezone))``. Note
+            ``resolve_tzinfo`` and not ``ZoneInfo``: :attr:`timezone` holds
+            the POSIX string the door reports, which ``ZoneInfo`` cannot
+            take.
 
             Falls back to a naive value only when :attr:`timezone` has not
             been read yet (call :meth:`refresh_settings` first) or does
