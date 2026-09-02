@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from powerpetdoor import (
+    REFRESH_STEP_SETTINGS,
+    REFRESH_STEPS,
     BatteryInfo,
     DoorStatus,
     NotificationSettings,
@@ -42,6 +44,7 @@ from powerpetdoor.const import (
     DOOR_STATE_CLOSED,
     DOOR_STATE_HOLDING,
     DOOR_STATE_KEEPUP,
+    DOOR_STATE_POWEROFF,
     DOOR_STATE_RISING,
     FIELD_AC_PRESENT,
     FIELD_AUTO,
@@ -2053,6 +2056,81 @@ class TestDoorUnitEdges:
         assert f"Refresh step {CMD_GET_SETTINGS} failed" in caplog.text
         assert f"Refresh step {CMD_GET_NOTIFICATIONS} failed" in caplog.text
 
+    async def test_refresh_names_the_failed_steps_to_its_caller(self):
+        """A log line cannot be acted on; the return value can.
+
+        The device drops requests - any command, occasionally, including a
+        valid one - so a partial refresh is ordinary rather than
+        exceptional. A consumer with a freshness contract of its own has no
+        other way to learn that the cache it is about to serve is stale.
+        """
+        door = PowerPetDoor("127.0.0.1")
+
+        def fake_send(msg_type, cmd, notify=False, **kwargs):
+            future = asyncio.get_running_loop().create_future()
+            future.set_exception(CommandError(cmd, "NAK"))
+            return future
+
+        door._client.send_message = fake_send
+
+        assert await door.refresh() == list(REFRESH_STEPS)
+
+    async def test_refresh_reports_settings_though_it_arrives_as_a_list(self, door, simulator):
+        """The step that matters most is the one that does not raise.
+
+        `refresh_settings` answers with its own failed sub-steps rather than
+        raising, so inside `refresh`'s gather it comes back as a non-empty
+        LIST where every other failed step is an exception. Counting only
+        exceptions therefore misses precisely the step carrying the power
+        flag, the sensor enables and the hold time.
+
+        Driven against the running simulator so that GET_SETTINGS is the
+        ONLY thing that fails - every other step really lands, so `settings`
+        can reach the result by way of the list and by no other route.
+        """
+        real_send = door._client.send_message
+
+        def fake_send(msg_type, cmd, notify=False, **kwargs):
+            if cmd == CMD_GET_SETTINGS:
+                future = asyncio.get_running_loop().create_future()
+                future.set_exception(CommandError(cmd, "NAK"))
+                return future
+            return real_send(msg_type, cmd, notify=notify, **kwargs)
+
+        door._client.send_message = fake_send
+
+        assert await door.refresh() == [REFRESH_STEP_SETTINGS]
+
+    async def test_refresh_settings_names_the_failed_command_to_its_caller(self, door, simulator):
+        """The two commands fail separately and are reported separately.
+
+        Losing GET_SETTINGS leaves the power flag stale; losing
+        GET_NOTIFICATIONS leaves only the five notification toggles stale.
+        A caller that cannot tell them apart has to treat the cheap failure
+        as the expensive one.
+        """
+        real_send = door._client.send_message
+
+        def fake_send(msg_type, cmd, notify=False, **kwargs):
+            if cmd == CMD_GET_NOTIFICATIONS:
+                future = asyncio.get_running_loop().create_future()
+                future.set_exception(CommandError(cmd, "NAK"))
+                return future
+            return real_send(msg_type, cmd, notify=notify, **kwargs)
+
+        door._client.send_message = fake_send
+
+        assert await door.refresh_settings() == [CMD_GET_NOTIFICATIONS]
+
+    async def test_a_refresh_that_landed_reports_nothing_failed(self, door, simulator):
+        """The other side of the boundary, against a real conversation.
+
+        Without this the tests above pass on a function that always names
+        every step, which would report a healthy door as permanently stale.
+        """
+        assert await door.refresh() == []
+        assert await door.refresh_settings() == []
+
     async def test_refresh_hardware_info_keeps_cache_on_empty_result(self):
         """An empty hw-info payload leaves the cached info in place."""
         door = PowerPetDoor("127.0.0.1")
@@ -3146,6 +3224,59 @@ class TestTheFacadeSendsEveryCommandUnderTheRightEnvelopeKey:
         await door.set_inside_sensor(True)
 
         assert sent == [(CONFIG, CMD_ENABLE_INSIDE)]
+
+
+class TestASwitchedOffDoorIsNotUnknown:
+    """`DOOR_POWEROFF` reaches the facade as a state, not as a warning.
+
+    Measured on a real door: switch `power_state` off and
+    `GET_DOOR_STATUS` answers `DOOR_POWEROFF`. The enum had no member for
+    it, so `from_string` fell to `UNKNOWN` and logged - on every status
+    read, for as long as the door stayed off. A consumer publishing the
+    status then showed "unknown" for a door the user had simply switched
+    off, and Home Assistant drops an undeclared state from long-term
+    statistics, so the history had a hole in it too.
+    """
+
+    def test_the_wire_name_parses(self):
+        assert DoorStatus.from_string(DOOR_STATE_POWEROFF) is DoorStatus.POWEROFF
+
+    def test_it_does_not_log_an_unknown_status(self, caplog):
+        """The warning is the symptom a user reports."""
+        with caplog.at_level(logging.WARNING, logger="powerpetdoor.door"):
+            DoorStatus.from_string(DOOR_STATE_POWEROFF)
+        assert "Unknown door status" not in caplog.text
+
+    def test_a_name_that_really_is_unknown_still_warns(self):
+        """...and the warning has not simply been removed."""
+        assert DoorStatus.from_string("DOOR_TELEPORTING") is DoorStatus.UNKNOWN
+
+    async def test_the_facade_reads_a_switched_off_door_as_closed(self, door, simulator):
+        """Over the real wire, end to end.
+
+        The flap is down and the motor will not run, so `is_closed` is the
+        honest answer - leaving it neither open nor closed would blank a
+        cover entity for a door whose position is not in doubt.
+        """
+        await door.set_power(False)
+        await door.refresh_status()
+
+        assert door.status is DoorStatus.POWEROFF
+        assert door.is_closed
+        assert not door.is_open
+        assert door.position == 0
+
+    async def test_switching_it_back_on_restores_an_ordinary_state(self, door, simulator):
+        """The other side of the boundary, so this cannot latch."""
+        await door.set_power(False)
+        await door.refresh_status()
+        assert door.status is DoorStatus.POWEROFF
+
+        await door.set_power(True)
+        await door.refresh_status()
+
+        assert door.status is not DoorStatus.POWEROFF
+        assert door.is_closed
 
 
 class TestTheAppSettingPolarities:

@@ -142,7 +142,11 @@ class InfoCommandsMixin:
             "connected_clients": num_clients,
             "running_script": running_script,
             "queued_scripts": queued_scripts,
-            "door": s.door_status,
+            # Through the shared reader, not off the state: a switched-off
+            # door reports DOOR_POWEROFF, and the control socket saying
+            # DOOR_CLOSED while the wire says otherwise is the interface
+            # drift the value registry exists to prevent.
+            "door": read_value(s, "door_status"),
             "power": s.power,
             "auto": s.auto,
             "inside": s.inside,
@@ -209,7 +213,7 @@ class InfoCommandsMixin:
         lines = [
             "Current State:",
             f"  Clients: {clients_str}",
-            f"  Door: {s.door_status}",
+            f"  Door: {read_value(s, 'door_status')}",
             f"  Power: {'ON' if s.power else 'OFF'}",
             f"  Auto (schedule): {'ON' if s.auto else 'OFF'}",
             f"  Inside sensor: {'enabled' if s.inside else 'disabled'}",

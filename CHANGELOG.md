@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-02
+
+### Fixed — a switched-off door is not an unknown door
+
+Asked `GET_DOOR_STATUS` while `power_state` is false, the unit answers
+**`DOOR_POWEROFF`** — not `DOOR_CLOSED`, and not any of the nine motion
+states. The flap is down and the motor will not run, so none of them
+describes it.
+
+The name was missing everywhere, so every status read while the door was
+switched off produced `DoorStatus.UNKNOWN` and a logged warning — not once,
+but for as long as the door stayed off, which is a state a user chooses
+deliberately. A consumer publishing the status showed "unknown" for a door
+someone had simply turned off, and Home Assistant drops an undeclared enum
+state from long-term statistics, so the history had a hole in it rather
+than a blip.
+
+`DoorStatus.POWEROFF` and `DOOR_STATE_POWEROFF` now exist, and the state
+counts as **closed**: the flap really is down, and reporting it as neither
+open nor closed would blank a cover entity for a door whose position is not
+in doubt. `position` is 0 for the same reason.
+
+The simulator answers it through the shared reader, so the wire, the
+prompt, the control socket and a script condition cannot disagree — two of
+those were reading `state.door_status` directly and would have said
+`DOOR_CLOSED` while the wire said otherwise. Two shipped scripts asserted
+that older, wrong belief and now assert both the exact wire string and
+`door_closed`.
+
+Whether the unit also *pushes* an unsolicited `DOOR_STATUS` when power is
+toggled is unprobed and recorded as such.
+
+### Added — `refresh()` says which steps did not land
+
+`refresh()` and `refresh_settings()` return the names of the steps that
+failed, empty when everything was read. They still never raise for a single
+dead step, and properties whose refresh failed still keep their cached
+value; what is new is that a caller can find that out.
+
+A log line is enough for a human reading it afterwards and no use at all to
+a caller deciding, right now, whether it may serve what it holds. The device
+drops requests - any command, occasionally, including a valid one - so a
+partial refresh is ordinary rather than exceptional.
+
+Consumers were already working around the gap. `ha-powerpetdoor`'s
+coordinator called `refresh_status()` before `refresh()` for no reason other
+than that it is "one call that actually raises" - and that only proves the
+door is answering, not that the settings arrived. A dropped `GET_SETTINGS`
+still left `power` at its pre-outage value and the refresh still counted as
+a success.
+
+Which matters because a door that loses mains power comes back with
+`power_state` reset to **on**: it does not persist off. A consumer that had
+switched the door off then holds a cached `False` that is the opposite of
+the truth, and in Home Assistant every entity gated on it reads
+`unavailable` - a device that looks broken while answering perfectly well.
+
+The steps are named rather than counted, because they are not equally
+load-bearing: `hardware_info` is static and a dropped read of it costs
+nothing, while `settings` carries the power flag. `REFRESH_STEPS` and
+`REFRESH_STEP_SETTINGS` are exported so a caller can test for one without
+spelling the string.
+
+Not breaking: both functions returned `None`.
+
+### Fixed — the settings step was invisible to `refresh()`'s own reporting
+
+`refresh_settings()` reports its two sub-steps rather than raising, so
+inside `refresh()`'s `gather` it came back as an ordinary value where every
+other failed step is an exception. Counting exceptions therefore missed
+precisely the step that matters most, in the log as well as in the new
+return value.
+
 ## [0.5.0] - 2026-09-01
 
 ### Fixed — `refresh_time()` is local, and the docs said how to undo that wrongly
@@ -1586,7 +1659,8 @@ accepted, and the run still exited 0.
 - Async/await interface using asyncio
 - Support for Python 3.11, 3.12, 3.13, and 3.14
 
-[Unreleased]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/corporategoth/py-powerpetdoor/compare/v0.4.1...v0.4.2

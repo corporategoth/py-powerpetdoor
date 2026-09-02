@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from ..const import DOOR_POSITIONS, DOOR_STATE_CLOSED, TIME_FORMAT
+from ..const import DOOR_POSITIONS, DOOR_STATE_CLOSED, DOOR_STATE_POWEROFF, TIME_FORMAT
 from ..i18n import t
 from ..tz_utils import to_posix_tz
 from .coerce import CoercionError, coerce_bool, coerce_number
@@ -132,6 +132,24 @@ def _power(sim: DoorSimulator, value: Any) -> None:
     if not value and sim.state.door_status != DOOR_STATE_CLOSED:
         sim.engine.close()
     sim.notify_settings_changed()
+
+
+def _door_status(state: DoorSimulatorState) -> str:
+    """The door state, as the unit reports it.
+
+    A switched-off door answers ``DOOR_POWEROFF`` rather than any of the
+    nine motion states - the flap is down and the motor will not run, so
+    none of them describes it. Read through here rather than off
+    ``state.door_status`` so the wire, the prompt and a script condition
+    cannot disagree about what a powered-off door is doing.
+
+    Whether the unit also *pushes* the change when power is switched off
+    is unprobed, so nothing here broadcasts it; every reader simply tells
+    the truth when asked.
+    """
+    if not state.power:
+        return DOOR_STATE_POWEROFF
+    return state.door_status
 
 
 def _timezone(sim: DoorSimulator, value: Any) -> None:
@@ -346,10 +364,10 @@ VALUES: dict[str, ValueSpec] = {
         _announce("broadcast_stats"),
         maximum=2**31 - 1,
     ),
-    "door_status": ValueSpec("text", lambda s: s.door_status, "Exact door state (read-only)"),
+    "door_status": ValueSpec("text", _door_status, "Exact door state (read-only)"),
     "position": ValueSpec(
         "int",
-        lambda s: DOOR_POSITIONS.get(s.door_status, 0),
+        lambda s: DOOR_POSITIONS.get(_door_status(s), 0),
         "How far open, 0-100 (read-only)",
     ),
     "time": ValueSpec(

@@ -36,7 +36,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Final
 
 from .client import (
     PowerPetDoorClient,
@@ -94,6 +94,7 @@ from .const import (
     DOOR_STATE_HOLDING,
     DOOR_STATE_IDLE,
     DOOR_STATE_KEEPUP,
+    DOOR_STATE_POWEROFF,
     DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
     DOOR_STATES_CLOSED,
@@ -162,6 +163,23 @@ from .tz_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The step of :meth:`PowerPetDoor.refresh` that reads ``GET_SETTINGS`` and
+#: ``GET_NOTIFICATIONS``. Named because it is the one a consumer usually
+#: cares about: it carries the power flag, the sensor enables and the hold
+#: time, so a consumer serving a stale copy of it misreports the door.
+REFRESH_STEP_SETTINGS: Final = "settings"
+
+#: Every step :meth:`PowerPetDoor.refresh` runs, in the order it gathers
+#: them, and the vocabulary its return value is drawn from. Exported so a
+#: caller can test for a step by name instead of spelling the string.
+REFRESH_STEPS: Final = (
+    "status",
+    REFRESH_STEP_SETTINGS,
+    "battery",
+    "stats",
+    "hardware_info",
+)
 
 
 _FLOAT_REPRESENTABLE_MAX = sys.float_info.max
@@ -272,6 +290,10 @@ class DoorStatus(Enum):
     CLOSING = DOOR_STATE_CLOSING
     CLOSING_TOP_OPEN = DOOR_STATE_CLOSING_TOP_OPEN
     CLOSING_MID_OPEN = DOOR_STATE_CLOSING_MID_OPEN
+    #: The unit is switched off - what the door answers while
+    #: ``power_state`` is false. The flap is down and the motor will not
+    #: run, so this counts as closed.
+    POWEROFF = DOOR_STATE_POWEROFF
     #: Status string not recognized (e.g. newer firmware); the door is in
     #: an indeterminate state - neither is_open nor is_closed is True.
     UNKNOWN = "UNKNOWN"
@@ -1639,21 +1661,36 @@ class PowerPetDoor:
     # =========================================================================
 
     @staticmethod
-    def _log_refresh_failures(names: list[str], results: Sequence[Any]) -> None:
-        """Log each failed step of a gathered refresh.
+    def _log_refresh_failures(names: Sequence[str], results: Sequence[Any]) -> list[str]:
+        """Log each failed step of a gathered refresh, and name them.
 
         ``refresh()``/``refresh_settings()`` gather with
         ``return_exceptions=True`` so one dead command cannot abort the
         rest. Without this, a device NAK or a drop during connect() would
         silently leave cached properties at their constructor defaults.
+
+        Returns:
+            The names of the steps that failed, in the order given.
+
+            A log line is enough for a human reading it afterwards and no
+            use at all to a caller that must decide, right now, whether it
+            may serve what it holds. The device drops requests - any
+            command, occasionally, including a valid one - so a step that
+            did not land is ordinary rather than exceptional, and the
+            cached property keeps whatever it held before. A consumer with
+            a freshness contract of its own, such as a Home Assistant
+            coordinator, needs that as a value.
         """
+        failed = []
         for name, result in zip(names, results, strict=True):
             if isinstance(result, BaseException):
                 logger.warning(
                     t("door.refresh_step_failed", "Refresh step %s failed: %r"), name, result
                 )
+                failed.append(name)
+        return failed
 
-    async def refresh(self, *, timeout: float | None = None) -> None:
+    async def refresh(self, *, timeout: float | None = None) -> list[str]:
         """Refresh all cached state from the door.
 
         Individual step failures are logged and do not abort the rest;
@@ -1661,6 +1698,17 @@ class PowerPetDoor:
 
         Args:
             timeout: Seconds to wait for each response. Defaults to default_timeout.
+
+        Returns:
+            The names of the steps that did not land, drawn from
+            :data:`REFRESH_STEPS` and in that order. Empty when the whole
+            cache is current, which is the only way a caller can know.
+
+            Not every step is equally load-bearing, which is why this
+            names them rather than returning a bool: ``hardware_info`` is
+            static and a dropped read of it costs nothing, while
+            ``settings`` carries the power flag that decides whether a
+            consumer shows the door as working at all.
         """
         results = await asyncio.gather(
             self.refresh_status(timeout=timeout),
@@ -1670,9 +1718,15 @@ class PowerPetDoor:
             self.refresh_hardware_info(timeout=timeout),
             return_exceptions=True,
         )
-        self._log_refresh_failures(
-            ["status", "settings", "battery", "stats", "hardware_info"], results
-        )
+        failed = self._log_refresh_failures(REFRESH_STEPS, results)
+        # `refresh_settings` answers with its own failed sub-steps rather
+        # than raising, so a settings read that did not happen arrives here
+        # as a non-empty list, not as an exception. It is still a step that
+        # did not land, and it is the one that matters most.
+        settings = results[REFRESH_STEPS.index(REFRESH_STEP_SETTINGS)]
+        if isinstance(settings, list) and settings:
+            failed.append(REFRESH_STEP_SETTINGS)
+        return [step for step in REFRESH_STEPS if step in failed]
 
     async def refresh_status(self, *, timeout: float | None = None) -> DoorStatus:
         """Refresh and return the door status.
@@ -1688,7 +1742,7 @@ class PowerPetDoor:
         self._status = DoorStatus.from_string(result)
         return self._status
 
-    async def refresh_settings(self, *, timeout: float | None = None) -> None:
+    async def refresh_settings(self, *, timeout: float | None = None) -> list[str]:
         """Refresh all settings from the door.
 
         Individual step failures are logged and do not abort the other
@@ -1696,6 +1750,14 @@ class PowerPetDoor:
 
         Args:
             timeout: Seconds to wait for each response. Defaults to default_timeout.
+
+        Returns:
+            The names of the commands that did not land - empty when both
+            did. ``GET_SETTINGS`` and ``GET_NOTIFICATIONS`` are separate
+            commands and fail separately, so the two are named rather than
+            collapsed: losing the first leaves the power flag and the
+            sensor enables stale, losing the second leaves only the five
+            notification toggles stale.
         """
         effective_timeout = timeout if timeout is not None else self.default_timeout
         # GET_SETTINGS includes hold time, timezone, and sensor voltages
@@ -1713,7 +1775,7 @@ class PowerPetDoor:
             ),
             return_exceptions=True,
         )
-        self._log_refresh_failures([CMD_GET_SETTINGS, CMD_GET_NOTIFICATIONS], results)
+        return self._log_refresh_failures([CMD_GET_SETTINGS, CMD_GET_NOTIFICATIONS], results)
 
     async def refresh_battery(self, *, timeout: float | None = None) -> BatteryInfo:
         """Refresh and return battery info.

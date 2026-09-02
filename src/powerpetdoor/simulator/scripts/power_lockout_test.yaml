@@ -9,9 +9,15 @@ steps:
   # An ignored trigger leaves the door closed immediately (no wait needed)
   - action: trigger
     sensor: inside
+  # A switched-off door reports DOOR_POWEROFF rather than DOOR_CLOSED, so
+  # the state is asserted both ways: the exact string the wire carries, and
+  # the question a caller actually asks.
   - action: assert
     condition: door_status
-    equals: DOOR_CLOSED
+    equals: DOOR_POWEROFF
+  - action: assert
+    condition: door_closed
+    equals: true
   - action: log
     message: "Door stayed closed with power off - correct!"
   - action: set

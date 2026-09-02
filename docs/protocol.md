@@ -1205,6 +1205,18 @@ requirement, not a courtesy.
 | `DOOR_CLOSING` | Closing has begun; the flap has not moved yet |
 | `DOOR_CLOSING_TOP_OPEN` | Door closing from fully open |
 | `DOOR_CLOSING_MID_OPEN` | Door closing from mid position |
+| `DOOR_POWEROFF` | The unit is switched off (`power_state` false) |
+
+`DOOR_POWEROFF` is not part of the motion sequence. It is what
+`GET_DOOR_STATUS` answers whenever `power_state` is false, in place of any
+of the nine above: the flap is down and the motor will not run, so none of
+them describes it. Switching the power back on returns the door to the
+ordinary states.
+
+A client that does not know it reads an unrecognised status for as long as
+the door is switched off — which is a state a user chooses deliberately,
+not an error. Whether the door also *pushes* an unsolicited `DOOR_STATUS`
+when power is toggled is unprobed.
 
 — the full sequence, measured by cycling a physical unit:
 

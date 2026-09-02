@@ -86,6 +86,7 @@ from .const import (
     DOOR_STATE_HOLDING,
     DOOR_STATE_IDLE,
     DOOR_STATE_KEEPUP,
+    DOOR_STATE_POWEROFF,
     DOOR_STATE_RISING,
     DOOR_STATE_SLOWING,
     DOOR_STATUS,
@@ -131,6 +132,8 @@ from .const import (
     TIME_FORMAT,
 )
 from .door import (
+    REFRESH_STEP_SETTINGS,
+    REFRESH_STEPS,
     BatteryInfo,
     DoorStatus,
     NotificationSettings,
@@ -163,13 +166,15 @@ from .tz_utils import (
     parse_posix_tz_string,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 __all__ = [
     # Door facade
     "BatteryInfo",
     "DoorStatus",
     "NotificationSettings",
     "PowerPetDoor",
+    "REFRESH_STEPS",
+    "REFRESH_STEP_SETTINGS",
     "Schedule",
     "ScheduleTime",
     # Client
@@ -302,6 +307,7 @@ __all__ = [
     "DOOR_STATE_HOLDING",
     "DOOR_STATE_IDLE",
     "DOOR_STATE_KEEPUP",
+    "DOOR_STATE_POWEROFF",
     "DOOR_STATE_RISING",
     "DOOR_STATE_SLOWING",
     # Constants - Priorities

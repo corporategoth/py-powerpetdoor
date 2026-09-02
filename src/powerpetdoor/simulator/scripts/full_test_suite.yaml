@@ -40,9 +40,15 @@ steps:
     value: "off"
   - action: trigger
     sensor: inside
+  # DOOR_POWEROFF, not DOOR_CLOSED: a switched-off door reports its own
+  # state rather than any of the motion states. The flap is still down -
+  # the trigger was ignored, which is what this is testing.
   - action: assert
     condition: door_status
-    equals: DOOR_CLOSED
+    equals: DOOR_POWEROFF
+  - action: assert
+    condition: door_closed
+    equals: true
   - action: set
     name: power
     value: "on"

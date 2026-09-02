@@ -227,6 +227,7 @@ DoorStatus.KEEPUP  # Door locked open (open)
 DoorStatus.CLOSING  # Closing has begun, flap has not moved yet
 DoorStatus.CLOSING_TOP_OPEN  # Door closing from top
 DoorStatus.CLOSING_MID_OPEN  # Door closing from middle
+DoorStatus.POWEROFF  # The unit is switched off; counts as closed
 DoorStatus.UNKNOWN  # Unrecognized status string from the device
 ```
 
@@ -613,11 +614,11 @@ While state is automatically kept in sync via callbacks, you can force a refresh
 
 ```python
 # Refresh all state
-await door.refresh()
+failed = await door.refresh()
 
 # Refresh specific aspects
 status = await door.refresh_status()
-await door.refresh_settings()
+failed_settings = await door.refresh_settings()
 battery = await door.refresh_battery()
 await door.refresh_stats()
 hw_info = await door.refresh_hardware_info()
@@ -628,8 +629,34 @@ schedules = await door.refresh_schedules()
 each step is gathered independently and a failure is logged as
 `Refresh step <name> failed: ...` (logger `powerpetdoor.door`). Properties
 whose refresh failed keep their previous cached value, so a device NAK or a
-drop during `connect()` leaves a partial cache rather than an exception -
-check the log if a property looks stale.
+drop during `connect()` leaves a partial cache rather than an exception.
+
+Both **return the names of the steps that did not land**, so a caller does
+not have to read that log to find out. The device drops requests - any
+command, occasionally, including a valid one - so a partial refresh is
+ordinary rather than exceptional, and a consumer with a freshness contract
+of its own needs the answer as a value:
+
+```python
+from powerpetdoor import REFRESH_STEP_SETTINGS
+
+if REFRESH_STEP_SETTINGS in await door.refresh():
+    # `power`, the sensor enables and the hold time are whatever they were
+    # before. Do not report them as current; ask again.
+    ...
+```
+
+`refresh()` names its steps from `REFRESH_STEPS` -
+`("status", "settings", "battery", "stats", "hardware_info")` - and returns
+them in that order, empty when everything was read. Naming them rather than
+answering yes/no is the point: `hardware_info` is static and a dropped read
+of it costs nothing, while `settings` carries the power flag. Use
+`REFRESH_STEP_SETTINGS` rather than spelling `"settings"`.
+
+`refresh_settings()` names the two commands it runs, `GET_SETTINGS` and
+`GET_NOTIFICATIONS`, which fail separately: losing the first leaves the
+power flag and the sensor enables stale, losing the second leaves only the
+five notification toggles stale.
 
 ## Supporting Types
 

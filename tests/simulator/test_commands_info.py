@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import powerpetdoor.simulator.prompt_common as prompt_common
-from powerpetdoor.const import DOOR_STATE_HOLDING
+from powerpetdoor.const import DOOR_STATE_CLOSED, DOOR_STATE_HOLDING, DOOR_STATE_POWEROFF
 from powerpetdoor.simulator import (
     DoorSimulator,
     DoorSimulatorState,
@@ -22,6 +22,7 @@ from powerpetdoor.simulator.commands import CommandHandler
 from powerpetdoor.simulator.commands.history import History
 from powerpetdoor.simulator.scripting import ScriptRunner
 from powerpetdoor.simulator.state import Schedule
+from powerpetdoor.simulator.values import read_value
 
 # ============================================================================
 # Fixtures
@@ -114,7 +115,12 @@ class TestStatusFullText:
         assert result.message == (
             "Current State:\n"
             "  Clients: none\n"
-            f"  Door: {DOOR_STATE_HOLDING}\n"
+            # DOOR_POWEROFF, not the DOOR_HOLDING stored above: this state
+            # sets the power off, and a switched-off door reports itself
+            # whatever the flap was last doing. The stored value is kept
+            # for when the power returns; it is simply not what the door
+            # answers while it is off.
+            f"  Door: {DOOR_STATE_POWEROFF}\n"
             "  Power: OFF\n"
             "  Auto (schedule): OFF\n"
             "  Inside sensor: enabled\n"
@@ -132,11 +138,44 @@ class TestStatusFullText:
             "  Auto-retracts: 2\n"
             "  Script: none running"
         )
-        assert result.data["door"] == DOOR_STATE_HOLDING
+        # Same substitution in the machine-readable half, for the same
+        # reason: the control socket and the prompt are one reader.
+        assert result.data["door"] == DOOR_STATE_POWEROFF
         assert result.data["schedules"] == [0]
         assert result.data["battery_percent"] == 50
         assert result.data["running_script"] is None
         assert result.data["queued_scripts"] == 0
+
+    async def test_a_switched_off_door_reads_poweroff_on_every_surface(self, command_handler):
+        """The prompt and the control socket agree with the wire.
+
+        Both read the door state off `state.door_status` directly rather
+        than through the shared reader, so a switched-off door showed
+        `DOOR_CLOSED` at the prompt while `GET_DOOR_STATUS` answered
+        `DOOR_POWEROFF` - two interfaces describing one door differently,
+        which is what the value registry exists to prevent.
+        """
+        sim = command_handler.simulator
+        sim.state.power = False
+        sim.state.door_status = DOOR_STATE_CLOSED
+
+        result = await command_handler.execute("status")
+
+        assert result.data["door"] == DOOR_STATE_POWEROFF
+        assert f"  Door: {DOOR_STATE_POWEROFF}" in result.message
+        # ...and it is the same answer the wire gives.
+        assert read_value(sim.state, "door_status") == DOOR_STATE_POWEROFF
+
+    async def test_a_powered_door_still_reads_its_real_state(self, command_handler):
+        """The other side of it, so the substitution cannot latch on."""
+        sim = command_handler.simulator
+        sim.state.power = True
+        sim.state.door_status = DOOR_STATE_CLOSED
+
+        result = await command_handler.execute("status")
+
+        assert result.data["door"] == DOOR_STATE_CLOSED
+        assert f"  Door: {DOOR_STATE_CLOSED}" in result.message
 
     async def test_status_aliases(self, command_handler):
         for alias in ("state", "info", "v"):

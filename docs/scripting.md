@@ -413,11 +413,11 @@ because there is no sensible default for a number or a status string.
 
 | Condition | Kind | Notes |
 |-----------|------|-------|
-| `door_closed` | yes/no | Down — `DOOR_CLOSED` or `DOOR_IDLE` |
+| `door_closed` | yes/no | Down — `DOOR_CLOSED`, `DOOR_IDLE` or `DOOR_POWEROFF` |
 | `door_open` | yes/no | Up and stopped — `DOOR_HOLDING` or `DOOR_KEEPUP` |
 | `door_closing` | yes/no | Travelling down, any of the three closing states |
 | `door_opening` | yes/no | Travelling up — `DOOR_RISING` or `DOOR_SLOWING` |
-| `door_status` | text | The exact state, e.g. `DOOR_KEEPUP` |
+| `door_status` | text | The exact state, e.g. `DOOR_KEEPUP`. Reads `DOOR_POWEROFF` whenever the power is off, whatever the flap was doing |
 | `position` | number | 0 = closed, 100 = fully open. Mirrors `PowerPetDoor.position` |
 | `power` | yes/no | |
 | `auto` | yes/no | Schedules enabled |

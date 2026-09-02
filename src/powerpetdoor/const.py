@@ -128,10 +128,21 @@ DOOR_STATE_SLOWING = "DOOR_SLOWING"
 DOOR_STATE_CLOSING = "DOOR_CLOSING"
 DOOR_STATE_CLOSING_TOP_OPEN = "DOOR_CLOSING_TOP_OPEN"
 DOOR_STATE_CLOSING_MID_OPEN = "DOOR_CLOSING_MID_OPEN"
+#: What the door answers `GET_DOOR_STATUS` with while `power_state` is
+#: false. It is a real state and not an error: the flap is down and the
+#: motor will not run, so none of the nine states above can describe it.
+#: Missing here, it read as `DoorStatus.UNKNOWN` - a warning on every
+#: status read, and a consumer showing "unknown" for a door that is simply
+#: switched off.
+DOOR_STATE_POWEROFF = "DOOR_POWEROFF"
 
 #: The door is down. ``DOOR_IDLE`` is the resting state a real door settles
 #: into after ``DOOR_CLOSED``, so both mean "closed" to a caller.
-DOOR_STATES_CLOSED = frozenset({DOOR_STATE_CLOSED, DOOR_STATE_IDLE})
+#: ``DOOR_POWEROFF`` joins them because the flap really is down - a
+#: powered-off door is shut and cannot open. Reporting it as neither open
+#: nor closed would leave a cover entity blank for a door whose position is
+#: not in doubt.
+DOOR_STATES_CLOSED = frozenset({DOOR_STATE_CLOSED, DOOR_STATE_IDLE, DOOR_STATE_POWEROFF})
 #: The door is up and has stopped travelling - the only states in which
 #: "open" is a settled fact rather than a prediction. ``DOOR_HOLDING`` is a
 #: timed open, ``DOOR_KEEPUP`` an indefinite one.
@@ -170,6 +181,7 @@ DOOR_POSITIONS: dict[str, int] = {
     DOOR_STATE_CLOSING: 100,
     DOOR_STATE_CLOSING_TOP_OPEN: 66,
     DOOR_STATE_CLOSING_MID_OPEN: 33,
+    DOOR_STATE_POWEROFF: 0,
 }
 
 # Command strings

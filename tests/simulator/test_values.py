@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from powerpetdoor.const import DOOR_STATE_CLOSED, DOOR_STATE_KEEPUP
+from powerpetdoor.const import DOOR_STATE_CLOSED, DOOR_STATE_KEEPUP, DOOR_STATE_POWEROFF
 from powerpetdoor.door import PowerPetDoor
 from powerpetdoor.simulator import DoorSimulator, DoorSimulatorState
 from powerpetdoor.simulator.coerce import CoercionError
@@ -523,3 +523,59 @@ class TestPowerOnDoesNotMoveTheFlap:
         set_named_value(sim, "power", True)
 
         assert sim.state.door_status == DOOR_STATE_CLOSED
+
+
+class TestASwitchedOffDoorReportsItself:
+    """`DOOR_POWEROFF`, measured on a real door.
+
+    Asked `GET_DOOR_STATUS` while `power_state` is false, the unit answers
+    `DOOR_POWEROFF` - not `DOOR_CLOSED`, and not any of the nine motion
+    states. The library did not know the name, so every status read while
+    the door was switched off produced `DoorStatus.UNKNOWN` and a logged
+    warning, and a consumer showed "unknown" for a door a user had simply
+    turned off.
+    """
+
+    async def test_a_powered_off_door_reports_poweroff(self, sim):
+        sim.state.power = True
+        sim.state.door_status = DOOR_STATE_CLOSED
+
+        set_named_value(sim, "power", False)
+
+        assert read_value(sim.state, "door_status") == DOOR_STATE_POWEROFF
+
+    async def test_power_on_returns_the_real_state(self, sim):
+        """The other side of the boundary.
+
+        A reader that answered `DOOR_POWEROFF` unconditionally would pass
+        the test above and report a working door as switched off forever.
+        """
+        sim.state.power = False
+        sim.state.door_status = DOOR_STATE_CLOSED
+
+        set_named_value(sim, "power", True)
+
+        assert read_value(sim.state, "door_status") == DOOR_STATE_CLOSED
+
+    async def test_it_masks_whatever_the_flap_was_doing(self, sim):
+        """Power off wins over the stored status, and does not erase it.
+
+        The flap state is still there for when the power comes back - the
+        reader substitutes, it does not overwrite.
+        """
+        sim.state.power = False
+        sim.state.door_status = DOOR_STATE_KEEPUP
+
+        assert read_value(sim.state, "door_status") == DOOR_STATE_POWEROFF
+        assert sim.state.door_status == DOOR_STATE_KEEPUP
+
+    async def test_position_follows_the_same_reader(self, sim):
+        """A door that cannot move is at 0, not wherever it was left.
+
+        `position` mirrors `PowerPetDoor.position`, and reading it off the
+        raw status would have said 100 for a switched-off door.
+        """
+        sim.state.power = False
+        sim.state.door_status = DOOR_STATE_KEEPUP
+
+        assert read_value(sim.state, "position") == 0
