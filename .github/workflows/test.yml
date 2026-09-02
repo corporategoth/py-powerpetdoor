@@ -127,7 +127,8 @@ jobs:
               exit 1
             fi
           fi
-          if echo "$changed" | grep -q '^src/' && ! echo "$changed" | grep -q '^CHANGELOG\.md$'; then
+          # Here-strings rather than pipes, for the SIGPIPE reason above.
+          if grep -q '^src/' <<<"$changed" && ! grep -q '^CHANGELOG\.md$' <<<"$changed"; then
             echo "::error::src/ changed but CHANGELOG.md did not."
             echo "Add an entry under [Unreleased], or explain why the change is not user-visible."
             echo "Changed files under src/:"
@@ -159,9 +160,17 @@ jobs:
       - name: The wheel carries the PEP 561 marker
         run: |
           wheel="$(echo dist/*.whl)"
-          if ! unzip -l "$wheel" | grep -q ' powerpetdoor/py.typed$'; then
+          # Captured first, then matched. NOT `unzip -l ... ` piped into
+          # `grep -q`: this shell runs with `pipefail`, `grep -q` exits the
+          # moment it matches, and `unzip` then dies of SIGPIPE - so the
+          # pipeline reports 141 and the guard fails BECAUSE the marker is
+          # present. Measured at 197 failures in 200 runs. It reached main
+          # anyway because the other 3 look like an ordinary flake and a
+          # re-run goes green.
+          listing="$(unzip -l "$wheel")"
+          if ! grep -q ' powerpetdoor/py.typed$' <<<"$listing"; then
             echo "::error::py.typed is missing from $wheel; downstream mypy sees this library as Any."
-            unzip -l "$wheel"
+            echo "$listing"
             exit 1
           fi
           echo "OK: py.typed present in $wheel"

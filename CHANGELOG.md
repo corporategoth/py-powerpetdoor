@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.1] - 2026-09-02
 
+### Fixed — a CI guard that failed because it succeeded
+
+The wheel's PEP 561 check was `unzip -l "$wheel" | grep -q ' powerpetdoor/py.typed$'`.
+`grep -q` exits the instant it matches, the producer's next write gets
+SIGPIPE, and the pipeline reports 141 — so under `pipefail`, which every
+`run:` block sets, the guard took its error branch precisely when
+`py.typed` **was** present. It printed the listing as evidence, with
+`powerpetdoor/py.typed` visible in it.
+
+Measured at 197 failures in 200 runs. It survived on main because the
+other three look like an ordinary flake, and the response to a flake is a
+re-run — which goes green often enough. The history shows exactly that:
+one commit failed and then passed on a re-run of the same tree.
+
+Both guards capture their output and match it with a here-string now, so
+nothing is piped and nothing can be signalled. A test walks every `run:`
+block in both copies of the workflow and refuses a pipe into `grep -q`,
+`grep -m` or `head`.
+
 ### Fixed — a switched-off door is not an unknown door
 
 Asked `GET_DOOR_STATUS` while `power_state` is false, the unit answers

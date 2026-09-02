@@ -18,6 +18,7 @@ attached to it that would stop it failing the build.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -281,3 +282,70 @@ class TestTheVersionGate:
             "tagged. main must never claim a version older than a published "
             "release."
         )
+
+
+class TestNoGuardCanFailBecauseItSucceeded:
+    """`cmd | grep -q` under `pipefail` reports failure on a MATCH.
+
+    `grep -q` exits the instant it matches; the producer's next write then
+    gets SIGPIPE and the pipeline reports 141. With `pipefail` set - which
+    every `run:` block here has - `if ! cmd | grep -q ...` therefore takes
+    the error branch precisely when the thing it is looking for is there.
+
+    This is not theoretical. The wheel's PEP 561 guard was written that
+    way and failed 197 times in 200 local runs, always with `py.typed`
+    present in the listing it printed. It survived on main because the
+    other 3 look like an ordinary flake, and a re-run goes green - so the
+    check was re-run rather than read.
+
+    Capture first and match with a here-string. Nothing is piped, so
+    nothing can be signalled.
+    """
+
+    @staticmethod
+    def _run_blocks() -> list[tuple[str, str]]:
+        """Every shell script in either copy of the workflow."""
+        blocks = []
+        for path in (WORKFLOW, REPO_ROOT / ".gitea" / "workflows" / "test.yml"):
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for job_name, job in document.get("jobs", {}).items():
+                for step in job.get("steps", []):
+                    script = step.get("run")
+                    if isinstance(script, str):
+                        blocks.append((f"{path.name}:{job_name}:{step.get('name')}", script))
+        return blocks
+
+    def test_no_run_block_pipes_into_an_early_exiting_matcher(self):
+        blocks = self._run_blocks()
+        assert blocks, "no run: blocks found; the parser is wrong"
+
+        offenders = [
+            where
+            for where, script in blocks
+            for line in script.splitlines()
+            # Comments are skipped: the guard below explains this bug by
+            # quoting the broken form, and matching that would make the
+            # explanation the offence.
+            if not line.lstrip().startswith("#")
+            and re.search(r"\|\s*(grep\s+(-\w*q|-\w*m\s*\d)|head\b)", line)
+        ]
+        assert offenders == [], (
+            "these pipe into a matcher that exits early, so under pipefail they "
+            f"fail when they SUCCEED: {offenders}. Capture the output first and "
+            "match it with a here-string."
+        )
+
+    def test_the_marker_guard_still_reads_the_listing(self):
+        """...and the replacement actually looks at the wheel.
+
+        Deleting the pipe is only right if the check still happens; a guard
+        that greps an empty variable passes for every wheel ever built.
+        """
+        step = _step(
+            _job(yaml.safe_load(WORKFLOW.read_text(encoding="utf-8")), "packaging"),
+            "The wheel carries the PEP 561 marker",
+        )
+        script = step["run"]
+        assert "unzip -l" in script
+        assert "powerpetdoor/py.typed" in script
+        assert "exit 1" in script
