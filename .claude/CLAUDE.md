@@ -141,15 +141,22 @@ The project supports a declared matrix of CPython versions (currently
 
 ### Manually tracked pins (MANDATORY)
 
-`.github/dependabot.yml` covers `github-actions` (root workflows **and** the
-composite action directory) plus `uv`. Two things sit outside anything
-automation can reach, so they rot silently unless a human moves them. Check
-them whenever you touch CI, and at least once per release:
+Dependency updates come from **Renovate, running on Gitea** (`renovate.json`,
+extending the shared preset in `neuromancy/forge-automation`), not Dependabot:
+GitHub is a push mirror, and the mirror deleted every Dependabot branch -
+closing its PR - within half an hour of it opening. Renovate covers
+`github-actions` in `.github/` (workflows and the composite action) and
+`.gitea/`, including the Gitea-hosted
+`neuromancy/workflows/.gitea/workflows/sync-github-wiki.yml@<sha>` pin (the
+**only** `uses:` here that receives a secret, so review its bumps like code),
+plus `pep621` + `uv.lock` and pre-commit revs, and runs `uv lock --upgrade`
+weekly (lock file maintenance) - which covers the transitive set, `tzdata`
+included. The SHA pins keep their `# vX.Y.Z` / `# main` comments; that comment
+is what Renovate tracks. Security fixes (OSV) skip the Monday window, and
+pending updates are listed on the "Dependency Dashboard" issue.
 
-| Pin | Where | Why automation cannot see it |
-|-----|-------|------------------------------|
-| `neuromancy/workflows/.gitea/workflows/sync-github-wiki.yml@<sha>` | `.gitea/workflows/sync-wiki.yml` | Dependabot has no Gitea support. This is also the **only** `uses:` in the repo that receives a secret, so its SHA pin matters more than the rest |
-| Transitive versions in `uv.lock` | `uv.lock` | `uv sync` never upgrades what is already pinned, and Dependabot's grouping moves direct dependencies. Run `uv lock --upgrade` periodically (the weekly fuzz cron is a natural home) and re-run the full suite |
+Still by hand: `christopherhx/gitea-*-artifact` publish no tags, so Renovate
+can only follow their `main` by digest - review those bumps like code.
 
 `tzdata` deserves specific attention: it is the library's only runtime
 dependency and the whole `tz_utils`/schedule feature reads IANA rules out of

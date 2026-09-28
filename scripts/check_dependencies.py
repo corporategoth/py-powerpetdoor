@@ -148,10 +148,9 @@ def check_vulnerabilities() -> list[dict] | None:
 # ---------------------------------------------------------------------------
 # CI action pins
 #
-# Dependabot covers these on GitHub, but this repository's GitHub side is a
-# push-mirror of Gitea: a Dependabot PR there cannot be merged into the
-# source of truth, and the next mirror push overwrites whatever it did. So
-# the same question has to be answerable locally, and on the Gitea runner.
+# Renovate (on Gitea, see renovate.json) opens PRs for these on a schedule.
+# This answers the same question locally and at pre-push, so a stale pin is
+# caught before it is pushed rather than a week later.
 # ---------------------------------------------------------------------------
 
 #: `uses: owner/repo@<40-hex sha>  # v4`
@@ -304,8 +303,8 @@ def check_action_pins() -> list[str]:
             # limit reading as an all-clear is the silent staleness this
             # script exists to prevent.
             #
-            # It does not fail, even under `--strict`: Dependabot covers
-            # the github-actions ecosystem natively (.github/dependabot.yml),
+            # It does not fail, even under `--strict`: Renovate covers
+            # the github-actions ecosystem natively (renovate.json),
             # so a pin that goes stale here still gets a PR. Blocking a push
             # on a network round trip that has a working backstop trades a
             # real outage for a duplicate one.

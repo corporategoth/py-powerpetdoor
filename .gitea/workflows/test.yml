@@ -94,8 +94,8 @@ jobs:
       - name: Check translations
         run: python scripts/check_translations.py --untranslated --strict
       # `--strict`, matching the pre-push hook: a dependency with a newer
-      # release fails here rather than becoming a Dependabot ticket on the
-      # mirror. The hook is the first line, this is the backstop for a
+      # release fails here rather than becoming a Renovate PR a week
+      # later. The hook is the first line, this is the backstop for a
       # push that skipped it.
       - name: Check dependencies
         run: python scripts/check_dependencies.py --strict
@@ -247,7 +247,7 @@ jobs:
           COVERAGE_FILE: .coverage.py${{ matrix.python-version }}
       - name: Upload coverage data
         if: ${{ always() }}
-        uses: christopherhx/gitea-upload-artifact@62ac910c5d3dfa85c7cb2df15afe2e342b2407c2 # untagged head
+        uses: christopherhx/gitea-upload-artifact@62ac910c5d3dfa85c7cb2df15afe2e342b2407c2 # main
         with:
           name: coverage-py${{ matrix.python-version }}
           path: |
@@ -297,25 +297,25 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --all-extras && echo "$(pwd)/.venv/bin" >> $GITHUB_PATH && echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
       - name: Download py3.11 coverage
-        uses: christopherhx/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # v4
+        uses: christopherhx/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # main
         with:
           name: coverage-py3.11
           path: coverage-data/py3.11
         continue-on-error: true
       - name: Download py3.12 coverage
-        uses: christopherhx/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # v4
+        uses: christopherhx/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # main
         with:
           name: coverage-py3.12
           path: coverage-data/py3.12
         continue-on-error: true
       - name: Download py3.13 coverage
-        uses: christopherhx/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # v4
+        uses: christopherhx/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # main
         with:
           name: coverage-py3.13
           path: coverage-data/py3.13
         continue-on-error: true
       - name: Download py3.14 coverage
-        uses: christopherhx/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # v4
+        uses: christopherhx/gitea-download-artifact@75635f32b4c1c41c4b3d64e8f85210112ed4c9c7 # main
         with:
           name: coverage-py3.14
           path: coverage-data/py3.14
@@ -340,7 +340,7 @@ jobs:
           flags: python
           fail_ci_if_error: false
       - name: Upload coverage report
-        uses: christopherhx/gitea-upload-artifact@62ac910c5d3dfa85c7cb2df15afe2e342b2407c2 # untagged head
+        uses: christopherhx/gitea-upload-artifact@62ac910c5d3dfa85c7cb2df15afe2e342b2407c2 # main
         with:
           name: coverage-report
           path: |
