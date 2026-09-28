@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — dependency updates come from Renovate on Gitea, not Dependabot
+
+GitHub is a push mirror of Gitea, and every mirror push deletes branches
+Gitea does not have - so each Dependabot PR lost its branch and closed
+itself within half an hour of opening, every week. Renovate runs on the
+Gitea side (`renovate.json`) and covers everything Dependabot did plus the
+two pins that were tracked by hand: the Gitea-hosted `neuromancy/workflows`
+reusable workflow, and the transitive set in `uv.lock` (weekly
+`uv lock --upgrade`). `.github/dependabot.yml` is gone.
+
 ## [0.5.1] - 2026-09-02
 
 ### Fixed — a CI guard that failed because it succeeded
