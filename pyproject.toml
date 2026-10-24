@@ -3,7 +3,7 @@
 # these from PyPI *inside* the release job that holds `id-token: write`, so a
 # hijacked setuptools/wheel release would be executing in the job that signs
 # and publishes the artifact.
-requires = ["setuptools==84.0.0", "wheel==0.48.0"]
+requires = ["setuptools==84.1.0", "wheel==0.48.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
